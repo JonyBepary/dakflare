@@ -66,6 +66,20 @@ export interface Env {
   PAIR_LIMITER?: RateLimit;
   ADMIN_LIMITER?: RateLimit;
   DEVICE_LIMITER?: RateLimit;
+  /**
+   * Separate binding for the shared pairing key. It must be a distinct limiter,
+   * not the same one keyed differently: sharing `PAIR_LIMITER` let one client
+   * drain the global budget and deny pairing to every other device.
+   */
+  PAIR_GLOBAL_LIMITER?: RateLimit;
+  /**
+   * Per-IP counter for FAILED device authentication only. Never incremented on
+   * success, so a busy legitimate device is unaffected. Skipped when the request
+   * carries no `CF-Connecting-IP` (local dev, conformance suite).
+   */
+  AUTH_FAIL_LIMITER?: RateLimit;
+  /** Per-device daily inbound row budget, read by the DO's `write_budget` table. */
+  INCOMING_ROWS_PER_DAY?: string;
 }
 
 type DeviceHandler = (
@@ -118,7 +132,21 @@ async function withAdmin(
 /** `withDevice` — §3.2 runs entirely inside `verifyDeviceSignature`. */
 async function withDevice(req: Request, env: Env, handler: DeviceHandler): Promise<Response> {
   const result = await verifyDeviceSignature(req, env);
-  if (!result.ok) return result.response;
+  if (!result.ok) {
+    // Count FAILURES only, and only where the edge tells us who is calling. A
+    // pre-auth counter keyed on an attacker-chosen header value would be a bypass;
+    // `CF-Connecting-IP` is set by Cloudflare and cannot be spoofed from outside.
+    // No header means local dev / the conformance suite, where limiting would be
+    // pure noise, so the whole check is skipped.
+    if (env.AUTH_FAIL_LIMITER) {
+      const ip = req.headers.get("CF-Connecting-IP");
+      if (ip !== null && ip !== "") {
+        const { success } = await env.AUTH_FAIL_LIMITER.limit({ key: `authfail:${ip}` });
+        if (!success) return err("rate_limited", 429);
+      }
+    }
+    return result.response;
+  }
 
   // Per-device throttle, applied after the signature proves which device it is.
   // A compromised device must not be able to flood the batch endpoints, each of

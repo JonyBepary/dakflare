@@ -38,6 +38,10 @@ export default defineConfig({
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
+			// Per-device daily inbound row budget. D1's daily rows-written allowance is
+			// shared by the whole deployment, so one looping device must not be able to
+			// spend it for everyone. Clamped to [100, 100000].
+			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
 			// AGPL-3.0 §13: point `/source` at YOUR fork.
 			SOURCE_URL: bindings.text("https://github.com/OWNER/dakflare"),
 
@@ -63,6 +67,18 @@ export default defineConfig({
 			DEVICE_LIMITER: bindings.rateLimit({
 				namespace: "1003",
 				simple: { limit: 600, period: 60 },
+			}),
+			// Separate binding, not the same limiter under another key: sharing
+			// PAIR_LIMITER let one client drain the shared bucket and deny pairing
+			// to everyone else in the colo.
+			PAIR_GLOBAL_LIMITER: bindings.rateLimit({
+				namespace: "1005",
+				simple: { limit: 300, period: 60 },
+			}),
+			// Counts FAILED device authentication only, per client IP.
+			AUTH_FAIL_LIMITER: bindings.rateLimit({
+				namespace: "1004",
+				simple: { limit: 120, period: 60 },
 			}),
 		},
 	},

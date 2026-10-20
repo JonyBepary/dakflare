@@ -14,6 +14,14 @@
  *     written with ONE `env.DB.batch()`.
  *   - `received_at` was only checked for "parses", so year 9999 was accepted and
  *     poisoned the `received_at DESC` index that every admin read uses.
+ *
+ * Hardening added since:
+ *   - A batch reserves its row count against the device's daily D1 write budget
+ *     (`/__reserve` on the device's Durable Object) BEFORE writing, so one device
+ *     cannot exhaust the deployment's shared write allowance.
+ *   - A thrown `env.DB.batch()` answers 503 `storage_unavailable` instead of letting
+ *     an uncaught rejection surface as a 500. The rows were not written, and the
+ *     `(device_id, local_id)` key makes the device's retry safe.
  */
 
 import type { Env } from "../index";
@@ -120,20 +128,56 @@ export async function handleIncomingBatch(
   }
 
   // ---- single transactional write ----------------------------------------
+  // The Durable Object is resolved once here: it owns this device's daily write
+  // budget and also serves the ack/pending tail of the request.
+  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
+
   let accepted = 0;
   let duplicates = 0;
   if (validated.length > 0) {
+    // Daily row budget, checked BEFORE the write. D1's write allowance is shared by
+    // every device in the deployment, so a single looping device must not be able
+    // to spend it all. A refusal is final for today: the rows are not written and
+    // the device is told why, rather than silently losing (or endlessly retrying)
+    // a batch it can never get in.
+    let reservation: Response;
+    try {
+      reservation = await stub.fetch("https://do/__reserve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: validated.length }),
+      });
+    } catch (error) {
+      console.error(`[incoming] write-budget reservation failed: ${String(error)}`);
+      return err("storage_unavailable", 503);
+    }
+    if (reservation.status === 429) return err("daily_quota_exceeded", 429);
+    if (!reservation.ok) {
+      // An unverifiable budget is not a reason to spend it.
+      console.error(`[incoming] write-budget reservation returned HTTP ${reservation.status}`);
+      return err("storage_unavailable", 503);
+    }
+
     const stmt = env.DB.prepare(
       `INSERT INTO messages
          (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
        VALUES (?, ?, ?, 'in', ?, ?, ?, ?)
        ON CONFLICT(device_id, local_id) DO NOTHING`
     );
-    const results = await env.DB.batch(
-      validated.map((m) =>
-        stmt.bind(m.id, deviceId, m.localId, m.peer, m.body, m.receivedAt, m.autoReply)
-      )
-    );
+    let results: D1Result[];
+    try {
+      results = await env.DB.batch(
+        validated.map((m) =>
+          stmt.bind(m.id, deviceId, m.localId, m.peer, m.body, m.receivedAt, m.autoReply)
+        )
+      );
+    } catch (error) {
+      // A thrown batch is a storage fault, not a client error. 503 tells the device
+      // to retry, and `(device_id, local_id)` makes that retry idempotent — unlike
+      // a 500, which reads as "your request was broken" and loses the batch.
+      console.error(`[incoming] D1 batch failed for ${deviceId}: ${String(error)}`);
+      return err("storage_unavailable", 503);
+    }
     for (const result of results) {
       // `meta.changes` is 0 when `ON CONFLICT DO NOTHING` skipped the row.
       if ((result.meta?.changes ?? 0) > 0) accepted++;
@@ -141,7 +185,6 @@ export async function handleIncomingBatch(
     }
   }
 
-  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   if (ackCommandIds.length > 0 || fcmToken) {
     await stub.fetch("https://do/__http_ack", {
       method: "POST",

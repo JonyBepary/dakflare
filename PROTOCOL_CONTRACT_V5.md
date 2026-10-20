@@ -278,7 +278,7 @@ Per request, inside a single `ctx.storage.transactionSync()`:
 W = 300_000
 now = Date.now()
 
-DELETE FROM nonces WHERE exp <= now            -- prune
+DELETE FROM nonces WHERE exp < now             -- prune
 
 SELECT 1 FROM nonces WHERE nonce = ?           -- detect
   → if a row exists: reject 401 nonce_replay
@@ -299,9 +299,14 @@ This is the reason `evicted_max_ts` can be deleted outright rather than tuned.
 
 ### 5.3 Bounds
 
-`DELETE … WHERE exp <= now` bounds the table to whatever fits in a 300 s window — at a sustained
+`DELETE … WHERE exp < now` bounds the table to whatever fits in a 300 s window — at a sustained
 10 req/s that is ~3000 rows, which is unremarkable for DO SQLite. There is no cap, therefore no
 eviction, therefore no eviction bug.
+
+The comparison is strict on purpose. A row's `exp` is the instant its own validity window closes, and
+a request at exactly `now = exp` is still inside the window (`|now − ts| ≤ W`, inclusive), so pruning
+at `exp <= now` would drop the guard one millisecond before it stops being needed. Pruning and
+admission must not share an inclusive boundary.
 
 ---
 
@@ -416,7 +421,10 @@ Uniform envelope, so the client never has to guess:
 | `404` | `device_unknown` | admin send/batch targeted a `device_id` absent from the D1 registry |
 | `404` | `not_found` | no route matched |
 | `413` | `payload_too_large` | request body exceeded 256 KiB, or an oversized field |
+| `409` | `device_exists` | pairing refused to change the key of an already-registered `device_id`; a rebind requires a `rotate` code |
 | `429` | `rate_limited` | pairing, admin, or per-device limiter exceeded |
+| `429` | `daily_quota_exceeded` | this device spent its daily inbound row budget; retry after 00:00 UTC |
+| `503` | `storage_unavailable` | a backing store failed; **nothing was written**, retry (the `(device_id, local_id)` key makes it safe) |
 
 `nonce_replay` and `timestamp_out_of_window` MUST be distinct from `invalid_signature`. Collapsing them
 into one opaque `401` is what makes this protocol undebuggable from a phone, and the distinct codes are
@@ -468,9 +476,9 @@ Authentication class per route. Anything not listed does not exist.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `POST` | `/v1/device/pair` | **none** | Bootstrap. Authenticated by the single-use pairing code in the body. Rate-limited per IP and globally. |
+| `POST` | `/v1/device/pair` | **none** | Bootstrap. Authenticated by the single-use pairing code in the body, which is atomically claimed before any Durable Object work (§11.8). Rate-limited per IP and globally, on separate buckets. |
 | `GET` | `/source` | **none** | AGPL-3.0 §13 source offer. `302` to `SOURCE_URL`. Not part of the device protocol. |
-| `POST` | `/v1/admin/pairing-code` | admin | Body `{ttl_ms?}`. Returns `{pairing_code, expires_at}`. `ttl_ms` clamped to `[1000, 86400000]`. |
+| `POST` | `/v1/admin/pairing-code` | admin | Body `{ttl_ms?, device_id?, purpose?}`. Returns `{pairing_code, expires_at, device_id, purpose}`. `ttl_ms` clamped to `[1000, 86400000]`; `purpose` is `enroll` (default) or `rotate`, and `rotate` requires `device_id` (§11.8). |
 | `GET` | `/v1/admin/health` | admin | Version, applied migrations, binding presence, row counts. **Never** message content. `503` when the schema or a critical binding is missing. |
 | `GET` | `/v1/devices` | admin | Fleet list. |
 | `DELETE` | `/v1/admin/devices/:device_id` | admin | Revoke: wipes the device from **the DO** (which is what verifies signatures) and from D1, closes its sockets. |
@@ -558,3 +566,30 @@ Durable Object request.
 
 A body over the cap returns `413 payload_too_large`; an array or field over its cap returns
 `400 bad_request`.
+
+### 11.8 Pairing scope, rotation and the atomic claim
+
+A pairing code is **not** a generic bearer token for any `device_id`. It carries two attributes fixed at
+mint time:
+
+| Field | Meaning |
+|---|---|
+| `device_id` | When set, the code may only be redeemed for that exact id. `NULL` means any **new** device. |
+| `purpose` | `enroll` (default) may only register an id that does not exist yet. `rotate` — which requires `device_id` — is the only purpose allowed to replace an existing key. |
+
+Redemption is **claim → Durable Object → finalize**:
+
+1. A single conditional `UPDATE … RETURNING` claims the code (`claimed_at`), requiring: unexpired, not
+   currently claimed by another request (a claim older than 30 s is abandoned and may be reclaimed),
+   matching `device_id` scope, and — for `enroll` — no existing device. Exactly one concurrent redeemer
+   can win; a loser updates zero rows and MUST NOT reach the Durable Object.
+2. Only the winner calls the DO, passing `rotate` derived from the code's `purpose`. A DO failure
+   **releases** the claim, so a failed redemption never burns the code (Rev B defect #13).
+3. The claim is consumed (`DELETE … WHERE claimed_at = our token`) and only then is the D1 registry
+   mirrored. The consume is checked by row count, never batched with the upsert: a zero-row `DELETE` is
+   a successful D1 statement, so batching would let the upsert commit without holding the claim.
+
+An `enroll` code redeemed against an already-registered `device_id` returns `409 device_exists`. An
+operator rotating a key must mint with `{ "purpose": "rotate", "device_id": "<id>" }`; the DO then
+evicts the previous key holder (closes sockets, drops its queued commands, nonces and per-command
+timers), which is authorized behaviour only under an explicit rotation.

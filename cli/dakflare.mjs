@@ -94,6 +94,49 @@ function parseFlags(argv) {
   return { flags, rest };
 }
 
+/**
+ * Resolve an admin token without putting it in argv when possible.
+ *
+ * Precedence: --token-file, DAKFLARE_ADMIN_TOKEN, --token (warned). Returns null when none
+ * is supplied, so callers can fall back to the saved config / a generated token.
+ * The value is only ever returned, never printed or handed to a subprocess.
+ */
+function resolveAdminToken(flags) {
+  if ('token-file' in flags) {
+    if (typeof flags['token-file'] !== 'string') fail('--token-file requires a path: --token-file <path>');
+    const file = flags['token-file'];
+    let token;
+    try {
+      token = fs.readFileSync(file, 'utf8').trim();
+    } catch (error) {
+      fail(`could not read --token-file ${file}: ${error?.message ?? error}`);
+    }
+    if (!token) fail(`--token-file ${file} is empty`);
+
+    // A token readable by group/other is a real exposure; warn rather than refuse (some
+    // filesystems mount secrets with modes this CLI cannot judge).
+    try {
+      if (fs.statSync(file).mode & 0o077) {
+        warn(`token file ${file} is readable by other users — chmod 600 it`);
+      }
+    } catch { /* the read above already succeeded; a stat race is not worth failing on */ }
+    return token;
+  }
+
+  const fromEnv = process.env.DAKFLARE_ADMIN_TOKEN;
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv;
+
+  if (typeof flags.token === 'string') {
+    // Deliberately on stderr: this warning must not be swallowed by piping stdout.
+    process.stderr.write(
+      '! --token is visible in process arguments and shell history; prefer DAKFLARE_ADMIN_TOKEN or --token-file\n'
+    );
+    return flags.token;
+  }
+
+  return null;
+}
+
 /** Run wrangler in the worker directory. Returns {status, stdout, stderr}. */
 function wrangler(args, { input, quiet = false } = {}) {
   const res = spawnSync('npx', ['wrangler', ...args], {
@@ -175,10 +218,15 @@ async function cmdInit(argv) {
   ok('Cloudflare account authenticated (wrangler OAuth)');
 
   // 2. Deployment admin plane: generate, never print.
-  const token = typeof flags.token === 'string' && flags.token.length >= 32
-    ? flags.token
-    : crypto.randomBytes(32).toString('hex');
-  ok(`admin token ${flags.token ? 'supplied' : 'generated'} (${mask(token)})`);
+  const supplied = resolveAdminToken(flags);
+  // init installs its own token, so it keeps the old rule: a supplied token must be at least
+  // 32 characters, otherwise a strong one is generated — audibly, not by silent replacement.
+  const useSupplied = Boolean(supplied && supplied.length >= 32);
+  if (supplied && !useSupplied) {
+    warn('supplied admin token is shorter than 32 characters — generating a stronger one instead');
+  }
+  const token = useSupplied ? supplied : crypto.randomBytes(32).toString('hex');
+  ok(`admin token ${useSupplied ? 'supplied' : 'generated'} (${mask(token)})`);
 
   // 3. Deploy. Prefer `cf` when the project has been migrated to cloudflare.config.ts;
   //    fall back to Wrangler otherwise. Both target the same Worker name and bindings.
@@ -197,7 +245,7 @@ async function cmdInit(argv) {
   if (!url) {
     warn('could not detect the deployment URL from wrangler output');
     out('  find it with `npx wrangler deployments status`, then:');
-    out('    dakflare use <worker-url> --token <admin-token>');
+    out('    dakflare use <worker-url> --token-file <path>');
   } else {
     ok(`deployed → ${url}`);
   }
@@ -225,9 +273,13 @@ async function cmdInit(argv) {
 async function cmdUse(argv) {
   const { flags, rest } = parseFlags(argv);
   const url = rest[0];
-  if (!url || !/^https?:\/\//.test(url)) fail('usage: dakflare use <worker-url> --token <admin-token>');
-  const token = typeof flags.token === 'string' ? flags.token : loadConfig()?.token;
-  if (!token) fail('no admin token: pass --token <admin-token>');
+  if (!url || !/^https?:\/\//.test(url)) {
+    fail('usage: dakflare use <worker-url> [--token-file <path> | --token <admin-token>]');
+  }
+  const token = resolveAdminToken(flags) ?? loadConfig()?.token;
+  if (!token) {
+    fail('no admin token: pass --token-file <path>, set DAKFLARE_ADMIN_TOKEN, or pass --token <admin-token>');
+  }
 
   const probe = await api({ url, token }, 'GET', '/v1/admin/health').catch((e) => ({ status: 0, data: { error: String(e) } }));
   if (probe.status !== 200) {
@@ -349,13 +401,20 @@ function cmdHelp() {
   out(`
 DakFlare — desktop CLI
 
-  dakflare init [--token <t>] [--url <u>]   install into your Cloudflare account
-  dakflare doctor                            health, migrations, bindings
-  dakflare pair [--ttl 600]                  mint a pairing code + deep link
-  dakflare devices                           list paired devices
-  dakflare send <+E164> <text> --device <id> queue an outbound SMS
-  dakflare use <url> --token <t>             point at an existing deployment
-  dakflare whoami                            show target + auth state
+  dakflare init [--url <u>] [--token-file <f>]    install into your Cloudflare account
+  dakflare doctor                                 health, migrations, bindings
+  dakflare pair [--ttl 600]                       mint a pairing code + deep link
+  dakflare devices                                list paired devices
+  dakflare send <+E164> <text> --device <id>      queue an outbound SMS
+  dakflare use <url> [--token-file <f>]           point at an existing deployment
+  dakflare whoami                                 show target + auth state
+
+Admin token (init, use)
+  --token-file <path>       read the token from a file (best: chmod 600)
+  DAKFLARE_ADMIN_TOKEN      read the token from the environment
+  --token <t>               supported, but visible in process arguments and shell history
+  precedence: --token-file, then DAKFLARE_ADMIN_TOKEN, then --token
+  With none supplied, \`use\` reuses the saved config and \`init\` generates a token.
 
 Credentials
   Cloudflare account  wrangler OAuth (owned by Wrangler, never stored here)

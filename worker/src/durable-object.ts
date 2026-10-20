@@ -38,7 +38,13 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
 import { err } from "./lib/errors";
 import { sendFcmHighPriorityWake } from "./lib/fcm";
-import { timingConfig, MAX_ACK_IDS, type TimingConfig } from "./lib/config";
+import {
+  timingConfig,
+  readIntEnv,
+  MAX_ACK_IDS,
+  MAX_INCOMING_MESSAGES,
+  type TimingConfig,
+} from "./lib/config";
 import { SIGNATURE_BYTES, utf8Bytes } from "./auth/canonical";
 
 interface WsAttachment {
@@ -169,6 +175,13 @@ export class DeviceGateway extends DurableObject<Env> {
           attempts  INTEGER NOT NULL,
           failed_at INTEGER NOT NULL
         );
+
+        -- Per-device daily inbound row budget. One row per UTC day, so a single
+        -- device cannot spend the shared D1 write allowance for every other device.
+        CREATE TABLE IF NOT EXISTS write_budget (
+          day  TEXT PRIMARY KEY,
+          rows INTEGER NOT NULL
+        );
       `);
 
       // Migration for objects created before `attempts` existed. SQLite has no
@@ -250,6 +263,11 @@ export class DeviceGateway extends DurableObject<Env> {
     /* 6. Pending commands (poll / piggyback) ------------------------------ */
     if (url.pathname === "/__pending") {
       return this.handlePending();
+    }
+
+    /* 6b. Daily inbound write budget --------------------------------------- */
+    if (url.pathname === "/__reserve") {
+      return this.handleReserve(req);
     }
 
     /* 7. Status transitions (guarded, §6.2) -------------------------------- */
@@ -352,8 +370,14 @@ export class DeviceGateway extends DurableObject<Env> {
     const replay = this.ctx.storage.transactionSync(() => {
       const sql = this.ctx.storage.sql;
 
-      // Prune everything that has outlived its own validity window.
-      sql.exec(`DELETE FROM nonces WHERE exp <= ?`, now);
+      // Prune everything whose replay-blocking window has already CLOSED.
+      //
+      // Strictly `<`, never `<=`. A nonce stored with `exp = ts + W` still has to
+      // reject a replay at the last acceptable instant: a copy claiming the same
+      // `ts` arriving at `now === exp` is inside the window (`|now - ts| <= W`,
+      // inclusive), so `exp <= now` deleted the guard exactly one millisecond too
+      // early. Pruning and admission must not share an inclusive boundary.
+      sql.exec(`DELETE FROM nonces WHERE exp < ?`, now);
 
       const found = sql.exec(`SELECT 1 AS present FROM nonces WHERE nonce = ?`, nonce).toArray();
       if (found.length > 0) return "nonce_replay" as const;
@@ -385,6 +409,10 @@ export class DeviceGateway extends DurableObject<Env> {
     const deviceId = body.device_id;
     const publicKeySpki = body.public_key_spki;
     const fcmToken = typeof body.fcm_token === "string" ? body.fcm_token : null;
+    // Authorization for replacing an existing key. Supplied by the Worker only when
+    // the redeemed pairing code was minted with `purpose = 'rotate'`, i.e. when an
+    // admin explicitly authorized a rotation of THIS device.
+    const rotate = body.rotate === true;
 
     if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
     if (typeof publicKeySpki !== "string" || publicKeySpki === "") return err("bad_request", 400);
@@ -404,10 +432,20 @@ export class DeviceGateway extends DurableObject<Env> {
     // A re-pair of the same device_id with a DIFFERENT key is a rotation, and the
     // previous key holder must be evicted — otherwise a stolen phone keeps its
     // socket and can still ack commands queued before the rotation.
+    //
+    // Rotation is only legitimate when the pairing code said so. An enrollment
+    // redemption that targets an existing device is a takeover attempt (or a lost
+    // race), and is refused WITHOUT writing anything: the D1 claim already blocks
+    // it, and this second check keeps the DO honest even if another caller reaches
+    // it directly. Re-pairing with the SAME key is not a rotation and stays allowed.
     const existing = this.ctx.storage.sql
       .exec(`SELECT public_key_spki FROM devices WHERE device_id = ?`, deviceId)
       .toArray()[0] as { public_key_spki?: string } | undefined;
     const rotating = existing !== undefined && existing.public_key_spki !== publicKeySpki;
+
+    if (existing !== undefined && rotating && rotate !== true) {
+      return err("device_exists", 409);
+    }
 
     this.ctx.storage.sql.exec(
       `INSERT INTO devices (device_id, public_key_spki, fcm_token, updated_at)
@@ -579,6 +617,65 @@ export class DeviceGateway extends DurableObject<Env> {
     for (const command of commands) this.markDispatched(command.command_id);
 
     return Response.json(commands);
+  }
+
+  /**
+   * Reserve inbound D1 rows against this device's daily budget.
+   *
+   * The D1 write allowance is shared by the whole deployment, so without a
+   * per-device cap one compromised or looping device can exhaust it for everybody
+   * and take the operator's message log down with it. The counter lives here —
+   * in the device's own object, in one synchronous transaction — so the check and
+   * the increment cannot be split by a concurrent batch.
+   *
+   * Reservation is deliberately pessimistic: rows that later turn out to be
+   * duplicates (`ON CONFLICT DO NOTHING`) are still charged. A device can always
+   * retry tomorrow; the shared budget cannot be unspent after the fact.
+   */
+  private async handleReserve(req: Request): Promise<Response> {
+    let payload: unknown;
+    try {
+      payload = await req.json();
+    } catch {
+      return err("bad_request", 400);
+    }
+    const requested = ((payload ?? {}) as Record<string, unknown>).rows;
+    if (
+      typeof requested !== "number" ||
+      !Number.isInteger(requested) ||
+      requested < 1 ||
+      requested > MAX_INCOMING_MESSAGES
+    ) {
+      return err("bad_request", 400);
+    }
+
+    const day = new Date().toISOString().slice(0, 10);
+    const cap = readIntEnv(this.env.INCOMING_ROWS_PER_DAY, 10_000, 100, 100_000);
+
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const currentRows = sql
+        .exec(`SELECT rows FROM write_budget WHERE day = ?`, day)
+        .toArray() as { rows: number }[];
+      const used = Number(currentRows[0]?.rows ?? 0);
+
+      if (used + requested > cap) return { granted: false as const, used };
+
+      sql.exec(
+        `INSERT INTO write_budget (day, rows) VALUES (?, ?)
+         ON CONFLICT(day) DO UPDATE SET rows = excluded.rows`,
+        day,
+        used + requested
+      );
+      // Yesterday's counters have no reader; drop them so the table stays at one
+      // row. Cheap, indexed by the primary key.
+      sql.exec(`DELETE FROM write_budget WHERE day < ?`, day);
+
+      return { granted: true as const, used: used + requested };
+    });
+
+    if (!outcome.granted) return err("daily_quota_exceeded", 429);
+    return Response.json({ ok: true, reserved: requested, used: outcome.used, cap });
   }
 
   private async handleStatusSingle(req: Request): Promise<Response> {

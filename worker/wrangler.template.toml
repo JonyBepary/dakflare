@@ -56,10 +56,21 @@ name = "DEVICE_LIMITER"
 namespace_id = "1003"
 simple = { limit = 600, period = 60 }
 
+[[ratelimits]]
+name = "AUTH_FAIL_LIMITER"
+namespace_id = "1004"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "PAIR_GLOBAL_LIMITER"
+namespace_id = "1005"
+simple = { limit = 300, period = 60 }
+
 [vars]
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
+INCOMING_ROWS_PER_DAY = "10000"
 # AGPL-3.0 §13: point this at YOUR fork. `/source` redirects here.
 SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 

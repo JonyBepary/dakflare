@@ -59,6 +59,7 @@ export function base64ToBytes(value: string): Uint8Array | null {
  * 2. header grammars                 -> 401 malformed_header
  * 3. no query string                 -> 400 unexpected_query
  * 4. |now - ts| <= window            -> 401 timestamp_out_of_window
+ * 4b. device_id exists in D1         -> 401 device_unknown
  * 5. body digest + canonical string  (no error of its own)
  * 6. signature decodes to 64 bytes   -> 401 bad_signature_length
  * 7. ECDSA P-256 / SHA-256 verify    -> 401 invalid_signature (in the DO)
@@ -101,6 +102,20 @@ export async function verifyDeviceSignature(req: Request, env: Env): Promise<Dev
   const windowMs = timingConfig(env as unknown as Record<string, unknown>).nonceWindowMs;
   if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > windowMs) {
     return { ok: false, response: err("timestamp_out_of_window", 401) };
+  }
+
+  // --- 4b. device registry (D1) -----------------------------------------
+  // Before the DO call, because `env.DEVICE.idFromName(deviceId)` CREATES the
+  // object on first touch: the constructor runs DDL and persists storage. Without
+  // this check, any unauthenticated caller could mint an unbounded number of
+  // durable, billable Durable Objects by inventing device ids. One indexed point
+  // read on the primary key, and it fails before any body is read or digested.
+  // `send.ts` already does the equivalent on the admin send path.
+  const known = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+    .bind(deviceId)
+    .first();
+  if (!known) {
+    return { ok: false, response: err("device_unknown", 401) };
   }
 
   // --- 5. raw body digest + canonical string ----------------------------

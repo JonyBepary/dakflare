@@ -1,19 +1,53 @@
 /**
  * Pairing — PROTOCOL_CONTRACT_V5 Rev C §1.1 (device_id grammar) and §8.
- * Port of master plan §5.4 with two verified Rev B defects fixed:
+ * Port of master plan §5.4 with the verified Rev B defects fixed.
  *
- *   #13 pairing atomicity. Rev B consumed the single-use code with
- *   `DELETE ... RETURNING` BEFORE calling the Durable Object and never checked
- *   the DO response, so a DO 500 still returned `{ok:true}`: D1 had burnt the
- *   code while the DO had no public key, and every later request 401'd
- *   `device_unknown` with no way to repair it. The order is now
- *   validate -> DO -> consume, with the consume and the device upsert in one
- *   `DB.batch()` and the DELETE asserted to have affected exactly one row.
+ * Design: claim -> Durable Object -> finalize.
+ *
+ *   A redemption atomically CLAIMS the pairing code (one UPDATE ... RETURNING that
+ *   stamps `claimed_at = now`) before any Durable Object work happens. The claim is
+ *   a short lease (30 s) so an abandoned redemption — a crashed isolate, a killed
+ *   request — cannot wedge a code forever. Winning the claim is the exclusive right
+ *   to call the DO for that code.
+ *
+ * Two properties are preserved deliberately, and both matter:
+ *
+ *   (a) A DO FAILURE DOES NOT BURN THE CODE. This is Rev B defect #13: Rev B
+ *   consumed the single-use code with `DELETE ... RETURNING` BEFORE calling the
+ *   Durable Object and never checked the DO response, so a DO 500 still returned
+ *   `{ok:true}`: D1 had burnt the code while the DO had no public key, and every
+ *   later request 401'd `device_unknown` with no way to repair it. Here the claim
+ *   is a reversible marker, not a delete: if the DO throws or answers non-ok, the
+ *   claim is released (`claimed_at = NULL`) and the code stays valid. The actual
+ *   DELETE happens only in the finalize step, after the DO has committed the key,
+ *   and it is bound to our own claim token.
+ *
+ *   (b) A CONCURRENT LOSER CANNOT REGISTER AN IDENTITY. Rev C's
+ *   validate -> DO -> consume order left a race: two requests could both validate
+ *   the same code, both reach the DO and both write a public key, while only one of
+ *   them then consumed the code. The loser had already created a persistent device
+ *   identity (and, on a rotation, evicted the winner's key holder). The claim above
+ *   is a single conditional UPDATE, so exactly one redemption can proceed; the loser
+ *   claims zero rows and returns without ever touching the DO.
+ *
+ * Also fixed here:
  *
  *   #12 unclamped scheduling input. `ttl_ms` is now finite-checked and clamped;
  *   Rev B passed any value straight through, so `ttl_ms: NaN` produced
  *   `expires_at = NULL`-adjacent garbage and a code that could never be consumed
  *   (or a code that lived forever).
+ *
+ * Scope (security fix 1): a code is bound to at most one `device_id`, and it carries
+ * a `purpose`. `enroll` may only register a device that does not exist yet, so a
+ * valid enrollment code can no longer rebind — and therefore take over — an already
+ * paired device. `rotate` requires an explicit `device_id` from the admin and is the
+ * only purpose allowed to replace an existing key. Rotation then evicts the previous
+ * key holder inside the DO, which is intended behaviour but only when authorized.
+ *
+ * Limiting (security fix 3): the per-IP limiter is checked first and a failure there
+ * returns immediately, so one client cannot exhaust the shared limiter budget and
+ * deny pairing to everybody else. The global limiter is a separate binding and is
+ * consulted only for requests that passed the per-IP check.
  */
 
 import type { Env } from "../index";
@@ -22,16 +56,48 @@ import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, clampTtlMs } from "../lib/config";
 
+/**
+ * How long a claim blocks other redeemers before it is treated as abandoned.
+ * Long enough for a DO round-trip, short enough that a crashed isolate does not
+ * leave an operator waiting for a code that expires in minutes.
+ */
+const CLAIM_LEASE_MS = 30_000;
+
+type PairingPurpose = "enroll" | "rotate";
+
 /** `POST /v1/admin/pairing-code` — mint a single-use, expiring pairing code. */
 export async function handleAdminPairingCode(req: Request, env: Env): Promise<Response> {
   let ttlMs = clampTtlMs(undefined);
+  let deviceId: string | null = null;
+  let purpose: PairingPurpose = "enroll";
+
   const mintBody = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!mintBody.ok && mintBody.reason === "payload_too_large") {
     return err("payload_too_large");
   }
-  // An empty or non-JSON body is fine here: use the default TTL.
-  if (mintBody.ok && "ttl_ms" in mintBody.value) {
-    ttlMs = clampTtlMs(mintBody.value.ttl_ms);
+  // An empty or non-JSON body is fine here: use the default TTL and scope.
+  if (mintBody.ok) {
+    const value = mintBody.value;
+    if ("ttl_ms" in value) ttlMs = clampTtlMs(value.ttl_ms);
+
+    if (value.device_id !== undefined && value.device_id !== null) {
+      // §1.1 grammar, so a code can never be bound to a device_id that no request
+      // could ever authenticate as.
+      if (typeof value.device_id !== "string" || !RE_DEVICE_ID.test(value.device_id)) {
+        return err("bad_request", 400);
+      }
+      deviceId = value.device_id;
+    }
+
+    if (value.purpose !== undefined && value.purpose !== null) {
+      if (value.purpose !== "enroll" && value.purpose !== "rotate") {
+        return err("bad_request", 400);
+      }
+      purpose = value.purpose;
+    }
+
+    // An unscoped rotation is meaningless: there is no device to rotate.
+    if (purpose === "rotate" && deviceId === null) return err("bad_request", 400);
   }
 
   const bytes = new Uint8Array(6);
@@ -44,30 +110,39 @@ export async function handleAdminPairingCode(req: Request, env: Env): Promise<Re
   await env.DB.batch([
     // Opportunistic purge: keeps the single-use table bounded without a cron.
     env.DB.prepare(`DELETE FROM pairing_codes WHERE expires_at <= ?`).bind(Date.now()),
-    env.DB.prepare(`INSERT INTO pairing_codes (code, expires_at) VALUES (?, ?)`).bind(
-      pairingCode,
-      expiresAt
-    ),
+    env.DB.prepare(
+      `INSERT INTO pairing_codes (code, expires_at, device_id, purpose) VALUES (?, ?, ?, ?)`
+    ).bind(pairingCode, expiresAt, deviceId, purpose),
   ]);
 
-  return Response.json({ pairing_code: pairingCode, expires_at: expiresAt });
+  return Response.json({
+    pairing_code: pairingCode,
+    expires_at: expiresAt,
+    device_id: deviceId,
+    purpose,
+  });
 }
 
 /** `POST /v1/device/pair` — bootstrap a device (authenticated by the pairing code alone). */
 export async function handleDevicePair(req: Request, env: Env): Promise<Response> {
-  // Unauthenticated route: throttle before touching the database. Two keys,
-  // because the Rate Limiting binding is per-colo — a per-IP key alone lets an
-  // IP-rotating botnet spread across locations, so a global key caps total
-  // pairing attempts as well.
+  // --- Step 1. Unauthenticated route: throttle before touching the database.
+  //
+  // Per-IP first, and return on failure BEFORE the global limiter is consulted.
+  // Two keys exist because the Rate Limiting binding is per-colo — a per-IP key
+  // alone lets an IP-rotating botnet spread across locations — but checking the
+  // shared key first (or unconditionally) lets one client drain the shared budget
+  // and lock every other device out of pairing.
   if (env.PAIR_LIMITER) {
     const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-    const [perIp, global] = await Promise.all([
-      env.PAIR_LIMITER.limit({ key: `ip:${ip}` }),
-      env.PAIR_LIMITER.limit({ key: "pair_global" }),
-    ]);
-    if (!perIp.success || !global.success) return err("rate_limited", 429);
+    const perIp = await env.PAIR_LIMITER.limit({ key: `ip:${ip}` });
+    if (!perIp.success) return err("rate_limited", 429);
+  }
+  if (env.PAIR_GLOBAL_LIMITER) {
+    const global = await env.PAIR_GLOBAL_LIMITER.limit({ key: "pair_global" });
+    if (!global.success) return err("rate_limited", 429);
   }
 
+  // --- Step 2. Parse/validate the body exactly as before. -------------------
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const body = parsed.value;
@@ -89,50 +164,117 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
 
   const now = Date.now();
 
-  // (a) Validate WITHOUT consuming, so a DO failure leaves the code intact.
-  const existing = await env.DB.prepare(
-    `SELECT code FROM pairing_codes WHERE code = ? AND expires_at > ?`
+  // --- Step 3. Atomic claim: ONE statement. --------------------------------
+  //
+  // Everything that decides whether this request may pair is in the WHERE clause,
+  // so the decision and the write cannot be separated by a concurrent request:
+  //   - the code exists and is unexpired;
+  //   - it is not claimed by someone else (a claim older than the lease is
+  //     abandoned and may be reclaimed);
+  //   - it is either unscoped or scoped to THIS device_id;
+  //   - an `enroll` code may not target a device that is already paired. That is
+  //     the takeover fix, expressed as data rather than as an application check
+  //     that a race could step over.
+  //
+  // A concurrent loser updates 0 rows and returns below, never reaching the DO.
+  const claim = await env.DB.prepare(
+    `UPDATE pairing_codes
+        SET claimed_at = ?1
+      WHERE code = ?2
+        AND expires_at > ?1
+        AND (claimed_at IS NULL OR claimed_at <= ?1 - ${CLAIM_LEASE_MS})
+        AND (device_id IS NULL OR device_id = ?3)
+        AND (purpose = 'rotate' OR NOT EXISTS (SELECT 1 FROM devices WHERE device_id = ?3))
+     RETURNING purpose`
   )
-    .bind(pairingCode, now)
-    .first<{ code: string }>();
-  if (!existing) return err("bad_request", 401);
+    .bind(now, pairingCode, deviceId)
+    .all<{ purpose: string }>();
 
-  // (b) Register in the device's Durable Object FIRST. A failure here must
-  //     surface as 5xx and must NOT burn the code.
+  // `.all()` rather than `.first()`: an UPDATE ... RETURNING result set is read
+  // more predictably through `results`, and the row count is explicit.
+  const claimed = claim.results?.[0];
+  if (!claimed) {
+    // Diagnostic only — the claim above already made the security decision.
+    const row = await env.DB.prepare(
+      `SELECT purpose FROM pairing_codes WHERE code = ? AND expires_at > ?`
+    )
+      .bind(pairingCode, now)
+      .first<{ purpose: string }>();
+
+    if (row?.purpose === "enroll") {
+      const device = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+        .bind(deviceId)
+        .first<{ ok: number }>();
+      if (device) return err("device_exists", 409);
+    }
+    return err("bad_request", 401);
+  }
+
+  const rotating = claimed.purpose === "rotate";
+
+  // --- Step 4. Register in the device's Durable Object. --------------------
+  //
+  // The claim is held across this call. A failure here RELEASES it and leaves the
+  // code valid: property (a) above.
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   let doRes: Response;
   try {
     doRes = await stub.fetch("https://do/__pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_id: deviceId, public_key_spki: publicKeySpki, fcm_token: fcmToken }),
+      body: JSON.stringify({
+        device_id: deviceId,
+        public_key_spki: publicKeySpki,
+        fcm_token: fcmToken,
+        rotate: rotating,
+      }),
     });
   } catch (error) {
     console.error(`[pair] DO unreachable: ${String(error)}`);
+    await releaseClaim(env, pairingCode, now);
     return internalError();
   }
   if (!doRes.ok) {
     console.error(`[pair] DO rejected pairing with HTTP ${doRes.status}`);
+    await releaseClaim(env, pairingCode, now);
+    // A refusal is a refusal: the DO declined an unauthorized rotation.
+    if (doRes.status === 409) return err("device_exists", 409);
     return internalError();
   }
 
-  // (c) Only now consume the code, atomically, together with the D1 upsert.
-  const [consume] = await env.DB.batch([
-    env.DB.prepare(
-      `DELETE FROM pairing_codes WHERE code = ? AND expires_at > ? RETURNING code`
-    ).bind(pairingCode, now),
-    env.DB.prepare(
-      `INSERT INTO devices (device_id, public_key, fcm_token, paired_at, last_seen)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(device_id) DO UPDATE SET
-         public_key = excluded.public_key,
-         fcm_token  = excluded.fcm_token,
-         last_seen  = excluded.last_seen`
-    ).bind(deviceId, publicKeySpki, fcmToken, now, now),
-  ]);
+  // --- Step 5. Finalize: consume OUR claim, THEN mirror the registry. ------
+  //
+  // These are deliberately two statements, not one `DB.batch()`. A D1 batch only
+  // rolls back when a statement ERRORS, and a DELETE matching zero rows is a
+  // SUCCESS — so batching the registry upsert beside the DELETE would let the
+  // upsert commit even when the DELETE changed nothing. That is the same
+  // phantom-identity shape this design removes, merely pushed behind the 30 s
+  // lease. Checking `changes` first makes the DELETE the real commit point.
+  //
+  // Bound to `claimed_at = now`, so this only consumes the claim this request owns.
+  const consume = await env.DB.prepare(
+    `DELETE FROM pairing_codes WHERE code = ? AND claimed_at = ?`
+  )
+    .bind(pairingCode, now)
+    .run();
 
-  // A concurrent pair won the race and consumed the code first.
-  if ((consume.meta?.changes ?? 0) !== 1) return err("bad_request", 401);
+  if ((consume.meta?.changes ?? 0) !== 1) {
+    // The lease was reclaimed by another redeemer while the DO call was in flight.
+    // It owns the code now; do not mirror a registry row for a claim we no longer
+    // hold, or its key could be overwritten by ours.
+    return err("bad_request", 401);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO devices (device_id, public_key, fcm_token, paired_at, last_seen)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(device_id) DO UPDATE SET
+       public_key = excluded.public_key,
+       fcm_token  = excluded.fcm_token,
+       last_seen  = excluded.last_seen`
+  )
+    .bind(deviceId, publicKeySpki, fcmToken, now, now)
+    .run();
 
   return Response.json({ ok: true });
 }
@@ -148,6 +290,25 @@ export async function handleDevicesList(env: Env): Promise<Response> {
 /** §8 covers device-protocol errors only; a server fault is a plain 500. */
 export function internalError(): Response {
   return Response.json({ error: "internal_error" }, { status: 500 });
+}
+
+/**
+ * Drop our claim without consuming the code.
+ *
+ * Bound to the exact `claimed_at` value this request wrote, so a lease that was
+ * already reclaimed by someone else is never cleared out from under them.
+ */
+async function releaseClaim(env: Env, pairingCode: string, claimedAt: number): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `UPDATE pairing_codes SET claimed_at = NULL WHERE code = ? AND claimed_at = ?`
+    )
+      .bind(pairingCode, claimedAt)
+      .run();
+  } catch (error) {
+    // The lease expires on its own, so a failed release only delays the retry.
+    console.error(`[pair] failed to release pairing claim: ${String(error)}`);
+  }
 }
 
 function isDecodableBase64(value: string): boolean {

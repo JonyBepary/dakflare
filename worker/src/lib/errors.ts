@@ -7,9 +7,16 @@
  * guess and `nonce_replay` / `timestamp_out_of_window` stay distinct from
  * `invalid_signature` (§8: collapsing them is what makes this protocol
  * undebuggable from a phone).
+ *
+ * Three codes extend the §8 table for conditions the frozen document did not have
+ * to describe: `device_exists` (pairing refused an unauthorized rebind),
+ * `daily_quota_exceeded` (this device spent its own daily write allowance) and
+ * `storage_unavailable` (the write did not happen; retry). They are distinct codes
+ * for the same reason as the rest: "try again tomorrow", "retry now" and "someone
+ * else owns this device" must not all look like `bad_request`.
  */
 
-/** The complete §8 code set. Nothing outside this union may be returned by `err()`. */
+/** The complete §8 code set, plus the three documented extensions above. */
 export type ErrorCode =
   | "unexpected_query"
   | "bad_request"
@@ -22,7 +29,13 @@ export type ErrorCode =
   | "device_unknown"
   | "nonce_replay"
   | "rate_limited"
-  | "payload_too_large";
+  | "payload_too_large"
+  /** Pairing: the target device_id is already registered and no rotation was authorized. */
+  | "device_exists"
+  /** The caller's own daily write reservation is exhausted. Retry tomorrow. */
+  | "daily_quota_exceeded"
+  /** A backing store failed; the batch was NOT written and the device should retry. */
+  | "storage_unavailable";
 
 /** §8 status codes, as a compile-time map so call sites cannot drift. */
 export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
@@ -38,6 +51,9 @@ export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
   nonce_replay: 401,
   rate_limited: 429,
   payload_too_large: 413,
+  device_exists: 409,
+  daily_quota_exceeded: 429,
+  storage_unavailable: 503,
 };
 
 const KNOWN_CODES = new Set<string>(Object.keys(ERROR_STATUS));

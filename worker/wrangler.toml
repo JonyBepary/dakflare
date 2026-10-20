@@ -65,10 +65,14 @@ id = "cabb16caf192453fa17b54b6e0f9d85f"
 # Rate limiting (hardening S3). Backed by the same infrastructure as WAF
 # rate-limiting rules. `namespace_id` must be unique per limiter.
 #
-#   PAIR_LIMITER   unauthenticated POST /v1/device/pair — per IP and one global
+#   PAIR_LIMITER   unauthenticated POST /v1/device/pair — per IP. Checked FIRST, and
+#                  a failure returns before the global limiter is consulted.
+#   PAIR_GLOBAL_LIMITER  the shared `pair_global` key — a separate binding on purpose,
+#                  so one client cannot drain the shared budget and deny everyone else
 #   ADMIN_LIMITER  admin routes — applied AFTER the bearer token is verified, so
 #                  random tokens cannot mint fresh keys
 #   DEVICE_LIMITER per paired device — applied AFTER the signature is verified
+#   AUTH_FAIL_LIMITER  per IP, incremented on FAILED device auth only
 #
 # Sized for the conformance suite: it issues ~40 admin calls and a 40+ request
 # device burst, so the device/admin windows must stay above that.
@@ -88,6 +92,16 @@ name = "DEVICE_LIMITER"
 namespace_id = "1003"
 simple = { limit = 600, period = 60 }
 
+[[ratelimits]]
+name = "AUTH_FAIL_LIMITER"
+namespace_id = "1004"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "PAIR_GLOBAL_LIMITER"
+namespace_id = "1005"
+simple = { limit = 300, period = 60 }
+
 [vars]
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
@@ -95,6 +109,9 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # Retention window for message bodies and phone numbers (D1 and DO `commands`).
 # A product decision, not an engineering default: see OPERATIONS.md.
 MESSAGE_RETENTION_DAYS = "90"
+# Per-device daily inbound row budget (D1 writes), enforced in the device's DO.
+# Bounds how much of the shared daily write allowance one device can consume.
+INCOMING_ROWS_PER_DAY = "10000"
 # AGPL-3.0 §13: the deployment must offer its source to the people using it.
 # Point this at your fork; `/source` redirects here and the landing page links to it.
 SOURCE_URL = "https://github.com/JonyBepary/dakflare"

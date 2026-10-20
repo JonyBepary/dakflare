@@ -163,7 +163,9 @@ export function loadIdentity({ required = true } = {}) {
 }
 
 function saveIdentity(identity) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(identity, null, 2));
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(identity, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(STATE_FILE, 0o600); } catch { /* best effort */ }
 }
 
 /* ───────────────────────────────── signed requests ───────────────────────── */
@@ -577,6 +579,8 @@ async function cmdPair() {
   }
 
   saveIdentity(identity);
+  const mode = fs.statSync(STATE_FILE).mode & 0o777;
+  if (mode !== 0o600) throw new Error(`state file mode is ${mode.toString(8)}, expected 600`);
   console.log(`\nidentity saved to ${path.relative(HERE, STATE_FILE)}`);
 }
 
@@ -1111,7 +1115,18 @@ async function cmdMultiDevice() {
     const oldKey = A.privateKey;
     const rotated = newIdentity();          // new key, same device id
     rotated.deviceId = A.deviceId;
-    const mint = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    const mint = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000, device_id: A.deviceId, purpose: "rotate" });
+    const enroll = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    const rebind = await fetch(`${WORKER_URL}/v1/device/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pairing_code: enroll.data.pairing_code,
+        device_id: A.deviceId,
+        public_key_spki: rotated.publicKeySpki,
+      }),
+    });
+    rep.check("an enroll code cannot rebind an existing device -> 409", rebind.status, 409);
     const re = await fetch(`${WORKER_URL}/v1/device/pair`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1142,7 +1157,7 @@ async function cmdMultiDevice() {
 
     const rotated2 = newIdentity();
     rotated2.deviceId = A.deviceId;
-    const mint2 = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    const mint2 = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000, device_id: A.deviceId, purpose: "rotate" });
     await fetch(`${WORKER_URL}/v1/device/pair`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

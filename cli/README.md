@@ -58,8 +58,12 @@ Two configs must not drift: bindings, vars, triggers and the DO export list are 
 | `dakflare pair [--ttl 600]` | mints a pairing code and a `dakflare://pair?u=…&c=…` deep link |
 | `dakflare devices` | lists paired devices with last-seen |
 | `dakflare send <+E164> <text> --device <id>` | queues an outbound SMS |
-| `dakflare use <url> --token <t>` | points at an existing deployment (verified before saving) |
+| `dakflare use <url> [--token-file <path>]` | points at an existing deployment (verified before saving) |
 | `dakflare whoami` | target, masked token, Cloudflare auth state |
+
+`init` and `use` take the admin token from `--token-file <path>`, else `DAKFLARE_ADMIN_TOKEN`, else
+`--token <t>` — `--token` is still supported but exposes the value in process arguments and shell history.
+Prefer `--token-file` (chmod `600`) or the environment variable.
 
 ## What it deliberately does not do
 

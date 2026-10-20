@@ -63,6 +63,7 @@ export default defineConfig({
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
+			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/JonyBepary/dakflare"),
 
@@ -93,6 +94,14 @@ export default defineConfig({
 			DEVICE_LIMITER: bindings.rateLimit({
 				namespace: "1003",
 				simple: { limit: 600, period: 60 },
+			}),
+			AUTH_FAIL_LIMITER: bindings.rateLimit({
+				namespace: "1004",
+				simple: { limit: 120, period: 60 },
+			}),
+			PAIR_GLOBAL_LIMITER: bindings.rateLimit({
+				namespace: "1005",
+				simple: { limit: 300, period: 60 },
 			}),
 		},
 	},

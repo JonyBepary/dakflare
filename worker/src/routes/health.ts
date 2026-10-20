@@ -32,8 +32,10 @@ export async function handleHealth(env: Env): Promise<Response> {
     KV: Boolean(env.KV),
     DEVICE: Boolean(env.DEVICE),
     PAIR_LIMITER: Boolean(env.PAIR_LIMITER),
+    PAIR_GLOBAL_LIMITER: Boolean(env.PAIR_GLOBAL_LIMITER),
     ADMIN_LIMITER: Boolean(env.ADMIN_LIMITER),
     DEVICE_LIMITER: Boolean(env.DEVICE_LIMITER),
+    AUTH_FAIL_LIMITER: Boolean(env.AUTH_FAIL_LIMITER),
     FCM_SERVICE_ACCOUNT: Boolean(env.FCM_SERVICE_ACCOUNT_JSON),
   };
 
