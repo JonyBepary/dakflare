@@ -24,30 +24,30 @@ They are not interchangeable. OAuth cannot call `/v1/admin/send`; the admin toke
 one out of a dashboard. `doctor`, `pair`, `devices`, and `send` work without the Cloudflare account
 being authenticated at all.
 
-## Why Wrangler, not `cf`
+## Wrangler and `cf` — which does what
 
-`cf` is Cloudflare's newer unified CLI (beta). It is deliberately **not** this project's build/deploy
-path, for three documented reasons:
+The project is **migrated to `cloudflare.config.ts`** (`cf migrate`, completed by hand for Durable Object
+`exports`), and keeps `wrangler.toml` alongside it. That is deliberate, not leftover: each tool owns a
+different job, and Cloudflare's migration guide itself tells you to keep using Wrangler for the gaps.
 
-1. **`cf` does not read `wrangler.toml`.** `cf dev`, `cf build` and `cf deploy` require
-   `cloudflare.config.ts`; in an unmigrated Wrangler project they fail — and Cloudflare documents that
-   automatic configuration can rewrite the project as a static site *without your Worker code or
-   bindings*. Their own guidance: *"Until you migrate the project, keep using Wrangler for development
-   and deployment, such as `wrangler dev` and `wrangler deploy`."*
-2. **D1 schema versioning is a Wrangler workflow.** The D1 docs describe migrations as created and
-   applied *with Wrangler*. `cf` offers `cf d1 query <DATABASE_ID> --sql`, which is a different
-   workflow and takes an id, not a name. Our `d1_migrations` table is read by `/v1/admin/health`, so the
-   migration runner is part of the contract with operators.
-3. **Our conformance lane is local-first** — `wrangler dev --local` with Durable Object SQLite,
-   hibernating sockets and alarms. `cf`'s local support is limited to selected KV/D1/R2 commands, and
-   its project commands are remote-oriented.
+| Task | Tool | Why |
+|---|---|---|
+| **Deploy** | `cf deploy` (`npm run deploy:cf`) | `cf` reads `cloudflare.config.ts`; the config is the canonical one |
+| **Local dev / conformance** | `wrangler dev --local` | `cf` has no local equivalent for Durable Object SQLite, alarms or hibernating sockets — and the whole test lane depends on them |
+| **D1 migrations** | either: `cf d1 migrations apply` or `wrangler d1 migrations apply` | both support it, including `--local`. `cf` takes the database id, Wrangler takes the name |
+| **Secrets** | `wrangler secret put --name dakflare-worker` | `cf` **cannot set a single secret yet**; its own migration guide says to use `npx wrangler` |
+| **Live logs** | `wrangler tail dakflare-worker` | `cf` **cannot stream logs yet** |
+| **Account / DNS / zones** | `cf d1 list`, `cf zones`, `cf dns` | Wrangler has no DNS support at all |
 
-`cf` is still the better tool for **account-level** work and needs no migration to use: `cf d1 list`,
-`cf zones`, `cf dns records` run in any directory. When custom-domain setup lands (hardening S4), that
-is the tool to reach for — Wrangler cannot manage DNS.
+Two configs must not drift: bindings, vars, triggers and the DO export list are declared in **both**
+`cloudflare.config.ts` and `wrangler.toml`. `npm run check:config` diffs the binding names.
 
-> **Do not run `cf dev`, `cf build`, or `cf deploy` in this repo** unless you have migrated it with
-> `cf migrate`. Running them on an unmigrated project can overwrite the configuration as a static site.
+> **The first `cf deploy` is a one-way door.** Switching Durable Object lifecycle from Wrangler's ordered
+> `[[migrations]]` to `exports` cannot be rolled back to a version created before the switch. Run it with
+> `cf deploy` — never a version upload — and only once `exports` lists every live class.
+>
+> **Never run `cf dev` or `cf build` on this project expecting the Wrangler behaviour** unless you intend
+> to use the `cf` bundler path; local development stays on `wrangler dev --local`.
 
 ## Commands
 

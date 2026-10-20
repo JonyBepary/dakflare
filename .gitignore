@@ -17,3 +17,7 @@ node_modules/
 
 # Generated test fixture (RSA private key) — never commit
 stub-service-account.json
+
+# cf build output (types + bundled assets)
+.cloudflare/
+worker/.cloudflare/

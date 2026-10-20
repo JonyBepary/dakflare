@@ -9,6 +9,8 @@
     "dev": "wrangler dev --local",
     "dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
     "deploy": "wrangler deploy",
+    "deploy:cf": "cf deploy",
+    "cf:check": "cf deploy --dry-run",
     "typecheck": "tsc --noEmit",
     "check:config": "node scripts/check-config.mjs",
     "migrate:local": "wrangler d1 migrations apply sms_gateway --local",

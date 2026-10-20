@@ -110,6 +110,22 @@ function wrangler(args, { input, quiet = false } = {}) {
   return res;
 }
 
+/** Run cf (the Cloudflare CLI) in the worker directory. */
+function cf(args, { input, quiet = false } = {}) {
+  const res = spawnSync('npx', ['cf', ...args], {
+    cwd: WORKER_DIR,
+    input,
+    encoding: 'utf8',
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  if (!quiet && res.status !== 0) {
+    const detail = (res.stderr || res.stdout || '').trim().split('\n').slice(-6).join('\n');
+    fail(`cf ${args.join(' ')} failed:\n${detail}`);
+  }
+  return res;
+}
+
 function wranglerLoggedIn() {
   const res = spawnSync('npx', ['wrangler', 'whoami'], { cwd: WORKER_DIR, encoding: 'utf8' });
   return /logged in/i.test(`${res.stdout}${res.stderr}`);
@@ -164,11 +180,12 @@ async function cmdInit(argv) {
     : crypto.randomBytes(32).toString('hex');
   ok(`admin token ${flags.token ? 'supplied' : 'generated'} (${mask(token)})`);
 
-  // 3. Deploy. Wrangler applies wrangler.toml, including automatic D1/KV provisioning
-  //    when the config carries no ids.
+  // 3. Deploy. Prefer `cf` when the project has been migrated to cloudflare.config.ts;
+  //    fall back to Wrangler otherwise. Both target the same Worker name and bindings.
   out('');
-  out('  deploying…');
-  const deploy = wrangler(['deploy'], { quiet: true });
+  const useCf = fs.existsSync(path.join(WORKER_DIR, 'cloudflare.config.ts'));
+  out(useCf ? '  deploying with cf (cloudflare.config.ts)…' : '  deploying with wrangler (wrangler.toml)…');
+  const deploy = useCf ? cf(['deploy'], { quiet: true }) : wrangler(['deploy'], { quiet: true });
   if (deploy.status !== 0) {
     const tail = `${deploy.stderr || ''}${deploy.stdout || ''}`.trim().split('\n').slice(-8).join('\n');
     fail(`deploy failed:\n${tail}`);
@@ -185,10 +202,11 @@ async function cmdInit(argv) {
     ok(`deployed → ${url}`);
   }
 
-  // 4. Set the Worker secret. Must happen after a deploy exists; it triggers a new version.
+  // 4. Set the Worker secret. `cf` cannot set a single secret yet (its own migration guide
+  //    says to use `npx wrangler`), so this step stays on Wrangler regardless of the deploy path.
   out('');
-  out('  setting ADMIN_TOKEN secret…');
-  wrangler(['secret', 'put', 'ADMIN_TOKEN'], { input: token });
+  out('  setting ADMIN_TOKEN secret (wrangler — cf cannot set single secrets yet)…');
+  wrangler(['secret', 'put', 'ADMIN_TOKEN', '--name', 'dakflare-worker'], { input: token });
 
   // 5. Persist locally.
   if (url) {
