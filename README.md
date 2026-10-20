@@ -41,9 +41,13 @@ npx wrangler d1 migrations apply sms_gateway --remote
 npx wrangler secret put ADMIN_TOKEN --name dakflare-worker   # cf cannot set single secrets yet
 npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON --name dakflare-worker   # optional
 
-npx cf deploy            # reads cloudflare.config.ts
-# npx wrangler deploy    # fallback, reads wrangler.toml — keep the two in sync
+npm run deploy           # builds dashboard/ into public/admin, then `cf deploy`
+# npx cf deploy          # deploy only, when public/admin is already built
 ```
+
+`wrangler deploy` is not available for this project: the Worker uses `cf`'s `exports` model for the
+Durable Object, which Wrangler's `[[durable_objects.bindings]]` cannot reconcile. Wrangler remains the
+tool for `dev`, `secret put`, `tail` and D1 migrations.
 
 Then check what you actually deployed:
 
@@ -65,8 +69,10 @@ worker/                     Worker + Durable Object + D1 migrations
   wrangler.template.toml    BYOCF starting point for wrangler (no ids)
   wrangler.account.toml     local Worker + real PREVIEW D1/KV
   wrangler.config.ts        build settings for cf's Wrangler bundler
-  public/                   landing page, served as a static asset
+  public/                   static assets: landing page + generated admin console
+  public/admin/             SvelteKit build output (generated, gitignored)
   src/                      routes, auth, DO, lib
+dashboard/                  SvelteKit 5 SPA admin console, served at /admin
 cli/                        dakflare desktop CLI (init, doctor, pair, devices, send)
 PROTOCOL_CONTRACT_V5.md     FROZEN wire format — the sole authority
 dakflare_v5_master_plan_rev_c.md   architecture, gates, schedule

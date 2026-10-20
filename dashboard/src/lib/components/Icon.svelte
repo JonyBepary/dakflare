@@ -1,0 +1,120 @@
+<script module lang="ts">
+	export type IconName =
+		| 'activity'
+		| 'smartphone'
+		| 'message'
+		| 'filter'
+		| 'logout'
+		| 'refresh'
+		| 'copy'
+		| 'check'
+		| 'plus'
+		| 'x'
+		| 'chevron-down'
+		| 'chevron-up'
+		| 'arrow-up-right'
+		| 'arrow-down-left'
+		| 'alert'
+		| 'info'
+		| 'key'
+		| 'moon'
+		| 'sun'
+		| 'trash'
+		| 'clock'
+		| 'external'
+		| 'shield'
+		| 'send';
+</script>
+
+<script lang="ts">
+	let {
+		name,
+		size = 16,
+		strokeWidth = 1.5
+	}: { name: IconName; size?: number; strokeWidth?: number } = $props();
+</script>
+
+<svg
+	width={size}
+	height={size}
+	viewBox="0 0 24 24"
+	fill="none"
+	stroke="currentColor"
+	stroke-width={strokeWidth}
+	stroke-linecap="round"
+	stroke-linejoin="round"
+	aria-hidden="true"
+	focusable="false"
+>
+	{#if name === 'activity'}
+		<path d="M3 12h4l2.5-6 4 12 2.5-6H21" />
+	{:else if name === 'smartphone'}
+		<rect x="6" y="2.5" width="12" height="19" rx="2.5" />
+		<path d="M10.5 18.5h3" />
+	{:else if name === 'message'}
+		<path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-5 4V5Z" />
+		<path d="M8 8h8M8 11h5" />
+	{:else if name === 'filter'}
+		<path d="M3.5 5h17l-6.5 7.5V20l-4-2v-5.5L3.5 5Z" />
+	{:else if name === 'logout'}
+		<path d="M10 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20H10" />
+		<path d="m15 8 4 4-4 4" />
+		<path d="M19 12H9" />
+	{:else if name === 'refresh'}
+		<path d="M20 11a8 8 0 1 0-2.34 5.66" />
+		<path d="M20 5v6h-6" />
+	{:else if name === 'copy'}
+		<rect x="9" y="9" width="11" height="11" rx="2" />
+		<path d="M5 15h-.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" />
+	{:else if name === 'check'}
+		<path d="m5 12.5 4.5 4.5L19 7.5" />
+	{:else if name === 'plus'}
+		<path d="M12 5v14M5 12h14" />
+	{:else if name === 'x'}
+		<path d="M6 6l12 12M18 6 6 18" />
+	{:else if name === 'chevron-down'}
+		<path d="m6 9.5 6 6 6-6" />
+	{:else if name === 'chevron-up'}
+		<path d="m6 14.5 6-6 6 6" />
+	{:else if name === 'arrow-up-right'}
+		<path d="M7 17 17 7" />
+		<path d="M9 7h8v8" />
+	{:else if name === 'arrow-down-left'}
+		<path d="M17 7 7 17" />
+		<path d="M15 17H7V9" />
+	{:else if name === 'alert'}
+		<path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+		<path d="M12 9v4" />
+		<path d="M12 16.5h.01" />
+	{:else if name === 'info'}
+		<circle cx="12" cy="12" r="9" />
+		<path d="M12 11v5" />
+		<path d="M12 8h.01" />
+	{:else if name === 'key'}
+		<circle cx="8" cy="8" r="4" />
+		<path d="m10.9 10.9 8.1 8.1" />
+		<path d="m16.5 16.5 2-2 2 2-2 2" />
+	{:else if name === 'moon'}
+		<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />
+	{:else if name === 'sun'}
+		<circle cx="12" cy="12" r="4" />
+		<path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+	{:else if name === 'trash'}
+		<path d="M4 7h16" />
+		<path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7" />
+		<path d="m6.5 7 .8 12.1A2 2 0 0 0 9.3 21h5.4a2 2 0 0 0 2-1.9L17.5 7" />
+	{:else if name === 'clock'}
+		<circle cx="12" cy="12" r="9" />
+		<path d="M12 7.5V12l3 2" />
+	{:else if name === 'external'}
+		<path d="M14 4h6v6" />
+		<path d="M20 4 11 13" />
+		<path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+	{:else if name === 'shield'}
+		<path d="M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6l7-3Z" />
+		<path d="m9 12 2 2 4-4" />
+	{:else if name === 'send'}
+		<path d="m21 3-9.5 9.5" />
+		<path d="M21 3 14.5 21l-3-7.5L4 10.5 21 3Z" />
+	{/if}
+</svg>

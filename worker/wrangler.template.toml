@@ -75,6 +75,7 @@ INCOMING_ROWS_PER_DAY = "10000"
 SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 
 [assets]
+binding = "ASSETS"
 directory = "public"
 
 [triggers]

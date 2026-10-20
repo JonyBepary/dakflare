@@ -1,0 +1,3 @@
+# The console is an operator surface, not a public site.
+User-agent: *
+Disallow: /admin

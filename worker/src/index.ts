@@ -26,9 +26,14 @@ import {
   handleRulesListAdmin,
 } from "./routes/admin";
 import { err } from "./lib/errors";
-import { readIntEnv } from "./lib/config";
+import { readJsonBoundedResult } from "./lib/body";
+import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
 export { DeviceGateway };
+
+/** HttpOnly session cookie carrying the dashboard's admin session. */
+const SESSION_COOKIE = "dakflare_admin";
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export interface Env {
   DEVICE: DurableObjectNamespace<DeviceGateway>;
@@ -80,6 +85,8 @@ export interface Env {
   AUTH_FAIL_LIMITER?: RateLimit;
   /** Per-device daily inbound row budget, read by the DO's `write_budget` table. */
   INCOMING_ROWS_PER_DAY?: string;
+  /** Static assets (`[assets] directory = "public"`). Serves `/admin` and the dashboard bundle. */
+  ASSETS: Fetcher;
 }
 
 type DeviceHandler = (
@@ -113,10 +120,26 @@ async function withAdmin(
   const expected = env.ADMIN_TOKEN;
   if (!expected) return unauthorized();
 
-  const header = req.headers.get("Authorization") ?? "";
-  const providedDigest = await sha256(header);
-  const expectedDigest = await sha256(`Bearer ${expected}`);
-  if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+  const authHeader = req.headers.get("Authorization");
+  if (authHeader !== null) {
+    // Bearer path — unchanged. A caller that sends `Authorization` gets no
+    // fallback to the cookie, so a bad bearer header still fails.
+    const providedDigest = await sha256(authHeader);
+    const expectedDigest = await sha256(`Bearer ${expected}`);
+    if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+  } else {
+    // Session-cookie path.
+    //
+    // CSRF guard: require a custom header. A cross-origin `fetch` cannot set
+    // `X-Admin-Session` without a CORS preflight, and this Worker allows no
+    // cross-origin CORS, so the preflight fails and the real request never
+    // leaves the browser. `SameSite=Strict` independently keeps the cookie off
+    // cross-site requests, so both layers would have to fail for a forged
+    // request to authenticate.
+    if (req.headers.get("X-Admin-Session") !== "1") return unauthorized();
+    const exp = await verifySession(expected, readCookie(req, SESSION_COOKIE));
+    if (exp === null) return unauthorized();
+  }
 
   // Rate-limit only AFTER the token is verified. Keying the limiter by token
   // material before verification lets an attacker send random `Authorization`
@@ -268,6 +291,31 @@ export default {
       return withDevice(req, env, (r, e, deviceId) => handleRulesGet(r, e, deviceId));
     }
 
+    /* ---- admin session (cookie) ---------------------------------------- */
+    // Not wrapped in `withAdmin`: these are the endpoints that establish and
+    // inspect the session in the first place.
+    if (method === "POST" && pathname === "/admin/session") {
+      return handleSessionCreate(req, env);
+    }
+    if (method === "GET" && pathname === "/admin/session") {
+      return handleSessionGet(req, env);
+    }
+    if (method === "DELETE" && pathname === "/admin/session") {
+      return handleSessionDelete(req);
+    }
+
+    /* ---- admin dashboard SPA ------------------------------------------- */
+    // Real asset files under `/admin/_app/...` are served by the assets layer
+    // before this Worker runs; only unknown client-side routes reach here. This
+    // must stay after every API route so `/v1/*` 404s are not swallowed.
+    if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+      // Fetch the DIRECTORY, not `/admin/index.html`: the assets layer's HTML
+      // handling canonicalises an explicit `.html` request with a 307 to
+      // `/admin/`, which would send the browser to the app root and lose the
+      // client-side route (a deep link to /admin/devices would land on /admin).
+      return env.ASSETS.fetch(new Request(new URL("/admin/", req.url), req));
+    }
+
     return Response.json({ error: "not_found" }, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
@@ -308,6 +356,158 @@ async function runRetention(env: Env): Promise<void> {
 
 function unauthorized(): Response {
   return Response.json({ error: "unauthorized" }, { status: 401 });
+}
+
+/* ---- session cookie helpers ------------------------------------------ */
+
+/**
+ * Session key derivation.
+ *
+ * The HMAC key is `SHA-256("dakflare-session-v1\n" + ADMIN_TOKEN)`, so rotating
+ * `ADMIN_TOKEN` invalidates every outstanding session without a revocation list.
+ * The label keeps the derivation domain-separated from any other use of the token.
+ */
+async function sessionKey(adminToken: string): Promise<CryptoKey> {
+  const digest = await sha256(`dakflare-session-v1\n${adminToken}`);
+  return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+}
+
+/**
+ * Mint a session cookie value: `v1.<expiry_ms>.<hmac_hex>`, where the HMAC
+ * covers exactly `v1.<expiry_ms>`. The expiry is therefore authenticated; a
+ * client cannot extend its own session by editing the cookie.
+ */
+async function mintSession(adminToken: string): Promise<{ value: string; exp: number }> {
+  const key = await sessionKey(adminToken);
+  const exp = Date.now() + SESSION_TTL_MS;
+  const payload = `v1.${exp}`;
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return { value: `${payload}.${toHex(new Uint8Array(signature))}`, exp };
+}
+
+/**
+ * Verify a session cookie value. Returns the authenticated expiry, or `null` for
+ * anything malformed, expired or forged. The MAC comparison is constant time.
+ */
+async function verifySession(
+  adminToken: string,
+  cookieValue: string | undefined
+): Promise<number | null> {
+  if (!cookieValue) return null;
+
+  const parts = cookieValue.split(".");
+  if (parts.length !== 3) return null;
+
+  const [version, rawExp, macHex] = parts;
+  if (version !== "v1") return null;
+
+  const exp = Number(rawExp);
+  if (!Number.isFinite(exp)) return null;
+  if (exp <= Date.now()) return null;
+
+  const mac = fromHex(macHex);
+  if (mac === null || mac.length !== 32) return null;
+
+  const key = await sessionKey(adminToken);
+  const expected = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${version}.${rawExp}`))
+  );
+  return timingSafeEqual(mac, expected) ? exp : null;
+}
+
+/** Read one cookie value from the request's `Cookie` header. */
+function readCookie(req: Request, name: string): string | undefined {
+  const header = req.headers.get("Cookie");
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
+}
+
+/** Build the `Set-Cookie` value with the attributes the dashboard expects. */
+function sessionCookie(value: string, maxAgeSeconds: number, secure: boolean): string {
+  return (
+    `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}` +
+    (secure ? "; Secure" : "")
+  );
+}
+
+/**
+ * `POST /admin/session` — exchange the admin token for an HttpOnly cookie.
+ *
+ * The token never persists in the browser: it is read from this one request and
+ * the response only carries the signed session. Rate-limited per IP *before*
+ * verification, because an unauthenticated login endpoint is exactly where
+ * guessing happens (unlike admin routes, a random guess here cannot mint a
+ * useful limiter key).
+ */
+async function handleSessionCreate(req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `login:${ip}` });
+    if (!success) return err("rate_limited", 429);
+  }
+
+  const expected = env.ADMIN_TOKEN;
+  if (!expected) return unauthorized();
+
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason, parsed.reason === "payload_too_large" ? 413 : 400);
+
+  const token = parsed.value.token;
+  if (typeof token !== "string") return err("bad_request", 400);
+
+  const providedDigest = await sha256(token);
+  const expectedDigest = await sha256(expected);
+  if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+
+  const { value, exp } = await mintSession(expected);
+  const secure = new URL(req.url).protocol === "https:";
+  return Response.json(
+    { ok: true, expires_at: exp },
+    { headers: { "Set-Cookie": sessionCookie(value, SESSION_TTL_MS / 1000, secure) } }
+  );
+}
+
+/** `GET /admin/session` — is this cookie still valid, and until when. */
+async function handleSessionGet(req: Request, env: Env): Promise<Response> {
+  const exp = env.ADMIN_TOKEN
+    ? await verifySession(env.ADMIN_TOKEN, readCookie(req, SESSION_COOKIE))
+    : null;
+  if (exp === null) return unauthorized();
+  return Response.json({ ok: true, expires_at: exp });
+}
+
+/** `DELETE /admin/session` — clear the cookie. Clearing needs no authentication. */
+function handleSessionDelete(req: Request): Response {
+  const secure = new URL(req.url).protocol === "https:";
+  return Response.json(
+    { ok: true },
+    { headers: { "Set-Cookie": sessionCookie("", 0, secure) } }
+  );
+}
+
+/* ---- byte helpers ----------------------------------------------------- */
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
+}
+
+/** Decode lowercase/uppercase hex, or `null` on an odd length or non-hex character. */
+function fromHex(hex: string): Uint8Array | null {
+  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
 async function sha256(input: string): Promise<Uint8Array> {
