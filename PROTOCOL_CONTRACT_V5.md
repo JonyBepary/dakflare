@@ -1,10 +1,16 @@
-# DakFlare — Device↔Edge Protocol Contract (v5, Rev C)
+# DakFlare — Device↔Edge Protocol Contract (v5, Rev D)
 
 > **Status:** FROZEN. This document is the sole authority for the wire format between the Android
 > device and the Cloudflare Worker. Where it disagrees with any other document, **this file wins.**
-> **Frozen at:** Rev C · **Plan:** `dakflare_v5_master_plan_rev_c.md`
+> **Frozen at:** Rev D · **Plan:** `dakflare_v5_master_plan_rev_c.md`
 > **Supersedes:** §4 of `sms_gateway_v5_master_plan_and_timeline.md` (Rev B)
 > **Change policy:** any edit requires bumping the version and regenerating the test vectors.
+>
+> **Rev D** adds the routes shipped in P0/S10 (`GET /v1/admin/health`, `GET /source`,
+> `DELETE /v1/admin/devices/:id`, `GET|DELETE /v1/admin/rules`), the `413 payload_too_large` code, and
+> §11.7 input caps. **The signed wire format is unchanged** — §2 canonical string, §1.1 header grammars,
+> §3 signature encoding, and §4 vectors A/B/C are byte-identical, so the freeze still holds for any
+> already-written client.
 
 ---
 
