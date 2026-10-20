@@ -32,7 +32,13 @@ function bindingNames(file) {
       section = header[1].trim();
       continue;
     }
-    if (section === "durable_objects.bindings" || section === "d1_databases" || section === "kv_namespaces") {
+    if (section === "durable_objects.bindings") {
+      // Durable Object bindings use `name =`, not `binding =` — missing that here meant
+      // the DO binding was never compared, so both Wrangler configs "agreed" by omission.
+      const m = /^name\s*=\s*"([^"]+)"/.exec(line);
+      if (m) names.bindings.push(`${section}:${m[1]}`);
+    }
+    if (section === "d1_databases" || section === "kv_namespaces") {
       const m = /^binding\s*=\s*"([^"]+)"/.exec(line);
       if (m) names.bindings.push(`${section}:${m[1]}`);
     }
@@ -58,6 +64,41 @@ const ROOT = path.join(HERE, "..");
 const local = bindingNames(path.join(ROOT, "wrangler.toml"));
 const account = bindingNames(path.join(ROOT, "wrangler.account.toml"));
 
+/**
+ * Third config: `cloudflare.config.ts`, written by `cf migrate` and completed by hand.
+ *
+ * A dual-config project drifts the moment someone adds a binding to one file only, and the
+ * symptom is a binding that is `undefined` at runtime in one tool and present in the other.
+ * This is a light parse — it only collects `NAME: bindings.x(...)` keys under `env` — but it
+ * catches exactly that drift.
+ */
+function cloudflareConfigNames(file) {
+  if (!fs.existsSync(file)) return null;
+  const text = fs.readFileSync(file, "utf8");
+  const names = new Set();
+  for (const line of text.split("\n")) {
+    const m = /^\s{2,}([A-Z][A-Z0-9_]*):\s*bindings\./.exec(line);
+    if (m) names.add(m[1]);
+  }
+  return [...names].sort();
+}
+
+const cfNames = cloudflareConfigNames(path.join(ROOT, "cloudflare.config.ts"));
+
+const flatLocalNames = [
+  ...local.bindings.map((b) => b.split(":")[1]),
+  ...local.ratelimits,
+  ...local.vars,
+].sort();
+
+const cfDrift = [];
+if (cfNames) {
+  const onlyLocal = flatLocalNames.filter((n) => !cfNames.includes(n));
+  const onlyCf = cfNames.filter((n) => !flatLocalNames.includes(n));
+  if (onlyLocal.length) cfDrift.push(`only in wrangler.toml: ${onlyLocal.join(", ")}`);
+  if (onlyCf.length) cfDrift.push(`only in cloudflare.config.ts: ${onlyCf.join(", ")}`);
+}
+
 const diffs = [];
 for (const key of ["bindings", "ratelimits", "vars"]) {
   const a = JSON.stringify(local[key]);
@@ -68,11 +109,13 @@ for (const key of ["crons", "observability"]) {
   if (local[key] !== account[key]) diffs.push(`${key}: local=${local[key]} account=${account[key]}`);
 }
 
-if (diffs.length) {
-  console.error("config drift between wrangler.toml and wrangler.account.toml:");
-  for (const d of diffs) console.error(`  - ${d}`);
+if (diffs.length || cfDrift.length) {
+  console.error("config drift detected:");
+  for (const d of diffs) console.error(`  - wrangler.toml vs wrangler.account.toml — ${d}`);
+  for (const d of cfDrift) console.error(`  - wrangler.toml vs cloudflare.config.ts — ${d}`);
   process.exit(1);
 }
 console.log(
-  `config in sync: ${local.bindings.length} bindings, ${local.ratelimits.length} limiters, ${local.vars.length} vars`
+  `config in sync: ${local.bindings.length} bindings, ${local.ratelimits.length} limiters, ${local.vars.length} vars` +
+  (cfNames ? `, cloudflare.config.ts ${cfNames.length} bindings` : "")
 );
