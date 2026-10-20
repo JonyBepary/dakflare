@@ -6,10 +6,12 @@
   "description": "SMS Gateway v5 edge backend (Worker + D1 + per-device Durable Object). Implements PROTOCOL_CONTRACT_V5 Rev C.",
   "scripts": {
     "dev": "wrangler dev --local",
+    "dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "check:config": "node scripts/check-config.mjs",
     "migrate:local": "wrangler d1 migrations apply sms_gateway --local",
-    "migrate:remote": "wrangler d1 migrations apply sms_gateway --remote"
+    "migrate:preview": "wrangler d1 migrations apply sms_gateway_preview --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",

@@ -21,7 +21,8 @@ export type ErrorCode =
   | "invalid_signature"
   | "device_unknown"
   | "nonce_replay"
-  | "rate_limited";
+  | "rate_limited"
+  | "payload_too_large";
 
 /** §8 status codes, as a compile-time map so call sites cannot drift. */
 export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
@@ -36,6 +37,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
   device_unknown: 401,
   nonce_replay: 401,
   rate_limited: 429,
+  payload_too_large: 413,
 };
 
 const KNOWN_CODES = new Set<string>(Object.keys(ERROR_STATUS));

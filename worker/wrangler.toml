@@ -1,24 +1,30 @@
 # SMS Gateway v5 — edge backend configuration.
-# Implements PROTOCOL_CONTRACT_V5 Rev C (§1 transport, §8 error surface) and
-# master plan §5.1.
+# Implements PROTOCOL_CONTRACT_V5 Rev C/RD (§1 transport, §8 error surface).
 #
 # ---------------------------------------------------------------------------
 # Secrets: this file MUST stay free of secrets. ADMIN_TOKEN and
-# FCM_SERVICE_ACCOUNT_JSON are provided through .dev.vars (local, see
-# .dev.vars.example) or `wrangler secret put <NAME>` (remote). A non-dev
-# ADMIN_TOKEN that is absent fails closed: withAdmin answers 401.
+# FCM_SERVICE_ACCOUNT_JSON come from `.dev.vars` locally or `wrangler secret put`
+# remotely. A missing ADMIN_TOKEN fails closed: every admin route answers 401.
+#
+# PRODUCTION DATA: every binding in THIS file is local. `wrangler dev` therefore
+# cannot touch production. The account-backed/production lane lives in
+# `wrangler.account.toml` and is used only via `--config` (see test-support/dev.sh).
+# The previous revision put `remote = true` here, which meant a bare `wrangler dev`
+# wrote straight into the production database. That footgun is removed.
 # ---------------------------------------------------------------------------
 
 name = "sms-gateway-worker"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
-compatibility_flags = ["nodejs_compat"]
+
+# Preview URLs are public by default and are not part of any route the device
+# uses. Keep them off.
+preview_urls = false
 
 # ---------------------------------------------------------------------------
 # Durable Object: one DeviceGateway instance per device_id.
-# NOTE: the `[[migrations]]` block below is the legacy v1 form and remains
-# correct for SQLite-backed Durable Objects. Declarative `[exports]` is the
-# successor syntax; do not switch until the migration story is re-verified.
+# `[[migrations]]` with `new_sqlite_classes` remains correct for SQLite-backed
+# DOs; declarative `[exports]` is the successor syntax.
 # ---------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "DEVICE"
@@ -30,51 +36,71 @@ new_sqlite_classes = ["DeviceGateway"]
 
 # ---------------------------------------------------------------------------
 # D1 — pairing codes, device registry, message log, rules.
-# Provisioned for real: `wrangler d1 create sms_gateway` (region APAC).
-# A real id is required for `--remote` and `deploy`; `--local` treats it as an
-# inert local key, which is why the previous revision's all-zero placeholder
-# passed locally and then failed the moment `--remote` validated it.
+# Local: `wrangler d1 migrations apply sms_gateway --local`.
 # ---------------------------------------------------------------------------
 [[d1_databases]]
 binding = "DB"
 database_name = "sms_gateway"
 database_id = "8d88069e-71cf-49a2-ba33-c150b02246b7"
-# Account-backed mode: `wrangler dev` (no flag) proxies this binding to the real
-# D1 database while the Worker and the Durable Object still run locally.
-# `wrangler dev --local` disables remote bindings, so the SAME config also serves
-# the pure-local lane. Nothing else needs to change to switch between them.
-remote = true
 
 # ---------------------------------------------------------------------------
-# KV — load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token under
-# `fcm_bearer_token` so the OAuth2 exchange runs at most once per ~55 minutes
-# instead of once per wake push.
-# Provisioned for real: `wrangler kv namespace create KV`.
+# KV — load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token under a key
+# that includes the service-account fingerprint, so rotating the account
+# invalidates the cache immediately instead of after ~55 minutes.
 #
-# NOTE: KV is eventually consistent in production (up to 60 s propagation) but
-# immediately consistent locally. The OAuth token cache is written to tolerate
-# that; the local suite cannot prove it, so it is a Tier 2 assertion.
+# KV is eventually consistent in production (up to 60 s propagation) but
+# immediately consistent locally; the cache is written to tolerate that.
 # ---------------------------------------------------------------------------
 [[kv_namespaces]]
 binding = "KV"
 id = "cabb16caf192453fa17b54b6e0f9d85f"
-# Same switch as D1 above: remote under `wrangler dev`, local under `--local`.
-remote = true
+
+# ---------------------------------------------------------------------------
+# Rate limiting (hardening S3). Backed by the same infrastructure as WAF
+# rate-limiting rules. `namespace_id` must be unique per limiter.
+#
+#   PAIR_LIMITER   unauthenticated POST /v1/device/pair — per IP and one global
+#   ADMIN_LIMITER  admin routes — applied AFTER the bearer token is verified, so
+#                  random tokens cannot mint fresh keys
+#   DEVICE_LIMITER per paired device — applied AFTER the signature is verified
+#
+# Sized for the conformance suite: it issues ~40 admin calls and a 40+ request
+# device burst, so the device/admin windows must stay above that.
+# ---------------------------------------------------------------------------
+[[ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "ADMIN_LIMITER"
+namespace_id = "1002"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "DEVICE_LIMITER"
+namespace_id = "1003"
+simple = { limit = 600, period = 60 }
 
 [vars]
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+# Retention window for message bodies and phone numbers (D1 and DO `commands`).
+# A product decision, not an engineering default: see OPERATIONS.md.
+MESSAGE_RETENTION_DAYS = "90"
 
 # ---------------------------------------------------------------------------
-# Workers Logs.
-#
-# Without this the deployment is a black box: the account-level observability API
-# returns nothing for this service, so a production error stays invisible until a
-# device misbehaves. Verified: before enabling, a query for this service returned
-# zero events while the account had thousands from other sources.
-#
-# Sampling 1.0 suits a fleet this size. Drop head_sampling_rate if volume matters.
+# Retention cron (hardening S6). 03:17 UTC daily.
+# `wrangler dev --test-scheduled` exercises this handler via
+# /cdn-cgi/local/scheduled — note that is the CRON handler, not DO alarms.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["17 3 * * *"]
+
+# ---------------------------------------------------------------------------
+# Workers Logs. Without this the deployment is a black box. Sampling 1.0 is the
+# documented default; lower it only once log volume is measured.
 # ---------------------------------------------------------------------------
 [observability]
 enabled = true

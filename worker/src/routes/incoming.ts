@@ -18,6 +18,14 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import {
+  MAX_ACK_IDS,
+  MAX_BODY_CHARS,
+  MAX_FCM_TOKEN_CHARS,
+  MAX_ID_CHARS,
+  MAX_INCOMING_MESSAGES,
+  MAX_PEER_CHARS,
+} from "../lib/config";
 
 /** §17: accept `received_at` inside [now - 30 days, now + 1 day]. */
 const RECEIVED_AT_PAST_MS = 30 * 24 * 60 * 60 * 1000;
@@ -51,17 +59,24 @@ export async function handleIncomingBatch(
 
   const messages = data.messages ?? [];
   if (!Array.isArray(messages)) return err("bad_request", 400);
+  // Unbounded arrays are unbounded D1 statements, DO work and billable rows.
+  if (messages.length > MAX_INCOMING_MESSAGES) return err("bad_request", 400);
 
   const ackCommandIds: string[] = [];
   if (data.ack_command_ids !== undefined) {
     if (!Array.isArray(data.ack_command_ids)) return err("bad_request", 400);
+    if (data.ack_command_ids.length > MAX_ACK_IDS) return err("bad_request", 400);
     for (const id of data.ack_command_ids) {
       if (typeof id === "string" && id !== "") ackCommandIds.push(id);
     }
   }
 
   const fcmToken =
-    typeof data.fcm_token === "string" && data.fcm_token !== "" ? data.fcm_token : null;
+    typeof data.fcm_token === "string" &&
+    data.fcm_token !== "" &&
+    data.fcm_token.length <= MAX_FCM_TOKEN_CHARS
+      ? data.fcm_token
+      : null;
 
   // ---- validate every row before writing anything (all-or-nothing) --------
   const now = Date.now();
@@ -72,14 +87,17 @@ export async function handleIncomingBatch(
 
     const localId = row.local_id;
     if (typeof localId !== "string" || localId === "") return err("bad_request", 400);
+    if (localId.length > MAX_ID_CHARS) return err("bad_request", 400);
 
     const body = row.body;
     if (typeof body !== "string") return err("bad_request", 400);
+    if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
 
     const sender = typeof row.sender_e164 === "string" && row.sender_e164 !== ""
       ? row.sender_e164
       : row.sender;
     if (typeof sender !== "string" || sender === "") return err("bad_request", 400);
+    if (sender.length > MAX_PEER_CHARS) return err("bad_request", 400);
 
     const receivedAtRaw = row.received_at;
     if (typeof receivedAtRaw !== "string" && typeof receivedAtRaw !== "number") {

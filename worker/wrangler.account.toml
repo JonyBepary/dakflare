@@ -1,0 +1,70 @@
+# Account-backed development configuration — LOCAL Worker, REAL D1 + KV.
+#
+#   npx wrangler dev --config wrangler.account.toml --env-file .dev.vars
+#
+# Why a separate file instead of `[env.account]` in wrangler.toml:
+#   * `d1_databases` / `kv_namespaces` are arrays of tables, so `[env.account.d1_databases]`
+#     is invalid TOML — it must be `[[env.account.d1_databases]]`.
+#   * `durable_objects`, `vars`, `ratelimits` and `triggers` are NOT inherited by an
+#     environment, so `[env.account]` would leave `env.DEVICE`, the rate limiters and
+#     the FCM base URLs undefined.
+#   * `--env` also switches the dev-vars file to `.dev.vars.<env>`, which silently
+#     unset ADMIN_TOKEN.
+# A full copy is duller but has none of those failure modes. Keep it in sync with
+# wrangler.toml — `npm run check:config` diffs the binding names.
+#
+# POINTS AT THE PREVIEW DATABASE, NEVER PRODUCTION. The conformance suite writes
+# rules, messages and devices; those must not land in the database a real phone
+# will pair against.
+
+name = "sms-gateway-worker-staging"
+main = "src/index.ts"
+compatibility_date = "2026-04-07"
+preview_urls = false
+
+[[durable_objects.bindings]]
+name = "DEVICE"
+class_name = "DeviceGateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceGateway"]
+
+# remote = true -> the real preview database, while the Worker and DO run locally.
+[[d1_databases]]
+binding = "DB"
+database_name = "sms_gateway_preview"
+database_id = "10ac7c2d-9fcc-45af-9074-6e4329bda700"
+remote = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "81f51c82606344c59cc3ca2e9e27d0a9"
+remote = true
+
+[[ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "ADMIN_LIMITER"
+namespace_id = "1002"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "DEVICE_LIMITER"
+namespace_id = "1003"
+simple = { limit = 600, period = 60 }
+
+[vars]
+FCM_BASE_URL = "https://fcm.googleapis.com"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+MESSAGE_RETENTION_DAYS = "90"
+
+[triggers]
+crons = ["17 3 * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1

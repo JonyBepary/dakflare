@@ -14,6 +14,8 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import { readJsonBoundedResult } from "../lib/body";
+import { MAX_BODY_BYTES } from "../lib/config";
 import { lintRe2 } from "../lib/re2-compat";
 
 const ALLOWED_MATCHER_TYPES = new Set(["exact", "prefix", "suffix", "glob", "regex"]);
@@ -48,16 +50,9 @@ export async function handleRulesGet(_req: Request, env: Env, deviceId: string):
 
 /** `POST /v1/rules` (admin) — create or replace a rule. */
 export async function handleRulesPost(req: Request, env: Env): Promise<Response> {
-  let payload: unknown;
-  try {
-    payload = await req.json();
-  } catch {
-    return err("bad_request", 400);
-  }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return err("bad_request", 400);
-  }
-  const input = payload as Record<string, unknown>;
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+  const input = parsed.value;
 
   // Accept both the flat and the nested matcher shapes Rev B supported.
   const matcher = (input.matcher ?? null) as Record<string, unknown> | null;

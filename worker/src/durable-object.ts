@@ -38,12 +38,19 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
 import { err } from "./lib/errors";
 import { sendFcmHighPriorityWake } from "./lib/fcm";
-import { timingConfig, type TimingConfig } from "./lib/config";
+import { timingConfig, MAX_ACK_IDS, type TimingConfig } from "./lib/config";
 import { SIGNATURE_BYTES, utf8Bytes } from "./auth/canonical";
 
 interface WsAttachment {
   deviceId: string;
   connectedAt: number;
+  /**
+   * Immutable per-connection id. A command's `ack_timeout` task carries the id
+   * of the socket it was pushed to, so a timeout closes exactly that socket
+   * instead of every socket the device happens to hold. Optional because a
+   * socket accepted before this field existed has no readable value.
+   */
+  socketId?: string;
 }
 
 /** The command shape sent to the device (§6.1 `PENDING -> DISPATCHED` payload). */
@@ -69,6 +76,8 @@ interface ScheduledTaskRow {
   id: string;
   kind: string;
   payload: string;
+  /** Consecutive failures. Past `MAX_TASK_ATTEMPTS` the row is dead-lettered. */
+  attempts: number;
 }
 
 /** `consumed`: the row's work finished, so the alarm loop may delete it. */
@@ -100,6 +109,14 @@ const ALLOWED_PREDECESSORS: Readonly<Record<string, readonly string[]>> = {
 
 /** Backoff before a failed alarm task is retried, so a persistent failure cannot spin. */
 const TASK_RETRY_BACKOFF_MS = 30_000;
+
+/**
+ * Consecutive failures before a task is moved to `dead_letters` instead of being
+ * rescheduled forever. Without a ceiling a persistently failing task retries
+ * every 30 s indefinitely, costing a Durable Object request each time and
+ * producing no signal beyond a log line.
+ */
+const MAX_TASK_ATTEMPTS = 5;
 
 /** `getWebSocketAutoResponseTimestamp` is unverified locally; clamp absurd future values. */
 const AUTO_RESPONSE_FUTURE_SKEW_MS = 60_000;
@@ -137,13 +154,32 @@ export class DeviceGateway extends DurableObject<Env> {
         CREATE INDEX IF NOT EXISTS idx_commands_state ON commands(state, priority, created_at);
 
         CREATE TABLE IF NOT EXISTS scheduled_tasks (
-          id      TEXT PRIMARY KEY,
-          run_at  INTEGER NOT NULL,
-          kind    TEXT NOT NULL,
-          payload TEXT
+          id       TEXT PRIMARY KEY,
+          run_at   INTEGER NOT NULL,
+          kind     TEXT NOT NULL,
+          payload  TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_run_at ON scheduled_tasks(run_at);
+
+        CREATE TABLE IF NOT EXISTS dead_letters (
+          id        TEXT PRIMARY KEY,
+          kind      TEXT NOT NULL,
+          payload   TEXT,
+          attempts  INTEGER NOT NULL,
+          failed_at INTEGER NOT NULL
+        );
       `);
+
+      // Migration for objects created before `attempts` existed. SQLite has no
+      // ADD COLUMN IF NOT EXISTS, so a duplicate-column error is the success case.
+      try {
+        ctx.storage.sql.exec(
+          `ALTER TABLE scheduled_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`
+        );
+      } catch {
+        // Column already present.
+      }
 
       // Hibernation-safe ping/pong: answered by the edge without waking the DO.
       ctx.setWebSocketAutoResponse(
@@ -172,7 +208,11 @@ export class DeviceGateway extends DurableObject<Env> {
       const server = pair[1];
 
       this.ctx.acceptWebSocket(server);
-      const attachment: WsAttachment = { deviceId, connectedAt: Date.now() };
+      const attachment: WsAttachment = {
+        deviceId,
+        connectedAt: Date.now(),
+        socketId: crypto.randomUUID(),
+      };
       server.serializeAttachment(attachment);
 
       this.scheduleTask("offline_alert", Date.now() + this.timings.offlineAlertMs, "offline_alert", "{}");
@@ -182,6 +222,11 @@ export class DeviceGateway extends DurableObject<Env> {
     /* 2. Pairing bootstrap ------------------------------------------------- */
     if (url.pathname === "/__pair") {
       return this.handlePair(req);
+    }
+
+    /* 2b. Revocation (hardening S10) ---------------------------------------- */
+    if (url.pathname === "/__revoke") {
+      return this.handleRevoke();
     }
 
     /* 3. Signature verify + replay guard (§3.2 steps 7 and 8) -------------- */
@@ -375,6 +420,29 @@ export class DeviceGateway extends DurableObject<Env> {
   /* ====================================================================== */
   /* Enqueue                                                                */
   /* ====================================================================== */
+
+  /**
+   * Wipe everything that lets this device talk to us.
+   *
+   * Deleting the D1 row alone does NOT revoke a device — the public key lives in
+   * this object's SQLite, so the key, all in-flight commands, the replay-guard
+   * nonces and the schedule have to go too, and every live socket closed.
+   */
+  private handleRevoke(): Response {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1000, "revoked");
+      } catch {
+        // Already closed.
+      }
+    }
+    this.ctx.storage.sql.exec(`DELETE FROM commands`);
+    this.ctx.storage.sql.exec(`DELETE FROM nonces`);
+    this.ctx.storage.sql.exec(`DELETE FROM devices`);
+    this.ctx.storage.sql.exec(`DELETE FROM scheduled_tasks`);
+    this.ctx.storage.deleteAlarm();
+    return Response.json({ ok: true });
+  }
 
   private async handleEnqueue(req: Request): Promise<Response> {
     const parsed = await readJson(req);
@@ -578,8 +646,8 @@ export class DeviceGateway extends DurableObject<Env> {
     return true;
   }
 
-  /** §6.1 `PENDING -> DISPATCHED` plus the 8 s `ack_timeout` that reverts it. */
-  private markDispatched(commandId: string): boolean {
+  /** §6.1 `PENDING -> DISPATCHED` plus the `ack_timeout` that reverts it. */
+  private markDispatched(commandId: string, socketId: string | null = null): boolean {
     const cursor = this.ctx.storage.sql.exec(
       `UPDATE commands SET state = 'DISPATCHED' WHERE command_id = ? AND state IN ('PENDING')`,
       commandId
@@ -590,7 +658,7 @@ export class DeviceGateway extends DurableObject<Env> {
       `ack:${commandId}`,
       Date.now() + this.timings.ackTimeoutMs,
       "ack_timeout",
-      JSON.stringify({ command_id: commandId })
+      JSON.stringify({ command_id: commandId, socket_id: socketId })
     );
     this.broadcastState(commandId, "DISPATCHED");
     return true;
@@ -639,7 +707,9 @@ export class DeviceGateway extends DurableObject<Env> {
     }
 
     if (data.op === "ack" && Array.isArray(data.command_ids)) {
-      for (const id of data.command_ids) {
+      // The HTTP path caps this list; the socket path must too, or the cap is a
+      // suggestion.
+      for (const id of data.command_ids.slice(0, MAX_ACK_IDS)) {
         if (typeof id !== "string" || id === "") continue;
         this.cancelAckTimeout(id);
         this.transition(id, "ACKED_BY_DEVICE");
@@ -686,7 +756,8 @@ export class DeviceGateway extends DurableObject<Env> {
       return false;
     }
 
-    for (const command of commands) this.markDispatched(command.command_id);
+    const socketId = readAttachment(ws).socketId ?? null;
+    for (const command of commands) this.markDispatched(command.command_id, socketId);
     return true;
   }
 
@@ -801,6 +872,18 @@ export class DeviceGateway extends DurableObject<Env> {
    */
   override async alarm(): Promise<void> {
     try {
+      // Retention (S6): terminal commands hold the outbound body and the peer
+      // number in DO SQLite. Pruning D1 alone would leave every outbound SMS
+      // body and phone number here forever.
+      const cutoff = Date.now() - this.timings.retentionDays * 86_400_000;
+      const pruned = this.ctx.storage.sql.exec(
+        `DELETE FROM commands WHERE state IN ('DELIVERED','FAILED','EXPIRED') AND created_at < ?`,
+        cutoff
+      );
+      if (pruned.rowsWritten > 0) {
+        console.log(`[retention] pruned ${pruned.rowsWritten} terminal commands`);
+      }
+
       const due = this.ctx.storage.sql
         .exec(
           `SELECT id, kind, payload FROM scheduled_tasks WHERE run_at <= ? ORDER BY run_at ASC`,
@@ -813,14 +896,34 @@ export class DeviceGateway extends DurableObject<Env> {
         try {
           outcome = await this.runTask(task);
         } catch (error) {
-          // Keep the row so the work is retried, but push it back so a persistent
-          // failure cannot spin the alarm in a hot loop.
-          console.error(`[alarm] task ${task.id} (${task.kind}) failed: ${String(error)}`);
-          this.ctx.storage.sql.exec(
-            `UPDATE scheduled_tasks SET run_at = ? WHERE id = ?`,
-            Date.now() + TASK_RETRY_BACKOFF_MS,
-            task.id
-          );
+          // Bounded retries. An unbounded retry loop costs a Durable Object
+          // request every 30 s forever and produces no signal beyond a log line.
+          const attempts = this.bumpAttempts(task.id);
+          if (attempts >= MAX_TASK_ATTEMPTS) {
+            this.ctx.storage.sql.exec(
+              `INSERT OR REPLACE INTO dead_letters (id, kind, payload, attempts, failed_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              task.id,
+              task.kind,
+              task.payload ?? "{}",
+              attempts,
+              Date.now()
+            );
+            this.ctx.storage.sql.exec(`DELETE FROM scheduled_tasks WHERE id = ?`, task.id);
+            console.error(
+              `[alarm:dead_letter] ${task.id} (${task.kind}) after ${attempts} attempts: ${String(error)}`
+            );
+          } else {
+            console.error(
+              `[alarm:retry] ${task.id} (${task.kind}) attempt ${attempts}: ${String(error)}`
+            );
+            this.ctx.storage.sql.exec(
+              `UPDATE scheduled_tasks SET attempts = ?, run_at = ? WHERE id = ?`,
+              attempts,
+              Date.now() + TASK_RETRY_BACKOFF_MS,
+              task.id
+            );
+          }
           continue;
         }
         // A task that rescheduled itself has already replaced its own row; only
@@ -853,11 +956,18 @@ export class DeviceGateway extends DurableObject<Env> {
         // command is left exactly as it is.
         const reverted = this.transition(commandId, "PENDING");
         if (reverted) {
-          for (const ws of this.ctx.getWebSockets()) {
-            try {
-              ws.close(1011, "ack_timeout");
-            } catch {
-              // Already closed.
+          // Close only the socket the command was pushed to. A command delivered
+          // over an HTTP poll has no owning socket, and one slow ack must not
+          // tear down a device's other connections.
+          const socketId = typeof payload.socket_id === "string" ? payload.socket_id : null;
+          if (socketId !== null) {
+            for (const ws of this.ctx.getWebSockets()) {
+              if (readAttachment(ws).socketId !== socketId) continue;
+              try {
+                ws.close(1011, "ack_timeout");
+              } catch {
+                // Already closed.
+              }
             }
           }
           await this.sendWakePush();
@@ -893,6 +1003,13 @@ export class DeviceGateway extends DurableObject<Env> {
 
     // Unknown kind: nothing to do, and keeping it would retry forever.
     return "consumed";
+  }
+
+  private bumpAttempts(id: string): number {
+    const row = this.ctx.storage.sql
+      .exec(`SELECT attempts FROM scheduled_tasks WHERE id = ?`, id)
+      .toArray()[0] as { attempts?: number } | undefined;
+    return Number(row?.attempts ?? 0) + 1;
   }
 
   private scheduleTask(id: string, runAt: number, kind: string, payload: string): void {
@@ -1004,6 +1121,9 @@ function readAttachment(ws: WebSocket): WsAttachment {
       return {
         deviceId: typeof candidate.deviceId === "string" ? candidate.deviceId : "",
         connectedAt: typeof candidate.connectedAt === "number" ? candidate.connectedAt : 0,
+        // Must be carried through: the ack_timeout path matches sockets by this id,
+        // and omitting it silently turns "close the owning socket" into "close none".
+        socketId: typeof candidate.socketId === "string" ? candidate.socketId : undefined,
       };
     }
   } catch {

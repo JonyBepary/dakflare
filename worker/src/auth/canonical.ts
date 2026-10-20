@@ -85,24 +85,41 @@ export function bodyBytesLen(body: string): number {
 }
 
 /**
+ * Build the five-line canonical string from an already-computed body digest.
+ *
+ * The request path uses this with `crypto.subtle.digest` (native, and on Workers
+ * Free the CPU budget is 10 ms per invocation, so a pure-JS digest over a large
+ * body is itself a denial-of-service vector). `buildCanonicalString` below keeps
+ * the synchronous JS digest for the contract vectors and unit tests.
+ */
+export function buildCanonicalStringFromDigest(
+  params: Omit<CanonicalParams, "bodyBytes">,
+  bodySha256Hex: string
+): string {
+  return [
+    params.method.toUpperCase(),
+    params.pathname,
+    params.timestampHeader,
+    params.nonce,
+    bodySha256Hex,
+  ].join(CANONICAL_SEPARATOR);
+}
+
+/**
  * Build the five-line canonical string of §2.1.
  *
  * Pure: same inputs always produce the same output; no I/O, no clock, no globals.
  * Reproduces §4.2 vectors A, B and C byte-for-byte.
  */
 export function buildCanonicalString(params: CanonicalParams): string {
-  const method = params.method.toUpperCase();
-  const bodySha256 = sha256Hex(params.bodyBytes);
-  return (
-    method +
-    CANONICAL_SEPARATOR +
-    params.pathname +
-    CANONICAL_SEPARATOR +
-    params.timestampHeader +
-    CANONICAL_SEPARATOR +
-    params.nonce +
-    CANONICAL_SEPARATOR +
-    bodySha256
+  return buildCanonicalStringFromDigest(
+    {
+      method: params.method,
+      pathname: params.pathname,
+      timestampHeader: params.timestampHeader,
+      nonce: params.nonce,
+    },
+    sha256Hex(params.bodyBytes)
   );
 }
 

@@ -16,7 +16,14 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
-import { clampExpiresInS } from "../lib/config";
+import { readJsonBoundedResult } from "../lib/body";
+import {
+  MAX_BODY_BYTES,
+  MAX_BODY_CHARS,
+  MAX_OUTBOUND_COMMANDS,
+  MAX_PEER_CHARS,
+  clampExpiresInS,
+} from "../lib/config";
 import { internalError } from "./pair";
 
 interface CommandPayload {
@@ -29,21 +36,18 @@ interface CommandPayload {
 
 /** `POST /v1/sms/send` (admin) — enqueue exactly one outbound SMS. */
 export async function handleSend(req: Request, env: Env): Promise<Response> {
-  let payload: unknown;
-  try {
-    payload = await req.json();
-  } catch {
-    return err("bad_request", 400);
-  }
-  if (!payload || typeof payload !== "object") return err("bad_request", 400);
-  const input = payload as Record<string, unknown>;
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+  const input = parsed.value;
 
   const deviceId = input.device_id;
   const to = input.to;
   const body = input.body;
   if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
   if (typeof to !== "string" || to === "") return err("bad_request", 400);
+  if (to.length > MAX_PEER_CHARS) return err("bad_request", 400);
   if (typeof body !== "string") return err("bad_request", 400);
+  if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
 
   // An unregistered device_id resolves to a brand-new Durable Object that no
   // device will ever poll, so the command would sit PENDING until it expired
@@ -80,19 +84,15 @@ export async function handleSend(req: Request, env: Env): Promise<Response> {
 
 /** `POST /v1/sms/send/batch` (admin) — enqueue many outbound SMS in one DO call. */
 export async function handleSendBatch(req: Request, env: Env): Promise<Response> {
-  let payload: unknown;
-  try {
-    payload = await req.json();
-  } catch {
-    return err("bad_request", 400);
-  }
-  if (!payload || typeof payload !== "object") return err("bad_request", 400);
-  const input = payload as Record<string, unknown>;
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+  const input = parsed.value;
 
   const deviceId = input.device_id;
   const commands = input.commands;
   if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
   if (!Array.isArray(commands)) return err("bad_request", 400);
+  if (commands.length > MAX_OUTBOUND_COMMANDS) return err("bad_request", 400);
   if (!(await deviceIsRegistered(env, deviceId))) return err("device_unknown", 404);
 
   // Validate every entry before any side effect: all-or-nothing.
@@ -104,7 +104,9 @@ export async function handleSendBatch(req: Request, env: Env): Promise<Response>
     const to = item.to;
     const body = item.body;
     if (typeof to !== "string" || to === "") return err("bad_request", 400);
+    if (to.length > MAX_PEER_CHARS) return err("bad_request", 400);
     if (typeof body !== "string") return err("bad_request", 400);
+    if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
     prepared.push({
       command_id: crypto.randomUUID(),
       to,

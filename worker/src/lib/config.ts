@@ -18,6 +18,8 @@ export interface TimingConfig {
   staleSocketMs: number;
   /** §3.2 step 4 acceptance window and §5.1 replay retention (`W`). */
   nonceWindowMs: number;
+  /** Days to keep message bodies and phone numbers (D1 and DO `commands`). */
+  retentionDays: number;
 }
 
 export const DEFAULT_TIMINGS: Readonly<TimingConfig> = {
@@ -25,6 +27,7 @@ export const DEFAULT_TIMINGS: Readonly<TimingConfig> = {
   offlineAlertMs: 900_000,
   staleSocketMs: 120_000,
   nonceWindowMs: 300_000,
+  retentionDays: 90,
 };
 
 /** Coerce one env var to an integer, falling back to `fallback` for anything unusable. */
@@ -65,6 +68,12 @@ export function timingConfig(env: Record<string, unknown> | undefined): TimingCo
     ),
     staleSocketMs: readIntEnv(source.STALE_SOCKET_MS, DEFAULT_TIMINGS.staleSocketMs, 500, 86_400_000),
     nonceWindowMs: readIntEnv(source.NONCE_WINDOW_MS, DEFAULT_TIMINGS.nonceWindowMs, 1_000, 3_600_000),
+    retentionDays: readIntEnv(
+      source.MESSAGE_RETENTION_DAYS,
+      DEFAULT_TIMINGS.retentionDays,
+      7,
+      3_650
+    ),
   };
 }
 
@@ -83,3 +92,41 @@ export function clampExpiresInS(value: unknown): number {
 export function clampTtlMs(value: unknown): number {
   return readIntEnv(value, 600_000, 1_000, 86_400_000);
 }
+
+/* ======================================================================== */
+/* Input bounds (hardening S2)                                              */
+/* ======================================================================== */
+
+/**
+ * Per-request caps. These exist because every unit of work in this Worker is
+ * billed or quota'd — Workers requests, Durable Object requests, D1 rows read
+ * and written, and DO SQLite rows — so an unbounded array is an unbounded bill
+ * and an unbounded way to exhaust the Workers Free daily allowance.
+ *
+ * The numbers: 500 messages is 2.5x the 200-row batch measured comfortable in
+ * the burst probe, and still a ~100 KiB JSON body, well inside the 256 KiB
+ * request cap below.
+ */
+export const MAX_INCOMING_MESSAGES = 500;
+export const MAX_OUTBOUND_COMMANDS = 200;
+export const MAX_STATUS_UPDATES = 500;
+export const MAX_ACK_IDS = 200;
+
+/**
+ * Request-body ceiling, enforced by reading the stream (never by trusting
+ * `Content-Length`, which a chunked request omits entirely).
+ *
+ * 256 KiB: a 500-message batch is ~100 KiB, so this is real headroom while
+ * keeping the unauthenticated worst case cheap. Workers Free gives 10 ms of CPU
+ * per invocation, so the body is digested with native `crypto.subtle.digest`
+ * rather than in JS — see `auth/canonical.ts`.
+ */
+export const MAX_BODY_BYTES = 262_144;
+
+/** Per-field ceilings. A single SMS body cannot legally be 900 KB. */
+export const MAX_BODY_CHARS = 4_096;
+export const MAX_PEER_CHARS = 32;
+export const MAX_ID_CHARS = 128;
+export const MAX_FCM_TOKEN_CHARS = 512;
+export const MAX_RULE_VALUE_CHARS = 512;
+export const MAX_REPLY_TEMPLATE_CHARS = 1_000;

@@ -953,6 +953,121 @@ async function cmdSuite() {
   process.exit(allOk ? 0 : 1);
 }
 
+/* ───────────────────────────── hardening command ───────────────────────────── */
+
+/**
+ * S2/S3/S10 negatives: input caps, the 413 path, admin rule CRUD, revocation.
+ * Deliberately NOT part of `suite`, because a rate-limit flood would lock the
+ * runner's IP out of pairing for a minute.
+ */
+async function cmdHardening() {
+  const identity = loadIdentity();
+  console.log(`== hardening ==\nworker: ${WORKER_URL}\ndevice: ${identity.deviceId}\n`);
+
+  let allOk = true;
+  const run = (rep) => { allOk = rep.print() && allOk; console.log(); };
+  const bigBody = "x".repeat(300_000);
+
+  console.log("-- S2 input caps --");
+  {
+    const rep = new Report("caps");
+    const msg = (i) => ({
+      local_id: `cap_${i}`, sender: "+8801712345678", body: "x",
+      received_at: new Date().toISOString(),
+    });
+
+    rep.check("501-row incoming batch -> 400",
+      (await device(identity, "POST", "/v1/sms/incoming/batch",
+        { messages: Array.from({ length: 501 }, (_, i) => msg(i)), ack_command_ids: [] })).status, 400);
+
+    rep.check("201-command send batch -> 400",
+      (await admin("POST", "/v1/sms/send/batch", {
+        device_id: identity.deviceId,
+        commands: Array.from({ length: 201 }, () => ({ to: "+8801712345678", body: "x" })),
+      })).status, 400);
+
+    rep.check("501 status updates -> 400",
+      (await device(identity, "POST", "/v1/sms/status/batch",
+        { updates: Array.from({ length: 501 }, () => ({ command_id: "x", status: "SENT" })) })).status, 400);
+
+    rep.check("201 ack ids -> 400",
+      (await device(identity, "POST", "/v1/sms/outgoing/poll",
+        { ack_command_ids: Array.from({ length: 201 }, () => "x") })).status, 400);
+
+    rep.check("5000-char message body -> 400",
+      (await device(identity, "POST", "/v1/sms/incoming/batch",
+        { messages: [{ ...msg(999), body: "y".repeat(5000) }], ack_command_ids: [] })).status, 400);
+
+    rep.check("oversized admin body -> 413 (not a 500)",
+      (await admin("POST", "/v1/sms/send",
+        { device_id: identity.deviceId, to: "+8801712345678", body: bigBody })).status, 413);
+
+    rep.check("oversized DEVICE body -> 413 before signature verification",
+      (await device(identity, "POST", "/v1/sms/incoming/batch", { pad: bigBody })).status, 413);
+    run(rep);
+  }
+
+  console.log("-- S10 admin rule CRUD --");
+  {
+    const rep = new Report("rules crud");
+    const id = `hard_${crypto.randomBytes(4).toString("hex")}`;
+    const created = await admin("POST", "/v1/rules", {
+      id, name: "hardening probe",
+      matcher: { type: "exact", value: "+8801712345678" },
+      body_matcher: { type: "keyword", value: "help" },
+      reply_template: "ok",
+    });
+    rep.check("create rule -> 200", created.status, 200);
+
+    const list = await admin("GET", "/v1/admin/rules");
+    rep.check("GET /v1/admin/rules -> 200", list.status, 200);
+    rep.check("admin list contains the new rule",
+      (list.data?.rules ?? []).some((r) => r.id === id), true);
+
+    rep.check("DELETE rule -> 200", (await admin("DELETE", `/v1/admin/rules/${id}`)).status, 200);
+    rep.check("DELETE the same rule again -> 404",
+      (await admin("DELETE", `/v1/admin/rules/${id}`)).status, 404);
+
+    const after = await admin("GET", "/v1/admin/rules");
+    rep.check("rule is gone from the list",
+      (after.data?.rules ?? []).some((r) => r.id === id), false);
+    run(rep);
+  }
+
+  console.log("-- S10 device revocation --");
+  {
+    const rep = new Report("revocation");
+    const victim = newIdentity();
+    const mint = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    const paired = await fetch(`${WORKER_URL}/v1/device/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pairing_code: mint.data.pairing_code,
+        device_id: victim.deviceId,
+        public_key_spki: victim.publicKeySpki,
+      }),
+    });
+    rep.check("throwaway device pairs -> 200", paired.status, 200);
+
+    const victimKey = { ...victim, privateKey: crypto.createPrivateKey(victim.privateKeyPem) };
+    rep.check("throwaway device can sign -> 200",
+      (await device(victimKey, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+
+    const revoked = await admin("DELETE", `/v1/admin/devices/${victim.deviceId}`);
+    rep.check("DELETE /v1/admin/devices/:id -> 200", revoked.status, 200);
+
+    // Proves revocation reaches the DO: D1 is not what verifies signatures.
+    const afterRevoke = await device(victimKey, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    rep.check("revoked device can no longer sign -> 401", afterRevoke.status, 401);
+    rep.check("...and it reports device_unknown", afterRevoke.data?.error, "device_unknown");
+    run(rep);
+  }
+
+  console.log(allOk ? "HARDENING PASSED" : "HARDENING FAILED");
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ────────────────────────────────── ws command ───────────────────────────── */
 
 async function cmdWs() {
@@ -1034,6 +1149,7 @@ const COMMANDS = {
   'verify-vectors': () => process.exit(cmdVerifyVectors().print() ? 0 : 1),
   pair: cmdPair,
   suite: cmdSuite,
+  hardening: cmdHardening,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,

@@ -159,6 +159,51 @@ first bite), replays it to prove idempotency at scale, enqueues 100 commands in 
 and acks everything so it leaves nothing `PENDING`. Measured against the current deployment: 200 rows
 in 932 ms, 100 commands in 415 ms, 7/7 assertions.
 
+## Free-plan budget — what actually drains it
+
+Measured against the operations this system performs, on the **Workers Free** allowances (100,000
+Workers requests/day, 100,000 Durable Object requests/day, 5M D1 rows read/day, 100,000 D1 rows
+written/day, 1,000 KV writes/day, 10 ms CPU per invocation, 50 subrequests per invocation).
+
+| Operation | Cost per unit | Free daily budget ÷ cost |
+|---|---|---|
+| Inbound SMS round trip (incoming batch → poll → status batch) | 3 Worker requests, **7 DO requests**, ~3 D1 rows written | **~14,300 messages/day** (DO requests bind first) |
+| Outbound SMS (`POST /v1/sms/send`) | 1 Worker, 1 DO, 1 D1 read, 1 D1 write | same order |
+| Idle connected device | 96 `offline_alert` alarms + ~96 ping requests/day | **~500 idle devices/day** |
+| Retention cron | ≤ 10,000 rows written/day (hard-capped) | 10 % of the write budget |
+| FCM token cache | ~24 KV writes/day | 2.4 % of 1,000 |
+
+**DO requests are the binding constraint**, not Worker requests or D1 storage. One phone exchanging a few
+hundred SMS/day sits at roughly 2–5 % of the daily allowance.
+
+**The one operation that could have drained a whole budget** was the retention cron: deleting N rows
+counts as N D1 rows *written*, and the original loop allowed 100 × 1,000 = 100,000 rows — the entire
+daily write allowance in a single run, on a first-run backlog. It is now hard-capped at 10 batches
+(10,000 rows/day), so a catch-up takes several days and can never starve live writes.
+
+**Watch on Free: CPU is 10 ms per invocation.** A 500-row incoming batch (JSON parse + validation +
+one `DB.batch()` of 500 statements) is the most CPU-hungry request in the system. It has not been
+measured on Free; if `1102` errors appear under load, lower `MAX_INCOMING_MESSAGES` to 200 — the size the
+burst probe measured comfortable at 932 ms wall time, most of which is I/O rather than CPU.
+
+Not a drain, despite looking like one: the 45 s WebSocket ping is an application-level auto-response, and
+Cloudflare documents that `setWebSocketAutoResponse()` replies "will not be charged"; hibernation also
+means an idle socket accrues no duration.
+
+## Free-plan check
+
+```bash
+# Workers + DO requests, D1 rows, CPU percentiles
+#   Dashboard → Workers & Pages → sms-gateway-worker → Metrics / Observability
+# D1 rows read+written per day
+#   Dashboard → Storage & Databases → D1 → sms_gateway → Metrics
+# KV operations
+#   Dashboard → Storage & Databases → KV → KV → Metrics
+```
+
+If any single day approaches 100,000 DO requests, the cause is almost certainly device count × ~192/day,
+not message volume.
+
 ## What local passing does NOT prove
 
 The local suite proves **application logic and the frozen HTTP contract**. It does not prove platform

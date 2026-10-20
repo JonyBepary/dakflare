@@ -19,18 +19,19 @@
 import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
-import { clampTtlMs } from "../lib/config";
+import { readJsonBoundedResult } from "../lib/body";
+import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, clampTtlMs } from "../lib/config";
 
 /** `POST /v1/admin/pairing-code` — mint a single-use, expiring pairing code. */
 export async function handleAdminPairingCode(req: Request, env: Env): Promise<Response> {
   let ttlMs = clampTtlMs(undefined);
-  try {
-    const body = (await req.json()) as unknown;
-    if (body && typeof body === "object" && "ttl_ms" in body) {
-      ttlMs = clampTtlMs((body as { ttl_ms?: unknown }).ttl_ms);
-    }
-  } catch {
-    // An empty or non-JSON body is fine: use the default TTL.
+  const mintBody = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!mintBody.ok && mintBody.reason === "payload_too_large") {
+    return err("payload_too_large");
+  }
+  // An empty or non-JSON body is fine here: use the default TTL.
+  if (mintBody.ok && "ttl_ms" in mintBody.value) {
+    ttlMs = clampTtlMs(mintBody.value.ttl_ms);
   }
 
   const bytes = new Uint8Array(6);
@@ -54,19 +55,28 @@ export async function handleAdminPairingCode(req: Request, env: Env): Promise<Re
 
 /** `POST /v1/device/pair` — bootstrap a device (authenticated by the pairing code alone). */
 export async function handleDevicePair(req: Request, env: Env): Promise<Response> {
-  let payload: unknown;
-  try {
-    payload = await req.json();
-  } catch {
-    return err("bad_request", 400);
+  // Unauthenticated route: throttle before touching the database. Two keys,
+  // because the Rate Limiting binding is per-colo — a per-IP key alone lets an
+  // IP-rotating botnet spread across locations, so a global key caps total
+  // pairing attempts as well.
+  if (env.PAIR_LIMITER) {
+    const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+    const [perIp, global] = await Promise.all([
+      env.PAIR_LIMITER.limit({ key: `ip:${ip}` }),
+      env.PAIR_LIMITER.limit({ key: "pair_global" }),
+    ]);
+    if (!perIp.success || !global.success) return err("rate_limited", 429);
   }
-  if (!payload || typeof payload !== "object") return err("bad_request", 400);
 
-  const body = payload as Record<string, unknown>;
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+  const body = parsed.value;
   const pairingCode = body.pairing_code;
   const deviceId = body.device_id;
   const publicKeySpki = body.public_key_spki;
-  const fcmToken = typeof body.fcm_token === "string" && body.fcm_token !== "" ? body.fcm_token : null;
+  const fcmToken = typeof body.fcm_token === "string" && body.fcm_token !== ""
+    ? body.fcm_token.slice(0, MAX_FCM_TOKEN_CHARS)
+    : null;
 
   if (typeof pairingCode !== "string" || pairingCode === "") return err("bad_request", 400);
   if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);

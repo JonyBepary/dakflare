@@ -14,6 +14,7 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import { MAX_STATUS_UPDATES } from "../lib/config";
 
 /** §6.1 status targets the device may report. `PENDING` and `DISPATCHED` are edge-owned. */
 const DEVICE_REPORTABLE_STATUSES = new Set([
@@ -48,6 +49,7 @@ export async function handleStatusBatch(
 
   const updates = data.updates ?? [];
   if (!Array.isArray(updates)) return err("bad_request", 400);
+  if (updates.length > MAX_STATUS_UPDATES) return err("bad_request", 400);
 
   const accepted: StatusUpdate[] = [];
   let ignored = 0;

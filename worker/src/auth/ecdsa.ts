@@ -15,14 +15,16 @@
 
 import type { Env } from "../index";
 import { err, asErrorCode } from "../lib/errors";
-import { timingConfig } from "../lib/config";
+import { MAX_BODY_BYTES, timingConfig } from "../lib/config";
+import { readBodyBounded } from "../lib/body";
 import {
   RE_DEVICE_ID,
   RE_NONCE,
   RE_SIGNATURE_B64,
   RE_TIMESTAMP,
   SIGNATURE_BYTES,
-  buildCanonicalString,
+  buildCanonicalStringFromDigest,
+  toHex,
   utf8Bytes,
 } from "./canonical";
 
@@ -103,15 +105,27 @@ export async function verifyDeviceSignature(req: Request, env: Env): Promise<Dev
 
   // --- 5. raw body digest + canonical string ----------------------------
   // §1.2: GET/HEAD carry no body, so the digest is SHA-256 of zero bytes.
-  const isBodyless = req.method === "GET" || req.method === "HEAD";
-  const body = isBodyless ? "" : await req.text();
-  const canonical = buildCanonicalString({
-    method: req.method,
-    pathname: url.pathname,
-    timestampHeader,
-    nonce,
-    bodyBytes: utf8Bytes(body),
-  });
+  //
+  // The body is read through a hard byte cap and digested with the native
+  // implementation. `req.text()` would buffer anything the caller sends, and a
+  // JS SHA-256 over a multi-megabyte body is a cheap way to exhaust the Workers
+  // Free 10 ms CPU budget before authentication has even happened.
+  const bodyResult = await readBodyBounded(req, MAX_BODY_BYTES);
+  if (!bodyResult.ok) {
+    return { ok: false, response: err("payload_too_large", 413) };
+  }
+  const body = bodyResult.text;
+  const bodyBytes = utf8Bytes(body);
+  const digest = await crypto.subtle.digest("SHA-256", bodyBytes);
+  const canonical = buildCanonicalStringFromDigest(
+    {
+      method: req.method,
+      pathname: url.pathname,
+      timestampHeader,
+      nonce,
+    },
+    toHex(new Uint8Array(digest))
+  );
 
   // --- 6. signature length ----------------------------------------------
   const signature = base64ToBytes(signatureB64);

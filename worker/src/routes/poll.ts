@@ -10,6 +10,7 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import { MAX_ACK_IDS } from "../lib/config";
 import { readPending } from "./incoming";
 
 export async function handlePoll(
@@ -32,6 +33,7 @@ export async function handlePoll(
   const ackCommandIds: string[] = [];
   if (data.ack_command_ids !== undefined) {
     if (!Array.isArray(data.ack_command_ids)) return err("bad_request", 400);
+    if (data.ack_command_ids.length > MAX_ACK_IDS) return err("bad_request", 400);
     for (const id of data.ack_command_ids) {
       if (typeof id === "string" && id !== "") ackCommandIds.push(id);
     }

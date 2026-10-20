@@ -1,0 +1,11 @@
+-- 0002_retention.sql — hardening S6.
+--
+-- The message log holds full SMS bodies and correspondent phone numbers, and D1
+-- caps a database at 10 GB (Workers Paid) / 500 MB (Free). Without an index on
+-- `received_at` the daily retention delete is a full table scan, which is both
+-- slow and billed as rows read across the whole table.
+--
+-- This index is NOT redundant with idx_messages_device(device_id, received_at):
+-- `device_id` is the leading column there, so that index cannot serve a
+-- `received_at`-only range predicate.
+CREATE INDEX IF NOT EXISTS idx_messages_received ON messages(received_at);
