@@ -1,5 +1,5 @@
 # Test identity — contains a P-256 private key. Never commit.
-.harness-state.json
+.harness-state*.json
 
 # Local Wrangler state (D1 SQLite, DO SQLite, KV simulation)
 .wrangler/

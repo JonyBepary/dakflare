@@ -401,6 +401,14 @@ export class DeviceGateway extends DurableObject<Env> {
       return err("bad_request", 400);
     }
 
+    // A re-pair of the same device_id with a DIFFERENT key is a rotation, and the
+    // previous key holder must be evicted — otherwise a stolen phone keeps its
+    // socket and can still ack commands queued before the rotation.
+    const existing = this.ctx.storage.sql
+      .exec(`SELECT public_key_spki FROM devices WHERE device_id = ?`, deviceId)
+      .toArray()[0] as { public_key_spki?: string } | undefined;
+    const rotating = existing !== undefined && existing.public_key_spki !== publicKeySpki;
+
     this.ctx.storage.sql.exec(
       `INSERT INTO devices (device_id, public_key_spki, fcm_token, updated_at)
        VALUES (?, ?, ?, ?)
@@ -414,7 +422,34 @@ export class DeviceGateway extends DurableObject<Env> {
       Date.now()
     );
 
+    if (rotating) this.evictPreviousKeyHolder();
+
     return Response.json({ ok: true });
+  }
+
+  /**
+   * Kill everything the previous key holder still controls.
+   *
+   * The new key is already stored, so no NEW request from the old key can pass
+   * verification. What survives a naive rotation is a live WebSocket (accepted
+   * before the change) plus any commands already dispatched to it — both of which
+   * let the old holder keep operating.
+   */
+  private evictPreviousKeyHolder(): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1000, "rekeyed");
+      } catch {
+        // Already closed.
+      }
+    }
+    this.ctx.storage.sql.exec(`DELETE FROM commands`);
+    this.ctx.storage.sql.exec(`DELETE FROM nonces`);
+    // Per-command timers only; the offline alert is harmless and self-arms.
+    this.ctx.storage.sql.exec(
+      `DELETE FROM scheduled_tasks WHERE id LIKE 'ack:%' OR id LIKE 'exp:%'`
+    );
+    this.syncNextAlarm();
   }
 
   /* ====================================================================== */

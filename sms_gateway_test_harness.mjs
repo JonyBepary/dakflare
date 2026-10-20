@@ -30,7 +30,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const STATE_FILE = path.join(HERE, '.harness-state.json');
 
 const WORKER_URL = process.env.WORKER_URL ?? 'http://127.0.0.1:8787';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token';
@@ -38,6 +37,15 @@ const STUB_URL = process.env.STUB_URL ?? 'http://127.0.0.1:8790';
 const ACK_TIMEOUT_MS = Number(process.env.HARNESS_ACK_TIMEOUT_MS ?? 1500);
 const PROXY_PORT = Number(process.env.PROXY_PORT ?? 8788);
 const WORKER_HOST = new URL(WORKER_URL);
+
+/**
+ * Identity is stored PER TARGET. A single `.harness-state.json` meant a local run
+ * silently replaced the identity paired against the deployed Worker, so the next
+ * remote run authenticated as a device that does not exist there and every request
+ * failed with `device_unknown`. The file name now carries the host.
+ */
+const TARGET_KEY = WORKER_HOST.host.replace(/[^A-Za-z0-9.-]/g, '_');
+const STATE_FILE = path.join(HERE, `.harness-state.${TARGET_KEY}.json`);
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -692,12 +700,18 @@ async function cmdSuite() {
   console.log('-- rules linter (§7) --');
   {
     const rep = new Report('rules');
-    const post = (value) => admin('POST', '/v1/rules', {
-      id: crypto.randomUUID(), name: 'probe',
-      matcher: { type: 'regex', value },
-      body_matcher: { type: 'keyword', value: 'help' },
-      reply_template: 'ok',
-    });
+    const createdRules = [];
+    const post = async (value) => {
+      const id = crypto.randomUUID();
+      const res = await admin('POST', '/v1/rules', {
+        id, name: 'probe',
+        matcher: { type: 'regex', value },
+        body_matcher: { type: 'keyword', value: 'help' },
+        reply_template: 'ok',
+      });
+      if (res.status === 200) createdRules.push(id);
+      return res;
+    };
 
     for (const [label, pattern] of [
       ['lookahead (?=a)', '(?=a)'],
@@ -723,6 +737,12 @@ async function cmdSuite() {
     rep.check('accepts (abc)+ (not nested) -> 200', good2.status, 200);
     const good3 = await post('(a|b)+');
     rep.check('accepts (a|b)+ (non-overlapping) -> 200', good3.status, 200);
+
+    // Teardown: the suite must not leak synthetic auto-reply rules. Leaving them
+    // behind is how 33 of them once ended up live in production.
+    for (const id of createdRules) await admin('DELETE', `/v1/admin/rules/${id}`);
+    const remaining = (await admin('GET', '/v1/admin/rules')).data?.rules ?? [];
+    rep.check('suite deleted every rule it created', remaining.filter((r) => createdRules.includes(r.id)).length, 0);
     run(rep);
   }
 
@@ -953,6 +973,202 @@ async function cmdSuite() {
   process.exit(allOk ? 0 : 1);
 }
 
+/* ─────────────────────────── multi-device command ─────────────────────────── */
+
+/** Pair a fresh device and return a usable signing identity. */
+async function pairDevice(label) {
+  const id = newIdentity();
+  const mint = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+  const res = await fetch(`${WORKER_URL}/v1/device/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pairing_code: mint.data.pairing_code,
+      device_id: id.deviceId,
+      public_key_spki: id.publicKeySpki,
+    }),
+  });
+  if (res.status !== 200) throw new Error(`pair ${label} failed: ${res.status}`);
+  return { label, ...id, privateKey: crypto.createPrivateKey(id.privateKeyPem) };
+}
+
+/**
+ * Multi-device isolation and key rotation.
+ *
+ * Isolation matters because one Durable Object per device is the whole
+ * architecture: if a command or a rule leaks across devices, the per-device DO
+ * boundary is decorative. Rotation matters because a phone is lost, reflashed or
+ * replaced, and re-pairing the same `device_id` must actually evict the old key.
+ */
+async function cmdMultiDevice() {
+  console.log(`== multi-device ==\nworker: ${WORKER_URL}\n`);
+
+  let allOk = true;
+  const run = (rep) => { allOk = rep.print() && allOk; console.log(); };
+
+  const A = await pairDevice("A");
+  const B = await pairDevice("B");
+  const C = await pairDevice("C");
+  console.log(`paired: A=${A.deviceId} B=${B.deviceId} C=${C.deviceId}\n`);
+
+  console.log("-- independent operation --");
+  {
+    const rep = new Report("independence");
+    for (const dev of [A, B, C]) {
+      const r = await device(dev, "POST", "/v1/sms/incoming/batch", {
+        messages: [{
+          local_id: `md_${dev.label}`, sender: "+8801712345678",
+          body: `from ${dev.label}`, received_at: new Date().toISOString(),
+        }],
+        ack_command_ids: [],
+      });
+      rep.check(`${dev.label} accepts its own batch`, r.status === 200 && r.data?.accepted === 1, true);
+    }
+    run(rep);
+  }
+
+  console.log("-- DO isolation: a command for A must not reach B or C --");
+  {
+    const rep = new Report("isolation");
+    const sent = await admin("POST", "/v1/sms/send", {
+      device_id: A.deviceId, to: "+8801712345678", body: "for A only",
+    });
+    const cmdId = sent.data?.command_id;
+
+    const pollA = await device(A, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    rep.check("A receives the command", (pollA.data?.commands ?? []).some((c) => c.command_id === cmdId), true);
+
+    const pollB = await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    const pollC = await device(C, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    rep.check("B receives nothing", (pollB.data?.commands ?? []).length, 0);
+    rep.check("C receives nothing", (pollC.data?.commands ?? []).length, 0);
+
+    // B cannot ack a command that belongs to A's object.
+    const crossAck = await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [cmdId] });
+    rep.check("B acking A's command is accepted-but-ignored", crossAck.status, 200);
+    const stateA = await admin("GET", `/v1/sms/commands/${cmdId}?device_id=${A.deviceId}`);
+    // Not asserting DISPATCHED exactly: the 8 s ack_timeout may legitimately have
+    // reverted it to PENDING by now. The point is that B's ack did not advance it.
+    rep.check("B's ack did not advance A's command to ACKED_BY_DEVICE",
+      stateA.data?.command?.state !== "ACKED_BY_DEVICE", true);
+    run(rep);
+  }
+
+  console.log("-- rule scoping: global vs per-device --");
+  {
+    const rep = new Report("rules scoping");
+    const gid = `global_${crypto.randomBytes(4).toString("hex")}`;
+    const aid = `devA_${crypto.randomBytes(4).toString("hex")}`;
+
+    rep.check("create global rule -> 200", (await admin("POST", "/v1/rules", {
+      id: gid, name: "global", matcher: { type: "exact", value: "+8801000000000" },
+      body_matcher: { type: "keyword", value: "x" }, reply_template: "g",
+    })).status, 200);
+
+    rep.check("create A-only rule -> 200", (await admin("POST", "/v1/rules", {
+      id: aid, device_id: A.deviceId, name: "A only",
+      matcher: { type: "exact", value: "+8801000000001" },
+      body_matcher: { type: "keyword", value: "x" }, reply_template: "a",
+    })).status, 200);
+
+    const seeA = (await device(A, "GET", "/v1/rules")).data?.rules ?? [];
+    const seeB = (await device(B, "GET", "/v1/rules")).data?.rules ?? [];
+    const idsA = seeA.map((r) => r.id);
+    const idsB = seeB.map((r) => r.id);
+
+    rep.check("A sees the global rule", idsA.includes(gid), true);
+    rep.check("A sees its own rule", idsA.includes(aid), true);
+    rep.check("B sees the global rule", idsB.includes(gid), true);
+    rep.check("B does NOT see A's rule", idsB.includes(aid), false);
+
+    await admin("DELETE", `/v1/admin/rules/${gid}`);
+    await admin("DELETE", `/v1/admin/rules/${aid}`);
+    run(rep);
+  }
+
+  console.log("-- fleet list + per-device revocation --");
+  {
+    const rep = new Report("fleet");
+    const fleet = await admin("GET", "/v1/devices");
+    const ids = (fleet.data?.devices ?? []).map((d) => d.device_id);
+    rep.check("fleet lists A", ids.includes(A.deviceId), true);
+    rep.check("fleet lists B", ids.includes(B.deviceId), true);
+    rep.check("fleet lists C", ids.includes(C.deviceId), true);
+
+    rep.check("revoke B -> 200", (await admin("DELETE", `/v1/admin/devices/${B.deviceId}`)).status, 200);
+    rep.check("B is now rejected -> 401",
+      (await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 401);
+    rep.check("A still works -> 200",
+      (await device(A, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+    rep.check("C still works -> 200",
+      (await device(C, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+    run(rep);
+  }
+
+  console.log("-- key rotation: same device_id, new keypair --");
+  {
+    const rep = new Report("rotation");
+    const oldKey = A.privateKey;
+    const rotated = newIdentity();          // new key, same device id
+    rotated.deviceId = A.deviceId;
+    const mint = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    const re = await fetch(`${WORKER_URL}/v1/device/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pairing_code: mint.data.pairing_code,
+        device_id: A.deviceId,
+        public_key_spki: rotated.publicKeySpki,
+      }),
+    });
+    rep.check("re-pair the same device_id -> 200", re.status, 200);
+
+    const newKeyIdentity = { ...rotated, privateKey: crypto.createPrivateKey(rotated.privateKeyPem) };
+    rep.check("the NEW key works -> 200",
+      (await device(newKeyIdentity, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+
+    const staleIdentity = { deviceId: A.deviceId, privateKey: oldKey, publicKeySpki: A.publicKeySpki };
+    const stale = await device(staleIdentity, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    rep.check("the OLD key is rejected -> 401", stale.status, 401);
+    rep.check("...as invalid_signature", stale.data?.error, "invalid_signature");
+
+    // Rotation must also evict a live session held by the old key holder,
+    // otherwise a stolen phone keeps its socket after the owner re-pairs.
+    const before = signWith(newKeyIdentity, "GET", "/v1/device/ws", "");
+    const ws = new RawWs({ pathname: "/v1/device/ws", headers: before.headers });
+    await ws.connect();
+    ws.sendText(JSON.stringify({ op: "hello" }));
+    await sleep(300);
+
+    const rotated2 = newIdentity();
+    rotated2.deviceId = A.deviceId;
+    const mint2 = await admin("POST", "/v1/admin/pairing-code", { ttl_ms: 60_000 });
+    await fetch(`${WORKER_URL}/v1/device/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pairing_code: mint2.data.pairing_code,
+        device_id: A.deviceId,
+        public_key_spki: rotated2.publicKeySpki,
+      }),
+    });
+
+    const closed = await ws.waitForClose(4000);
+    rep.check("rotation closes the session held by the previous key", closed !== null, true);
+    if (closed !== null) console.log(`  NOTE  rotated socket closed with ${closed}`);
+    ws.close();
+    run(rep);
+  }
+
+  console.log("-- cleanup --");
+  for (const dev of [A, C]) {
+    await admin("DELETE", `/v1/admin/devices/${dev.deviceId}`).catch(() => undefined);
+  }
+
+  console.log(allOk ? "MULTI-DEVICE PASSED" : "MULTI-DEVICE FAILED");
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ───────────────────────────── hardening command ───────────────────────────── */
 
 /**
@@ -1150,6 +1366,7 @@ const COMMANDS = {
   pair: cmdPair,
   suite: cmdSuite,
   hardening: cmdHardening,
+  multidevice: cmdMultiDevice,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,
