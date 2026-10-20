@@ -1,0 +1,172 @@
+/**
+ * Rules — PROTOCOL_CONTRACT_V5 Rev C §7 (RE2 rule language) and §8.
+ * Port of master plan §5.4 with brief fixes #14, #15 and #16.
+ *
+ *   #14 The linter is now `lib/re2-compat.ts` (§7) instead of three string
+ *       regexes; in particular lookahead is rejected, because Rev B let it
+ *       through and it then failed to compile in RE2/J on the phone.
+ *   #15 `id` is generated server-side when missing/malformed, so a POST can no
+ *       longer create an id-less rule (§7.3).
+ *   #16 `device_id` scoping: NULL = global rule, otherwise per-device. The
+ *       device-authenticated read is bound to the authenticated device, so one
+ *       device can never be served another's rules.
+ */
+
+import type { Env } from "../index";
+import { err } from "../lib/errors";
+import { lintRe2 } from "../lib/re2-compat";
+
+const ALLOWED_MATCHER_TYPES = new Set(["exact", "prefix", "suffix", "glob", "regex"]);
+const ALLOWED_BODY_TYPES = new Set(["keyword", "regex"]);
+
+/** §7.1 length caps, measured in BYTES (a UTF-8 pattern can exceed its char count). */
+const MAX_PATTERN_BYTES = 512;
+const MAX_REPLY_TEMPLATE_BYTES = 1000;
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+/**
+ * `GET /v1/rules` (device-authenticated).
+ *
+ * §7/#16: a device sees global rules plus its own, never another device's.
+ */
+export async function handleRulesGet(_req: Request, env: Env, deviceId: string): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, name, enabled, priority, matcher_type, matcher_value,
+            body_type, body_value, reply_template, cooldown_s, max_per_hour,
+            sim_slot, allow_shortcode, device_id, updated_at
+       FROM rules
+      WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)
+      ORDER BY priority DESC, id ASC`
+  )
+    .bind(deviceId)
+    .all();
+  return Response.json({ rules: rows.results ?? [] });
+}
+
+/** `POST /v1/rules` (admin) — create or replace a rule. */
+export async function handleRulesPost(req: Request, env: Env): Promise<Response> {
+  let payload: unknown;
+  try {
+    payload = await req.json();
+  } catch {
+    return err("bad_request", 400);
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return err("bad_request", 400);
+  }
+  const input = payload as Record<string, unknown>;
+
+  // Accept both the flat and the nested matcher shapes Rev B supported.
+  const matcher = (input.matcher ?? null) as Record<string, unknown> | null;
+  const bodyMatcher = (input.body_matcher ?? null) as Record<string, unknown> | null;
+
+  const matcherType = String(
+    matcher && typeof matcher.type === "string" ? matcher.type : input.matcher_type ?? ""
+  );
+  const matcherValue =
+    matcher && matcher.value !== undefined
+      ? String(matcher.value)
+      : String(input.matcher_value ?? "");
+  const bodyType = String(
+    bodyMatcher && typeof bodyMatcher.type === "string" ? bodyMatcher.type : input.body_type ?? ""
+  );
+  const bodyValue =
+    bodyMatcher && bodyMatcher.value !== undefined
+      ? String(bodyMatcher.value)
+      : String(input.body_value ?? "");
+  const replyTemplate = String(input.reply_template ?? "");
+
+  if (!ALLOWED_MATCHER_TYPES.has(matcherType) || !ALLOWED_BODY_TYPES.has(bodyType)) {
+    return err("bad_request", 400);
+  }
+  if (
+    utf8Length(matcherValue) > MAX_PATTERN_BYTES ||
+    utf8Length(bodyValue) > MAX_PATTERN_BYTES ||
+    utf8Length(replyTemplate) > MAX_REPLY_TEMPLATE_BYTES
+  ) {
+    return err("bad_request", 400);
+  }
+
+  // §7.1: reject anything RE2/J cannot compile, before it can reach a device.
+  if (matcherType === "regex") {
+    const reason = lintRe2(matcherValue);
+    if (reason) {
+      console.warn(`[rules] matcher regex rejected: ${reason}`);
+      return err("rule_rejected", 400);
+    }
+  }
+  if (bodyType === "regex") {
+    const reason = lintRe2(bodyValue);
+    if (reason) {
+      console.warn(`[rules] body regex rejected: ${reason}`);
+      return err("rule_rejected", 400);
+    }
+  }
+
+  // #15 §7.3: an id must be a non-empty string, otherwise generate one. SQLite
+  // permits NULL in a non-INTEGER PRIMARY KEY and treats each NULL as distinct,
+  // so an id-less POST used to create untargetable duplicate rules.
+  const rawId = input.id;
+  const id =
+    typeof rawId === "string" && rawId.trim() !== "" ? rawId.trim() : crypto.randomUUID();
+
+  // `name` is NOT NULL: validate it when supplied, otherwise derive a stable one
+  // so a rule can never be stored nameless.
+  const rawName = input.name;
+  let name: string;
+  if (rawName === undefined || rawName === null) {
+    name = `rule-${id}`;
+  } else if (typeof rawName === "string" && rawName.trim() !== "") {
+    name = rawName;
+  } else {
+    return err("bad_request", 400);
+  }
+
+  // #16: NULL device_id = global rule; a string = per-device rule.
+  const rawDeviceId = input.device_id;
+  let deviceId: string | null = null;
+  if (rawDeviceId !== undefined && rawDeviceId !== null && rawDeviceId !== "") {
+    if (typeof rawDeviceId !== "string") return err("bad_request", 400);
+    deviceId = rawDeviceId;
+  }
+
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO rules
+       (id, name, enabled, priority, matcher_type, matcher_value,
+        body_type, body_value, reply_template, cooldown_s, max_per_hour,
+        sim_slot, allow_shortcode, device_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      id,
+      name,
+      input.enabled === undefined ? 1 : input.enabled ? 1 : 0,
+      readInt(input.priority, 0),
+      matcherType,
+      matcherValue,
+      bodyType,
+      bodyValue,
+      replyTemplate,
+      readInt(input.cooldown_seconds ?? input.cooldown_s, 60),
+      readInt(input.max_replies_per_hour ?? input.max_per_hour, 10),
+      readInt(input.sim_slot, 0),
+      input.allow_shortcode_reply || input.allow_shortcode ? 1 : 0,
+      deviceId,
+      Date.now()
+    )
+    .run();
+
+  return Response.json({ ok: true, id });
+}
+
+function readInt(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return fallback;
+}

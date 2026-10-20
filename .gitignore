@@ -1,0 +1,19 @@
+# Test identity — contains a P-256 private key. Never commit.
+.harness-state.json
+
+# Local Wrangler state (D1 SQLite, DO SQLite, KV simulation)
+.wrangler/
+worker/.wrangler/
+
+# Local secrets
+.dev.vars
+worker/.dev.vars
+
+# Dependencies
+node_modules/
+
+# OS noise
+.DS_Store
+
+# Generated test fixture (RSA private key) — never commit
+stub-service-account.json

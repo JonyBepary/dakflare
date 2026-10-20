@@ -1,0 +1,19 @@
+{
+  "name": "sms-gateway-worker",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SMS Gateway v5 edge backend (Worker + D1 + per-device Durable Object). Implements PROTOCOL_CONTRACT_V5 Rev C.",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply sms_gateway --local",
+    "migrate:remote": "wrangler d1 migrations apply sms_gateway --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.112.0"
+  }
+}

@@ -1,0 +1,280 @@
+{
+  "v": 2,
+  "name": "SMS Gateway v5 — Conformance (Rev C)",
+  "folders": [
+    {
+      "v": 2,
+      "name": "1. Bootstrap",
+      "folders": [],
+      "requests": [
+        {
+          "v": "1",
+          "name": "1.1 Mint pairing code (admin)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/admin/pairing-code",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true },
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\npw.expect(pw.response.body.pairing_code).toBeType('string')",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "{\n  \"ttl_ms\": 600000\n}" },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "1.2 Pair device (no auth — single-use code)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/device/pair",
+          "params": [],
+          "headers": [
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect([200, 401]).toInclude(pw.response.status)\n// 200 on first use, 401 on reuse or expiry",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"pairing_code\": \"PASTE_FROM_1.1\",\n  \"device_id\": \"devharness00000001\",\n  \"public_key_spki\": \"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEufadQxlqGCX37BDqlC6kmiciAEjLKVfKT9zsKFRAghF7VfWmTk2NfOeQPdeQTgzlAICBaPEV0/n8ZfZD1ZHf4Q==\",\n  \"fcm_token\": \"hoppscotch-fcm-token\"\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        }
+      ]
+    },
+    {
+      "v": 2,
+      "name": "2. Device (signed by the :8788 proxy)",
+      "folders": [],
+      "requests": [
+        {
+          "v": "1",
+          "name": "2.1 Poll for pending commands",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/outgoing/poll",
+          "params": [],
+          "headers": [
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\n// The four X-* headers are injected by the proxy; see test-support/README.md",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"ack_command_ids\": [],\n  \"fcm_token\": \"hoppscotch-fcm-token\"\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "2.2 Incoming batch (dedup key is device_id + local_id)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/incoming/batch",
+          "params": [],
+          "headers": [
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\npw.expect(pw.response.body.accepted + pw.response.body.duplicates).toBe(1)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"messages\": [\n    {\n      \"local_id\": \"hoppscotch_0001\",\n      \"sender\": \"+8801712345678\",\n      \"body\": \"hello from Hoppscotch\",\n      \"received_at\": \"2026-10-19T10:00:00.000Z\",\n      \"auto_reply_sent\": false\n    }\n  ],\n  \"ack_command_ids\": []\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "2.3 Status batch (forward-only transitions)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/status/batch",
+          "params": [],
+          "headers": [
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\n// A rejected transition is a 200 no-op, not an error",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"updates\": [\n    { \"command_id\": \"PASTE_COMMAND_ID\", \"status\": \"SENT\" },\n    { \"command_id\": \"PASTE_COMMAND_ID\", \"status\": \"DELIVERED\" }\n  ]\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "2.4 Rules for this device",
+          "method": "GET",
+          "endpoint": "http://localhost:8788/v1/rules",
+          "params": [],
+          "headers": [],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "" },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "2.5 Rejection battery (expect 400/401, never 200)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/outgoing/poll",
+          "params": [{ "key": "unexpected", "value": "query", "active": true }],
+          "headers": [
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "// §1.2: a signed request carrying a query string must be refused BEFORE crypto\npw.expect(pw.response.status).toBe(400)\npw.expect(pw.response.body.error).toBe('unexpected_query')",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "{}" },
+          "requestVariables": [],
+          "responses": {}
+        }
+      ]
+    },
+    {
+      "v": 2,
+      "name": "3. Admin (send + inspect)",
+      "folders": [],
+      "requests": [
+        {
+          "v": "1",
+          "name": "3.1 Send one SMS",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/send",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true },
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\n// 404 device_unknown if the device is not in the D1 registry",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"device_id\": \"devharness00000001\",\n  \"to\": \"+8801712345678\",\n  \"body\": \"sent from Hoppscotch\",\n  \"priority\": \"high\",\n  \"expires_in_s\": 600\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.2 Send batch",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/sms/send/batch",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true },
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\npw.expect(pw.response.body.command_ids.length).toBe(3)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"device_id\": \"devharness00000001\",\n  \"commands\": [\n    { \"to\": \"+8801712345678\", \"body\": \"one\" },\n    { \"to\": \"+8801712345678\", \"body\": \"two\" },\n    { \"to\": \"+8801712345678\", \"body\": \"three\" }\n  ]\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.3 Upsert a rule (RE2-compatible only)",
+          "method": "POST",
+          "endpoint": "http://localhost:8788/v1/rules",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true },
+            { "key": "Content-Type", "value": "application/json", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\n// Try '((a+))+' or '(?=a)' here: both must return 400 (§7.1)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": {
+            "contentType": "application/json",
+            "body": "{\n  \"id\": \"rule-hoppscotch-1\",\n  \"name\": \"Bangla help\",\n  \"enabled\": true,\n  \"priority\": 10,\n  \"matcher\": { \"type\": \"regex\", \"value\": \"^\\\\+880[0-9]{9}$\" },\n  \"body_matcher\": { \"type\": \"keyword\", \"value\": \"help\" },\n  \"reply_template\": \"Sahajjo pathano hoyeche\",\n  \"cooldown_seconds\": 60,\n  \"max_replies_per_hour\": 10,\n  \"sim_slot\": 0,\n  \"allow_shortcode_reply\": false\n}"
+          },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.4 Fleet list",
+          "method": "GET",
+          "endpoint": "http://localhost:8788/v1/devices",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "" },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.5 Message log (includes direction:out)",
+          "method": "GET",
+          "endpoint": "http://localhost:8788/v1/messages",
+          "params": [
+            { "key": "device_id", "value": "devharness00000001", "active": true },
+            { "key": "limit", "value": "50", "active": true }
+          ],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "" },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.6 Command state",
+          "method": "GET",
+          "endpoint": "http://localhost:8788/v1/sms/commands/PASTE_COMMAND_ID",
+          "params": [{ "key": "device_id", "value": "devharness00000001", "active": true }],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\n// state is at body.command.state — NOT top level (§11.5)",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "" },
+          "requestVariables": [],
+          "responses": {}
+        },
+        {
+          "v": "1",
+          "name": "3.7 Device status",
+          "method": "GET",
+          "endpoint": "http://localhost:8788/v1/device/devharness00000001/status",
+          "params": [],
+          "headers": [
+            { "key": "Authorization", "value": "Bearer dev-admin-token", "active": true }
+          ],
+          "preRequestScript": "",
+          "testScript": "pw.expect(pw.response.status).toBe(200)\npw.expect(pw.response.body).toHaveProperty('ws_connected')",
+          "auth": { "authType": "none", "authActive": true },
+          "body": { "contentType": "application/json", "body": "" },
+          "requestVariables": [],
+          "responses": {}
+        }
+      ]
+    }
+  ],
+  "requests": [],
+  "auth": { "authType": "none", "authActive": true },
+  "headers": []
+}

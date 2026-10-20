@@ -1,0 +1,188 @@
+/**
+ * Outbound commands — PROTOCOL_CONTRACT_V5 Rev C §6.1 (`PENDING` creation) and §8.
+ * Port of master plan §5.4 with two port-brief fixes:
+ *
+ *   #18 persist outbound messages. `messages.direction` has always permitted
+ *   'out' but Rev B never wrote an outbound row, so `GET /v1/messages` could only
+ *   ever show half the conversation.
+ *
+ *   #9  one DO call per batch. Rev B called `/__enqueue` once per command inside a
+ *   `for` loop with `await` (N serialised DO round-trips) and each call re-pushed
+ *   every in-flight command over the socket; a batch of N enqueues re-sent
+ *   command #1 N times. Batches now go through a single `/__enqueue_batch` call.
+ *
+ *   #12 `expires_in_s` is finite-checked and clamped to [1, 86400], default 600.
+ */
+
+import type { Env } from "../index";
+import { err } from "../lib/errors";
+import { clampExpiresInS } from "../lib/config";
+import { internalError } from "./pair";
+
+interface CommandPayload {
+  command_id: string;
+  to: string;
+  body: string;
+  priority: string;
+  expires_at: number;
+}
+
+/** `POST /v1/sms/send` (admin) — enqueue exactly one outbound SMS. */
+export async function handleSend(req: Request, env: Env): Promise<Response> {
+  let payload: unknown;
+  try {
+    payload = await req.json();
+  } catch {
+    return err("bad_request", 400);
+  }
+  if (!payload || typeof payload !== "object") return err("bad_request", 400);
+  const input = payload as Record<string, unknown>;
+
+  const deviceId = input.device_id;
+  const to = input.to;
+  const body = input.body;
+  if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
+  if (typeof to !== "string" || to === "") return err("bad_request", 400);
+  if (typeof body !== "string") return err("bad_request", 400);
+
+  // An unregistered device_id resolves to a brand-new Durable Object that no
+  // device will ever poll, so the command would sit PENDING until it expired
+  // with no signal to the caller. Reject it up front rather than black-hole it.
+  if (!(await deviceIsRegistered(env, deviceId))) return err("device_unknown", 404);
+
+  const commandId = crypto.randomUUID();
+  const expiresAt = Date.now() + clampExpiresInS(input.expires_in_s) * 1000;
+  const priority = readPriority(input.priority);
+
+  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
+  let res: Response;
+  try {
+    res = await stub.fetch("https://do/__enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command_id: commandId,
+        to,
+        body,
+        priority,
+        expires_at: expiresAt,
+      }),
+    });
+  } catch (error) {
+    console.error(`[send] DO unreachable: ${String(error)}`);
+    return internalError();
+  }
+  if (!res.ok) return internalError();
+
+  await persistOutbound(env, deviceId, commandId, to, body);
+  return Response.json({ command_id: commandId });
+}
+
+/** `POST /v1/sms/send/batch` (admin) — enqueue many outbound SMS in one DO call. */
+export async function handleSendBatch(req: Request, env: Env): Promise<Response> {
+  let payload: unknown;
+  try {
+    payload = await req.json();
+  } catch {
+    return err("bad_request", 400);
+  }
+  if (!payload || typeof payload !== "object") return err("bad_request", 400);
+  const input = payload as Record<string, unknown>;
+
+  const deviceId = input.device_id;
+  const commands = input.commands;
+  if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
+  if (!Array.isArray(commands)) return err("bad_request", 400);
+  if (!(await deviceIsRegistered(env, deviceId))) return err("device_unknown", 404);
+
+  // Validate every entry before any side effect: all-or-nothing.
+  const now = Date.now();
+  const prepared: CommandPayload[] = [];
+  for (const entry of commands) {
+    if (!entry || typeof entry !== "object") return err("bad_request", 400);
+    const item = entry as Record<string, unknown>;
+    const to = item.to;
+    const body = item.body;
+    if (typeof to !== "string" || to === "") return err("bad_request", 400);
+    if (typeof body !== "string") return err("bad_request", 400);
+    prepared.push({
+      command_id: crypto.randomUUID(),
+      to,
+      body,
+      priority: readPriority(item.priority),
+      expires_at: now + clampExpiresInS(item.expires_in_s) * 1000,
+    });
+  }
+
+  if (prepared.length === 0) return Response.json({ command_ids: [] });
+
+  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
+  let res: Response;
+  try {
+    // ONE DO call for the whole batch — one push, one wake push, one lock
+    // acquisition, instead of N.
+    res = await stub.fetch("https://do/__enqueue_batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands: prepared }),
+    });
+  } catch (error) {
+    console.error(`[send] DO unreachable: ${String(error)}`);
+    return internalError();
+  }
+  if (!res.ok) return internalError();
+
+  // #18: persist one outbound `messages` row per command, in a single D1 batch.
+  await env.DB.batch(
+    prepared.map((command) =>
+      env.DB.prepare(
+        `INSERT INTO messages
+           (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
+         VALUES (?, ?, ?, 'out', ?, ?, ?, 0)
+         ON CONFLICT(device_id, local_id) DO NOTHING`
+      ).bind(command.command_id, deviceId, command.command_id, command.to, command.body, now)
+    )
+  );
+
+  return Response.json({ command_ids: prepared.map((c) => c.command_id) });
+}
+
+async function persistOutbound(
+  env: Env,
+  deviceId: string,
+  commandId: string,
+  to: string,
+  body: string
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO messages
+         (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
+       VALUES (?, ?, ?, 'out', ?, ?, ?, 0)
+       ON CONFLICT(device_id, local_id) DO NOTHING`
+    )
+      .bind(commandId, deviceId, commandId, to, body, Date.now())
+      .run();
+  } catch (error) {
+    // The command is already queued in the DO; a bookkeeping failure must not
+    // turn a successful send into a 500.
+    console.error(`[send] outbound message persist failed: ${String(error)}`);
+  }
+}
+
+function readPriority(value: unknown): string {
+  if (value === "high" || value === "normal" || value === "low") return value;
+  return "normal";
+}
+
+/**
+ * `devices` in D1 is the fleet registry written at pairing time (§11). A device
+ * that is absent there has no Durable Object state and no public key, so it can
+ * never authenticate and never poll.
+ */
+async function deviceIsRegistered(env: Env, deviceId: string): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+    .bind(deviceId)
+    .first();
+  return row !== null;
+}

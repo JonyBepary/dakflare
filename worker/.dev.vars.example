@@ -1,0 +1,21 @@
+# Copy to `.dev.vars` (git-ignored) for `wrangler dev`.
+#
+# ADMIN_TOKEN is deliberately NOT in wrangler.toml [vars]: a token in the config
+# file is a committed secret. When ADMIN_TOKEN is unset every admin route fails
+# closed with 401, so `wrangler dev` alone is not enough — you need this file.
+ADMIN_TOKEN="dev-admin-token"
+
+# FCM HTTP v1 service account. Absent is fine locally: the wake push degrades to
+# a single log line and command enqueue still works.
+# FCM_SERVICE_ACCOUNT_JSON='{"client_email":"...","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n","project_id":"..."}'
+
+# ---------------------------------------------------------------------------
+# Timing overrides (optional). All are Number-parsed and clamped; the defaults
+# are ACK_TIMEOUT_MS=8000, OFFLINE_ALERT_MS=900000, STALE_SOCKET_MS=120000,
+# NONCE_WINDOW_MS=300000. The conformance suite shrinks these so it does not have
+# to wait 8 s for an ack_timeout or 15 min for an offline alert.
+# ---------------------------------------------------------------------------
+# ACK_TIMEOUT_MS="500"
+# OFFLINE_ALERT_MS="5000"
+# STALE_SOCKET_MS="2000"
+# NONCE_WINDOW_MS="300000"

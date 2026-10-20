@@ -1,0 +1,15 @@
+# Local secrets: never commit.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Wrangler / build state
+.wrangler/
+dist/
+worker/.wrangler/
+
+# Dependencies
+node_modules/
+
+# OS noise
+.DS_Store
