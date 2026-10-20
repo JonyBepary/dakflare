@@ -61,7 +61,7 @@ FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
 # AGPL-3.0 §13: point this at YOUR fork. `/source` redirects here.
-SOURCE_URL = "https://github.com/jonybepary/dakflare"
+SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 
 [assets]
 directory = "public"

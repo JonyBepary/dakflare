@@ -27,7 +27,7 @@ Auth is not a shared secret. Each device signs `METHOD\nPATH\nTIMESTAMP\nNONCE\n
 ## Quick start (bring your own Cloudflare account)
 
 ```bash
-git clone https://github.com/jonybepary/dakflare
+git clone https://github.com/JonyBepary/dakflare
 cd dakflare/worker
 npm install
 

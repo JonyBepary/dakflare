@@ -97,7 +97,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
 # AGPL-3.0 §13: the deployment must offer its source to the people using it.
 # Point this at your fork; `/source` redirects here and the landing page links to it.
-SOURCE_URL = "https://github.com/jonybepary/dakflare"
+SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 
 # ---------------------------------------------------------------------------
 # Static assets (packaging P0). The landing page is served without invoking the
