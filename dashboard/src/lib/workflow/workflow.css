@@ -1,0 +1,406 @@
+/* ==========================================================================
+   Workflow canvas
+   --------------------------------------------------------------------------
+   Svelte Flow ships a neutral grey theme. These overrides map its variables
+   onto the console's warm-paper tokens so the canvas reads as part of the
+   product, in both light and dark mode. Node cards deliberately look like the
+   rest of the console: hairline strokes, mono labels, one accent.
+   ========================================================================== */
+
+.svelte-flow.svelte-flow {
+	--xy-background-color: var(--bg);
+	--xy-background-pattern-color: var(--line-strong);
+	--xy-background-pattern-dots-color: var(--line-strong);
+
+	--xy-edge-stroke: var(--line-strong);
+	--xy-edge-stroke-selected: var(--accent);
+	--xy-edge-stroke-width: 1.5;
+	--xy-connectionline-stroke: var(--accent);
+	--xy-connectionline-stroke-width: 1.5;
+
+	--xy-handle-background-color: var(--surface);
+	--xy-handle-border-color: var(--line-strong);
+
+	--xy-selection-background-color: color-mix(in srgb, var(--accent) 8%, transparent);
+	--xy-selection-border: 1px dashed var(--accent);
+
+	--xy-controls-button-background-color: var(--surface);
+	--xy-controls-button-background-color-hover: var(--surface-2);
+	--xy-controls-button-border-color: var(--line);
+	--xy-controls-button-color: var(--ink-2);
+	--xy-controls-button-color-hover: var(--ink);
+	--xy-controls-box-shadow: var(--shadow);
+
+	--xy-minimap-background-color: var(--surface);
+	--xy-minimap-node-background-color: var(--surface-3);
+	--xy-minimap-node-stroke-color: var(--line-strong);
+	--xy-minimap-mask-background-color: color-mix(in srgb, var(--ink) 7%, transparent);
+	--xy-minimap-mask-stroke-color: var(--line-strong);
+
+	--xy-attribution-background-color: transparent;
+
+	--xy-edge-label-background-color: var(--surface);
+	--xy-edge-label-color: var(--ink-2);
+
+	font-family: var(--font-sans);
+	background: var(--bg);
+}
+
+.svelte-flow .svelte-flow__background {
+	background-color: var(--bg);
+}
+
+.svelte-flow .svelte-flow__attribution {
+	font-family: var(--font-mono);
+	font-size: 9px;
+	letter-spacing: 0.04em;
+	padding: 2px 5px;
+	border-radius: 3px;
+}
+
+.svelte-flow .svelte-flow__attribution a {
+	color: var(--ink-3);
+}
+
+/* --------------------------------------------------------------- node card */
+
+.wf-node {
+	position: relative;
+	width: 214px;
+	padding: 10px 12px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--r);
+	background: var(--surface);
+	color: var(--ink);
+	box-shadow: var(--shadow);
+	transition:
+		border-color 140ms ease,
+		box-shadow 140ms ease;
+}
+
+.wf-node::before {
+	content: '';
+	position: absolute;
+	left: -1px;
+	top: 9px;
+	bottom: 9px;
+	width: 2px;
+	border-radius: 2px;
+	background: var(--line-strong);
+}
+
+.wf-node-trigger::before {
+	background: var(--accent);
+}
+
+.wf-node-extract::before {
+	background: var(--info);
+}
+
+.wf-node-condition::before {
+	background: var(--warn);
+}
+
+.wf-node-send_sms::before {
+	background: var(--ok);
+}
+
+.wf-node-stop::before {
+	background: var(--ink-3);
+}
+
+.wf-node.is-selected {
+	border-color: var(--accent);
+	box-shadow:
+		0 0 0 3px var(--accent-soft),
+		var(--shadow);
+}
+
+.wf-node.is-active {
+	border-color: color-mix(in srgb, var(--ok) 58%, var(--line));
+	box-shadow:
+		0 0 0 3px color-mix(in srgb, var(--ok) 15%, transparent),
+		var(--shadow);
+}
+
+.wf-node.is-selected.is-active {
+	border-color: var(--accent);
+	box-shadow:
+		0 0 0 3px var(--accent-soft),
+		0 0 0 6px color-mix(in srgb, var(--ok) 12%, transparent),
+		var(--shadow);
+}
+
+.svelte-flow .svelte-flow__node:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 3px;
+	border-radius: var(--r);
+}
+
+.wf-node-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.wf-node-icon {
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	flex: none;
+	border: 1px solid var(--line);
+	border-radius: var(--r-sm);
+	background: var(--surface-2);
+	color: var(--ink-2);
+}
+
+.wf-node-type {
+	font-family: var(--font-mono);
+	font-size: 9.5px;
+	font-weight: 500;
+	letter-spacing: 0.11em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.wf-node-ran {
+	margin-left: auto;
+	padding: 1px 4px;
+	border: 1px solid color-mix(in srgb, var(--ok) 36%, var(--line));
+	border-radius: 3px;
+	background: color-mix(in srgb, var(--ok) 8%, var(--surface));
+	color: var(--ok);
+	font-family: var(--font-mono);
+	font-size: 8.5px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	line-height: 1.5;
+}
+
+.wf-node-summary {
+	margin-top: 7px;
+	font-size: 11.5px;
+	line-height: 1.45;
+	color: var(--ink-2);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.wf-branches {
+	margin: 9px -12px -10px;
+	border-top: 1px solid var(--line);
+}
+
+.wf-branch {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 23px;
+	padding: 0 12px;
+}
+
+.wf-branch + .wf-branch {
+	border-top: 1px dashed var(--line);
+}
+
+.wf-branch-key {
+	width: 32px;
+	font-family: var(--font-mono);
+	font-size: 9px;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.wf-branch-rule {
+	flex: 1;
+	height: 1px;
+	background: repeating-linear-gradient(
+		to right,
+		var(--line-strong) 0 3px,
+		transparent 3px 6px
+	);
+	opacity: 0.8;
+}
+
+/* ------------------------------------------------------------- node toolbar */
+
+.svelte-flow__node-toolbar.wf-toolbar,
+.wf-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--r-sm);
+	background: var(--surface);
+	box-shadow: var(--shadow);
+	pointer-events: all;
+}
+
+.wf-tool {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 3px;
+	background: transparent;
+	color: var(--ink-3);
+	transition:
+		background-color 120ms ease,
+		color 120ms ease;
+}
+
+.wf-tool:hover {
+	background: var(--surface-2);
+	color: var(--ink);
+}
+
+.wf-tool-danger:hover {
+	background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+	color: var(--danger);
+}
+
+.wf-tool:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+.wf-tool-sep {
+	width: 1px;
+	height: 14px;
+	background: var(--line);
+}
+
+/* ----------------------------------------------------------------- handles */
+
+.svelte-flow .svelte-flow__handle {
+	width: 9px;
+	height: 9px;
+	min-width: 9px;
+	min-height: 9px;
+	border: 1.5px solid var(--line-strong);
+	background: var(--surface);
+	transition:
+		border-color 120ms ease,
+		background-color 120ms ease,
+		transform 120ms ease;
+}
+
+/* Keep the dot small but give the pointer a forgiving target. */
+.svelte-flow .svelte-flow__handle::after {
+	content: '';
+	position: absolute;
+	inset: -6px;
+	border-radius: 50%;
+}
+
+.svelte-flow .svelte-flow__handle-right {
+	right: -5px;
+}
+
+.svelte-flow .svelte-flow__handle-left {
+	left: -5px;
+}
+
+.svelte-flow .wf-node.is-selected .svelte-flow__handle {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+}
+
+.svelte-flow .svelte-flow__handle.connectingindicator,
+.svelte-flow .svelte-flow__handle.connectionindicator:hover {
+	border-color: var(--accent);
+	background: var(--accent);
+}
+
+.svelte-flow .svelte-flow__handle.valid {
+	background: var(--ok);
+	border-color: var(--ok);
+}
+
+/* ------------------------------------------------------------------- edges */
+
+.svelte-flow .svelte-flow__edge-path.wf-edge-active {
+	stroke-dasharray: 7 4;
+	animation: wf-edge-flow 750ms linear infinite;
+}
+
+@keyframes wf-edge-flow {
+	to {
+		stroke-dashoffset: -22;
+	}
+}
+
+.svelte-flow .svelte-flow__edge.selectable:focus .svelte-flow__edge-path {
+	outline: none;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+.svelte-flow .svelte-flow__controls {
+	border: 1px solid var(--line);
+	border-radius: var(--r);
+	overflow: hidden;
+	box-shadow: var(--shadow);
+}
+
+.svelte-flow .svelte-flow__controls-button {
+	width: 28px;
+	height: 28px;
+	border-bottom-color: var(--line);
+}
+
+.svelte-flow .svelte-flow__controls-button:last-child {
+	border-bottom: 0;
+}
+
+.svelte-flow .svelte-flow__controls-button svg {
+	max-width: 13px;
+	max-height: 13px;
+}
+
+.svelte-flow .svelte-flow__minimap {
+	border: 1px solid var(--line);
+	border-radius: var(--r);
+	overflow: hidden;
+	box-shadow: var(--shadow);
+}
+
+.svelte-flow .svelte-flow__minimap-mask {
+	fill: var(--xy-minimap-mask-background-color);
+}
+
+/* ------------------------------------------------------------ canvas chrome */
+
+.svelte-flow .svelte-flow__panel {
+	margin: 10px;
+}
+
+.svelte-flow .svelte-flow__panel.top.left {
+	margin: 10px;
+}
+
+.svelte-flow .svelte-flow__selection {
+	border-radius: 2px;
+}
+
+@media (max-width: 620px) {
+	.wf-node {
+		width: 196px;
+		padding: 9px 11px;
+	}
+
+	.wf-branches {
+		margin: 8px -11px -9px;
+	}
+}

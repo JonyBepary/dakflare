@@ -16,7 +16,11 @@ import type {
 	PairingCode,
 	Rule,
 	RuleInput,
-	SessionInfo
+	SessionInfo,
+	Workflow,
+	WorkflowIssue,
+	WorkflowSaveInput,
+	WorkflowSummary
 } from './types';
 
 const SESSION_PATH = '/admin/session';
@@ -24,12 +28,15 @@ const SESSION_PATH = '/admin/session';
 export class ApiError extends Error {
 	readonly status: number;
 	readonly code: string | null;
+	/** The endpoint's machine-readable payload when it sends one (`details` on a 400). */
+	readonly details: unknown;
 
-	constructor(message: string, status: number, code: string | null = null) {
+	constructor(message: string, status: number, code: string | null = null, details: unknown = null) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
 		this.code = code;
+		this.details = details;
 	}
 }
 
@@ -39,6 +46,7 @@ const CODE_MESSAGES: Record<string, string> = {
 	device_unknown: 'That device is not registered with the gateway.',
 	device_exists: 'That device is already paired. Use rotate to replace its key.',
 	rule_rejected: 'The gateway rejected this rule. Check the pattern against the RE2 subset.',
+	workflow_invalid: 'The gateway rejected this workflow graph. See the checks list for details.',
 	not_found: 'Not found — it may already have been removed.',
 	rate_limited: 'Rate limited. Wait a moment and try again.',
 	daily_quota_exceeded: 'This device has used its daily write allowance.',
@@ -112,7 +120,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 			unauthorizedHandler?.();
 		}
 		const fallback = `Request failed (${response.status}).`;
-		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code);
+		const details =
+			payload && typeof payload === 'object'
+				? ((payload as Record<string, unknown>).details ?? null)
+				: null;
+		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details);
 	}
 
 	return { data: payload as T, status: response.status };
@@ -183,6 +195,45 @@ export async function getMessages(
 export async function getRules(): Promise<Rule[]> {
 	const data = await get<{ rules: Rule[] }>('/v1/admin/rules');
 	return data.rules ?? [];
+}
+
+/* ---------------------------------------------------------------- workflows */
+
+export async function getWorkflows(): Promise<WorkflowSummary[]> {
+	const data = await get<{ workflows: WorkflowSummary[] }>('/v1/admin/workflows');
+	return data.workflows ?? [];
+}
+
+export async function getWorkflow(id: string): Promise<Workflow> {
+	const data = await get<{ workflow: Workflow }>(
+		`/v1/admin/workflows/${encodeURIComponent(id)}`
+	);
+	return data.workflow;
+}
+
+export async function saveWorkflow(id: string, input: WorkflowSaveInput): Promise<Workflow> {
+	const data = await get<{ workflow: Workflow }>(
+		`/v1/admin/workflows/${encodeURIComponent(id)}`,
+		{ method: 'PUT', body: JSON.stringify(input) }
+	);
+	return data.workflow;
+}
+
+export async function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
+	return get<{ ok: boolean }>(`/v1/admin/workflows/${encodeURIComponent(id)}`, {
+		method: 'DELETE'
+	});
+}
+
+/** Coerce the Worker's `workflow_invalid` details into the dashboard's issue shape. */
+export function readWorkflowIssues(error: unknown): WorkflowIssue[] {
+	if (!(error instanceof ApiError) || !Array.isArray(error.details)) return [];
+	return error.details.flatMap((entry) => {
+		if (!entry || typeof entry !== 'object') return [];
+		const value = entry as Record<string, unknown>;
+		if (typeof value.path !== 'string' || typeof value.message !== 'string') return [];
+		return [{ path: value.path, message: value.message }];
+	});
 }
 
 /* ------------------------------------------------------------------- writes */

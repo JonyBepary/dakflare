@@ -14,9 +14,10 @@ export default defineConfig({
 			// Pure SPA: no server rendering, no server routes. The dashboard is served
 			// as static assets by the API Worker under /admin, and talks to the same
 			// origin's JSON API. See worker/src/index.ts for the /admin route.
-			// No `fallback`: every route is prerendered to its own HTML file, so the
-			// assets layer resolves `/admin/devices` directly. A fallback would
-			// overwrite the root `index.html` with the generic shell.
+			// Every route is prerendered to its own HTML file, so the assets layer
+			// resolves `/admin/devices` directly. Saved workflow ids only exist in D1,
+			// so the editor is one static route (`/admin/workflows/edit`) that takes the
+			// id in the query string — no dynamic route and no `200.html` fallback.
 			adapter: adapter({
 				pages: '../worker/public/admin',
 				assets: '../worker/public/admin'

@@ -130,3 +130,16 @@ export const MAX_ID_CHARS = 128;
 export const MAX_FCM_TOKEN_CHARS = 512;
 export const MAX_RULE_VALUE_CHARS = 512;
 export const MAX_REPLY_TEMPLATE_CHARS = 1_000;
+
+/**
+ * Workflow-graph ceilings.
+ *
+ * A canvas graph is stored whole, so these bound what one save can cost: 50 nodes
+ * is far more than a readable canvas holds, 100 edges is twice the maximum a fully
+ * connected 50-node DAG would need in practice, and 64 KiB keeps the document
+ * comfortably inside the 256 KiB request cap while still leaving room for node
+ * labels and templates. `lib/workflow.ts` enforces all three.
+ */
+export const MAX_WORKFLOW_NODES = 50;
+export const MAX_WORKFLOW_EDGES = 100;
+export const MAX_WORKFLOW_GRAPH_BYTES = 65_536;

@@ -92,6 +92,104 @@ export interface RuleInput {
 	allow_shortcode: boolean;
 }
 
+/* --------------------------------------------------------------- workflows */
+
+export type WorkflowNodeType = 'trigger' | 'extract' | 'condition' | 'send_sms' | 'stop';
+
+export interface WorkflowPosition {
+	x: number;
+	y: number;
+}
+
+export interface WorkflowNode {
+	id: string;
+	type: WorkflowNodeType;
+	position: WorkflowPosition;
+	data: Record<string, unknown>;
+}
+
+export interface WorkflowEdge {
+	id: string;
+	source: string;
+	target: string;
+	sourceHandle?: 'true' | 'false';
+	label?: string;
+}
+
+export interface WorkflowGraph {
+	nodes: WorkflowNode[];
+	edges: WorkflowEdge[];
+}
+
+export interface WorkflowSummary {
+	id: string;
+	name: string;
+	enabled: boolean;
+	device_id: string | null;
+	updated_at: number;
+	node_count: number;
+}
+
+export interface Workflow {
+	id: string;
+	name: string;
+	enabled: boolean;
+	device_id: string | null;
+	graph: WorkflowGraph;
+	version: number;
+	created_at: number;
+	updated_at: number;
+}
+
+export interface WorkflowIssue {
+	path: string;
+	message: string;
+}
+
+export interface WorkflowSaveInput {
+	name: string;
+	enabled?: boolean;
+	device_id?: string | null;
+	graph: WorkflowGraph;
+}
+
+/** Node `data` shapes, mirroring the Worker's workflow contract. */
+export type SenderMode = 'any' | 'exact' | 'prefix' | 'regex';
+export type BodyMode = 'any' | 'keyword' | 'regex';
+export type ConditionOp = 'equals' | 'not_equals' | 'contains' | 'matches' | 'exists';
+
+export interface ModeSpec<Mode extends string = string> {
+	mode: Mode;
+	value?: string;
+}
+
+export interface TriggerData {
+	kind: 'incoming';
+	sender?: ModeSpec<SenderMode>;
+	body?: ModeSpec<BodyMode>;
+}
+
+export interface ExtractData {
+	source: 'body' | 'sender';
+	pattern: string;
+	flags?: '' | 'i';
+}
+
+export interface ConditionData {
+	left: string;
+	op: ConditionOp;
+	right?: string;
+}
+
+export interface SendSmsData {
+	to: string;
+	body: string;
+}
+
+export interface StopData {
+	reason?: string;
+}
+
 export interface PairingCode {
 	pairing_code: string;
 	expires_at: number;

@@ -21,7 +21,8 @@
 		{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
 		{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone' },
 		{ href: ROUTES.messages, label: 'Messages', icon: 'message' },
-		{ href: ROUTES.rules, label: 'Rules', icon: 'filter' }
+		{ href: ROUTES.rules, label: 'Rules', icon: 'filter' },
+		{ href: ROUTES.workflows, label: 'Workflows', icon: 'workflow' }
 	];
 
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');

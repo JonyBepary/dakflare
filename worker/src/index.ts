@@ -19,6 +19,12 @@ import { handleIncomingBatch, handleMessagesList } from "./routes/incoming";
 import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost } from "./routes/rules";
+import {
+  handleWorkflowDelete,
+  handleWorkflowGet,
+  handleWorkflowPut,
+  handleWorkflowsList,
+} from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
   handleDeviceRevoke,
@@ -236,6 +242,23 @@ export default {
     if (method === "DELETE" && ruleDeleteMatch) {
       const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
       return withAdmin(req, env, () => handleRuleDelete(env, ruleId));
+    }
+
+    // Workflow graphs. The id segment is passed to the handler RAW and decoded
+    // there, after `withAdmin`, so a malformed escape cannot throw on an
+    // unauthenticated path. The list route has no segment and is matched first.
+    if (method === "GET" && pathname === "/v1/admin/workflows") {
+      return withAdmin(req, env, () => handleWorkflowsList(env));
+    }
+    const workflowMatch = pathname.match(/^\/v1\/admin\/workflows\/([^/]+)$/);
+    if (method === "GET" && workflowMatch) {
+      return withAdmin(req, env, () => handleWorkflowGet(env, workflowMatch[1]));
+    }
+    if (method === "PUT" && workflowMatch) {
+      return withAdmin(req, env, () => handleWorkflowPut(req, env, workflowMatch[1]));
+    }
+    if (method === "DELETE" && workflowMatch) {
+      return withAdmin(req, env, () => handleWorkflowDelete(env, workflowMatch[1]));
     }
     if (method === "GET" && pathname === "/v1/devices") {
       return withAdmin(req, env, () => handleDevicesList(env));

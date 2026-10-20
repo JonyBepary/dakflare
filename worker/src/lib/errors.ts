@@ -14,13 +14,20 @@
  * `storage_unavailable` (the write did not happen; retry). They are distinct codes
  * for the same reason as the rest: "try again tomorrow", "retry now" and "someone
  * else owns this device" must not all look like `bad_request`.
+ *
+ * A fourth extension, `workflow_invalid`, is ADMIN-ONLY: a saved workflow graph
+ * failed `lib/workflow.ts`. It carries a `details` array of
+ * `{ path, message }` issues so the canvas can point at the offending field, which
+ * `bad_request`'s bare envelope cannot express. Devices never see it.
  */
 
-/** The complete §8 code set, plus the three documented extensions above. */
+/** The complete §8 code set, plus the documented extensions above. */
 export type ErrorCode =
   | "unexpected_query"
   | "bad_request"
   | "rule_rejected"
+  /** Admin-only: a workflow graph failed `lib/workflow.ts`; `details` lists the issues. */
+  | "workflow_invalid"
   | "missing_auth_headers"
   | "malformed_header"
   | "timestamp_out_of_window"
@@ -42,6 +49,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
   unexpected_query: 400,
   bad_request: 400,
   rule_rejected: 400,
+  workflow_invalid: 400,
   missing_auth_headers: 401,
   malformed_header: 401,
   timestamp_out_of_window: 401,

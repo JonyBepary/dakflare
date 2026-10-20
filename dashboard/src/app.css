@@ -1573,14 +1573,18 @@ select.input {
 	.mobile-nav {
 		order: 4;
 		flex-basis: 100%;
+		flex-wrap: wrap;
 		overflow: visible;
-		justify-content: space-between;
+		justify-content: flex-start;
+		column-gap: 2px;
+		row-gap: 2px;
 	}
 
 	.mobile-nav .nav-link {
-		flex: 1;
+		flex: 0 0 auto;
 		justify-content: center;
-		padding: 6px 4px;
+		padding: 5px 6px;
+		gap: 5px;
 	}
 
 	.page-actions {

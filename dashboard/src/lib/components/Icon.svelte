@@ -23,7 +23,13 @@
 		| 'clock'
 		| 'external'
 		| 'shield'
-		| 'send';
+		| 'send'
+		| 'workflow'
+		| 'zap'
+		| 'branch'
+		| 'braces'
+		| 'stop'
+		| 'grip';
 </script>
 
 <script lang="ts">
@@ -116,5 +122,27 @@
 	{:else if name === 'send'}
 		<path d="m21 3-9.5 9.5" />
 		<path d="M21 3 14.5 21l-3-7.5L4 10.5 21 3Z" />
+	{:else if name === 'workflow'}
+		<rect x="3" y="3.5" width="6" height="5" rx="1" />
+		<rect x="15" y="15.5" width="6" height="5" rx="1" />
+		<rect x="3" y="15.5" width="6" height="5" rx="1" />
+		<path d="M9 6h3a3 3 0 0 1 3 3v9" />
+		<path d="M6 8.5V15.5" />
+	{:else if name === 'zap'}
+		<path d="M13.5 2.5 5 13.5h6l-.5 8L19 10.5h-6l.5-8Z" />
+	{:else if name === 'branch'}
+		<circle cx="5.5" cy="6" r="2.2" />
+		<circle cx="18.5" cy="6" r="2.2" />
+		<circle cx="12" cy="18.5" r="2.2" />
+		<path d="M5.5 8.2v2.3a3 3 0 0 0 3 3h1.3M18.5 8.2v2.3a3 3 0 0 1-3 3h-1.3" />
+		<path d="M12 13.5v2.8" />
+	{:else if name === 'braces'}
+		<path d="M9 3.5H8A1.5 1.5 0 0 0 6.5 5v4.2A2.3 2.3 0 0 1 4.2 11.5a2.3 2.3 0 0 1 2.3 2.3V18A1.5 1.5 0 0 0 8 19.5h1" />
+		<path d="M15 3.5h1A1.5 1.5 0 0 1 17.5 5v4.2a2.3 2.3 0 0 0 2.3 2.3 2.3 2.3 0 0 0-2.3 2.3V18a1.5 1.5 0 0 1-1.5 1.5h-1" />
+	{:else if name === 'stop'}
+		<rect x="4.5" y="4.5" width="15" height="15" rx="4" />
+		<rect x="9" y="9" width="6" height="6" rx="1" />
+	{:else if name === 'grip'}
+		<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="2.4" />
 	{/if}
 </svg>

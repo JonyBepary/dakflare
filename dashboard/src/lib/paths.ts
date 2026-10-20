@@ -13,7 +13,11 @@ export const ROUTES = {
 	login: resolve('/login'),
 	devices: resolve('/devices'),
 	messages: resolve('/messages'),
-	rules: resolve('/rules')
+	rules: resolve('/rules'),
+	workflows: resolve('/workflows'),
+	// One static editor route for drafts and saved flows alike; the workflow key
+	// travels as `?id=<id>` because saved ids only exist in D1 at runtime.
+	workflowEdit: resolve('/workflows/edit')
 } as const;
 
 export const BASE = ROUTES.overview.replace(/\/$/, '');
