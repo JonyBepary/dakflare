@@ -24,6 +24,31 @@ They are not interchangeable. OAuth cannot call `/v1/admin/send`; the admin toke
 one out of a dashboard. `doctor`, `pair`, `devices`, and `send` work without the Cloudflare account
 being authenticated at all.
 
+## Why Wrangler, not `cf`
+
+`cf` is Cloudflare's newer unified CLI (beta). It is deliberately **not** this project's build/deploy
+path, for three documented reasons:
+
+1. **`cf` does not read `wrangler.toml`.** `cf dev`, `cf build` and `cf deploy` require
+   `cloudflare.config.ts`; in an unmigrated Wrangler project they fail — and Cloudflare documents that
+   automatic configuration can rewrite the project as a static site *without your Worker code or
+   bindings*. Their own guidance: *"Until you migrate the project, keep using Wrangler for development
+   and deployment, such as `wrangler dev` and `wrangler deploy`."*
+2. **D1 schema versioning is a Wrangler workflow.** The D1 docs describe migrations as created and
+   applied *with Wrangler*. `cf` offers `cf d1 query <DATABASE_ID> --sql`, which is a different
+   workflow and takes an id, not a name. Our `d1_migrations` table is read by `/v1/admin/health`, so the
+   migration runner is part of the contract with operators.
+3. **Our conformance lane is local-first** — `wrangler dev --local` with Durable Object SQLite,
+   hibernating sockets and alarms. `cf`'s local support is limited to selected KV/D1/R2 commands, and
+   its project commands are remote-oriented.
+
+`cf` is still the better tool for **account-level** work and needs no migration to use: `cf d1 list`,
+`cf zones`, `cf dns records` run in any directory. When custom-domain setup lands (hardening S4), that
+is the tool to reach for — Wrangler cannot manage DNS.
+
+> **Do not run `cf dev`, `cf build`, or `cf deploy` in this repo** unless you have migrated it with
+> `cf migrate`. Running them on an unmigrated project can overwrite the configuration as a static site.
+
 ## Commands
 
 | Command | Does |
