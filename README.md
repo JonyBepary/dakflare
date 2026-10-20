@@ -31,14 +31,18 @@ git clone https://github.com/JonyBepary/dakflare
 cd dakflare/worker
 npm install
 
-cp wrangler.template.toml wrangler.toml     # ships WITHOUT resource ids
-npx wrangler d1 create sms_gateway          # or let `wrangler deploy` provision it
-npx wrangler kv namespace create KV
+cp wrangler.template.toml wrangler.toml          # BYOCF: no resource ids
+cp cloudflare.config.template.ts cloudflare.config.ts   # BYOCF: no resource ids
+
+npx wrangler d1 create sms_gateway          # or let deploy provision it
+npx wrangler kv namespace create KV         # paste the id into cloudflare.config.ts
 npx wrangler d1 migrations apply sms_gateway --remote
 
-npx wrangler secret put ADMIN_TOKEN         # required — admin routes fail closed without it
-npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON   # optional: wake pushes
-npx wrangler deploy
+npx wrangler secret put ADMIN_TOKEN --name dakflare-worker   # cf cannot set single secrets yet
+npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON --name dakflare-worker   # optional
+
+npx cf deploy            # reads cloudflare.config.ts
+# npx wrangler deploy    # fallback, reads wrangler.toml — keep the two in sync
 ```
 
 Then check what you actually deployed:
@@ -55,9 +59,12 @@ message body, phone number, or key.
 
 ```
 worker/                     Worker + Durable Object + D1 migrations
-  wrangler.toml             operator config (keeps real resource ids)
-  wrangler.template.toml    BYOCF starting point (no ids → automatic provisioning)
+  cloudflare.config.ts       canonical config for `cf` (deploy, resources)
+  cloudflare.config.template.ts  BYOCF starting point for cf (no resource ids)
+  wrangler.toml             local dev + secrets + tail (keeps real resource ids)
+  wrangler.template.toml    BYOCF starting point for wrangler (no ids)
   wrangler.account.toml     local Worker + real PREVIEW D1/KV
+  wrangler.config.ts        build settings for cf's Wrangler bundler
   public/                   landing page, served as a static asset
   src/                      routes, auth, DO, lib
 cli/                        dakflare desktop CLI (init, doctor, pair, devices, send)

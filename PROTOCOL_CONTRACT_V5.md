@@ -409,7 +409,8 @@ Uniform envelope, so the client never has to guess:
 | `401` | `unauthorized` | admin route without a valid bearer token |
 | `404` | `device_unknown` | admin send/batch targeted a `device_id` absent from the D1 registry |
 | `404` | `not_found` | no route matched |
-| `429` | `rate_limited` | reserved |
+| `413` | `payload_too_large` | request body exceeded 256 KiB, or an oversized field |
+| `429` | `rate_limited` | pairing, admin, or per-device limiter exceeded |
 
 `nonce_replay` and `timestamp_out_of_window` MUST be distinct from `invalid_signature`. Collapsing them
 into one opaque `401` is what makes this protocol undebuggable from a phone, and the distinct codes are
@@ -447,6 +448,11 @@ The harness MUST fail loudly on each of these, and each is currently *not* cover
 - `EXPIRED` then a late `SENT` leaves the command `EXPIRED`
 - `DELIVERED` then `SENT` leaves the command `DELIVERED`
 - a lookahead pattern is rejected `400`, and the same pattern is proven uncompilable by RE2/J
+- an array above its cap yields `400`: `messages` > 500, `commands` > 200, `updates` > 500,
+  `ack_command_ids` > 200 — over HTTP **and** over the WebSocket `ack`
+- a field above its ceiling yields `400`: body 4096, peer 32, id 128, `fcm_token` 512 characters
+- a request body above 256 KiB yields `413 payload_too_large`, **including a chunked body that sends no
+  `Content-Length`** — the cap is enforced by reading the stream, never by trusting the header
 
 ---
 
@@ -456,11 +462,17 @@ Authentication class per route. Anything not listed does not exist.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `POST` | `/v1/device/pair` | **none** | Bootstrap. Authenticated by the single-use pairing code in the body. |
-| `POST` | `/v1/admin/pairing-code` | admin | Body `{ttl_ms?}`. Returns `{pairing_code, expires_at}`. `ttl_ms` clamped to `[1000, 86400000]`. || `GET` | `/v1/devices` | admin | Fleet list. |
+| `POST` | `/v1/device/pair` | **none** | Bootstrap. Authenticated by the single-use pairing code in the body. Rate-limited per IP and globally. |
+| `GET` | `/source` | **none** | AGPL-3.0 §13 source offer. `302` to `SOURCE_URL`. Not part of the device protocol. |
+| `POST` | `/v1/admin/pairing-code` | admin | Body `{ttl_ms?}`. Returns `{pairing_code, expires_at}`. `ttl_ms` clamped to `[1000, 86400000]`. |
+| `GET` | `/v1/admin/health` | admin | Version, applied migrations, binding presence, row counts. **Never** message content. `503` when the schema or a critical binding is missing. |
+| `GET` | `/v1/devices` | admin | Fleet list. |
+| `DELETE` | `/v1/admin/devices/:device_id` | admin | Revoke: wipes the device from **the DO** (which is what verifies signatures) and from D1, closes its sockets. |
 | `GET` | `/v1/messages` | admin | `?device_id=&limit=&before=`. `limit` default 50, max 200. Newest first. |
 | `GET` | `/v1/sms/commands/:command_id` | admin | `?device_id=`. Single command's current state. |
 | `GET` | `/v1/device/:device_id/status` | admin | `{ws_connected, queue_depth}`. |
+| `GET` | `/v1/admin/rules` | admin | Every rule, including disabled and other devices'. |
+| `DELETE` | `/v1/admin/rules/:rule_id` | admin | Delete by id. `404` when absent. |
 | `POST` | `/v1/rules` | admin | Upsert a rule. `device_id` optional → global rule. |
 | `POST` | `/v1/sms/send` | admin | Body `{device_id, to, body, priority?, expires_in_s?}`. Returns `{command_id}`. |
 | `POST` | `/v1/sms/send/batch` | admin | Body `{device_id, commands[]}`. Returns `{command_ids}`. |
@@ -520,3 +532,23 @@ tamper → `invalid_signature`, all four grammar rejections, nonce replay → `n
 surface, outbound persistence with `direction:'out'`, poll → ack → `DELIVERED`, and incoming dedup with
 the `received_at` bound. The canonical-string builder reproduces §4.2 vectors A/B/C byte-for-byte, and
 its hand-rolled SHA-256 matches `node:crypto` on all three.
+
+### 11.7 Input caps
+
+Enforced before any work is done, so an oversized request pays for nothing — no crypto, no D1 write, no
+Durable Object request.
+
+| Cap | Value |
+|---|---|
+| request body | 256 KiB, enforced by **reading the stream** (never by trusting `Content-Length`) |
+| `messages[]` | 500 |
+| `commands[]` | 200 |
+| `updates[]` | 500 |
+| `ack_command_ids[]` | 200 — over HTTP **and** over the WebSocket `ack` |
+| message `body` | 4096 chars |
+| `peer` / `to` | 32 chars |
+| `local_id` / `command_id` | 128 chars |
+| `fcm_token` | 512 chars |
+
+A body over the cap returns `413 payload_too_large`; an array or field over its cap returns
+`400 bad_request`.

@@ -1,6 +1,6 @@
 {
   "name": "dakflare",
-  "version": "0.4.0",
+  "version": "5.0.0",
   "description": "Desktop CLI for DakFlare — sovereign device-to-edge SMS relay on Cloudflare Workers & Android.",
   "type": "module",
   "license": "AGPL-3.0-only",
