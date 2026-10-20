@@ -89,6 +89,21 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # Retention window for message bodies and phone numbers (D1 and DO `commands`).
 # A product decision, not an engineering default: see OPERATIONS.md.
 MESSAGE_RETENTION_DAYS = "90"
+# AGPL-3.0 §13: the deployment must offer its source to the people using it.
+# Point this at your fork; `/source` redirects here and the landing page links to it.
+SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+
+# ---------------------------------------------------------------------------
+# Static assets (packaging P0). The landing page is served without invoking the
+# Worker; unmatched paths fall through to the Worker, so /v1/* and /source keep
+# their behaviour and an unknown path still returns the Worker's 404.
+#
+# When the builder SPA lands, set not_found_handling = "single-page-application"
+# and pair it with run_worker_first = ["/v1/*", "/source"] so API 404s and the
+# source redirect are not swallowed by the SPA fallback.
+# ---------------------------------------------------------------------------
+[assets]
+directory = "public"
 
 # ---------------------------------------------------------------------------
 # Retention cron (hardening S6). 03:17 UTC daily.

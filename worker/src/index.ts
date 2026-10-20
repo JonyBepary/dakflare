@@ -19,6 +19,7 @@ import { handleIncomingBatch, handleMessagesList } from "./routes/incoming";
 import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost } from "./routes/rules";
+import { handleHealth } from "./routes/health";
 import {
   handleDeviceRevoke,
   handleRuleDelete,
@@ -52,6 +53,12 @@ export interface Env {
   NONCE_WINDOW_MS?: string;
   /** Retention window in days for message bodies (D1 and DO). Default 90. */
   MESSAGE_RETENTION_DAYS?: string;
+  /**
+   * Where `/source` redirects. AGPL-3.0 §13 requires a network deployment to offer its
+   * source to the people using it; this makes the offer a configuration value rather
+   * than a hardcoded URL that goes stale on a fork.
+   */
+  SOURCE_URL?: string;
   /**
    * Rate Limiting bindings. Optional so a deployment without them still type
    * checks and runs; each call site guards on presence.
@@ -145,6 +152,14 @@ export default {
     const method = req.method.toUpperCase();
 
     /* ---- public bootstrapping ----------------------------------------- */
+    // AGPL-3.0 §13 source offer. Public by design: it must be reachable by anyone the
+    // deployment serves, including someone who has never paired a device.
+    if (method === "GET" && pathname === "/source") {
+      return env.SOURCE_URL
+        ? Response.redirect(env.SOURCE_URL, 302)
+        : Response.json({ error: "not_found" }, { status: 404 });
+    }
+
     if (method === "POST" && pathname === "/v1/device/pair") {
       return handleDevicePair(req, env);
     }
@@ -152,6 +167,10 @@ export default {
     /* ---- admin -------------------------------------------------------- */
     if (method === "POST" && pathname === "/v1/admin/pairing-code") {
       return withAdmin(req, env, () => handleAdminPairingCode(req, env));
+    }
+
+    if (method === "GET" && pathname === "/v1/admin/health") {
+      return withAdmin(req, env, () => handleHealth(env));
     }
 
     // S10: revocation must reach the Durable Object, not just D1.

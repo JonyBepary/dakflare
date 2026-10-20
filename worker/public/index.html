@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMS Gateway</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #0b0d10; color: #e6e8eb; padding: 24px;
+  }
+  @media (prefers-color-scheme: light) { body { background: #f7f8fa; color: #14171a; } }
+  main { max-width: 34rem; width: 100%; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  p { margin: 0 0 14px; color: #9aa4af; }
+  @media (prefers-color-scheme: light) { p { color: #5b6672; } }
+  .card {
+    border: 1px solid #222933; border-radius: 10px; padding: 18px 20px;
+    margin: 18px 0; background: #11151a;
+  }
+  @media (prefers-color-scheme: light) {
+    .card { border-color: #e1e5ea; background: #fff; }
+  }
+  a { color: #6aa8ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul { margin: 8px 0 0; padding-left: 18px; }
+  li { margin: 6px 0; }
+  code {
+    font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #1a2027; padding: 1px 5px; border-radius: 4px;
+  }
+  @media (prefers-color-scheme: light) { code { background: #eef1f4; } }
+  footer { margin-top: 22px; font-size: 12.5px; color: #6f7a86; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SMS Gateway</h1>
+  <p>This deployment is running in its operator's own Cloudflare account.</p>
+
+  <div class="card">
+    <strong>You are looking at the API host, not the console.</strong>
+    <ul>
+      <li>Device traffic is ECDSA-signed and lives under <code>/v1/device/*</code> and <code>/v1/sms/*</code>.</li>
+      <li>Operator endpoints live under <code>/v1/admin/*</code> and require a bearer token.</li>
+      <li>Health and installed version: <code>GET /v1/admin/health</code> (admin token required).</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <strong>Source</strong>
+    <p style="margin:6px 0 0">
+      This software is licensed <strong>AGPL-3.0</strong>. Under section 13, users interacting with it
+      over a network are entitled to its source.
+      <a href="/source">Get the source</a>.
+    </p>
+  </div>
+
+  <footer>
+    If you did not expect this service to exist, contact the account owner — this page is served
+    from their Worker, not from a shared platform.
+  </footer>
+</main>
+</body>
+</html>

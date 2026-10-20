@@ -61,6 +61,10 @@ simple = { limit = 600, period = 60 }
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
+SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+
+[assets]
+directory = "public"
 
 [triggers]
 crons = ["17 3 * * *"]

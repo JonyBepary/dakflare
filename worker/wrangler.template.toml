@@ -1,0 +1,78 @@
+# TEMPLATE — copy to `wrangler.toml` for a fresh install.
+#
+#   cp worker/wrangler.template.toml worker/wrangler.toml
+#   npx wrangler d1 create sms_gateway        # then paste the id below, OR
+#   npx wrangler deploy                       # automatic provisioning fills them in
+#
+# Deliberately contains NO `database_id` and NO KV `id`. Those identify *one account's*
+# resources; committing them makes the repo deployable only into the author's account.
+#
+# Cloudflare's automatic provisioning: "When you run `wrangler deploy`, resources will be
+# created for you, and their IDs will be written back to your configuration file." Note
+# that this write-back happens for deploys from this repo — a deploy triggered from the
+# dashboard or GitHub creates the resources but does not write the IDs back, so keep them
+# in your own working copy either way.
+
+name = "sms-gateway-worker"
+main = "src/index.ts"
+compatibility_date = "2026-04-07"
+preview_urls = false
+
+[[durable_objects.bindings]]
+name = "DEVICE"
+class_name = "DeviceGateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceGateway"]
+
+# --- D1 -------------------------------------------------------------------
+# No `database_id`: provisioning creates it. If you prefer to create it yourself:
+#   npx wrangler d1 create sms_gateway
+#   npx wrangler d1 migrations apply sms_gateway --remote
+[[d1_databases]]
+binding = "DB"
+database_name = "sms_gateway"
+
+# --- KV -------------------------------------------------------------------
+# No `id` for the same reason.
+#   npx wrangler kv namespace create KV
+[[kv_namespaces]]
+binding = "KV"
+
+# --- Rate limiting --------------------------------------------------------
+[[ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "ADMIN_LIMITER"
+namespace_id = "1002"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "DEVICE_LIMITER"
+namespace_id = "1003"
+simple = { limit = 600, period = 60 }
+
+[vars]
+FCM_BASE_URL = "https://fcm.googleapis.com"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+MESSAGE_RETENTION_DAYS = "90"
+# AGPL-3.0 §13: point this at YOUR fork. `/source` redirects here.
+SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+
+[assets]
+directory = "public"
+
+[triggers]
+crons = ["17 3 * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# --- Secrets (not in this file) -------------------------------------------
+#   npx wrangler secret put ADMIN_TOKEN              # required; unset fails closed
+#   npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON # optional until you want wake pushes
