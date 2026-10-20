@@ -1,4 +1,4 @@
-# Security policy
+# DakFlare Security Policy
 
 ## Supported versions
 

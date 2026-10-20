@@ -1,4 +1,4 @@
-# SMS Gateway v5 — Master Plan (Rev C)
+# DakFlare v5 — Master Plan (Rev C)
 
 > **Status:** Rev C — verified, corrected, re-scoped.
 > **Supersedes:** `sms_gateway_v5_master_plan_and_timeline.md` (Rev B).
@@ -33,8 +33,8 @@ The risks Rev B missed, ranked by what they cost:
    §1 correctly says is undebuggable from a phone — was under-specified.
 2. **The gate could not fail.** The harness and the client would have shared an author, so a protocol
    mismatch could never be detected by the harness that defines the protocol.
-3. **The gate's own artifacts did not exist.** §6 referenced `sms_gateway_test_harness.mjs` and
-   `hoppscotch_sms_gateway_collection.json` as present in the workspace. Neither existed.
+3. **The gate's own artifacts did not exist.** §6 referenced `dakflare_test_harness.mjs` and
+   `hoppscotch_dakflare_collection.json` as present in the workspace. Neither existed.
 4. **The gate was not sound even if it had run.** "Pass twice in a row against `--local`" can pass on
    leftover state, and local runs enforce none of the production limits.
 
@@ -200,7 +200,7 @@ B4b, any change requires a version bump and regenerated vectors.
 
 ### 4.3 Staged deploy gate — results
 
-**Deployed and run** at `https://sms-gateway-worker.sohelahmedjony.workers.dev` against real D1, KV and
+**Deployed and run** at `https://dakflare-worker.sohelahmedjony.workers.dev` against real D1, KV and
 Durable Objects, with production timings (`ACK_TIMEOUT_MS=8000`, `OFFLINE_ALERT_MS=900000`,
 `STALE_SOCKET_MS=120000`) and a 32-byte random `ADMIN_TOKEN` set as a secret.
 
@@ -233,7 +233,7 @@ acks its own commands so it leaves nothing `PENDING`.
 
 **Workers Logs — configured, unverified from here.** `[observability] enabled = true` is now in
 `wrangler.toml`, because without it the deployment is a black box. But the observability API returns no
-events for `sms-gateway-worker` (it does return them for two unrelated workers), `wrangler tail` cannot
+events for `dakflare-worker` (it does return them for two unrelated workers), `wrangler tail` cannot
 connect from this environment (`ETIMEDOUT`), and the API MCP's credentials get a 403 on the script
 settings endpoint. So "zero errors in the production logs" is **not** verified — do not claim it. What
 *is* verified is weaker but real: all 82 remote assertions assert status codes, so any error surfacing
@@ -355,8 +355,8 @@ out at `STALE_SOCKET_MS` (verified: a 135 s-quiet socket is closed `1001`). See 
 **Day 0 — done**
 - [x] Contract frozen; P-256 test key and 3 byte-exact vectors generated and verified.
 - [x] Backend scaffold implemented with all defect fixes.
-- [x] Harness complete: `sms_gateway_test_harness.mjs` (83 assertions, raw RFC 6455 client, signing
-      proxy), `hoppscotch_sms_gateway_collection.json`, `test-support/` (FCM stub, `dev.sh`, README).
+- [x] Harness complete: `dakflare_test_harness.mjs` (83 assertions, raw RFC 6455 client, signing
+      proxy), `hoppscotch_dakflare_collection.json`, `test-support/` (FCM stub, `dev.sh`, README).
 
 **Days 1–2 — B1** ✅
 - [x] `selftest` green (grammar + DER→P1363 known-answer tests + all §4 vectors).

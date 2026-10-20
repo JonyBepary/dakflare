@@ -1,6 +1,6 @@
-# test-support — running the conformance suite
+# DakFlare — test-support
 
-The harness is `sms_gateway_test_harness.mjs` at the repository root: a zero-dependency Node
+The harness is `dakflare_test_harness.mjs` at the repository root: a zero-dependency Node
 "Virtual Android Device" that implements the wire protocol of `PROTOCOL_CONTRACT_V5.md` from the
 contract text alone. It was deliberately **not** derived from `worker/src` — its only value is that it
 can disagree with the server.
@@ -42,9 +42,9 @@ GOOGLE_TOKEN_URL=http://127.0.0.1:8790/token
 ACCOUNT_BACKED=1 ./test-support/dev.sh
 
 # terminal 2
-node sms_gateway_test_harness.mjs selftest    # no server needed
-node sms_gateway_test_harness.mjs pair
-node sms_gateway_test_harness.mjs suite
+node dakflare_test_harness.mjs selftest    # no server needed
+node dakflare_test_harness.mjs pair
+node dakflare_test_harness.mjs suite
 ```
 
 Other commands: `verify-vectors`, `proxy`, `ws`, `stub`, `reset`.
@@ -57,8 +57,8 @@ these must pass:
 
 ```bash
 # 1. same-state: catches non-idempotency and accumulated-state bugs
-node sms_gateway_test_harness.mjs pair && node sms_gateway_test_harness.mjs suite
-node sms_gateway_test_harness.mjs pair && node sms_gateway_test_harness.mjs suite
+node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite
+node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite
 
 # 2. fresh-state: catches migration and bootstrap bugs
 rm -rf worker/.wrangler/state        # local mode only; account-backed uses real D1
@@ -107,7 +107,7 @@ have shipped:
 identity from `pair`, and `WORKER_URL` + `ADMIN_TOKEN`:
 
 ```bash
-node sms_gateway_test_harness.mjs pair          # with WORKER_URL/ADMIN_TOKEN exported
+node dakflare_test_harness.mjs pair          # with WORKER_URL/ADMIN_TOKEN exported
 node test-support/platform-gate.mjs             # ~5.5 min
 ```
 
@@ -194,7 +194,7 @@ means an idle socket accrues no duration.
 
 ```bash
 # Workers + DO requests, D1 rows, CPU percentiles
-#   Dashboard → Workers & Pages → sms-gateway-worker → Metrics / Observability
+#   Dashboard → Workers & Pages → dakflare-worker → Metrics / Observability
 # D1 rows read+written per day
 #   Dashboard → Storage & Databases → D1 → sms_gateway → Metrics
 # KV operations
@@ -224,16 +224,16 @@ behaviour. Verified gaps:
   structurally valid JWT that Google rejects is only caught against the real endpoint.
 - **DO placement and TLS/CDN behaviour** in front of the Worker are untestable offline.
 
-These are Tier 2 (staged deploy) items. See §4.3 of `sms_gateway_v5_master_plan_rev_c.md`.
+These are Tier 2 (staged deploy) items. See §4.3 of `dakflare_v5_master_plan_rev_c.md`.
 
 ## Hoppscotch
 
 ```bash
-node sms_gateway_test_harness.mjs pair     # once, to create the signing identity
-node sms_gateway_test_harness.mjs proxy    # :8788
+node dakflare_test_harness.mjs pair     # once, to create the signing identity
+node dakflare_test_harness.mjs proxy    # :8788
 ```
 
-Import `hoppscotch_sms_gateway_collection.json` and point it at `http://localhost:8788`. The proxy
+Import `hoppscotch_dakflare_collection.json` and point it at `http://localhost:8788`. The proxy
 injects the four signed headers for device routes and forwards your `Authorization` header for admin
 routes, so no request needs manual signing. Requests `2.x` and `3.x` depend on `1.1`/`1.2` having been
 run first to mint and pair a device.

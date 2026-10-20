@@ -20,8 +20,8 @@
 #   ./test-support/dev.sh
 #
 # Then, in another terminal:
-#   node sms_gateway_test_harness.mjs pair
-#   node sms_gateway_test_harness.mjs suite
+#   node dakflare_test_harness.mjs pair
+#   node dakflare_test_harness.mjs suite
 #
 # NOTE: this does not wipe state. For the fresh-state run required by the plan:
 #   rm -rf worker/.wrangler/state

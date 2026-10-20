@@ -21,7 +21,7 @@
  *   WORKER_URL=https://... ADMIN_TOKEN=... node test-support/platform-gate.mjs
  */
 
-import { RawWs, signWith, loadIdentity, admin, sleep } from '../sms_gateway_test_harness.mjs';
+import { RawWs, signWith, loadIdentity, admin, sleep } from '../dakflare_test_harness.mjs';
 
 const WORKER_URL = process.env.WORKER_URL;
 if (!WORKER_URL) {

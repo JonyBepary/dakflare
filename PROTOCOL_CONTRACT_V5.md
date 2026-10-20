@@ -1,8 +1,9 @@
-# SMS Gateway — Device↔Edge Protocol Contract (v5, Rev C)
+# DakFlare — Device↔Edge Protocol Contract (v5, Rev C)
 
 > **Status:** FROZEN. This document is the sole authority for the wire format between the Android
 > device and the Cloudflare Worker. Where it disagrees with any other document, **this file wins.**
-> **Frozen at:** Rev C · **Supersedes:** §4 of `sms_gateway_v5_master_plan_and_timeline.md` (Rev B)
+> **Frozen at:** Rev C · **Plan:** `dakflare_v5_master_plan_rev_c.md`
+> **Supersedes:** §4 of `sms_gateway_v5_master_plan_and_timeline.md` (Rev B)
 > **Change policy:** any edit requires bumping the version and regenerating the test vectors.
 
 ---

@@ -17,7 +17,7 @@
 # rules, messages and devices; those must not land in the database a real phone
 # will pair against.
 
-name = "sms-gateway-worker-staging"
+name = "dakflare-worker-staging"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
 preview_urls = false
@@ -61,7 +61,7 @@ simple = { limit = 600, period = 60 }
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
-SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+SOURCE_URL = "https://github.com/jonybepary/dakflare"
 
 [assets]
 directory = "public"

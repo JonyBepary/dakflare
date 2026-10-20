@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * sms_gateway_test_harness.mjs — independent conformance harness for the SMS gateway.
+ * dakflare_test_harness.mjs — independent conformance harness for the SMS gateway.
  *
  * This is a "Virtual Android Device": a zero-dependency Node client that speaks the
  * frozen wire protocol of PROTOCOL_CONTRACT_V5.md from the contract text alone. It is
@@ -151,7 +151,7 @@ function newIdentity() {
 
 export function loadIdentity({ required = true } = {}) {
   if (!fs.existsSync(STATE_FILE)) {
-    if (required) throw new Error('no identity: run `node sms_gateway_test_harness.mjs pair` first');
+    if (required) throw new Error('no identity: run `node dakflare_test_harness.mjs pair` first');
     return null;
   }
   const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -1380,7 +1380,7 @@ const cmd = process.argv[2];
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   if (!cmd || !COMMANDS[cmd]) {
-    console.log(`usage: node sms_gateway_test_harness.mjs <${Object.keys(COMMANDS).join('|')}>`);
+    console.log(`usage: node dakflare_test_harness.mjs <${Object.keys(COMMANDS).join('|')}>`);
     process.exit(cmd ? 1 : 0);
   }
   await COMMANDS[cmd]();

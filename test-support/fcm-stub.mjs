@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * SMS Gateway v5 — local FCM HTTP v1 + Google OAuth2 stub.
+ * DakFlare v5 — local FCM HTTP v1 + Google OAuth2 stub.
  *
  * This is an *independent* offline stand-in for two Google endpoints that the
  * Worker under test calls out to:
@@ -24,7 +24,7 @@
  * Zero runtime dependencies: node builtins only.
  *
  * Run standalone:   node test-support/fcm-stub.mjs [--port 8790]
- * Or via harness:   node sms_gateway_test_harness.mjs stub
+ * Or via harness:   node dakflare_test_harness.mjs stub
  */
 import http from 'node:http';
 import crypto from 'node:crypto';

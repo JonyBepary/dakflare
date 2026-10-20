@@ -1,4 +1,4 @@
-# SMS Gateway v5 — edge backend configuration.
+# DakFlare v5 — edge backend configuration.
 # Implements PROTOCOL_CONTRACT_V5 Rev C/RD (§1 transport, §8 error surface).
 #
 # ---------------------------------------------------------------------------
@@ -13,7 +13,11 @@
 # wrote straight into the production database. That footgun is removed.
 # ---------------------------------------------------------------------------
 
-name = "sms-gateway-worker"
+name = "dakflare-worker"
+# Legacy deployment: renamed from "SMS Gateway v5" → DakFlare. The Worker formerly deployed as
+# `sms-gateway-worker` at https://sms-gateway-worker.sohelahmedjony.workers.dev; that URL is kept
+# only because historical B4b gate logs reference it. A rename deploys a NEW Worker — the old one
+# keeps running until you delete it explicitly.
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
 
@@ -28,6 +32,8 @@ preview_urls = false
 # ---------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "DEVICE"
+# Class name intentionally unchanged: it is the Durable Object identity already bound to deployed
+# instances, and renaming it requires a new migration tag. Display name: DakFlareDeviceDO.
 class_name = "DeviceGateway"
 
 [[migrations]]
@@ -91,7 +97,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
 # AGPL-3.0 §13: the deployment must offer its source to the people using it.
 # Point this at your fork; `/source` redirects here and the landing page links to it.
-SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+SOURCE_URL = "https://github.com/jonybepary/dakflare"
 
 # ---------------------------------------------------------------------------
 # Static assets (packaging P0). The landing page is served without invoking the

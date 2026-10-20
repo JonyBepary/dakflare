@@ -13,7 +13,7 @@
 # dashboard or GitHub creates the resources but does not write the IDs back, so keep them
 # in your own working copy either way.
 
-name = "sms-gateway-worker"
+name = "dakflare-worker"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
 preview_urls = false
@@ -61,7 +61,7 @@ FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
 # AGPL-3.0 §13: point this at YOUR fork. `/source` redirects here.
-SOURCE_URL = "https://github.com/OWNER/sms-gateway"
+SOURCE_URL = "https://github.com/jonybepary/dakflare"
 
 [assets]
 directory = "public"

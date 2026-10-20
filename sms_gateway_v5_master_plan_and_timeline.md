@@ -1,4 +1,4 @@
-# SMS Gateway v5 — Master Plan, Backend-First Strategy & Execution Timeline (Rev B — Fully Self-Contained)
+# DakFlare v5 — Master Plan, Backend-First Strategy & Execution Timeline (Rev B — historical, superseded)
 
 > **Status:** Locked (v5 Architecture + Backend-First B1–B6 Strategy + Review C1–C4 / M1–M5 Patched)
 > **Start Date:** October 18, 2026
@@ -12,7 +12,7 @@ The entire integration risk in a custom Android-to-Cloudflare SMS gateway lives 
 2. **Durable Object Hibernation Edge Cases:** Validating `setWebSocketAutoResponse`, the 8-second `ack_timeout` half-open socket recovery, first-45-second `connectedAt` fallback, and `evicted_max_ts` replay protection is nearly impossible to debug from a physical phone.
 3. **Two-Phase ACK Ordering (`PENDING → DISPATCHED → ACKED_BY_DEVICE → SENT → DELIVERED`):** A physical phone sending multipart SMS over a cellular carrier is slow (5–15 seconds) and unobservable; if the client fails to ACK immediately upon Room DB persistence (before calling `SmsManager`), the 8-second `ack_timeout` will fire mid-send.
 
-All three risks are validated deterministically in **Milestones B1–B4** using the zero-dependency Node.js Virtual Android Device (`sms_gateway_test_harness.mjs`) and Hoppscotch (`hoppscotch_sms_gateway_collection.json`). Once **B4** passes twice in a row against `wrangler dev --local` (plus a one-time `--remote` smoke check for WebSocket Hibernation), the API contract is frozen and Kotlin becomes a straightforward client implementation in **B5–B6**.
+All three risks are validated deterministically in **Milestones B1–B4** using the zero-dependency Node.js Virtual Android Device (`dakflare_test_harness.mjs`) and Hoppscotch (`hoppscotch_dakflare_collection.json`). Once **B4** passes twice in a row against `wrangler dev --local` (plus a one-time `--remote` smoke check for WebSocket Hibernation), the API contract is frozen and Kotlin becomes a straightforward client implementation in **B5–B6**.
 
 ## 2. Milestone Roadmap & Schedule (B1–B6)
 
@@ -21,7 +21,7 @@ Two timeline tracks are provided below starting **October 18, 2026**: a **7-Day 
 | Milestone | Target Window (7-Day Sprint) | Target Window (14-Day Part-Time) | Core Deliverables | Acceptance Gate (Must Pass to Advance) |
 | :--- | :--- | :--- | :--- | :--- |
 | **B1: Worker Scaffold, D1 & Pairing** | **Day 1** (Oct 18) | **Days 1–2** (Oct 18–19) | `wrangler.toml`, D1 schema (`messages`, `rules`, `devices`, `pairing_codes`), DO SQLite DDL in `blockConcurrencyWhile`, `/v1/admin/pairing-code`, `/v1/device/pair`. | `curl /v1/admin/pairing-code` returns a code; atomic D1 `DELETE ... RETURNING *` pairs device in both D1 & DO and rejects reuse/expiry with `401`. |
-| **B2: ECDSA P1363 Auth & Replay Guard** | **Day 2** (Oct 19) | **Days 3–4** (Oct 20–21) | `withDevice` body-preserving middleware, Web Crypto ECDSA P-256 P1363 verifier, `transactionSync`-wrapped `device_meta` 32-nonce ring buffer + `evicted_max_ts` guard. | `node sms_gateway_test_harness.mjs selftest` and `pair` pass; parallel requests succeed; tampered body and replayed/evicted nonces return `401`. |
+| **B2: ECDSA P1363 Auth & Replay Guard** | **Day 2** (Oct 19) | **Days 3–4** (Oct 20–21) | `withDevice` body-preserving middleware, Web Crypto ECDSA P-256 P1363 verifier, `transactionSync`-wrapped `device_meta` 32-nonce ring buffer + `evicted_max_ts` guard. | `node dakflare_test_harness.mjs selftest` and `pair` pass; parallel requests succeed; tampered body and replayed/evicted nonces return `401`. |
 | **B3: Batch Sync, Poll, Status & AST Rules** | **Day 3** (Oct 20) | **Days 5–6** (Oct 22–23) | `/v1/sms/incoming/batch` (`ON CONFLICT DO NOTHING`), `/v1/sms/outgoing/poll`, `/v1/sms/status/batch`, `/v1/sms/send`, `/v1/rules` with pure-JS AST ReDoS + length linter. | Harness `suite` steps 1–10 pass; Hoppscotch collection `1.1 → 2.5` succeeds through the `:8788` signing proxy. |
 | **B4: Hibernating WS, Alarms & FCM Push** | **Day 4** (Oct 21) | **Days 7–8** (Oct 24–25) | `setWebSocketAutoResponse` ping/pong, `serializeAttachment`, multiplexed `scheduled_tasks` alarm (`expire`, `offline_alert`, `ack_timeout`), FCM HTTP v1 OAuth2 client. **API Contract Freeze.** | Harness `ws` + full `suite` pass **twice consecutively** without state corruption; `wrangler d1 execute` confirms persisted rows. |
 | **B5: Android Keystore, Pairing & Transport** | **Days 5–6** (Oct 22–23) | **Days 9–11** (Oct 26–28) | Android Keystore ECDSA P-256 keygen, Kotlin `derToP1363()`, QR/code pairing UI, `SignedHttpClient` (root-CA pinned), `remoteMessaging` ForegroundService + WS client. | Physical Android 14/15 phone pairs, connects over WSS, survives 6+ hours without FGS timeout, and restarts on `BOOT_COMPLETED`. |
@@ -39,7 +39,7 @@ Two timeline tracks are provided below starting **October 18, 2026**: a **7-Day 
 * **Day 2 — Milestone B2 (ECDSA P-256 P1363 & Concurrency-Safe Replay Protection):**
   * Implement `verifyDeviceSignature()` in `worker/src/auth/ecdsa.ts` and body-preserving `withDevice()` wrapper in `worker/src/index.ts`.
   * Implement `/__auth/verify` inside the Durable Object: read `public_key_spki` synchronously, run `await crypto.subtle.verify()` outside locks, then wrap the `device_meta` read → `evicted_max_ts` check → `recent_nonces` check → ring-buffer append → `UPDATE` inside `this.ctx.storage.transactionSync(() => { ... })`.
-  * Verify against `node sms_gateway_test_harness.mjs selftest` and `node sms_gateway_test_harness.mjs pair`.
+  * Verify against `node dakflare_test_harness.mjs selftest` and `node dakflare_test_harness.mjs pair`.
 * **Day 3 — Milestone B3 (HTTP Batch Endpoints, Two-Phase HTTP ACK & AST Linter):**
   * Wire `handleSend`, `handleSendBatch`, `handleIncomingBatch`, `handlePoll`, `handleStatusBatch`, `handleRulesGet`, and `handleRulesPost`.
   * Use `ON CONFLICT(device_id, local_id) DO NOTHING` in `handleIncomingBatch` and validate `Date.parse(m.received_at)` against `NaN`.
@@ -49,7 +49,7 @@ Two timeline tracks are provided below starting **October 18, 2026**: a **7-Day 
   * Forward WebSocket upgrades via `stub.fetch(new Request(url.toString(), req))` so hop-by-hop `Upgrade` headers stay intact.
   * Configure `this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"op":"ping"}', '{"op":"pong"}'))` in the DO constructor and `server.serializeAttachment({ deviceId, connectedAt: Date.now() })` on upgrade.
   * Implement multiplexed `alarm()` handler over `scheduled_tasks` (`expire`, `offline_alert` with `getWebSocketAutoResponseTimestamp ?? connectedAt` re-check, and 8-second `ack_timeout` → close socket + FCM HTTP v1 push).
-  * Pass all **B4 Acceptance Gates** (including back-to-back `node sms_gateway_test_harness.mjs suite` runs and a one-time `wrangler dev --remote` hibernation check). **Freeze backend API.**
+  * Pass all **B4 Acceptance Gates** (including back-to-back `node dakflare_test_harness.mjs suite` runs and a one-time `wrangler dev --remote` hibernation check). **Freeze backend API.**
 
 ### Phase 2: Android Client Implementation (Days 5–7)
 
@@ -81,7 +81,7 @@ Every file required to run `wrangler dev --local` and pass the B4 conformance su
 
 ```toml
 # worker/wrangler.toml
-name = "sms-gateway-worker"
+name = "dakflare-worker"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
 
@@ -1068,7 +1068,7 @@ export class DeviceGateway extends DurableObject<Env> {
 }
 ```
 
-### 5.6 Patched Conformance Test Excerpt (`sms_gateway_test_harness.mjs` — Fixes C2, C3, M1, & Minor)
+### 5.6 Patched Conformance Test Excerpt (`dakflare_test_harness.mjs` — Fixes C2, C3, M1, & Minor)
 
 ```javascript
 // 1. Expired pairing code negative test (Minor fix)
@@ -1118,8 +1118,8 @@ assert(freshAfterBurst.status === 200, "Fresh request after eviction burst must 
 ## 6. B4 API Contract Freeze & Verification Gate
 
 Companion testing artifacts located in the project workspace:
-* **Virtual Android Device & E2E Runner:** `sms_gateway_test_harness.mjs`
-* **Hoppscotch REST Collection:** `hoppscotch_sms_gateway_collection.json`
+* **Virtual Android Device & E2E Runner:** `dakflare_test_harness.mjs`
+* **Hoppscotch REST Collection:** `hoppscotch_dakflare_collection.json`
 
 Run the following terminal sequence to validate Milestones B1–B4 before starting Android development in Milestone B5:
 
@@ -1133,14 +1133,14 @@ wrangler dev --local
 # Terminal 2 — Run Virtual Android Device Conformance Suite
 export WORKER_URL=http://localhost:8787
 export ADMIN_TOKEN=dev-admin-token
-node sms_gateway_test_harness.mjs selftest
-node sms_gateway_test_harness.mjs pair
-node sms_gateway_test_harness.mjs suite
-node sms_gateway_test_harness.mjs suite   # Must pass twice in a row!
+node dakflare_test_harness.mjs selftest
+node dakflare_test_harness.mjs pair
+node dakflare_test_harness.mjs suite
+node dakflare_test_harness.mjs suite   # Must pass twice in a row!
 
 # Terminal 3 — Interactive Hoppscotch Proxy & Live WebSocket Phone
-node sms_gateway_test_harness.mjs proxy
-node sms_gateway_test_harness.mjs ws
+node dakflare_test_harness.mjs proxy
+node dakflare_test_harness.mjs ws
 ```
 
 ### Mandatory B4 Freeze Checklist
