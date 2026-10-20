@@ -14,11 +14,12 @@ export default defineConfig({
 			// Pure SPA: no server rendering, no server routes. The dashboard is served
 			// as static assets by the API Worker under /admin, and talks to the same
 			// origin's JSON API. See worker/src/index.ts for the /admin route.
+			// No `fallback`: every route is prerendered to its own HTML file, so the
+			// assets layer resolves `/admin/devices` directly. A fallback would
+			// overwrite the root `index.html` with the generic shell.
 			adapter: adapter({
 				pages: '../worker/public/admin',
-				assets: '../worker/public/admin',
-				fallback: 'index.html',
-				strict: false
+				assets: '../worker/public/admin'
 			}),
 
 			// Served under /admin, so every asset URL and route is prefixed.

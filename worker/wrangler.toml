@@ -126,7 +126,6 @@ SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 # source redirect are not swallowed by the SPA fallback.
 # ---------------------------------------------------------------------------
 [assets]
-binding = "ASSETS"
 directory = "public"
 
 # ---------------------------------------------------------------------------

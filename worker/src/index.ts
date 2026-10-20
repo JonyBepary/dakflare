@@ -85,8 +85,6 @@ export interface Env {
   AUTH_FAIL_LIMITER?: RateLimit;
   /** Per-device daily inbound row budget, read by the DO's `write_budget` table. */
   INCOMING_ROWS_PER_DAY?: string;
-  /** Static assets (`[assets] directory = "public"`). Serves `/admin` and the dashboard bundle. */
-  ASSETS: Fetcher;
 }
 
 type DeviceHandler = (
@@ -304,16 +302,13 @@ export default {
       return handleSessionDelete(req);
     }
 
-    /* ---- admin dashboard SPA ------------------------------------------- */
-    // Real asset files under `/admin/_app/...` are served by the assets layer
-    // before this Worker runs; only unknown client-side routes reach here. This
-    // must stay after every API route so `/v1/*` 404s are not swallowed.
+    // Every real console route is a PRERENDERED file (`/admin/devices.html`),
+    // so the assets layer serves it before this Worker runs — which is why
+    // there is no `ASSETS` binding: `cf` deploys assets but exposes none to the
+    // Worker. Only an unknown path under `/admin` reaches here; send the
+    // operator to the console root instead of answering with the JSON 404.
     if (pathname === "/admin" || pathname.startsWith("/admin/")) {
-      // Fetch the DIRECTORY, not `/admin/index.html`: the assets layer's HTML
-      // handling canonicalises an explicit `.html` request with a 307 to
-      // `/admin/`, which would send the browser to the app root and lose the
-      // client-side route (a deep link to /admin/devices would land on /admin).
-      return env.ASSETS.fetch(new Request(new URL("/admin/", req.url), req));
+      return Response.redirect(new URL("/admin/", req.url).toString(), 302);
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });
