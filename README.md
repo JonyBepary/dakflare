@@ -60,6 +60,7 @@ worker/                     Worker + Durable Object + D1 migrations
   wrangler.account.toml     local Worker + real PREVIEW D1/KV
   public/                   landing page, served as a static asset
   src/                      routes, auth, DO, lib
+cli/                        dakflare desktop CLI (init, doctor, pair, devices, send)
 PROTOCOL_CONTRACT_V5.md     FROZEN wire format — the sole authority
 dakflare_v5_master_plan_rev_c.md   architecture, gates, schedule
 dakflare_test_harness.mjs   zero-dependency virtual device + conformance suite
