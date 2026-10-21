@@ -43,17 +43,28 @@ box used for M0.
 
 ### Android prerequisites
 
+No sudo needed; everything installs under `$HOME`:
+
 ```bash
-# once per machine
-rustup target add aarch64-linux-android armv7-linux-androideabi \
-                  i686-linux-android x86_64-linux-android
-# ANDROID_HOME / NDK_HOME must point at a real SDK + NDK
+simulator/scripts/android-setup.sh     # JDK 17 + SDK 35 + build-tools + NDK 27 + rust targets
+source ~/.config/dakflare/android-env.sh
+```
+
+It needs ~6 GB free and refuses to run below that unless given `--force`.
+
+```bash
+adb connect <phone-ip>:<debug-port>    # the Wireless-debugging port, not the pairing port
+cd simulator
 npm run tauri android init
 npm run tauri android dev
 ```
 
-M0 could not run this: the machine has no Android SDK/NDK. The Rust core and the
-webview bundle are the two pieces that were verified instead.
+Target device used for the port: **Pixel 8 (`shiba`), Android 17 / SDK 37,
+`arm64-v8a` only, dual SIM, no default SMS app**. `arm64-v8a` alone means the
+`aarch64-linux-android` target is the one that matters.
+
+If the adb server restarts (or the machine reboots) the wireless connection is
+lost even though the pairing persists; re-run `adb connect`.
 
 ## M4 status
 
