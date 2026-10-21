@@ -316,6 +316,64 @@ impl DeviceClient {
             .ok_or_else(|| ProtocolError::Shape("no command_id in response".into()))
     }
 
+    /// `PUT /v1/admin/workflows/:id` — install or replace a flow.
+    pub async fn admin_put_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        graph: Value,
+    ) -> Result<(), ProtocolError> {
+        let token = self
+            .target
+            .admin_token
+            .as_deref()
+            .ok_or_else(|| ProtocolError::Shape("no admin token configured".into()))?;
+
+        let res = self
+            .http
+            .put(self.target.url(&format!("/v1/admin/workflows/{id}")))
+            .bearer_auth(token)
+            .json(&json!({ "name": name, "enabled": true, "graph": graph }))
+            .send()
+            .await?;
+
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(ProtocolError::Status {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(())
+    }
+
+    /// `DELETE /v1/admin/workflows/:id`.
+    pub async fn admin_delete_workflow(&self, id: &str) -> Result<(), ProtocolError> {
+        let token = self
+            .target
+            .admin_token
+            .as_deref()
+            .ok_or_else(|| ProtocolError::Shape("no admin token configured".into()))?;
+
+        let res = self
+            .http
+            .delete(self.target.url(&format!("/v1/admin/workflows/{id}")))
+            .bearer_auth(token)
+            .send()
+            .await?;
+
+        let status = res.status();
+        if !status.is_success() && status.as_u16() != 404 {
+            let text = res.text().await.unwrap_or_default();
+            return Err(ProtocolError::Status {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(())
+    }
+
     /// `DELETE /v1/messages?device_id=` — erase this device's message log.
     pub async fn purge_messages(&self) -> Result<u64, ProtocolError> {
         let token = self

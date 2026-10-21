@@ -55,6 +55,31 @@ npm run tauri android dev
 M0 could not run this: the machine has no Android SDK/NDK. The Rust core and the
 webview bundle are the two pieces that were verified instead.
 
+## M3 status
+
+| Check | Result |
+|---|---|
+| Flow interpreter (pure Rust): extract, condition, template, stop, budgets | **pass** — 8 tests |
+| Worker fallback via WASM (same crate, `wasm32-unknown-unknown`) | **pass** — live |
+| Injected `CODE 483920` produces `Your code is 483920` | **pass** — production probe |
+| Retried batch does not send twice | **pass** — `duplicates=1`, no extra command |
+| WeakRef/alloc boundary | hand-rolled `alloc`/`dealloc`/`run_json`, no wasm-bindgen |
+
+The reply rides back in the **same upload response**: `handleIncomingBatch`
+finishes by reading the pending queue, which marks the just-enqueued command
+`DISPATCHED`. The carrier captures commands from that response as well as from a
+later poll, because skipping the first path silently dropped replies.
+
+`workflow` execution is Worker-only today. Device-side execution (M4) is the other
+half of "device primary, Worker fallback"; the `flow_runs` dedupe key is already
+in the schema for it.
+
+Rebuild the bundled module after changing `simulator/flow`:
+
+```bash
+simulator/flow-wasm/build.sh   # writes worker/src/wasm/flow.wasm
+```
+
 ## M2 status
 
 | Check | Result |
@@ -123,5 +148,5 @@ so it is safe to run against the live deployment.
 1. Protocol client in `core` (pair, signed poll, inbound batch, WebSocket).
 2. Target switcher (deployed Worker) + cleanup rails (`sim*` prefixes,
    message purge endpoint).
-3. WebSocket transport (poll covers delivery today).
-4. Flow interpreter in Rust, compiled to WASM for the Worker fallback.
+3. Device-side flow execution + `flow_runs` reporting (M4).
+4. WebSocket transport (poll covers delivery today).

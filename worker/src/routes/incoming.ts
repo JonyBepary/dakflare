@@ -27,6 +27,7 @@
 import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
+import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
 import {
   MAX_ACK_IDS,
   MAX_BODY_CHARS,
@@ -179,10 +180,33 @@ export async function handleIncomingBatch(
       console.error(`[incoming] D1 batch failed for ${deviceId}: ${String(error)}`);
       return err("storage_unavailable", 503);
     }
-    for (const result of results) {
+    const acceptedMessages: AcceptedMessage[] = [];
+    for (let i = 0; i < results.length; i++) {
       // `meta.changes` is 0 when `ON CONFLICT DO NOTHING` skipped the row.
-      if ((result.meta?.changes ?? 0) > 0) accepted++;
-      else duplicates++;
+      if ((results[i].meta?.changes ?? 0) > 0) {
+        accepted++;
+        const row = validated[i];
+        acceptedMessages.push({
+          localId: row.localId,
+          sender: row.peer,
+          body: row.body,
+          receivedAt: row.receivedAt,
+        });
+      } else {
+        duplicates++;
+      }
+    }
+
+    // Flow fallback, only for rows that were actually inserted. A retried batch
+    // is all duplicates, so it cannot send a second reply. A failure here must
+    // not fail the upload: the messages are already durable.
+    if (acceptedMessages.length > 0) {
+      try {
+        const enqueued = await dispatchFlows(env, deviceId, acceptedMessages);
+        if (enqueued > 0) console.log(`[flow] enqueued ${enqueued} command(s) for ${deviceId}`);
+      } catch (error) {
+        console.error(`[flow] dispatch failed for ${deviceId}: ${String(error)}`);
+      }
     }
   }
 

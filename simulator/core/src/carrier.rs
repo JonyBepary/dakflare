@@ -24,6 +24,11 @@ pub struct Injected {
     pub uploaded: bool,
     pub accepted: u64,
     pub duplicates: u64,
+    /// Commands the upload response already delivered. The incoming handler ends
+    /// by reading the pending queue, so a freshly enqueued auto-reply comes back
+    /// in the same response and is marked DISPATCHED by the DO. A later poll
+    /// would not see it — this is the intended low-latency path.
+    pub captured: Vec<Message>,
 }
 
 /// "Receive" one SMS.
@@ -50,6 +55,7 @@ pub async fn inject_inbound(
             uploaded: false,
             accepted: 0,
             duplicates: 0,
+            captured: Vec::new(),
         });
     }
 
@@ -76,26 +82,27 @@ pub async fn inject_inbound(
         store.set_message_state(&message.id, "uploaded").await?;
     }
 
+    let commands = response.get("commands").cloned().unwrap_or(serde_json::Value::Null);
+    let captured = capture_commands(store, client.expect("checked above"), device_id, &commands).await?;
+
     Ok(Injected {
         message,
         uploaded: true,
         accepted,
         duplicates,
+        captured,
     })
 }
 
-/// `poll` → capture every queued command as an outbound message → ack them.
-///
-/// Acknowledgement happens in a second poll, exactly as a device would do, so the
-/// command leaves `PENDING`/`DISPATCHED` and stops being redelivered.
-pub async fn drain_outbox(
+/// Record each command as an outbound message, then acknowledge it so the
+/// Worker stops redelivering it.
+async fn capture_commands(
     store: &Store,
     client: &DeviceClient,
     device_id: &str,
+    commands: &serde_json::Value,
 ) -> Result<Vec<Message>, CarrierError> {
-    let commands = client.poll(&[]).await?;
     let entries = commands.as_array().cloned().unwrap_or_default();
-
     let mut captured = Vec::new();
     let mut ack_ids: Vec<String> = Vec::new();
 
@@ -105,9 +112,6 @@ pub async fn drain_outbox(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        // The wire shape is `to` (durable-object `toView`), not the SQL column
-        // name `to_e164`. Accept both so a future rename cannot silently produce
-        // an outbound message with an empty recipient.
         let to = entry
             .get("to")
             .or_else(|| entry.get("to_e164"))
@@ -132,7 +136,6 @@ pub async fn drain_outbox(
     }
 
     if !ack_ids.is_empty() {
-        // A push-wakeup may add commands here; they stay queued for the next drain.
         client.poll(&ack_ids).await?;
         for message in &captured {
             store.set_message_state(&message.id, "sent").await?;
@@ -140,6 +143,19 @@ pub async fn drain_outbox(
     }
 
     Ok(captured)
+}
+
+/// `poll` → capture every queued command as an outbound message → ack them.
+///
+/// Acknowledgement happens in a second poll, exactly as a device would do, so the
+/// command leaves `PENDING`/`DISPATCHED` and stops being redelivered.
+pub async fn drain_outbox(
+    store: &Store,
+    client: &DeviceClient,
+    device_id: &str,
+) -> Result<Vec<Message>, CarrierError> {
+    let commands = client.poll(&[]).await?;
+    capture_commands(store, client, device_id, &commands).await
 }
 
 fn now_ms() -> i64 {
@@ -185,6 +201,7 @@ mod tests {
                 .unwrap();
 
         assert!(!injected.uploaded);
+        assert!(injected.captured.is_empty());
         assert_eq!(injected.message.direction, "in");
         assert_eq!(injected.message.body, "CODE 483920");
         assert_eq!(injected.message.state, "received");

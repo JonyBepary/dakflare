@@ -11,3 +11,7 @@ vite.config.ts.timestamp-*
 
 # Rust build artifacts (core crate)
 /core/target
+
+# Rust build artifacts (flow crates)
+/flow/target
+/flow-wasm/target
