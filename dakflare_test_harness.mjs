@@ -136,6 +136,29 @@ export function derToP1363(der) {
   return Buffer.concat([r, s]); // exactly 64
 }
 
+/**
+ * Re-encode a 64-byte P1363 signature as minimal ASN.1 DER. Used by `selftest`
+ * to prove derToP1363 agrees with Node's own P1363 output for the SAME (r, s):
+ * two separate signatures cannot be compared because ECDSA is randomized (§4.3).
+ */
+function derFromP1363(p1363) {
+  const integer = (bytes) => {
+    let i = 0;
+    while (i < bytes.length - 1 && bytes[i] === 0x00) i++;
+    let v = bytes.subarray(i);
+    if (v[0] & 0x80) v = Buffer.concat([Buffer.from([0x00]), v]);
+    return Buffer.concat([Buffer.from([0x02, v.length]), v]);
+  };
+  const body = Buffer.concat([
+    integer(p1363.subarray(0, 32)),
+    integer(p1363.subarray(32, 64)),
+  ]);
+  const header = body.length < 0x80
+    ? Buffer.from([0x30, body.length])
+    : Buffer.from([0x30, 0x81, body.length]);
+  return Buffer.concat([header, body]);
+}
+
 /* ────────────────────────────────── identity ──────────────────────────────── */
 
 function newIdentity() {
@@ -513,17 +536,38 @@ function cmdSelftest() {
   rep1.check('both encodings verify the same message independently',
     crypto.verify('sha256', msg, { key: crypto.createPublicKey(priv), dsaEncoding: 'ieee-p1363' }, p1363Node), true);
 
-  // force leading-zero padding: sign many messages until a DER int needs padding
-  let sawPad = false, sawShort = false;
-  for (let i = 0; i < 200 && !(sawPad && sawShort); i++) {
-    const d = crypto.sign('sha256', Buffer.from('pad' + i), priv);
-    const len = d.length;
-    if (len === 72) sawPad = true;
-    if (len < 71) sawShort = true;
-    if (derToP1363(d).length !== 64) { rep1.check(`64 bytes for DER len ${len}`, false, true); break; }
+  // Prove the converter agrees with Node's own P1363 output for the same (r,s).
+  // ECDSA is randomized, so we re-encode Node's P1363 bytes as minimal DER and
+  // convert that back; equality is exact, not merely "both verify".
+  {
+    const p = crypto.sign('sha256', msg, { key: priv, dsaEncoding: 'ieee-p1363' });
+    const reDer = derFromP1363(p);
+    rep1.check('Node P1363 -> minimal DER -> derToP1363 round-trips exactly',
+      derToP1363(reDer).toString('hex'), p.toString('hex'));
+    rep1.check('the round-trip DER is one of the 70/71/72-byte forms',
+      [70, 71, 72].includes(reDer.length), true);
   }
-  rep1.check('saw a 72-byte DER (leading-zero padded integer) and converted it', sawPad, true);
-  rep1.check('saw a short DER (<71 bytes) and converted it', sawShort, true);
+
+  // §4.3: DER inputs are 72, 71 and 70 bytes; each must convert to exactly 64.
+  const convLen = new Map();
+  let first72 = null;
+  for (let i = 0; i < 600 && convLen.size < 3; i++) {
+    const d = crypto.sign('sha256', Buffer.from('pad' + i), priv);
+    if (d.length !== 70 && d.length !== 71 && d.length !== 72) continue;
+    if (d.length === 72 && !first72) first72 = d;
+    convLen.set(d.length, derToP1363(d).length);
+  }
+  rep1.check('saw all three DER input lengths 70, 71 and 72',
+    [...convLen.keys()].sort((a, b) => a - b), [70, 71, 72]);
+  for (const n of [70, 71, 72]) {
+    rep1.check(`DER input length ${n} -> exactly 64 bytes`, convLen.get(n), 64);
+  }
+  if (first72) {
+    rep1.check('naive slice(-64) is NOT the conversion for a 72-byte DER',
+      derToP1363(first72).equals(first72.subarray(first72.length - 64)), false);
+  } else {
+    rep1.check('found a 72-byte DER to prove naive slice(-64) wrong', false, true);
+  }
   rep1.checkFn('garbage DER is rejected, not silently mis-sliced', () => {
     try { derToP1363(Buffer.from('not a der signature at all')); return 'accepted garbage'; }
     catch { return true; }
@@ -535,6 +579,20 @@ function cmdSelftest() {
 
   console.log(ok ? '\nSELFTEST OK' : '\nSELFTEST FAILED');
   process.exit(ok ? 0 : 1);
+}
+
+/** POST /v1/device/pair with an identity's device_id + SPKI. Never throws on HTTP errors. */
+async function pairRequest(identity, pairingCode) {
+  const res = await fetch(`${WORKER_URL}/v1/device/pair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pairing_code: pairingCode,
+      device_id: identity.deviceId,
+      public_key_spki: identity.publicKeySpki,
+    }),
+  });
+  return { status: res.status, data: await res.json().catch(() => null) };
 }
 
 async function cmdPair() {
@@ -550,11 +608,11 @@ async function cmdPair() {
   // Expiry must be provoked with a 1 s TTL and a short wait (contract §11.4).
   const shortLived = await admin('POST', '/v1/admin/pairing-code', { ttl_ms: 1000 });
   await sleep(1250);
-  const expiredRes = await fetch(`${WORKER_URL}/v1/device/pair`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pairing_code: shortLived.data.pairing_code, device_id: identity.deviceId, public_key_spki: identity.publicKeySpki }),
-  });
-  console.log(`expired code -> ${expiredRes.status} (want 401)`);
+  const expiredRes = await pairRequest(identity, shortLived.data.pairing_code);
+  if (expiredRes.status !== 401) {
+    throw new Error(`expired pairing code -> ${expiredRes.status}, want 401 (contract §11.4)`);
+  }
+  console.log('expired code -> 401');
 
   const paired = await fetch(`${WORKER_URL}/v1/device/pair`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -563,11 +621,11 @@ async function cmdPair() {
   if (paired.status !== 200) throw new Error(`pair failed: ${paired.status} ${await paired.text()}`);
   console.log(`pair -> ${paired.status}`);
 
-  const reuse = await fetch(`${WORKER_URL}/v1/device/pair`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pairing_code: minted.data.pairing_code, device_id: identity.deviceId, public_key_spki: identity.publicKeySpki }),
-  });
-  console.log(`reuse -> ${reuse.status} (want 401)`);
+  const reuse = await pairRequest(identity, minted.data.pairing_code);
+  if (reuse.status !== 401) {
+    throw new Error(`reused pairing code -> ${reuse.status}, want 401`);
+  }
+  console.log('reuse -> 401');
 
   // The load-bearing check: a signed request must now succeed, which proves the
   // Durable Object actually registered the key (not just D1).
@@ -596,6 +654,38 @@ async function cmdSuite() {
 
   let allOk = true;
   const run = (rep) => { allOk = rep.print() && allOk; console.log(); };
+
+  /* ── pairing (§11.4) ───────────────────────────────────────────────────── */
+  console.log('-- pairing --');
+  {
+    const rep = new Report('pairing');
+
+    // §11.4: negative ttl_ms is clamped to >= 1000 ms, so it is NOT pre-expired.
+    const neg = newIdentity();
+    const negCode = await admin('POST', '/v1/admin/pairing-code', { ttl_ms: -1000 });
+    rep.check('ttl_ms:-1000 still mints a code (clamped, not pre-expired)', negCode.status, 200);
+    rep.check('...and that code pairs successfully', (await pairRequest(neg, negCode.data.pairing_code)).status, 200);
+
+    // Expiry must be provoked with ttl_ms:1000 and a ~1.2 s wait.
+    const fresh = newIdentity();
+    const shortCode = await admin('POST', '/v1/admin/pairing-code', { ttl_ms: 1000 });
+    await sleep(1250);
+    rep.check('expired code -> 401', (await pairRequest(fresh, shortCode.data.pairing_code)).status, 401);
+
+    const code = await admin('POST', '/v1/admin/pairing-code', { ttl_ms: 60_000 });
+    rep.check('valid code -> 200', (await pairRequest(fresh, code.data.pairing_code)).status, 200);
+    rep.check('re-used code -> 401', (await pairRequest(fresh, code.data.pairing_code)).status, 401);
+
+    // The load-bearing check: a signed request must work immediately, which proves
+    // D1 and the device's Durable Object agree rather than one half-registering.
+    const live = { ...fresh, privateKey: crypto.createPrivateKey(fresh.privateKeyPem) };
+    rep.check('signed request after pairing -> 200 (D1/DO agree)',
+      (await device(live, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] })).status, 200);
+
+    await admin('DELETE', `/v1/admin/devices/${fresh.deviceId}`);
+    await admin('DELETE', `/v1/admin/devices/${neg.deviceId}`);
+    run(rep);
+  }
 
   // Register an FCM token up front. The Durable Object looks up the device's
   // stored fcm_token before pushing, so without this the wake path has no target
@@ -719,7 +809,12 @@ async function cmdSuite() {
 
     for (const [label, pattern] of [
       ['lookahead (?=a)', '(?=a)'],
+      ['negative lookahead (?!a)', '(?!a)'],
       ['lookbehind (?<=a)', '(?<=a)'],
+      ['negative lookbehind (?<!a)', '(?<!a)'],
+      ['nested quantifier (a+)+', '(a+)+'],
+      ['nested quantifier (?:a+)+', '(?:a+)+'],
+      ['nested quantifier (a+b+)+', '(a+b+)+'],
       ['nested quantifier ((a+))+', '((a+))+'],
       ['nested quantifier ((a+)(b+))+', '((a+)(b+))+'],
       ['nested counted (a{1,50}){1,50}', '(a{1,50}){1,50}'],
@@ -728,7 +823,10 @@ async function cmdSuite() {
       ['backreference \\1', 'a\\1'],
       ['named backref \\k<n>', 'a\\k<n>'],
       ['possessive a*+', 'a*+'],
+      ['possessive a++', 'a++'],
+      ['possessive a{2,3}+', 'a{2,3}+'],
       ['atomic group (?>a)', '(?>a)'],
+      ['conditional (?(1)a)', '(?(1)a)'],
       ['600-byte pattern', 'x'.repeat(600)],
     ]) {
       const r = await post(pattern);
