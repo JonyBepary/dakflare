@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { invoke } from '@tauri-apps/api/core';
-	import { AlertDialog } from 'bits-ui';
+	import { AlertDialog, Switch } from 'bits-ui';
 
 	type Device = {
 		device_id: string;
@@ -37,6 +37,26 @@
 	let busy = $state<Record<string, boolean>>({});
 
 	const configured = $derived(Boolean(target.base_url));
+
+	type Message = {
+		id: string;
+		device_id: string;
+		direction: 'in' | 'out';
+		peer: string;
+		body: string;
+		state: string;
+		local_id: string | null;
+		created_at: number;
+	};
+
+	let carrierDevice = $state('');
+	let offline = $state(false);
+	let sender = $state('+15550001111');
+	let messageBody = $state('CODE 483920');
+	let thread = $state<Message[]>([]);
+	let carrierBusy = $state(false);
+	let carrierNotice = $state('');
+
 
 	async function refresh() {
 		try {
@@ -130,8 +150,98 @@
 		return new Date(ms).toLocaleString();
 	}
 
+
+	async function loadThread() {
+		if (!carrierDevice) {
+			thread = [];
+			return;
+		}
+		try {
+			thread = await invoke<Message[]>('list_messages', {
+				deviceId: carrierDevice,
+				limit: 100
+			});
+			offline = await invoke<boolean>('get_offline', { deviceId: carrierDevice });
+		} catch (e) {
+			carrierNotice = String(e);
+		}
+	}
+
+	async function toggleOffline(value: boolean) {
+		if (!carrierDevice) return;
+		try {
+			await invoke('set_offline', { deviceId: carrierDevice, offline: value });
+			offline = value;
+			carrierNotice = value
+				? 'Carrier off: messages stay local and nothing is uploaded.'
+				: 'Carrier on: injects upload over the signed endpoint.';
+		} catch (e) {
+			carrierNotice = String(e);
+		}
+	}
+
+	async function inject() {
+		if (!carrierDevice) return;
+		carrierBusy = true;
+		try {
+			const result = await invoke<{
+				uploaded: boolean;
+				accepted: number;
+				duplicates: number;
+			}>('carrier_inject', {
+				deviceId: carrierDevice,
+				sender: sender.trim(),
+				body: messageBody
+			});
+			carrierNotice = result.uploaded
+				? `Uploaded · accepted ${result.accepted}, duplicates ${result.duplicates}`
+				: 'Recorded locally (carrier off)';
+			await loadThread();
+		} catch (e) {
+			carrierNotice = String(e);
+		} finally {
+			carrierBusy = false;
+		}
+	}
+
+	async function drain() {
+		if (!carrierDevice) return;
+		carrierBusy = true;
+		try {
+			const captured = await invoke<Message[]>('carrier_drain', {
+				deviceId: carrierDevice
+			});
+			carrierNotice =
+				captured.length === 0
+					? 'Poll OK · no queued commands'
+					: `Poll OK · captured ${captured.length} outbound message(s)`;
+			await loadThread();
+		} catch (e) {
+			carrierNotice = String(e);
+		} finally {
+			carrierBusy = false;
+		}
+	}
+
+	async function clearThread() {
+		if (!carrierDevice) return;
+		try {
+			const deleted = await invoke<number>('clear_messages', {
+				deviceId: carrierDevice
+			});
+			carrierNotice = `Cleared ${deleted} local message(s)`;
+			await loadThread();
+		} catch (e) {
+			carrierNotice = String(e);
+		}
+	}
+
 	onMount(async () => {
 		await Promise.all([refresh(), loadTarget()]);
+		if (!carrierDevice && devices.length > 0) {
+			carrierDevice = devices[0].device_id;
+			await loadThread();
+		}
 	});
 </script>
 
@@ -347,3 +457,97 @@
 		{/if}
 	</section>
 </div>
+
+<section class="panel" style="margin-top: 16px;">
+	<div class="row" style="justify-content: space-between;">
+		<h2>Carrier <span style="color: var(--ink-3); text-transform: none; letter-spacing: 0;">· simulated radio</span></h2>
+		<span class="pill">{offline ? 'offline' : 'online'}</span>
+	</div>
+
+	<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
+		Inbound is injected here instead of arriving from a radio; outbound is captured from the
+		command queue instead of being handed to SmsManager.
+	</p>
+
+	<div class="grid" style="grid-template-columns: 220px minmax(0,1fr); margin-top: 12px;">
+		<div class="field" style="margin-top: 0;">
+			<label for="carrier-device">Device</label>
+			<select id="carrier-device" bind:value={carrierDevice} onchange={loadThread}>
+				{#each devices as device (device.device_id)}
+					<option value={device.device_id}>{device.label} · {device.device_id}</option>
+				{/each}
+			</select>
+		</div>
+
+		<div class="field" style="margin-top: 0;">
+			<span class="field-label">Carrier state</span>
+			<div class="row" style="gap: 10px;">
+				<Switch.Root
+					checked={offline}
+					onCheckedChange={(value: boolean) => void toggleOffline(value)}
+					aria-label="Simulate offline carrier"
+				>
+					<Switch.Thumb />
+				</Switch.Root>
+				<span style="font-size: 12px; color: var(--ink-3);">
+					{offline ? 'Offline — injects are stored locally only' : 'Online — injects upload over the signed endpoint'}
+				</span>
+			</div>
+		</div>
+	</div>
+
+	<div class="grid" style="grid-template-columns: minmax(0,1fr) minmax(0,1.4fr); margin-top: 12px;">
+		<div class="field" style="margin-top: 0;">
+			<label for="carrier-sender">From</label>
+			<input id="carrier-sender" bind:value={sender} autocomplete="off" />
+		</div>
+		<div class="field" style="margin-top: 0;">
+			<label for="carrier-body">Message</label>
+			<input id="carrier-body" bind:value={messageBody} autocomplete="off" />
+		</div>
+	</div>
+
+	<div class="row" style="margin-top: 12px;">
+		<button class="primary" onclick={inject} disabled={!carrierDevice || carrierBusy}>
+			Inject inbound
+		</button>
+		<button onclick={drain} disabled={!carrierDevice || carrierBusy || offline}>
+			Poll outbox
+		</button>
+		<span style="flex: 1"></span>
+		<button onclick={clearThread} disabled={!carrierDevice || carrierBusy}>Clear thread</button>
+	</div>
+
+	{#if carrierNotice}
+		<p style="margin: 10px 0 0; font-size: 12px; color: var(--ink-3);" aria-live="polite">
+			{carrierNotice}
+		</p>
+	{/if}
+
+	{#if carrierDevice}
+		<div style="margin-top: 14px; display: flex; flex-direction: column; gap: 8px;">
+			{#if thread.length === 0}
+				<p class="empty">No messages for this device yet. Inject one above.</p>
+			{:else}
+				{#each thread as entry (entry.id)}
+					<div
+						class="device"
+						style="margin-top: 0; display: grid; grid-template-columns: 52px minmax(0,1fr) auto; gap: 10px; align-items: start;"
+					>
+						<span class="pill" style={entry.direction === 'in' ? '' : 'color: var(--accent)'}>
+							{entry.direction === 'in' ? 'IN' : 'OUT'}
+						</span>
+						<div>
+							<div style="font-family: var(--mono); font-size: 12px;">{entry.peer}</div>
+							<div style="margin-top: 2px;">{entry.body}</div>
+						</div>
+						<div style="text-align: right; font-size: 11px; color: var(--ink-3);">
+							<div>{entry.state}</div>
+							<div>{when(entry.created_at)}</div>
+						</div>
+					</div>
+				{/each}
+			{/if}
+		</div>
+	{/if}
+</section>

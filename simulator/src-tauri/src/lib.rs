@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use dakflare_core::{Device, DeviceClient, NewDevice, Store, Target};
+use dakflare_core::{
+    Device, DeviceClient, Message, NewDevice, Store, Target, drain_outbox, inject_inbound,
+};
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -203,6 +205,113 @@ async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<
     client.revoke().await.map_err(|e| e.to_string())
 }
 
+/* ---------------------------------------------------------------- carrier */
+
+/// "Receive" one SMS: record it locally, then upload when online.
+#[tauri::command]
+async fn carrier_inject(
+    state: State<'_, AppState>,
+    device_id: String,
+    sender: String,
+    body: String,
+) -> Result<serde_json::Value, String> {
+    let offline = state
+        .store
+        .is_offline(&device_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let client = if offline {
+        None
+    } else {
+        Some(client_for(&state, &device_id).await?.0)
+    };
+
+    let result = inject_inbound(
+        state.store.as_ref(),
+        client.as_ref(),
+        &device_id,
+        &sender,
+        &body,
+        offline,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "uploaded": result.uploaded,
+        "accepted": result.accepted,
+        "duplicates": result.duplicates,
+        "message_id": result.message.id,
+        "state": result.message.state,
+    }))
+}
+
+/// Poll the Worker and capture every queued command as an outbound message.
+#[tauri::command]
+async fn carrier_drain(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Vec<Message>, String> {
+    if state
+        .store
+        .is_offline(&device_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Err("Device is offline. Turn the carrier back on to poll.".into());
+    }
+
+    let (client, _device) = client_for(&state, &device_id).await?;
+    drain_outbox(state.store.as_ref(), &client, &device_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_messages(
+    state: State<'_, AppState>,
+    device_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<Message>, String> {
+    state
+        .store
+        .list_messages(&device_id, limit.unwrap_or(100).clamp(1, 500))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_messages(state: State<'_, AppState>, device_id: String) -> Result<u64, String> {
+    state
+        .store
+        .clear_messages(&device_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_offline(
+    state: State<'_, AppState>,
+    device_id: String,
+    offline: bool,
+) -> Result<(), String> {
+    state
+        .store
+        .set_offline(&device_id, offline)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_offline(state: State<'_, AppState>, device_id: String) -> Result<bool, String> {
+    state
+        .store
+        .is_offline(&device_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn schema_version(state: State<'_, AppState>) -> Result<i64, String> {
     state
@@ -244,6 +353,12 @@ pub fn run() {
             poll_device,
             purge_messages,
             revoke_device,
+            carrier_inject,
+            carrier_drain,
+            list_messages,
+            clear_messages,
+            set_offline,
+            get_offline,
             schema_version
         ])
         .run(tauri::generate_context!())

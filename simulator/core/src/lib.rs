@@ -4,11 +4,13 @@
 //! client must compile and test without a desktop shell, and they must be usable
 //! from the Android build later.
 
+pub mod carrier;
 pub mod db;
 pub mod identity;
 pub mod protocol;
 
-pub use db::{Device, NewDevice, Store, StoreError};
+pub use carrier::{CarrierError, Injected, drain_outbox, inject_inbound};
+pub use db::{Device, Message, NewDevice, Store, StoreError};
 pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
 };

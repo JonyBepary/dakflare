@@ -71,7 +71,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: v
 @media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 
 .field { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
-.field label { font-size: 12px; color: var(--ink-2); }
+.field label, .field .field-label { font-size: 12px; color: var(--ink-2); }
 .field small { color: var(--ink-3); font-size: 11px; }
 
 input, select {

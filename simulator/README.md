@@ -55,6 +55,21 @@ npm run tauri android dev
 M0 could not run this: the machine has no Android SDK/NDK. The Rust core and the
 webview bundle are the two pieces that were verified instead.
 
+## M2 status
+
+| Check | Result |
+|---|---|
+| Inject inbound: local thread + signed upload | **pass** — live probe |
+| Capture outbound: poll → record → ack | **pass** — live probe |
+| Offline switch: stores locally, skips upload/poll | **pass** — unit test + UI |
+| Message thread + clear | **pass** — unit test |
+
+The probe now covers the carrier path as well: pair, inject `CODE 483920`
+(uploaded, accepted=1), queue a real command as admin, drain it through a signed
+poll (captured with the right recipient), then purge and revoke. It also caught a
+real bug: the command wire field is `to`, not the SQL column `to_e164`, so the
+first capture produced an outbound row with an empty peer.
+
 ## M1 status
 
 | Check | Result |
@@ -108,5 +123,5 @@ so it is safe to run against the live deployment.
 1. Protocol client in `core` (pair, signed poll, inbound batch, WebSocket).
 2. Target switcher (deployed Worker) + cleanup rails (`sim*` prefixes,
    message purge endpoint).
-3. Carrier panel: inject inbound, capture outbound.
+3. WebSocket transport (poll covers delivery today).
 4. Flow interpreter in Rust, compiled to WASM for the Worker fallback.

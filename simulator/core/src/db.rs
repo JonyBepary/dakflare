@@ -118,6 +118,18 @@ pub struct NewDevice<'a> {
     pub sim_slot: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub id: String,
+    pub device_id: String,
+    pub direction: String,
+    pub peer: String,
+    pub body: String,
+    pub state: String,
+    pub local_id: Option<String>,
+    pub created_at: i64,
+}
+
 pub struct Store {
     db: Database,
 }
@@ -315,6 +327,111 @@ impl Store {
         }
     }
 
+    /// Append a message to this device's local thread.
+    pub async fn record_message(
+        &self,
+        device_id: &str,
+        direction: &str,
+        peer: &str,
+        body: &str,
+        state: &str,
+        local_id: Option<&str>,
+    ) -> Result<Message, StoreError> {
+        let id = format!("msg{}", random_hex(12)?);
+        let now = now_ms()?;
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO messages
+                (id, device_id, direction, peer, body, state, local_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id.clone(),
+                device_id,
+                direction,
+                peer,
+                body,
+                state,
+                local_id,
+                now
+            ],
+        )
+        .await?;
+
+        Ok(Message {
+            id,
+            device_id: device_id.to_string(),
+            direction: direction.to_string(),
+            peer: peer.to_string(),
+            body: body.to_string(),
+            state: state.to_string(),
+            local_id: local_id.map(str::to_string),
+            created_at: now,
+        })
+    }
+
+    pub async fn set_message_state(&self, id: &str, state: &str) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "UPDATE messages SET state = ? WHERE id = ?",
+            params![state, id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_messages(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages WHERE device_id = ?
+                  ORDER BY created_at DESC, id DESC LIMIT ?",
+                params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn clear_messages(&self, device_id: &str) -> Result<u64, StoreError> {
+        let conn = self.db.connect()?;
+        let deleted = conn
+            .execute("DELETE FROM messages WHERE device_id = ?", params![device_id])
+            .await?;
+        Ok(deleted as u64)
+    }
+
+    /// Airplane-mode switch. Persisted per device so it survives a restart.
+    pub async fn set_offline(&self, device_id: &str, offline: bool) -> Result<(), StoreError> {
+        self.set_setting(&format!("offline:{device_id}"), if offline { "1" } else { "0" })
+            .await
+    }
+
+    pub async fn is_offline(&self, device_id: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .get_setting(&format!("offline:{device_id}"))
+            .await?
+            .as_deref()
+            == Some("1"))
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
         let conn = self.db.connect()?;
         let affected = conn
@@ -322,6 +439,16 @@ impl Store {
             .await?;
         Ok(affected > 0)
     }
+}
+
+fn random_hex(bytes: usize) -> Result<String, StoreError> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer).map_err(|_| StoreError::Clock)?;
+    let mut out = String::with_capacity(bytes * 2);
+    for byte in buffer {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
 }
 
 fn now_ms() -> Result<i64, StoreError> {

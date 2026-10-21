@@ -279,6 +279,43 @@ impl DeviceClient {
 
     /* ---- admin: cleanup -------------------------------------------------- */
 
+    /// `POST /v1/sms/send` — queue an outbound SMS for this device (admin).
+    pub async fn admin_send(&self, to: &str, body: &str) -> Result<String, ProtocolError> {
+        let token = self
+            .target
+            .admin_token
+            .as_deref()
+            .ok_or_else(|| ProtocolError::Shape("no admin token configured".into()))?;
+
+        let res = self
+            .http
+            .post(self.target.url("/v1/sms/send"))
+            .bearer_auth(token)
+            .json(&json!({
+                "device_id": self.device_id,
+                "to": to,
+                "body": body,
+            }))
+            .send()
+            .await?;
+
+        let status = res.status();
+        let text = res.text().await?;
+        if !status.is_success() {
+            return Err(ProtocolError::Status {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|e| ProtocolError::Shape(format!("{e}: {text}")))?;
+        value
+            .get("command_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ProtocolError::Shape("no command_id in response".into()))
+    }
+
     /// `DELETE /v1/messages?device_id=` — erase this device's message log.
     pub async fn purge_messages(&self) -> Result<u64, ProtocolError> {
         let token = self
