@@ -109,13 +109,19 @@ export async function handleCommandStatus(
   deviceId: string,
   commandId: string
 ): Promise<Response> {
-  if (!deviceId) return err("bad_request", 400);
+  // §11.5: a missing device_id is the only 404; an unknown command id is a
+  // successful read that reports `command: null`. The DO's 404 therefore means
+  // "no such command", not "bad request".
+  if (!deviceId) return Response.json({ error: "not_found" }, { status: 404 });
+
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   const res = await stub.fetch(
     `https://do/__command?command_id=${encodeURIComponent(commandId)}`,
     { method: "GET" }
   );
-  if (!res.ok) return err("bad_request", 404);
+  if (res.status === 404) return Response.json({ command: null });
+  if (!res.ok) return Response.json({ error: "internal_error" }, { status: 500 });
+
   const payload = (await res.json().catch(() => null)) as { command?: unknown } | null;
   return Response.json({ command: payload?.command ?? null });
 }

@@ -900,6 +900,16 @@ async function cmdSuite() {
 
     rep.check('new command is PENDING', (await readState()).state, 'PENDING');
 
+    // §11.5: an unknown command id is a successful read with `command: null`;
+    // only a missing device_id is a 404. This used to be a 404 and drifted.
+    const unknownCommand = await admin(
+      'GET', `/v1/sms/commands/does-not-exist?device_id=${identity.deviceId}`
+    );
+    rep.check('unknown command id -> 200', unknownCommand.status, 200);
+    rep.check('...reports command: null', unknownCommand.data?.command, null);
+    const missingDevice = await admin('GET', '/v1/sms/commands/does-not-exist');
+    rep.check('missing device_id -> 404', missingDevice.status, 404);
+
     const msgs = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=50`);
     rep.check('outbound row persisted with direction=out',
       (msgs.data?.messages ?? []).some((m) => m.direction === 'out' && m.body === 'suite lifecycle'), true);
