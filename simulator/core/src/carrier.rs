@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{Message, Store, StoreError};
 use crate::flowrun::{RemoteFlow, run_flows};
-use crate::protocol::{DeviceClient, InboundMessage, ProtocolError};
+use crate::protocol::{DeviceClient, InboundMessage, OutboundReport, ProtocolError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CarrierError {
@@ -81,9 +81,17 @@ pub async fn inject_inbound(
                 // action types from being silently ignored when they land.
                 match action {
                     dakflare_flow::Action::SendSms { to, body } => {
+                        let outbound_id = format!("out-{}", random_hex(8)?);
                         captured.push(
                             store
-                                .record_message(device_id, "out", to, body, "sent", None)
+                                .record_message(
+                                    device_id,
+                                    "out",
+                                    to,
+                                    body,
+                                    "sent",
+                                    Some(&outbound_id),
+                                )
                                 .await?,
                         );
                     }
@@ -93,8 +101,23 @@ pub async fn inject_inbound(
         }
     }
 
+    // Everything unsent-to-the-log, including a backlog from a previous failed
+    // mirror, rides along in this same request.
+    let pending = store.list_unmirrored_outbound(device_id, 100).await?;
+    let reports: Vec<OutboundReport> = pending
+        .iter()
+        .filter_map(|message| {
+            Some(OutboundReport {
+                local_id: message.local_id.clone()?,
+                to: message.peer.clone(),
+                body: message.body.clone(),
+                sent_at: message.created_at,
+            })
+        })
+        .collect();
+
     let response = client
-        .upload_inbound_with_runs(
+        .upload_batch(
             &[InboundMessage {
                 local_id,
                 sender: sender.to_string(),
@@ -103,8 +126,14 @@ pub async fn inject_inbound(
             }],
             &[],
             &runs,
+            &reports,
         )
         .await?;
+
+    if !reports.is_empty() {
+        let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+        store.mark_mirrored(&ids).await?;
+    }
 
     let accepted = response.get("accepted").and_then(|v| v.as_u64()).unwrap_or(0);
     let duplicates = response
@@ -168,8 +197,9 @@ async fn capture_commands(
             continue;
         }
 
+        let outbound_id = format!("out-{}", random_hex(8)?);
         let message = store
-            .record_message(device_id, "out", &to, &body, "queued", None)
+            .record_message(device_id, "out", &to, &body, "queued", Some(&outbound_id))
             .await?;
         ack_ids.push(command_id);
         captured.push(message);
@@ -179,6 +209,11 @@ async fn capture_commands(
         client.poll(&ack_ids).await?;
         for message in &captured {
             store.set_message_state(&message.id, "sent").await?;
+        }
+        // Mirror what the device just sent. Best effort: an unsent row keeps
+        // `mirrored = 0` and is retried on the next sync.
+        if let Err(error) = mirror_pending(store, client, device_id).await {
+            eprintln!("[carrier] outbound mirror failed: {error}");
         }
     }
 
@@ -196,6 +231,40 @@ pub async fn drain_outbox(
 ) -> Result<Vec<Message>, CarrierError> {
     let commands = client.poll(&[]).await?;
     capture_commands(store, client, device_id, &commands).await
+}
+
+
+/// Upload any outbound rows the deployment has not accepted yet.
+pub async fn mirror_pending(
+    store: &Store,
+    client: &DeviceClient,
+    device_id: &str,
+) -> Result<usize, CarrierError> {
+    let pending = store.list_unmirrored_outbound(device_id, 100).await?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    let reports: Vec<OutboundReport> = pending
+        .iter()
+        .filter_map(|message| {
+            Some(OutboundReport {
+                local_id: message.local_id.clone()?,
+                to: message.peer.clone(),
+                body: message.body.clone(),
+                sent_at: message.created_at,
+            })
+        })
+        .collect();
+
+    if reports.is_empty() {
+        return Ok(0);
+    }
+
+    client.upload_outbound(&reports).await?;
+    let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+    store.mark_mirrored(&ids).await?;
+    Ok(pending.len())
 }
 
 fn now_ms() -> i64 {

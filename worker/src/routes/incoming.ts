@@ -59,6 +59,8 @@ interface ValidatedMessage {
   body: string;
   receivedAt: number;
   autoReply: number;
+  /** "in" (default) or "out" for a message the DEVICE sent itself. */
+  direction: "in" | "out";
 }
 
 export async function handleIncomingBatch(
@@ -146,6 +148,13 @@ export async function handleIncomingBatch(
     if (typeof localId !== "string" || localId === "") return err("bad_request", 400);
     if (localId.length > MAX_ID_CHARS) return err("bad_request", 400);
 
+    // M4 mirroring: a device that sent an SMS locally reports it in the same
+    // batch so the operator's log is complete. Absent means inbound, which keeps
+    // older clients working unchanged.
+    const rawDirection = row.direction;
+    const direction = rawDirection === undefined ? "in" : rawDirection;
+    if (direction !== "in" && direction !== "out") return err("bad_request", 400);
+
     const body = row.body;
     if (typeof body !== "string") return err("bad_request", 400);
     if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
@@ -173,6 +182,7 @@ export async function handleIncomingBatch(
       body,
       receivedAt,
       autoReply: row.auto_reply_sent || row.auto_reply ? 1 : 0,
+      direction,
     });
   }
 
@@ -210,14 +220,23 @@ export async function handleIncomingBatch(
     const stmt = env.DB.prepare(
       `INSERT INTO messages
          (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
-       VALUES (?, ?, ?, 'in', ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(device_id, local_id) DO NOTHING`
     );
     let results: D1Result[];
     try {
       results = await env.DB.batch(
         validated.map((m) =>
-          stmt.bind(m.id, deviceId, m.localId, m.peer, m.body, m.receivedAt, m.autoReply)
+          stmt.bind(
+            m.id,
+            deviceId,
+            m.localId,
+            m.direction,
+            m.peer,
+            m.body,
+            m.receivedAt,
+            m.autoReply
+          )
         )
       );
     } catch (error) {
@@ -233,12 +252,15 @@ export async function handleIncomingBatch(
       if ((results[i].meta?.changes ?? 0) > 0) {
         accepted++;
         const row = validated[i];
-        acceptedMessages.push({
-          localId: row.localId,
-          sender: row.peer,
-          body: row.body,
-          receivedAt: row.receivedAt,
-        });
+        // Outbound mirror rows are history, not triggers.
+        if (row.direction === "in") {
+          acceptedMessages.push({
+            localId: row.localId,
+            sender: row.peer,
+            body: row.body,
+            receivedAt: row.receivedAt,
+          });
+        }
       } else {
         duplicates++;
       }

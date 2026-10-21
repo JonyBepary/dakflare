@@ -93,6 +93,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
             value TEXT NOT NULL
         )",
     ),
+    (
+        7,
+        // Whether this row exists in the deployment's message log. Outbound rows
+        // are mirrored after they are actually sent; a failed upload leaves the
+        // flag at 0 so the next sync retries instead of losing history.
+        "ALTER TABLE messages ADD COLUMN mirrored INTEGER NOT NULL DEFAULT 0",
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +439,49 @@ impl Store {
             == Some("1"))
     }
 
+
+    /// Outbound rows the deployment has not accepted yet.
+    pub async fn list_unmirrored_outbound(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages
+                  WHERE device_id = ? AND direction = 'out' AND mirrored = 0
+                  ORDER BY created_at ASC LIMIT ?",
+                params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn mark_mirrored(&self, ids: &[String]) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        for id in ids {
+            conn.execute("UPDATE messages SET mirrored = 1 WHERE id = ?", params![id.as_str()])
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
         let conn = self.db.connect()?;
         let affected = conn
@@ -534,6 +584,43 @@ mod tests {
             store.get_setting("target").await.unwrap().as_deref(),
             Some("https://other.workers.dev")
         );
+    }
+
+
+    #[tokio::test]
+    async fn outbound_rows_start_unmirrored_and_can_be_marked() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "mirror",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let sent = store
+            .record_message(&device.device_id, "out", "+1555", "hello", "sent", Some("out-1"))
+            .await
+            .unwrap();
+        let received = store
+            .record_message(&device.device_id, "in", "+1555", "hi", "uploaded", Some("in-1"))
+            .await
+            .unwrap();
+
+        let pending = store.list_unmirrored_outbound(&device.device_id, 10).await.unwrap();
+        assert_eq!(pending.len(), 1, "only outbound rows are mirrored");
+        assert_eq!(pending[0].id, sent.id);
+
+        store.mark_mirrored(&[sent.id.clone()]).await.unwrap();
+        assert!(store
+            .list_unmirrored_outbound(&device.device_id, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(received.direction, "in");
     }
 
     #[tokio::test]

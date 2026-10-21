@@ -64,6 +64,7 @@ webview bundle are the two pieces that were verified instead.
 | Worker fallback skips flows the device ran | **pass** — `device_sent=1 fallback=0` |
 | Fallback still replies when the device reports no run | **pass** — `device_sent=0 fallback=1` |
 | Purge removes `flow_runs` with the message log | **pass** |
+| Device-sent SMS visible in `/admin/messages` (`direction: "out"`) | **pass** — probe asserts it |
 
 The probe now asserts the split explicitly:
 
@@ -72,8 +73,12 @@ case A:   device_sent=1 fallback=0
           → +15551230000 · Your code is 483920
 case B:   device_sent=0 fallback=1
           → +15551230000 · Your code is 777111
+mirror:   device-sent SMS visible to admin = true
 FLOW PROBE OK — device primary, Worker fallback
 ```
+
+Locally-sent rows are uploaded with `direction: "out"`; a failed mirror keeps
+`mirrored = 0` in the local DB and is retried on the next sync.
 
 ## M3 status
 

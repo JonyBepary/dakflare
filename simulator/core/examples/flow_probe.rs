@@ -125,12 +125,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("          → {} · {}", message.peer, message.body);
     }
 
+    // The operator must be able to see the device-sent SMS in /admin/messages.
+    let log = client.admin_list_messages(50).await?;
+    let mirrored = log
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter().any(|row| {
+                row.get("direction").and_then(|d| d.as_str()) == Some("out")
+                    && row.get("body").and_then(|b| b.as_str()) == Some("Your code is 483920")
+                    && row.get("peer").and_then(|p| p.as_str()) == Some("+15551230000")
+            })
+        })
+        .unwrap_or(false);
+    println!("mirror:   device-sent SMS visible to admin = {mirrored}");
+
     let a_ok = case_a.device_sent == 1
         && case_a.fallback == 0
         && case_a
             .captured
             .iter()
-            .any(|m| m.body == "Your code is 483920");
+            .any(|m| m.body == "Your code is 483920")
+        && mirrored;
 
     let b_ok = case_b.device_sent == 0
         && case_b.fallback == 1

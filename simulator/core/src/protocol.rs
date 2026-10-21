@@ -301,6 +301,18 @@ impl DeviceClient {
         ack_command_ids: &[String],
         runs: &[crate::flowrun::FlowRunReport],
     ) -> Result<Value, ProtocolError> {
+        self.upload_batch(messages, ack_command_ids, runs, &[]).await
+    }
+
+    /// One request carrying inbound messages, device flow runs and outbound rows
+    /// to mirror. Keeping them together makes the upload atomic.
+    pub async fn upload_batch(
+        &self,
+        messages: &[InboundMessage],
+        ack_command_ids: &[String],
+        runs: &[crate::flowrun::FlowRunReport],
+        outbound: &[OutboundReport],
+    ) -> Result<Value, ProtocolError> {
         let payload: Vec<Value> = messages
             .iter()
             .map(|m| {
@@ -312,6 +324,17 @@ impl DeviceClient {
                 })
             })
             .collect();
+
+        let mut payload = payload;
+        payload.extend(outbound.iter().map(|report| {
+            json!({
+                "local_id": report.local_id,
+                "sender_e164": report.to,
+                "body": report.body,
+                "received_at": report.sent_at,
+                "direction": "out",
+            })
+        }));
 
         let runs_payload: Vec<Value> = runs
             .iter()
@@ -585,5 +608,63 @@ mod tests {
     fn target_requires_a_url_scheme() {
         assert!(Target::new("https://example.workers.dev/", None).is_ok());
         assert!(Target::new("example.workers.dev", None).is_err());
+    }
+}
+
+/// One SMS the device sent locally, to be mirrored into the deployment log.
+#[derive(Debug, Clone)]
+pub struct OutboundReport {
+    pub local_id: String,
+    pub to: String,
+    pub body: String,
+    pub sent_at: i64,
+}
+
+impl DeviceClient {
+    /// Mirror locally-sent SMS into the deployment's message log.
+    ///
+    /// Sent through the same inbound endpoint with `direction: "out"`, so the
+    /// `(device_id, local_id)` idempotency key makes retries free.
+    pub async fn upload_outbound(
+        &self,
+        reports: &[OutboundReport],
+    ) -> Result<Value, ProtocolError> {
+        if reports.is_empty() {
+            return Ok(Value::Null);
+        }
+        let payload: Vec<Value> = reports
+            .iter()
+            .map(|report| {
+                json!({
+                    "local_id": report.local_id,
+                    "sender_e164": report.to,
+                    "body": report.body,
+                    "received_at": report.sent_at,
+                    "direction": "out",
+                })
+            })
+            .collect();
+
+        self.signed_post(
+            "/v1/sms/incoming/batch",
+            json!({ "messages": payload, "ack_command_ids": [] }),
+        )
+        .await
+    }
+
+    /// Admin read of the message log, used by probes and the dashboard.
+    pub async fn admin_list_messages(&self, limit: u32) -> Result<Value, ProtocolError> {
+        let token = self
+            .target
+            .admin_token
+            .as_deref()
+            .ok_or_else(|| ProtocolError::Shape("no admin token configured".into()))?;
+
+        let url = format!(
+            "{}/v1/messages?device_id={}&limit={}",
+            self.target.base_url, self.device_id, limit
+        );
+        let res = self.http.get(url).bearer_auth(token).send().await?;
+        Self::decode(res).await
     }
 }

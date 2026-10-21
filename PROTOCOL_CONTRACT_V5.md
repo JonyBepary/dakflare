@@ -492,7 +492,7 @@ Authentication class per route. Anything not listed does not exist.
 | `POST` | `/v1/sms/send` | admin | Body `{device_id, to, body, priority?, expires_in_s?}`. Returns `{command_id}`. |
 | `POST` | `/v1/sms/send/batch` | admin | Body `{device_id, commands[]}`. Returns `{command_ids}`. |
 | `GET` | `/v1/device/ws` | device | WebSocket upgrade. Signed as a `GET` with an empty body (§2.3). |
-| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], ack_command_ids[], fcm_token?, flow_runs?}`. `flow_runs` reports flows the device already executed for those messages. |
+| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], ack_command_ids[], fcm_token?, flow_runs?}`. Each message may be `"direction": "out"` for an SMS the device sent itself (default `"in"`). `flow_runs` reports flows the device already executed. |
 | `POST` | `/v1/sms/outgoing/poll` | device | Body `{ack_command_ids[], fcm_token?}`. |
 | `POST` | `/v1/sms/status/batch` | device | Body `{updates[]}`. |
 | `GET` | `/v1/rules` | device | Returns global rules plus this device's own. |
@@ -610,6 +610,18 @@ The Worker runs its own interpreter only for `(local_id, flow_id, flow_version)`
 tuples the device did **not** report. `flow_version` is part of the key: a graph
 edited after the message arrived is a different flow, and a v1 run must not
 suppress a legitimately different v2.
+
+### 11.10 Device-sent SMS is mirrored into the operator log
+
+When the device sends an SMS itself (device-primary flow execution), it reports
+the row through the same batch endpoint with `"direction": "out"`. That gives
+outbound history the same `(device_id, local_id)` idempotency as inbound, so a
+retry is free and a replayed batch cannot duplicate rows.
+
+Outbound mirror rows are history, not triggers: they never start a flow. A device
+that could not reach the deployment keeps the row locally with `mirrored = 0` and
+retries it with the next sync, so a transient network failure does not lose the
+operator's copy.
 
 Reports are accepted only for messages the batch actually inserted, so a replayed
 batch cannot inflate the run log, and a replayed message cannot send a second
