@@ -55,6 +55,27 @@ npm run tauri android dev
 M0 could not run this: the machine has no Android SDK/NDK. The Rust core and the
 webview bundle are the two pieces that were verified instead.
 
+## M1 status
+
+| Check | Result |
+|---|---|
+| Protocol client: mint code, pair, signed poll, inbound upload | **pass** — live probe against production |
+| Cleanup: purge message log, revoke device | **pass** — probe removed its own rows |
+| Canonical string + P1363 headers (contract §2/§3) | **pass** — unit tests |
+| WebSocket transport | not yet |
+
+The probe is `core/examples/probe.rs`:
+
+```bash
+cd core
+DAKFLARE_URL=https://<worker>.workers.dev DAKFLARE_ADMIN_TOKEN=... \
+  cargo run --example probe
+```
+
+It creates a temporary identity, pairs, polls, uploads one inbound message,
+purges that device's log, revokes the device and deletes the temp database —
+so it is safe to run against the live deployment.
+
 ## M0 status
 
 | Check | Result |

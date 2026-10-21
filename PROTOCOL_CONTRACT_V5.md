@@ -483,6 +483,7 @@ Authentication class per route. Anything not listed does not exist.
 | `GET` | `/v1/devices` | admin | Fleet list. |
 | `DELETE` | `/v1/admin/devices/:device_id` | admin | Revoke: wipes the device from **the DO** (which is what verifies signatures) and from D1, closes its sockets. |
 | `GET` | `/v1/messages` | admin | `?device_id=&limit=&before=`. `limit` default 50, max 200. Newest first. |
+| `DELETE` | `/v1/messages` | admin | `?device_id=`. Erases that device's message log (simulator cleanup / erasure request). Returns `{ok, deleted}`. |
 | `GET` | `/v1/sms/commands/:command_id` | admin | `?device_id=`. Single command's current state. |
 | `GET` | `/v1/device/:device_id/status` | admin | `{ws_connected, queue_depth}`. |
 | `GET` | `/v1/admin/rules` | admin | Every rule, including disabled and other devices'. |

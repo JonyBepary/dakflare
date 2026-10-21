@@ -15,7 +15,7 @@ import { verifyDeviceSignature } from "./auth/ecdsa";
 import { handleAdminPairingCode, handleDevicePair, handleDevicesList } from "./routes/pair";
 import { handleSend, handleSendBatch } from "./routes/send";
 import { handleWs } from "./routes/ws";
-import { handleIncomingBatch, handleMessagesList } from "./routes/incoming";
+import { handleIncomingBatch, handleMessagesList, handleMessagesPurge } from "./routes/incoming";
 import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost } from "./routes/rules";
@@ -265,6 +265,9 @@ export default {
     }
     if (method === "GET" && pathname === "/v1/messages") {
       return withAdmin(req, env, () => handleMessagesList(env, url));
+    }
+    if (method === "DELETE" && pathname === "/v1/messages") {
+      return withAdmin(req, env, () => handleMessagesPurge(env, url));
     }
     if (method === "POST" && pathname === "/v1/rules") {
       return withAdmin(req, env, () => handleRulesPost(req, env));

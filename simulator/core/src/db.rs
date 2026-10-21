@@ -86,6 +86,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
             created_at INTEGER NOT NULL
         )",
     ),
+    (
+        6,
+        "CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +250,32 @@ impl Store {
         Ok(devices)
     }
 
+    pub async fn get_device(&self, device_id: &str) -> Result<Option<Device>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT device_id, public_key_spki, platform, platform_id, label,
+                        carrier, sim_slot, created_at, updated_at
+                   FROM devices WHERE device_id = ?",
+                params![device_id],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(Device {
+                device_id: row.get(0)?,
+                public_key_spki: row.get(1)?,
+                platform: row.get(2)?,
+                platform_id: row.get(3)?,
+                label: row.get(4)?,
+                carrier: row.get(5)?,
+                sim_slot: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
     /// Private key for signing. Simulator-only API surface.
     pub async fn private_key(&self, device_id: &str) -> Result<Option<String>, StoreError> {
         let conn = self.db.connect()?;
@@ -251,6 +284,30 @@ impl Store {
                 "SELECT private_key_pkcs8 FROM devices WHERE device_id = ?",
                 params![device_id],
             )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+
+    /// Persist a small key/value setting (target URL, admin token, …).
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query("SELECT value FROM settings WHERE key = ?", params![key])
             .await?;
         match rows.next().await? {
             Some(row) => Ok(Some(row.get(0)?)),
@@ -334,6 +391,22 @@ mod tests {
             crate::identity::verify_p1363(&device.public_key_spki, canonical, &signature).unwrap()
         );
         assert_eq!(identity.device_id, device.device_id);
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip_and_overwrite() {
+        let (_dir, store) = open_temp().await;
+        assert_eq!(store.get_setting("target").await.unwrap(), None);
+        store.set_setting("target", "https://example.workers.dev").await.unwrap();
+        assert_eq!(
+            store.get_setting("target").await.unwrap().as_deref(),
+            Some("https://example.workers.dev")
+        );
+        store.set_setting("target", "https://other.workers.dev").await.unwrap();
+        assert_eq!(
+            store.get_setting("target").await.unwrap().as_deref(),
+            Some("https://other.workers.dev")
+        );
     }
 
     #[tokio::test]

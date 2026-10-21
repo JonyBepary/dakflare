@@ -6,8 +6,13 @@
 
 pub mod db;
 pub mod identity;
+pub mod protocol;
 
 pub use db::{Device, NewDevice, Store, StoreError};
 pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
+};
+pub use protocol::{
+    DeviceClient, InboundMessage, ProtocolError, SignedHeaders, Target, canonical_string,
+    sign_request,
 };

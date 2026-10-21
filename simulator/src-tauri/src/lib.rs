@@ -1,17 +1,117 @@
 //! Tauri shell for the DakFlare device simulator.
 //!
 //! Everything interesting lives in `dakflare-core`: identity, the libSQL store and
-//! (next) the protocol client. This file only owns the app lifecycle and exposes
-//! those operations to the webview.
+//! the protocol client. This file owns the app lifecycle and the command surface
+//! the webview calls.
 
 use std::sync::Arc;
 
-use dakflare_core::{Device, NewDevice, Store};
+use dakflare_core::{Device, DeviceClient, NewDevice, Store, Target};
+use serde::Serialize;
 use tauri::{Manager, State};
 
 struct AppState {
     store: Arc<Store>,
 }
+
+#[derive(Serialize)]
+struct TargetView {
+    base_url: Option<String>,
+    has_admin_token: bool,
+}
+
+async fn load_target(state: &AppState) -> Result<Target, String> {
+    let base_url = state
+        .store
+        .get_setting("base_url")
+        .await
+        .map_err(|e| e.to_string())?
+        .filter(|v| !v.trim().is_empty())
+        .ok_or("No target URL configured. Set one in Target first.")?;
+
+    let token = state
+        .store
+        .get_setting("admin_token")
+        .await
+        .map_err(|e| e.to_string())?
+        .filter(|v| !v.trim().is_empty());
+
+    Target::new(base_url, token).map_err(|e| e.to_string())
+}
+
+async fn client_for(state: &AppState, device_id: &str) -> Result<(DeviceClient, Device), String> {
+    let target = load_target(state).await?;
+    let device = state
+        .store
+        .get_device(device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Unknown device")?;
+    let private_key = state
+        .store
+        .private_key(device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Device has no private key")?;
+
+    Ok((
+        DeviceClient::new(target, device.device_id.clone(), private_key),
+        device,
+    ))
+}
+
+/* ---------------------------------------------------------------- target */
+
+#[tauri::command]
+async fn get_target(state: State<'_, AppState>) -> Result<TargetView, String> {
+    let base_url = state
+        .store
+        .get_setting("base_url")
+        .await
+        .map_err(|e| e.to_string())?;
+    let token = state
+        .store
+        .get_setting("admin_token")
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(TargetView {
+        base_url,
+        has_admin_token: token.map(|t| !t.is_empty()).unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+async fn save_target(
+    state: State<'_, AppState>,
+    base_url: String,
+    admin_token: Option<String>,
+) -> Result<(), String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Target URL is required".into());
+    }
+    // Validate shape before storing, so a typo fails here rather than at pairing.
+    Target::new(trimmed, None).map_err(|e| e.to_string())?;
+
+    state
+        .store
+        .set_setting("base_url", trimmed)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(token) = admin_token.filter(|t| !t.trim().is_empty()) {
+        state
+            .store
+            .set_setting("admin_token", token.trim())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/* ---------------------------------------------------------------- devices */
 
 #[tauri::command]
 async fn list_devices(state: State<'_, AppState>) -> Result<Vec<Device>, String> {
@@ -58,6 +158,51 @@ async fn delete_device(state: State<'_, AppState>, device_id: String) -> Result<
         .map_err(|e| e.to_string())
 }
 
+/* --------------------------------------------------------------- protocol */
+
+/// Mint an enrolment code with the admin token and pair this device with it.
+#[tauri::command]
+async fn pair_device(
+    state: State<'_, AppState>,
+    device_id: String,
+    ttl_ms: Option<u64>,
+) -> Result<String, String> {
+    let (client, device) = client_for(&state, &device_id).await?;
+    let code = client
+        .mint_pairing_code(ttl_ms.unwrap_or(120_000))
+        .await
+        .map_err(|e| e.to_string())?;
+    client
+        .pair(&code, &device.public_key_spki)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Paired as {}", device.device_id))
+}
+
+/// One signed poll; returns the queued commands.
+#[tauri::command]
+async fn poll_device(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<serde_json::Value, String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    client.poll(&[]).await.map_err(|e| e.to_string())
+}
+
+/// Test-cleanup: erase this device's message log on the deployment.
+#[tauri::command]
+async fn purge_messages(state: State<'_, AppState>, device_id: String) -> Result<u64, String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    client.purge_messages().await.map_err(|e| e.to_string())
+}
+
+/// Revoke the device server-side (D1 + its Durable Object).
+#[tauri::command]
+async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    client.revoke().await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn schema_version(state: State<'_, AppState>) -> Result<i64, String> {
     state
@@ -79,9 +224,10 @@ pub fn run() {
 
             // Opening the store is async; setup runs before the event loop, so a
             // blocking open here is simpler than racing the UI against a lazy DB.
-            let store = tauri::async_runtime::block_on(Store::open(dir.join("simulator.db"))).map_err(
-                |e| std::io::Error::other(format!("could not open local database: {e}")),
-            )?;
+            let store = tauri::async_runtime::block_on(Store::open(dir.join("simulator.db")))
+                .map_err(|e| {
+                    std::io::Error::other(format!("could not open local database: {e}"))
+                })?;
 
             app.manage(AppState {
                 store: Arc::new(store),
@@ -89,9 +235,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_target,
+            save_target,
             list_devices,
             create_device,
             delete_device,
+            pair_device,
+            poll_device,
+            purge_messages,
+            revoke_device,
             schema_version
         ])
         .run(tauri::generate_context!())

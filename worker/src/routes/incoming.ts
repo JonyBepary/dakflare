@@ -26,6 +26,7 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import { RE_DEVICE_ID } from "../auth/canonical";
 import {
   MAX_ACK_IDS,
   MAX_BODY_CHARS,
@@ -195,6 +196,26 @@ export async function handleIncomingBatch(
 
   const commands = await readPending(stub);
   return Response.json({ accepted, duplicates, commands });
+}
+
+/**
+ * `DELETE /v1/messages?device_id=` — admin-only purge for one device.
+ *
+ * Exists for two reasons: test/simulator cleanup must not leave SMS bodies and
+ * phone numbers in the production log for the whole retention window, and an
+ * operator needs a real erasure path for a device they are decommissioning.
+ * Scoped by `device_id` on purpose — there is no "delete everything".
+ */
+export async function handleMessagesPurge(env: Env, requestUrl: URL): Promise<Response> {
+  const deviceId = requestUrl.searchParams.get("device_id");
+  if (!deviceId) return err("bad_request", 400);
+  if (!RE_DEVICE_ID.test(deviceId)) return err("bad_request", 400);
+
+  const result = await env.DB.prepare(`DELETE FROM messages WHERE device_id = ?`)
+    .bind(deviceId)
+    .run();
+
+  return Response.json({ ok: true, deleted: Number(result.meta?.changes ?? 0) });
 }
 
 /**
