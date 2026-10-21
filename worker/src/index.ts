@@ -20,6 +20,7 @@ import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost } from "./routes/rules";
 import {
+  handleDeviceFlows,
   handleWorkflowDelete,
   handleWorkflowGet,
   handleWorkflowPut,
@@ -313,6 +314,9 @@ export default {
     }
     if (method === "GET" && pathname === "/v1/rules") {
       return withDevice(req, env, (r, e, deviceId) => handleRulesGet(r, e, deviceId));
+    }
+    if (method === "GET" && pathname === "/v1/flows") {
+      return withDevice(req, env, (_r, e, deviceId) => handleDeviceFlows(e, deviceId));
     }
 
     /* ---- admin session (cookie) ---------------------------------------- */

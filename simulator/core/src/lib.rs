@@ -6,11 +6,13 @@
 
 pub mod carrier;
 pub mod db;
+pub mod flowrun;
 pub mod identity;
 pub mod protocol;
 
 pub use carrier::{CarrierError, Injected, drain_outbox, inject_inbound};
 pub use db::{Device, Message, NewDevice, Store, StoreError};
+pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
 pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
 };

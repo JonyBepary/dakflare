@@ -492,10 +492,11 @@ Authentication class per route. Anything not listed does not exist.
 | `POST` | `/v1/sms/send` | admin | Body `{device_id, to, body, priority?, expires_in_s?}`. Returns `{command_id}`. |
 | `POST` | `/v1/sms/send/batch` | admin | Body `{device_id, commands[]}`. Returns `{command_ids}`. |
 | `GET` | `/v1/device/ws` | device | WebSocket upgrade. Signed as a `GET` with an empty body (§2.3). |
-| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], ack_command_ids[], fcm_token?}`. |
+| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], ack_command_ids[], fcm_token?, flow_runs?}`. `flow_runs` reports flows the device already executed for those messages. |
 | `POST` | `/v1/sms/outgoing/poll` | device | Body `{ack_command_ids[], fcm_token?}`. |
 | `POST` | `/v1/sms/status/batch` | device | Body `{updates[]}`. |
 | `GET` | `/v1/rules` | device | Returns global rules plus this device's own. |
+| `GET` | `/v1/flows` | device | Workflow graphs this device runs locally: fleet-wide plus its own, each with `version`. Never another device's. |
 
 ### 11.1 Route matching order
 
@@ -594,3 +595,24 @@ An `enroll` code redeemed against an already-registered `device_id` returns `409
 operator rotating a key must mint with `{ "purpose": "rotate", "device_id": "<id>" }`; the DO then
 evicts the previous key holder (closes sockets, drops its queued commands, nonces and per-command
 timers), which is authorized behaviour only under an explicit rotation.
+
+### 11.9 Flow execution is device-first, Worker-fallback
+
+The device is the primary engine: it fetches `GET /v1/flows`, runs the graph when
+the SMS arrives (instant, offline-capable), performs `send_sms` itself, and
+reports the run with the message:
+
+```json
+{ "local_id": "…", "flow_id": "wf_…", "flow_version": 3, "outcome": "delivered" }
+```
+
+The Worker runs its own interpreter only for `(local_id, flow_id, flow_version)`
+tuples the device did **not** report. `flow_version` is part of the key: a graph
+edited after the message arrived is a different flow, and a v1 run must not
+suppress a legitimately different v2.
+
+Reports are accepted only for messages the batch actually inserted, so a replayed
+batch cannot inflate the run log, and a replayed message cannot send a second
+reply. If a device uploads without reporting a run (app killed mid-flow, flows
+not yet synced), the fallback produces the reply as a queued command, delivered
+on the next poll.

@@ -55,6 +55,26 @@ npm run tauri android dev
 M0 could not run this: the machine has no Android SDK/NDK. The Rust core and the
 webview bundle are the two pieces that were verified instead.
 
+## M4 status
+
+| Check | Result |
+|---|---|
+| Device fetches its flows (`GET /v1/flows`, signed, device-scoped) | **pass** — live |
+| Device runs the graph locally and reports `flow_runs` | **pass** — live |
+| Worker fallback skips flows the device ran | **pass** — `device_sent=1 fallback=0` |
+| Fallback still replies when the device reports no run | **pass** — `device_sent=0 fallback=1` |
+| Purge removes `flow_runs` with the message log | **pass** |
+
+The probe now asserts the split explicitly:
+
+```
+case A:   device_sent=1 fallback=0
+          → +15551230000 · Your code is 483920
+case B:   device_sent=0 fallback=1
+          → +15551230000 · Your code is 777111
+FLOW PROBE OK — device primary, Worker fallback
+```
+
 ## M3 status
 
 | Check | Result |

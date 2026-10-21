@@ -227,6 +227,19 @@ async fn carrier_inject(
         Some(client_for(&state, &device_id).await?.0)
     };
 
+    // Device-first: pull this device's flows and run them here, before upload.
+    // An empty list (or a sync failure) simply leaves the Worker as the engine.
+    let flows = match client.as_ref() {
+        Some(client) => match client.fetch_flows().await {
+            Ok(flows) => Some(flows),
+            Err(error) => {
+                eprintln!("[carrier] flow sync failed: {error}");
+                None
+            }
+        },
+        None => None,
+    };
+
     let result = inject_inbound(
         state.store.as_ref(),
         client.as_ref(),
@@ -234,6 +247,7 @@ async fn carrier_inject(
         &sender,
         &body,
         offline,
+        flows.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -244,6 +258,8 @@ async fn carrier_inject(
         "duplicates": result.duplicates,
         "message_id": result.message.id,
         "state": result.message.state,
+        "device_sent": result.device_sent,
+        "fallback": result.fallback,
     }))
 }
 

@@ -120,6 +120,48 @@ async function selectWorkflow(env: Env, id: string): Promise<WorkflowRow | null>
 /* Handlers                                                                 */
 /* ======================================================================== */
 
+
+/**
+ * `GET /v1/flows` (device-authenticated) — the flows this device must run locally.
+ *
+ * Scoped exactly like `GET /v1/rules`: fleet-wide plus this device's own, never
+ * another device's. The graph and its `version` are both returned because the
+ * device-side run is deduped against `(local_id, flow_id, version)`.
+ *
+ * This exists so the primary engine can work without an admin credential. The
+ * simulator happens to hold one, but a real phone must never need one.
+ */
+export async function handleDeviceFlows(env: Env, deviceId: string): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, graph, version, updated_at
+       FROM workflows
+      WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)
+      ORDER BY updated_at DESC
+      LIMIT 20`
+  )
+    .bind(deviceId)
+    .all<{ id: string; graph: string; version: number; updated_at: number }>();
+
+  const flows = (rows.results ?? []).flatMap((row) => {
+    try {
+      return [
+        {
+          id: row.id,
+          version: Number(row.version),
+          graph: JSON.parse(row.graph) as unknown,
+          updated_at: Number(row.updated_at),
+        },
+      ];
+    } catch {
+      // A corrupted graph is skipped rather than breaking the whole sync.
+      console.error(`[flows] ${row.id}: stored graph is not JSON`);
+      return [];
+    }
+  });
+
+  return Response.json({ flows });
+}
+
 /** `GET /v1/admin/workflows` — ids and metadata, newest save first, no graphs. */
 export async function handleWorkflowsList(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(

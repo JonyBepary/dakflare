@@ -21,6 +21,48 @@ export interface AcceptedMessage {
   receivedAt: number;
 }
 
+
+function runKey(localId: string, flowId: string, version: number): string {
+  return `${localId}|${flowId}|${version}`;
+}
+
+/**
+ * Which (message, flow, version) triples this device already executed.
+ *
+ * Bounded by the accepted-message count (≤500 per batch), so the `IN` list stays
+ * well inside SQLite's parameter limit.
+ */
+async function alreadyRun(
+  env: Env,
+  deviceId: string,
+  messages: AcceptedMessage[]
+): Promise<Set<string>> {
+  const ids = messages.map((m) => m.localId);
+  if (ids.length === 0) return new Set();
+
+  const placeholders = ids.map(() => "?").join(", ");
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT local_id, flow_id, flow_version
+         FROM flow_runs
+        WHERE device_id = ? AND local_id IN (${placeholders})`
+    )
+      .bind(deviceId, ...ids)
+      .all<{ local_id: string; flow_id: string; flow_version: number }>();
+
+    return new Set(
+      (rows.results ?? []).map((row) =>
+        runKey(row.local_id, row.flow_id, Number(row.flow_version))
+      )
+    );
+  } catch (error) {
+    // A failed lookup means we might run something the device ran. Better a
+    // possible duplicate than silently dropping automation.
+    console.error(`[flow] could not read device runs: ${String(error)}`);
+    return new Set();
+  }
+}
+
 const MAX_FLOWS_PER_DEVICE = 20;
 const MAX_RUNS_PER_BATCH = 200;
 const COMMAND_TTL_MS = 86_400_000;
@@ -33,17 +75,20 @@ export async function dispatchFlows(
   if (messages.length === 0) return 0;
 
   const rows = await env.DB.prepare(
-    `SELECT id, graph
+    `SELECT id, graph, version
        FROM workflows
       WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)
       ORDER BY updated_at DESC
       LIMIT ${MAX_FLOWS_PER_DEVICE}`
   )
     .bind(deviceId)
-    .all<{ id: string; graph: string }>();
+    .all<{ id: string; graph: string; version: number }>();
 
   const workflows = rows.results ?? [];
   if (workflows.length === 0) return 0;
+
+  // Device-first: skip any (message, flow, version) the device already ran.
+  const ranByDevice = await alreadyRun(env, deviceId, messages);
 
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   let runs = 0;
@@ -59,6 +104,9 @@ export async function dispatchFlows(
     }
 
     for (const message of messages) {
+      if (ranByDevice.has(runKey(message.localId, workflow.id, Number(workflow.version)))) {
+        continue;
+      }
       if (runs >= MAX_RUNS_PER_BATCH) {
         console.warn(`[flow] run budget exhausted for this batch`);
         return enqueued;

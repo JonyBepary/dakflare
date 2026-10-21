@@ -28,6 +28,7 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
+import { RE_WORKFLOW_ID } from "../lib/workflow";
 import {
   MAX_ACK_IDS,
   MAX_BODY_CHARS,
@@ -40,6 +41,16 @@ import {
 /** §17: accept `received_at` inside [now - 30 days, now + 1 day]. */
 const RECEIVED_AT_PAST_MS = 30 * 24 * 60 * 60 * 1000;
 const RECEIVED_AT_FUTURE_MS = 24 * 60 * 60 * 1000;
+
+/** Upper bound on device-reported flow runs per batch (500 messages max anyway). */
+const MAX_FLOW_RUN_REPORTS = 1_000;
+
+interface ReportedRun {
+  localId: string;
+  flowId: string;
+  flowVersion: number;
+  outcome: string;
+}
 
 interface ValidatedMessage {
   id: string;
@@ -87,6 +98,42 @@ export async function handleIncomingBatch(
     data.fcm_token.length <= MAX_FCM_TOKEN_CHARS
       ? data.fcm_token
       : null;
+
+  // M4: runs the DEVICE already performed for these messages. Recorded so the
+  // Worker fallback can skip them; the device is the primary engine.
+  const reportedRuns: ReportedRun[] = [];
+  if (data.flow_runs !== undefined) {
+    if (!Array.isArray(data.flow_runs)) return err("bad_request", 400);
+    if (data.flow_runs.length > MAX_FLOW_RUN_REPORTS) return err("bad_request", 400);
+    for (const entry of data.flow_runs) {
+      if (!entry || typeof entry !== "object") return err("bad_request", 400);
+      const row = entry as Record<string, unknown>;
+      const localId = row.local_id;
+      const flowId = row.flow_id;
+      const flowVersion = row.flow_version;
+      const outcome = row.outcome;
+      if (typeof localId !== "string" || localId === "" || localId.length > MAX_ID_CHARS) {
+        return err("bad_request", 400);
+      }
+      if (typeof flowId !== "string" || !RE_WORKFLOW_ID.test(flowId)) return err("bad_request", 400);
+      if (
+        typeof flowVersion !== "number" ||
+        !Number.isInteger(flowVersion) ||
+        flowVersion < 1
+      ) {
+        return err("bad_request", 400);
+      }
+      if (typeof outcome !== "string" || outcome === "" || outcome.length > 32) {
+        return err("bad_request", 400);
+      }
+      reportedRuns.push({
+        localId,
+        flowId,
+        flowVersion,
+        outcome,
+      });
+    }
+  }
 
   // ---- validate every row before writing anything (all-or-nothing) --------
   const now = Date.now();
@@ -197,6 +244,32 @@ export async function handleIncomingBatch(
       }
     }
 
+    // Persist the device's own runs, but only for rows this batch actually
+    // inserted: a replayed batch must not inflate the run log with duplicates.
+    if (reportedRuns.length > 0 && acceptedMessages.length > 0) {
+      const acceptedIds = new Set(acceptedMessages.map((m) => m.localId));
+      const rows = reportedRuns.filter((run) => acceptedIds.has(run.localId));
+      if (rows.length > 0) {
+        const now = Date.now();
+        const stmt = env.DB.prepare(
+          `INSERT INTO flow_runs (device_id, local_id, flow_id, flow_version, outcome, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(device_id, local_id, flow_id, flow_version) DO NOTHING`
+        );
+        try {
+          await env.DB.batch(
+            rows.map((run) =>
+              stmt.bind(deviceId, run.localId, run.flowId, run.flowVersion, run.outcome, now)
+            )
+          );
+        } catch (error) {
+          // Recording is best-effort: the messages are already durable, and the
+          // worst case is the fallback running a flow the device also ran.
+          console.error(`[flow] could not record device runs: ${String(error)}`);
+        }
+      }
+    }
+
     // Flow fallback, only for rows that were actually inserted. A retried batch
     // is all duplicates, so it cannot send a second reply. A failure here must
     // not fail the upload: the messages are already durable.
@@ -235,11 +308,17 @@ export async function handleMessagesPurge(env: Env, requestUrl: URL): Promise<Re
   if (!deviceId) return err("bad_request", 400);
   if (!RE_DEVICE_ID.test(deviceId)) return err("bad_request", 400);
 
-  const result = await env.DB.prepare(`DELETE FROM messages WHERE device_id = ?`)
-    .bind(deviceId)
-    .run();
+  // Flow-run records describe messages, so they must not outlive them.
+  const [messages, runs] = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM messages WHERE device_id = ?`).bind(deviceId),
+    env.DB.prepare(`DELETE FROM flow_runs WHERE device_id = ?`).bind(deviceId),
+  ]);
 
-  return Response.json({ ok: true, deleted: Number(result.meta?.changes ?? 0) });
+  return Response.json({
+    ok: true,
+    deleted: Number(messages.meta?.changes ?? 0),
+    flow_runs_deleted: Number(runs.meta?.changes ?? 0),
+  });
 }
 
 /**

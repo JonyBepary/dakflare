@@ -8,6 +8,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{Message, Store, StoreError};
+use crate::flowrun::{RemoteFlow, run_flows};
 use crate::protocol::{DeviceClient, InboundMessage, ProtocolError};
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +30,10 @@ pub struct Injected {
     /// in the same response and is marked DISPATCHED by the DO. A later poll
     /// would not see it — this is the intended low-latency path.
     pub captured: Vec<Message>,
+    /// Messages the DEVICE produced by running its own flows.
+    pub device_sent: usize,
+    /// Messages the WORKER fallback produced (flows the device did not run).
+    pub fallback: usize,
 }
 
 /// "Receive" one SMS.
@@ -43,6 +48,7 @@ pub async fn inject_inbound(
     sender: &str,
     body: &str,
     offline: bool,
+    flows: Option<&[RemoteFlow]>,
 ) -> Result<Injected, CarrierError> {
     let local_id = format!("sim-{}", random_hex(8)?);
     let message = store
@@ -56,12 +62,39 @@ pub async fn inject_inbound(
             accepted: 0,
             duplicates: 0,
             captured: Vec::new(),
+            device_sent: 0,
+            fallback: 0,
         });
     }
 
+    let client = client.expect("checked above");
+
+    // Device-first: run the flows here, before the upload, so the run can be
+    // reported in the same request and the Worker fallback stays out of the way.
+    let mut captured: Vec<Message> = Vec::new();
+    let mut runs = Vec::new();
+    if let Some(flows) = flows {
+        if !flows.is_empty() {
+            let local = run_flows(flows, &local_id, sender, body);
+            for action in &local.actions {
+                // `Action` has one variant today; an explicit match keeps new
+                // action types from being silently ignored when they land.
+                match action {
+                    dakflare_flow::Action::SendSms { to, body } => {
+                        captured.push(
+                            store
+                                .record_message(device_id, "out", to, body, "sent", None)
+                                .await?,
+                        );
+                    }
+                }
+            }
+            runs = local.reports;
+        }
+    }
+
     let response = client
-        .expect("checked above")
-        .upload_inbound(
+        .upload_inbound_with_runs(
             &[InboundMessage {
                 local_id,
                 sender: sender.to_string(),
@@ -69,6 +102,7 @@ pub async fn inject_inbound(
                 received_at: now_ms(),
             }],
             &[],
+            &runs,
         )
         .await?;
 
@@ -82,8 +116,12 @@ pub async fn inject_inbound(
         store.set_message_state(&message.id, "uploaded").await?;
     }
 
+    // Fallback replies (flows the device did not run) arrive in this response.
+    let device_sent = captured.len();
     let commands = response.get("commands").cloned().unwrap_or(serde_json::Value::Null);
-    let captured = capture_commands(store, client.expect("checked above"), device_id, &commands).await?;
+    let fallback_messages = capture_commands(store, client, device_id, &commands).await?;
+    let fallback = fallback_messages.len();
+    captured.extend(fallback_messages);
 
     Ok(Injected {
         message,
@@ -91,6 +129,8 @@ pub async fn inject_inbound(
         accepted,
         duplicates,
         captured,
+        device_sent,
+        fallback,
     })
 }
 
@@ -196,7 +236,7 @@ mod tests {
             .unwrap();
 
         let injected =
-            inject_inbound(&store, None, &device.device_id, "+15550001111", "CODE 483920", true)
+            inject_inbound(&store, None, &device.device_id, "+15550001111", "CODE 483920", true, None)
                 .await
                 .unwrap();
 

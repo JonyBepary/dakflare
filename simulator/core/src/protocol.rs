@@ -192,19 +192,16 @@ impl DeviceClient {
 
     /* ---- device: signed requests ---------------------------------------- */
 
-    async fn signed_post(&self, path: &str, body: Value) -> Result<Value, ProtocolError> {
-        let body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| ProtocolError::Shape(format!("serialize: {e}")))?;
+    fn signed_headers(&self, method: &str, path: &str, body: &[u8]) -> Result<HeaderMap, ProtocolError> {
         let signed = sign_request(
             &self.device_id,
             &self.private_key_pkcs8_pem,
-            "POST",
+            method,
             path,
-            &body_bytes,
+            body,
         )?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             HeaderName::from_static("x-device-id"),
             header_value(&self.device_id)?,
@@ -221,6 +218,26 @@ impl DeviceClient {
             HeaderName::from_static("x-signature"),
             header_value(&signed.signature_b64)?,
         );
+        Ok(headers)
+    }
+
+    async fn decode(response: reqwest::Response) -> Result<Value, ProtocolError> {
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(ProtocolError::Status {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        serde_json::from_str(&text).map_err(|e| ProtocolError::Shape(format!("{e}: {text}")))
+    }
+
+    async fn signed_post(&self, path: &str, body: Value) -> Result<Value, ProtocolError> {
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProtocolError::Shape(format!("serialize: {e}")))?;
+        let mut headers = self.signed_headers("POST", path, &body_bytes)?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let res = self
             .http
@@ -229,16 +246,31 @@ impl DeviceClient {
             .body(body_bytes)
             .send()
             .await?;
+        Self::decode(res).await
+    }
 
-        let status = res.status();
-        let text = res.text().await?;
-        if !status.is_success() {
-            return Err(ProtocolError::Status {
-                status: status.as_u16(),
-                body: text,
-            });
+    /// Signed GETs sign an empty body (§1.2).
+    async fn signed_get(&self, path: &str) -> Result<Value, ProtocolError> {
+        let headers = self.signed_headers("GET", path, b"")?;
+        let res = self.http.get(self.target.url(path)).headers(headers).send().await?;
+        Self::decode(res).await
+    }
+
+    /// `GET /v1/flows` — the flows this device runs locally.
+    pub async fn fetch_flows(&self) -> Result<Vec<crate::flowrun::RemoteFlow>, ProtocolError> {
+        let value = self.signed_get("/v1/flows").await?;
+        let list = value
+            .get("flows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProtocolError::Shape("no flows array in response".into()))?;
+
+        let mut flows = Vec::with_capacity(list.len());
+        for entry in list {
+            let parsed: crate::flowrun::RemoteFlow = serde_json::from_value(entry.clone())
+                .map_err(|e| ProtocolError::Shape(format!("flow shape: {e}")))?;
+            flows.push(parsed);
         }
-        serde_json::from_str(&text).map_err(|e| ProtocolError::Shape(format!("{e}: {text}")))
+        Ok(flows)
     }
 
     /// `POST /v1/sms/outgoing/poll` — returns the `commands` array.
@@ -258,6 +290,17 @@ impl DeviceClient {
         messages: &[InboundMessage],
         ack_command_ids: &[String],
     ) -> Result<Value, ProtocolError> {
+        self.upload_inbound_with_runs(messages, ack_command_ids, &[]).await
+    }
+
+    /// Upload with the device's own flow runs attached, so the Worker fallback
+    /// can skip them.
+    pub async fn upload_inbound_with_runs(
+        &self,
+        messages: &[InboundMessage],
+        ack_command_ids: &[String],
+        runs: &[crate::flowrun::FlowRunReport],
+    ) -> Result<Value, ProtocolError> {
         let payload: Vec<Value> = messages
             .iter()
             .map(|m| {
@@ -270,11 +313,24 @@ impl DeviceClient {
             })
             .collect();
 
-        self.signed_post(
-            "/v1/sms/incoming/batch",
-            json!({ "messages": payload, "ack_command_ids": ack_command_ids }),
-        )
-        .await
+        let runs_payload: Vec<Value> = runs
+            .iter()
+            .map(|run| {
+                json!({
+                    "local_id": run.local_id,
+                    "flow_id": run.flow_id,
+                    "flow_version": run.flow_version,
+                    "outcome": run.outcome,
+                })
+            })
+            .collect();
+
+        let mut body = json!({ "messages": payload, "ack_command_ids": ack_command_ids });
+        if let Some(map) = body.as_object_mut() {
+            map.insert("flow_runs".into(), Value::Array(runs_payload));
+        }
+
+        self.signed_post("/v1/sms/incoming/batch", body).await
     }
 
     /* ---- admin: cleanup -------------------------------------------------- */
