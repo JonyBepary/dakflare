@@ -4,12 +4,13 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { deleteSession, setUnauthorizedHandler } from '$lib/api';
-	import { formatAbsolute, formatRelative } from '$lib/format';
+	import { formatAbsolute } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import Brand from '$lib/components/Brand.svelte';
 	import AlertBanner from '$lib/components/AlertBanner.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
+	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
@@ -165,7 +166,7 @@
 				<p class="session-line" title={session.expiresAt ? formatAbsolute(session.expiresAt) : undefined}>
 					<span class="session-dot"></span>
 					{#if session.expiresAt}
-						<span>session · {formatRelative(session.expiresAt)}</span>
+						<span>session · <RelativeTime value={session.expiresAt} /></span>
 					{:else}
 						<span>session active</span>
 					{/if}

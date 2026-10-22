@@ -84,8 +84,10 @@ statement of the pipeline above. Neither tab is presented as the default: the di
 latency/offline, not difficulty. Cross-links: a rule's test panel links to workflows; a
 workflow's simulation panel links to rules.
 
-Devices are named. `label` is captured at pairing (app) or minting (console), persisted in
-D1, and shown wherever a device id appears. An id is secondary, monospaced, copyable.
+Devices are named. `label` is captured from the device at pairing (never invented by
+the console) and shown wherever a device id appears; a device that has never reported one
+keeps its id as the primary text. A re-pair that reports no label preserves the existing
+one. An operator-facing rename is not exposed yet.
 
 ---
 

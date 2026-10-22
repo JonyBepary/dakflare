@@ -41,6 +41,12 @@
 	let refreshing = $state(false);
 	let statusesLoading = $state(false);
 	let error = $state<string | null>(null);
+	let refreshError = $state<string | null>(null);
+	let lastRefreshedAt = $state<number | null>(null);
+	let refreshInFlight = false;
+	let fleetAttempted = false;
+
+	const REFRESH_MS = 30_000;
 
 	let mintOpen = $state(false);
 	let purpose = $state<'enroll' | 'rotate'>('enroll');
@@ -123,27 +129,40 @@
 			.join(' ') || undefined
 	);
 
-	async function load() {
-		if (devices.length > 0) refreshing = true;
-		else loading = true;
-		error = null;
+	async function load(background = false) {
+		if (refreshInFlight) return;
+		refreshInFlight = true;
+		if (!fleetAttempted) loading = true;
+		else if (!background) refreshing = true;
 		try {
-			devices = await getDevices();
-			void loadStatuses(devices);
+			const list = await getDevices();
+			devices = list;
+			await loadStatuses(list, background);
+			lastRefreshedAt = Date.now();
+			refreshError = null;
+			error = null;
 		} catch (failure) {
-			error = describeError(failure);
+			if (fleetAttempted) {
+				// Keep the rows that are on screen; only the freshness note changes.
+				refreshError = describeError(failure);
+			} else {
+				error = describeError(failure);
+			}
 		} finally {
 			loading = false;
 			refreshing = false;
+			refreshInFlight = false;
+			fleetAttempted = true;
 		}
 	}
 
-	async function loadStatuses(list: Device[]) {
+	async function loadStatuses(list: Device[], quiet = false) {
 		if (list.length === 0) {
 			statuses = {};
+			if (!quiet) statusesLoading = false;
 			return;
 		}
-		statusesLoading = true;
+		if (!quiet) statusesLoading = true;
 		const results = await Promise.all(
 			list.map(async (device) => {
 				try {
@@ -155,7 +174,7 @@
 			})
 		);
 		statuses = Object.fromEntries(results);
-		statusesLoading = false;
+		if (!quiet) statusesLoading = false;
 	}
 
 	async function openMint(
@@ -376,7 +395,20 @@
 				openDetail(requestedDevice);
 			}
 		})();
-		return () => stopWatching();
+
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible') void load(true);
+		}, REFRESH_MS);
+		const onVisible = () => {
+			if (document.visibilityState === 'visible') void load(true);
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
+		return () => {
+			stopWatching();
+			clearInterval(timer);
+			document.removeEventListener('visibilitychange', onVisible);
+		};
 	});
 </script>
 
@@ -412,6 +444,12 @@
 		no contact recorded. Wake is <span class="mono">push</span> with an FCM token, otherwise
 		<span class="mono">poll-only</span>.
 	</p>
+
+	{#if refreshError && lastRefreshedAt}
+		<p class="refresh-note" role="status" title={refreshError}>
+			last refreshed <RelativeTime value={lastRefreshedAt} /> · refresh failed
+		</p>
+	{/if}
 
 	<div class="stack">
 		{#if revokedNotice}
@@ -955,6 +993,14 @@
 		margin: -4px 0 var(--s-4);
 		font-size: 11.5px;
 		line-height: 1.6;
+		color: var(--ink-3);
+	}
+
+	.refresh-note {
+		margin: -8px 0 var(--s-4);
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		line-height: 1.45;
 		color: var(--ink-3);
 	}
 

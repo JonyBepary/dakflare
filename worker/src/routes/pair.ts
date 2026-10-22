@@ -299,8 +299,10 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
        public_key = excluded.public_key,
        fcm_token  = excluded.fcm_token,
        last_seen  = excluded.last_seen,
-       label      = excluded.label,
-       sim_slot   = excluded.sim_slot`
+       -- A re-pair that does not report a label must not erase one an operator
+       -- set (or a previous build reported). Null means "unknown", not "clear".
+       label      = COALESCE(excluded.label, devices.label),
+       sim_slot   = COALESCE(excluded.sim_slot, devices.sim_slot)`
   )
     .bind(deviceId, publicKeySpki, fcmToken, now, now, label, simSlot)
     .run();

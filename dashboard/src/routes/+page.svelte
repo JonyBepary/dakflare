@@ -44,6 +44,13 @@
 	let fleetStatuses = $state<Record<string, DeviceStatus | null>>({});
 	let fleetLoading = $state(true);
 	let fleetError = $state<string | null>(null);
+	let healthRefreshError = $state<string | null>(null);
+	let fleetRefreshError = $state<string | null>(null);
+	let healthInFlight = false;
+	let fleetInFlight = false;
+	let fleetAttempted = false;
+
+	const REFRESH_MS = 30_000;
 
 	const fleetStates = $derived(
 		devices.map((device) =>
@@ -79,6 +86,13 @@
 	});
 
 	const openAlerts = $derived(health?.open_alerts ?? health?.counts?.open_alerts ?? 0);
+
+	const refreshNote = $derived.by(() => {
+		if (healthRefreshError && fleetRefreshError) return 'health and fleet refresh failed';
+		if (healthRefreshError) return 'health refresh failed';
+		if (fleetRefreshError) return 'fleet refresh failed';
+		return null;
+	});
 
 	const missingCapabilities = $derived(
 		(health?.missing_bindings ?? []).filter((key) => !OPTIONAL_BINDINGS.has(key))
@@ -140,30 +154,37 @@
 			});
 	});
 
-	async function load() {
-		if (health) refreshing = true;
-		else loading = true;
-		error = null;
+	async function loadHealth(): Promise<void> {
+		if (healthInFlight) return;
+		healthInFlight = true;
+		const hadHealth = health !== null;
+		if (!hadHealth) loading = true;
 		try {
 			const result = await getHealth();
 			health = result.health;
 			checkedAt = result.health.checked_at ?? Date.now();
+			error = null;
+			healthRefreshError = null;
 		} catch (failure) {
-			error = describeError(failure);
+			// A refresh must never blank a page that already has values; the
+			// initial failure still gets the full diagnostic panel.
+			if (hadHealth) healthRefreshError = describeError(failure);
+			else error = describeError(failure);
 		} finally {
+			healthInFlight = false;
 			loading = false;
-			refreshing = false;
 		}
 	}
 
 	/**
 	 * Fleet reachability is a separate read from deployment health. A health
 	 * failure must not hide a dead fleet, and a healthy Worker must not imply a
-	 * reachable phone.
+	 * reachable phone. Background failures keep the last known fleet.
 	 */
-	async function loadFleet() {
-		fleetLoading = true;
-		fleetError = null;
+	async function loadFleet(): Promise<void> {
+		if (fleetInFlight) return;
+		fleetInFlight = true;
+		if (!fleetAttempted) fleetLoading = true;
 		try {
 			const list = await getDevices();
 			const pairs = await Promise.all(
@@ -177,28 +198,54 @@
 			);
 			devices = list;
 			fleetStatuses = Object.fromEntries(pairs);
+			fleetError = null;
+			fleetRefreshError = null;
 		} catch (failure) {
-			devices = [];
-			fleetStatuses = {};
-			fleetError = describeError(failure);
+			if (fleetAttempted) {
+				fleetRefreshError = describeError(failure);
+			} else {
+				devices = [];
+				fleetStatuses = {};
+				fleetError = describeError(failure);
+			}
 		} finally {
 			fleetLoading = false;
+			fleetInFlight = false;
+			fleetAttempted = true;
 		}
 	}
 
-	function refreshAll() {
-		void load();
-		void loadFleet();
+	async function refreshAll(manual = false): Promise<void> {
+		if (healthInFlight || fleetInFlight) return;
+		if (manual) refreshing = true;
+		try {
+			await Promise.all([loadHealth(), loadFleet()]);
+		} finally {
+			if (manual) refreshing = false;
+		}
 	}
 
 	onMount(() => {
-		void load();
-		void loadFleet();
+		void refreshAll();
+
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible') void refreshAll();
+		}, REFRESH_MS);
+		const onVisible = () => {
+			if (document.visibilityState === 'visible') void refreshAll();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
 		const onAlertsChanged = () => {
-			void load();
+			void loadHealth();
 		};
 		window.addEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
-		return () => window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+
+		return () => {
+			clearInterval(timer);
+			document.removeEventListener('visibilitychange', onVisible);
+			window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+		};
 	});
 </script>
 
@@ -213,14 +260,19 @@
 		description="Live health, schema and capability state for this deployment."
 	>
 		{#if checkedAt}
-			<span class="checked mono" title={formatAbsolute(checkedAt)}>
-				checked {formatClock(checkedAt)}
+			<span
+				class="checked mono"
+				class:has-error={refreshNote}
+				title={refreshNote ?? formatAbsolute(checkedAt)}
+			>
+				last refreshed <RelativeTime value={checkedAt} />
+				{#if refreshNote}<span class="refresh-failure"> · {refreshNote}</span>{/if}
 			</span>
 		{/if}
 		<button
 			type="button"
 			class="btn"
-			onclick={refreshAll}
+			onclick={() => void refreshAll(true)}
 			disabled={loading || refreshing}
 			aria-busy={refreshing}
 		>
@@ -234,7 +286,7 @@
 			<div class="panel-body stack">
 				<Notice tone="danger" title="Health check failed">{error}</Notice>
 				<div class="row">
-					<button type="button" class="btn btn-primary" onclick={() => void load()}>
+					<button type="button" class="btn btn-primary" onclick={() => void refreshAll()}>
 						<Icon name="refresh" size={14} /> Try again
 					</button>
 				</div>
