@@ -38,13 +38,22 @@ class MainActivity : TauriActivity() {
     // The content view may already be attached, so ask for an explicit dispatch.
     ViewCompat.requestApplyInsets(content)
 
-    // M5.1: a bare runtime prompt so the receiver can persist real SMS. The
-    // explanatory screen (and the SEND_SMS pair) belongs to M5.4; this request
-    // is asynchronous and never blocks the webview.
-    if (checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
-      requestPermissions(arrayOf(Manifest.permission.RECEIVE_SMS)) { granted ->
+    // M5.2: the gateway needs both halves of the SMS role. Requesting them
+    // together avoids a second dialog: RECEIVE_SMS lets the manifest receiver
+    // run with the app closed, SEND_SMS lets it answer a flow. The explanatory
+    // screen belongs to M5.4. This request is asynchronous and never blocks the
+    // webview.
+    val smsPermissions = arrayOf(
+      Manifest.permission.RECEIVE_SMS,
+      Manifest.permission.SEND_SMS,
+    )
+    val missing = smsPermissions.filter {
+      checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+    }
+    if (missing.isNotEmpty()) {
+      requestPermissions(missing.toTypedArray()) { granted ->
         if (granted != true) {
-          Log.w("DakFlareSms", "RECEIVE_SMS not granted; inbound SMS stays disabled")
+          Log.w("DakFlareSms", "SMS permissions not granted; gateway stays disabled")
         }
       }
     }

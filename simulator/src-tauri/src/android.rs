@@ -2,16 +2,17 @@
 //!
 //! A manifest `BroadcastReceiver` runs with no Tauri runtime and no webview, so
 //! it cannot use the command surface. It calls these functions directly on the
-//! packaged `libsimulator_lib.so`; the Rust core still owns the database.
+//! packaged `libsimulator_lib.so`; the Rust core still owns the database and the
+//! flow interpreter.
 //!
 //! Rules for this module:
-//! - Never log a sender or a body.
+//! - Never log a sender or a body (nor an action body).
 //! - Never let a panic cross the FFI boundary; every path returns a JSON string.
 //! - Take the app data directory from Kotlin. Never guess it.
 
 use std::path::Path;
 
-use dakflare_core::{CarrierError, Store, receive_offline};
+use dakflare_core::{Action, CarrierError, Store, receive_and_reply};
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
@@ -22,8 +23,9 @@ const DB_FILE: &str = "simulator.db";
 
 /// `dev.dakflare.simulator.bridge.NativeBridge.storeIncoming`
 ///
-/// Persists one inbound SMS in `<appDir>/simulator.db` and returns
-/// `{"ok":true,"device_id":"…","local_id":"…"}` or
+/// Persistence-only entry kept for callers built before M5.2. It runs the same
+/// path (the inbound row is written before any flow runs) but returns no
+/// actions: `{"ok":true,"device_id":"…","local_id":"…"}` or
 /// `{"ok":false,"error":"unpaired"|"bad_input"|"storage"}`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeIncoming(
@@ -34,24 +36,90 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeInco
     body: JString,
     received_at_ms: jlong,
 ) -> jstring {
-    // Top-level guard: no Rust panic may unwind across the JNI boundary. The
-    // inner guard exists so a failure inside the blocking store call keeps its
-    // own message; both end as the same `storage` JSON.
-    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match read_inputs(&mut env, &app_dir, &sender, &body, received_at_ms) {
+    let json = guarded(
+        &mut env,
+        &app_dir,
+        &sender,
+        &body,
+        received_at_ms,
+        "storeIncoming",
+        false,
+    );
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.processIncoming`
+///
+/// Persists one inbound SMS, runs the locally cached flows and returns the
+/// replies the receiver must send:
+/// `{"ok":true,"device_id":"…","local_id":"…","actions":[{"to":"…","body":"…"}]}`
+/// or `{"ok":false,"error":"unpaired"|"bad_input"|"storage"}`.
+///
+/// The inbound row is written before flows run, so a reply failure never loses
+/// the message.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIncoming(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    sender: JString,
+    body: JString,
+    received_at_ms: jlong,
+) -> jstring {
+    let json = guarded(
+        &mut env,
+        &app_dir,
+        &sender,
+        &body,
+        received_at_ms,
+        "processIncoming",
+        true,
+    );
+    to_jstring(&mut env, json)
+}
+
+/// Decode arguments, run the blocking call and render JSON. Both guards end as
+/// the same `storage` error, so a panic can never unwind across JNI.
+fn guarded(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    sender: &JString,
+    body: &JString,
+    received_at_ms: i64,
+    entry: &'static str,
+    include_actions: bool,
+) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_inputs(env, app_dir, sender, body, received_at_ms) {
             Ok((app_dir, sender, body)) => {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    store_blocking(&app_dir, &sender, &body, received_at_ms)
+                    incoming_blocking(&app_dir, &sender, &body, received_at_ms)
                 })) {
-                    Ok(Ok((device_id, local_id))) => serde_json::json!({
-                        "ok": true,
-                        "device_id": device_id,
-                        "local_id": local_id,
-                    })
-                    .to_string(),
+                    Ok(Ok(outcome)) => {
+                        let mut value = serde_json::json!({
+                            "ok": true,
+                            "device_id": outcome.device_id,
+                            "local_id": outcome.local_id,
+                        });
+                        if include_actions {
+                            // Only "to" and "body": the JNI contract stays small
+                            // and Kotlin never sees an action tag it must map.
+                            let actions: Vec<serde_json::Value> = outcome
+                                .actions
+                                .iter()
+                                .map(|action| match action {
+                                    Action::SendSms { to, body } => {
+                                        serde_json::json!({ "to": to, "body": body })
+                                    }
+                                })
+                                .collect();
+                            value["actions"] = serde_json::Value::Array(actions);
+                        }
+                        value.to_string()
+                    }
                     Ok(Err(code)) => error_json(code),
                     Err(_) => {
-                        eprintln!("[jni] storeIncoming panicked");
+                        eprintln!("[jni] {entry} panicked in the core");
                         error_json("storage")
                     }
                 }
@@ -61,11 +129,13 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeInco
     })) {
         Ok(json) => json,
         Err(_) => {
-            eprintln!("[jni] storeIncoming panicked before storage");
+            eprintln!("[jni] {entry} panicked before storage");
             error_json("storage")
         }
-    };
+    }
+}
 
+fn to_jstring(env: &mut JNIEnv, json: String) -> jstring {
     match env.new_string(json) {
         Ok(value) => value.into_raw(),
         // Only reachable if the JVM cannot allocate; there is no way to report
@@ -110,12 +180,18 @@ fn java_string(env: &mut JNIEnv, value: &JString) -> Result<String, &'static str
         .map_err(|_| "bad_input")
 }
 
-fn store_blocking(
+struct IncomingOutcome {
+    device_id: String,
+    local_id: String,
+    actions: Vec<Action>,
+}
+
+fn incoming_blocking(
     app_dir: &str,
     sender: &str,
     body: &str,
     received_at_ms: i64,
-) -> Result<(String, String), &'static str> {
+) -> Result<IncomingOutcome, &'static str> {
     let dir = Path::new(app_dir);
     std::fs::create_dir_all(dir).map_err(|_| "storage")?;
 
@@ -125,10 +201,14 @@ fn store_blocking(
         let store = Store::open(dir.join(DB_FILE))
             .await
             .map_err(|_| "storage")?;
-        let message = receive_offline(&store, None, sender, body, received_at_ms)
+        let (message, actions) = receive_and_reply(&store, None, sender, body, received_at_ms)
             .await
             .map_err(map_carrier_error)?;
-        Ok((message.device_id, message.local_id.unwrap_or_default()))
+        Ok(IncomingOutcome {
+            device_id: message.device_id,
+            local_id: message.local_id.unwrap_or_default(),
+            actions,
+        })
     })
 }
 

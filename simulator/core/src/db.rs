@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libsql::{Builder, Database, params};
 use serde::{Deserialize, Serialize};
 
+use crate::flowrun::RemoteFlow;
 use crate::identity::{Identity, is_valid_device_id};
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +20,8 @@ pub enum StoreError {
     Database(#[from] libsql::Error),
     #[error("invalid device id: {0}")]
     InvalidDeviceId(String),
+    #[error("corrupt stored data: {0}")]
+    Corrupt(String),
     #[error("time went backwards")]
     Clock,
 }
@@ -99,6 +102,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // are mirrored after they are actually sent; a failed upload leaves the
         // flag at 0 so the next sync retries instead of losing history.
         "ALTER TABLE messages ADD COLUMN mirrored INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        8,
+        // The last successfully fetched flow set, so the Android receiver can
+        // run flows with no network and no webview. `(id, version)` is the key
+        // because an edited graph is a different flow; the table holds the set
+        // the server last served, not an append-only history.
+        "CREATE TABLE IF NOT EXISTS flows (
+            id         TEXT NOT NULL,
+            version    INTEGER NOT NULL,
+            graph      TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY (id, version)
+        )",
     ),
 ];
 
@@ -550,6 +567,62 @@ impl Store {
             .await?;
         Ok(affected > 0)
     }
+
+    /// Replace the cached flow set with the last successfully fetched one.
+    ///
+    /// The fetched list is authoritative: rows are inserted/updated in one
+    /// transaction and every row not in it is deleted. That is deliberate —
+    /// a flow deleted on the server must stop running on the phone, and a graph
+    /// version that is no longer served must not keep answering alongside the
+    /// current one. An empty list therefore clears the cache.
+    ///
+    /// Callers must only call this after a successful fetch. A failed fetch
+    /// leaves the previous set untouched for the next background run.
+    pub async fn replace_flows(&self, flows: &[RemoteFlow]) -> Result<(), StoreError> {
+        let fetched_at = now_ms()?;
+        let conn = self.db.connect()?;
+        // Atomic: a crash between delete and insert must not leave the receiver
+        // with no flows at all.
+        let tx = conn.transaction().await?;
+        tx.execute("DELETE FROM flows", ()).await?;
+        for flow in flows {
+            let graph = serde_json::to_string(&flow.graph)
+                .map_err(|e| StoreError::Corrupt(format!("flow graph: {e}")))?;
+            tx.execute(
+                "INSERT INTO flows (id, version, graph, fetched_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(id, version) DO UPDATE SET
+                     graph = excluded.graph,
+                     fetched_at = excluded.fetched_at",
+                params![flow.id.as_str(), flow.version, graph, fetched_at],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The flow set the background receiver executes. Empty until the first
+    /// successful fetch (see [`Store::replace_flows`]).
+    pub async fn load_flows(&self) -> Result<Vec<RemoteFlow>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query("SELECT id, version, graph FROM flows ORDER BY id, version", ())
+            .await?;
+
+        let mut flows = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let graph: String = row.get(2)?;
+            let graph = serde_json::from_str(&graph)
+                .map_err(|e| StoreError::Corrupt(format!("flow graph: {e}")))?;
+            flows.push(RemoteFlow {
+                id: row.get(0)?,
+                version: row.get(1)?,
+                graph,
+            });
+        }
+        Ok(flows)
+    }
 }
 
 fn random_hex(bytes: usize) -> Result<String, StoreError> {
@@ -701,5 +774,73 @@ mod tests {
         assert!(store.delete_device(&device.device_id).await.unwrap());
         assert!(store.list_devices().await.unwrap().is_empty());
         assert!(store.private_key(&device.device_id).await.unwrap().is_none());
+    }
+
+    fn flow(id: &str, version: i64, body: &str) -> RemoteFlow {
+        RemoteFlow {
+            id: id.into(),
+            version,
+            graph: serde_json::json!({
+                "nodes": [
+                    { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                    { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": body } },
+                    { "id": "e1", "type": "stop", "data": {} }
+                ],
+                "edges": [
+                    { "id": "a", "source": "t1", "target": "s1" },
+                    { "id": "b", "source": "s1", "target": "e1" }
+                ]
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn flows_persist_and_load_round_trip() {
+        let (_dir, store) = open_temp().await;
+        assert!(store.load_flows().await.unwrap().is_empty());
+
+        store
+            .replace_flows(&[flow("wf_a", 1, "first"), flow("wf_b", 3, "second")])
+            .await
+            .unwrap();
+
+        let loaded = store.load_flows().await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "wf_a");
+        assert_eq!(loaded[0].version, 1);
+        assert_eq!(loaded[0].graph["nodes"][1]["data"]["body"], "first");
+        assert_eq!(loaded[1].id, "wf_b");
+        assert_eq!(loaded[1].version, 3);
+
+        // The graph column stores JSON, not a Rust debug string: a real run must
+        // parse what was persisted.
+        let run = crate::run_flows(&loaded, "native-1", "+15550001111", "anything");
+        assert_eq!(run.actions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn replacing_flows_removes_vanished_ids_and_stale_versions() {
+        let (_dir, store) = open_temp().await;
+        store
+            .replace_flows(&[flow("wf_keep", 1, "v1"), flow("wf_gone", 1, "gone")])
+            .await
+            .unwrap();
+
+        // A deleted flow must stop running, and the same id served at a new
+        // version replaces the old graph instead of answering twice.
+        store
+            .replace_flows(&[flow("wf_keep", 2, "v2"), flow("wf_new", 1, "new")])
+            .await
+            .unwrap();
+
+        let loaded = store.load_flows().await.unwrap();
+        let ids: Vec<&str> = loaded.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["wf_keep", "wf_new"]);
+        assert_eq!(loaded[0].version, 2);
+        assert_eq!(loaded[0].graph["nodes"][1]["data"]["body"], "v2");
+
+        // An empty fetched set clears the cache rather than reviving old rows.
+        store.replace_flows(&[]).await.unwrap();
+        assert!(store.load_flows().await.unwrap().is_empty());
     }
 }

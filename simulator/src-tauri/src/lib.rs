@@ -317,7 +317,16 @@ async fn carrier_inject(
     // An empty list (or a sync failure) simply leaves the Worker as the engine.
     let flows = match client.as_ref() {
         Some(client) => match client.fetch_flows().await {
-            Ok(flows) => Some(flows),
+            Ok(flows) => {
+                // The Android receiver runs with no network and no webview, so
+                // the last good set must live in the local store. Persisting
+                // only on success is what makes a failed fetch harmless: the
+                // previous rows stay in place for the background path.
+                if let Err(error) = state.store.replace_flows(&flows).await {
+                    eprintln!("[carrier] flow persist failed: {error}");
+                }
+                Some(flows)
+            }
             Err(error) => {
                 eprintln!("[carrier] flow sync failed: {error}");
                 None

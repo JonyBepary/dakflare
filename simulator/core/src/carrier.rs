@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use dakflare_flow::Action;
+
 use crate::db::{Message, Store, StoreError};
 use crate::flowrun::{RemoteFlow, run_flows};
 use crate::protocol::{DeviceClient, InboundMessage, OutboundReport, ProtocolError};
@@ -99,6 +101,94 @@ pub async fn receive_offline(
             None => Err(CarrierError::Store(error)),
         },
     }
+}
+
+/// Receive one SMS and run the locally persisted flows against it.
+///
+/// The inbound row is written first, through [`receive_offline`], so a failure
+/// while running flows never loses the message. Every `Action::SendSms` is then
+/// recorded as an outbound `queued` row with a local id derived from the inbound
+/// row and the action's position: the existing mirror path uploads it later, and
+/// a re-delivered broadcast finds those rows already there.
+///
+/// Only actions recorded by this call are returned. A re-delivered broadcast
+/// therefore returns no actions, which stops the Android receiver from sending a
+/// second SMS for the same message (the retry queue is M5.5's job).
+pub async fn receive_and_reply(
+    store: &Store,
+    device_id: Option<&str>,
+    sender: &str,
+    body: &str,
+    received_at_ms: i64,
+) -> Result<(Message, Vec<Action>), CarrierError> {
+    let message = receive_offline(store, device_id, sender, body, received_at_ms).await?;
+
+    // Always set by `receive_offline`; a row without one has no stable dedupe
+    // key, so it is stored but not answered.
+    let Some(inbound_local_id) = message.local_id.clone() else {
+        return Ok((message, Vec::new()));
+    };
+
+    let flows = match store.load_flows().await {
+        Ok(flows) => flows,
+        Err(error) => {
+            // The inbound row is already written; an unreadable flow cache is a
+            // reason not to answer, never a reason to lose the message.
+            eprintln!("[carrier] stored flows unavailable: {error}");
+            return Ok((message, Vec::new()));
+        }
+    };
+    if flows.is_empty() {
+        return Ok((message, Vec::new()));
+    }
+
+    let run = run_flows(&flows, &inbound_local_id, &message.peer, &message.body);
+    let mut actions = Vec::new();
+    for (index, action) in run.actions.iter().enumerate() {
+        let Action::SendSms { to, body } = action;
+        let outbound_local_id = reply_local_id(&inbound_local_id, index);
+
+        if store
+            .message_by_local_id(&message.device_id, &outbound_local_id)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+
+        match store
+            .record_message(
+                &message.device_id,
+                "out",
+                to,
+                body,
+                "queued",
+                Some(&outbound_local_id),
+            )
+            .await
+        {
+            Ok(_) => actions.push(action.clone()),
+            // A duplicate broadcast racing this one hit UNIQUE(device_id,
+            // local_id). The winner already represents the reply.
+            Err(error) => {
+                if store
+                    .message_by_local_id(&message.device_id, &outbound_local_id)
+                    .await?
+                    .is_none()
+                {
+                    return Err(CarrierError::Store(error));
+                }
+            }
+        }
+    }
+
+    Ok((message, actions))
+}
+
+/// The deterministic outbound id for one reply. Same inbound delivery and same
+/// action index always resolve to the same row.
+fn reply_local_id(inbound_local_id: &str, action_index: usize) -> String {
+    format!("{inbound_local_id}-reply-{action_index}")
 }
 
 /// Pick the device an inbound message belongs to. No "default device" flag
@@ -542,6 +632,144 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, CarrierError::InvalidInput("sender")));
+    }
+
+    fn reply_flow(id: &str, version: i64, body: &str) -> crate::flowrun::RemoteFlow {
+        crate::flowrun::RemoteFlow {
+            id: id.into(),
+            version,
+            graph: serde_json::json!({
+                "nodes": [
+                    { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                    { "id": "s1", "type": "send_sms", "data": {
+                        "to": "{{sender}}", "body": body } },
+                    { "id": "e1", "type": "stop", "data": {} }
+                ],
+                "edges": [
+                    { "id": "a", "source": "t1", "target": "s1" },
+                    { "id": "b", "source": "s1", "target": "e1" }
+                ]
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_and_reply_records_one_queued_outbound_row() {
+        let (_dir, store, device) = paired_store().await;
+        store
+            .replace_flows(&[reply_flow("wf_reply", 1, "got it")])
+            .await
+            .unwrap();
+        let received_at = 1_776_470_400_000;
+
+        let (message, actions) =
+            receive_and_reply(&store, None, "+15550001111", "ping", received_at)
+                .await
+                .unwrap();
+
+        assert_eq!(message.direction, "in");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0],
+            Action::SendSms {
+                to: "+15550001111".into(),
+                body: "got it".into(),
+            }
+        );
+
+        let outbound = store
+            .list_unmirrored_outbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].peer, "+15550001111");
+        assert_eq!(outbound[0].body, "got it");
+        assert_eq!(outbound[0].state, "queued");
+        let expected = format!(
+            "{}-reply-0",
+            message.local_id.as_deref().expect("inbound local id")
+        );
+        assert_eq!(outbound[0].local_id.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn redelivered_broadcast_does_not_reply_twice() {
+        let (_dir, store, device) = paired_store().await;
+        store
+            .replace_flows(&[reply_flow("wf_reply", 1, "got it")])
+            .await
+            .unwrap();
+        let received_at = 1_776_470_400_000;
+
+        let (_, first) = receive_and_reply(&store, None, "+15550001111", "ping", received_at)
+            .await
+            .unwrap();
+        let (again, second) = receive_and_reply(&store, None, "+15550001111", "ping", received_at)
+            .await
+            .unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "a re-delivery must not send a second reply"
+        );
+        assert_eq!(again.state, "received");
+
+        let rows = store.list_messages(&device.device_id, 50).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one inbound and one outbound row, never two of each"
+        );
+        let outbound = store
+            .list_unmirrored_outbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(outbound.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_stored_flows_means_no_reply_but_the_message_is_kept() {
+        let (_dir, store, device) = paired_store().await;
+
+        let (message, actions) =
+            receive_and_reply(&store, None, "+15550001111", "ping", 1_776_470_400_000)
+                .await
+                .unwrap();
+
+        assert!(actions.is_empty());
+        assert_eq!(message.direction, "in");
+        assert_eq!(
+            store
+                .list_messages(&device.device_id, 50)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .list_unmirrored_outbound(&device.device_id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flow_deleted_from_the_fetched_set_stops_replying() {
+        let (_dir, store, _device) = paired_store().await;
+        store
+            .replace_flows(&[reply_flow("wf_reply", 1, "got it")])
+            .await
+            .unwrap();
+        // Simulates the next successful sync after the flow was deleted.
+        store.replace_flows(&[]).await.unwrap();
+
+        let (_, actions) = receive_and_reply(&store, None, "+15550001111", "ping", 42)
+            .await
+            .unwrap();
+        assert!(actions.is_empty());
     }
 
     #[tokio::test]

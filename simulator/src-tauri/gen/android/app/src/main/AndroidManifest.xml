@@ -3,6 +3,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Inbound SMS. The receiver is manifest-declared so it runs with no Activity. -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <!-- Outbound flow replies from SmsReceiver; requested with RECEIVE_SMS. -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <!--
+        Own-number sources for the self-number guard (M5.4 requests it at
+        runtime). Declared now so the guard can read them once granted; without
+        it every source is empty and the guard reports itself as unknown.
+    -->
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
