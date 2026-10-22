@@ -512,15 +512,12 @@
 							<p class="field-error span-3" id="scope-error" role="alert">{scopeError}</p>
 						{/if}
 
-						<p class="hint span-3">
-							{#if purpose === 'rotate'}
-								Rotation replaces the key of an existing device and evicts the previous holder
-								immediately. The old phone stops authenticating.
-							{:else}
+						{#if purpose !== 'rotate'}
+							<p class="hint span-3">
 								An enrollment code registers a device that is not yet paired. It cannot take over an
 								existing device id.
-							{/if}
-						</p>
+							</p>
+						{/if}
 
 						<div class="form-foot">
 							<button
@@ -980,6 +977,19 @@
 	.mint-panel {
 		border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
 		scroll-margin-top: 16px;
+	}
+
+	.rotate-note {
+		margin-top: 7px;
+		padding: 7px 8px;
+		border: 1px solid color-mix(in srgb, var(--warn) 28%, var(--line));
+		border-left-width: 2px;
+		border-left-color: var(--warn);
+		border-radius: var(--r-sm);
+		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
+		color: var(--ink-2);
+		font-size: 11px;
+		line-height: 1.45;
 	}
 
 	@media (max-width: 900px) {
