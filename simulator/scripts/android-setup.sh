@@ -13,6 +13,10 @@
 #
 set -euo pipefail
 
+# rustup/cargo usually live in ~/.cargo/bin, which a non-login shell may not
+# have on PATH (this bit the first run).
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
+
 SDK_ROOT="${ANDROID_HOME:-$HOME/Android/Sdk}"
 JDK_ROOT="$HOME/.local/opt"
 NDK_MAJOR=27
@@ -118,7 +122,7 @@ export JAVA_HOME="$JDK_ROOT/jdk-17"
 export ANDROID_HOME="$SDK_ROOT"
 export ANDROID_SDK_ROOT="$SDK_ROOT"
 export NDK_HOME="$NDK_PATH"
-export PATH="\$JAVA_HOME/bin:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools:\$PATH"
+export PATH="\$JAVA_HOME/bin:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools:\$HOME/.cargo/bin:\$PATH"
 EOF
 
 echo "wrote $ENV_FILE"
