@@ -17,6 +17,6 @@ pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
 };
 pub use protocol::{
-    DeviceClient, InboundMessage, ProtocolError, SignedHeaders, Target, canonical_string,
-    sign_request,
+    DeviceClient, InboundMessage, PairLink, PairLinkError, ProtocolError, SignedHeaders, Target,
+    canonical_string, parse_pair_link, sign_request,
 };

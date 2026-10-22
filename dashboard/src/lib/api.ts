@@ -8,6 +8,7 @@
  */
 
 import type {
+	CommandInfo,
 	Device,
 	DeviceStatus,
 	Health,
@@ -195,6 +196,42 @@ export async function getMessages(
 export async function getRules(): Promise<Rule[]> {
 	const data = await get<{ rules: Rule[] }>('/v1/admin/rules');
 	return data.rules ?? [];
+}
+
+/* --------------------------------------------------------------- outbound */
+
+export async function sendSms(input: {
+	device_id: string;
+	to: string;
+	body: string;
+}): Promise<{ command_id: string }> {
+	return get<{ command_id: string }>('/v1/sms/send', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+/**
+ * Current state of one command. An unknown id is a successful read with
+ * `command: null` — only a missing `device_id` is a 404 — so the UI must not
+ * treat `null` as a transport failure.
+ */
+export async function getCommand(
+	deviceId: string,
+	commandId: string
+): Promise<CommandInfo | null> {
+	const params = new URLSearchParams({ device_id: deviceId });
+	const data = await get<{ command: CommandInfo | null }>(
+		`/v1/sms/commands/${encodeURIComponent(commandId)}?${params.toString()}`
+	);
+	return data.command ?? null;
+}
+
+export async function purgeMessages(
+	deviceId: string
+): Promise<{ ok: boolean; deleted: number; flow_runs_deleted: number }> {
+	const params = new URLSearchParams({ device_id: deviceId });
+	return get(`/v1/messages?${params.toString()}`, { method: 'DELETE' });
 }
 
 /* ---------------------------------------------------------------- workflows */

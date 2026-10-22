@@ -123,6 +123,23 @@ export ANDROID_HOME="$SDK_ROOT"
 export ANDROID_SDK_ROOT="$SDK_ROOT"
 export NDK_HOME="$NDK_PATH"
 export PATH="\$JAVA_HOME/bin:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools:\$HOME/.cargo/bin:\$PATH"
+
+# Rust cross-compilation does not infer the NDK toolchain from NDK_HOME: cargo
+# needs the clang wrappers and llvm-ar explicitly, or the link step fails with
+# "linker not found". API 24 is Tauri's minSdk. (Host tag is linux-x86_64.)
+export NDK_BIN="\$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+export CC_aarch64_linux_android="\$NDK_BIN/aarch64-linux-android24-clang"
+export AR_aarch64_linux_android="\$NDK_BIN/llvm-ar"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="\$CC_aarch64_linux_android"
+export CC_armv7_linux_androideabi="\$NDK_BIN/armv7a-linux-androideabi24-clang"
+export AR_armv7_linux_androideabi="\$NDK_BIN/llvm-ar"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="\$CC_armv7_linux_androideabi"
+export CC_i686_linux_android="\$NDK_BIN/i686-linux-android24-clang"
+export AR_i686_linux_android="\$NDK_BIN/llvm-ar"
+export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="\$CC_i686_linux_android"
+export CC_x86_64_linux_android="\$NDK_BIN/x86_64-linux-android24-clang"
+export AR_x86_64_linux_android="\$NDK_BIN/llvm-ar"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="\$CC_x86_64_linux_android"
 EOF
 
 echo "wrote $ENV_FILE"

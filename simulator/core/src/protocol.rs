@@ -15,6 +15,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -52,6 +53,137 @@ impl Target {
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
+}
+
+/* ---- onboarding links --------------------------------------------------- */
+
+/// Where a pairing code came from: a bare code, or an operator's deep link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairLink {
+    /// Worker base URL carried by the link (`u`); `None` for a bare code.
+    pub base_url: Option<String>,
+    /// The 12-character pairing code, normalized to uppercase.
+    pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PairLinkError {
+    #[error("paste a pairing code or a dakflare://pair link")]
+    Empty,
+    #[error("not a DakFlare pairing link: expected dakflare://pair?u=…&c=…")]
+    NotALink,
+    #[error("wrong link scheme: expected dakflare://pair")]
+    Scheme,
+    #[error("wrong link target: expected dakflare://pair")]
+    Host,
+    #[error("the link is missing its worker URL (u)")]
+    MissingUrl,
+    #[error("the link is missing its pairing code (c)")]
+    MissingCode,
+    #[error("the pairing code must be 12 hexadecimal characters")]
+    BadCode,
+    #[error("the link contains invalid percent-encoding")]
+    BadEncoding,
+}
+
+/// Parse what the user pasted: either a full `dakflare://pair?u=…&c=…` deep
+/// link, or a bare 12-character code.
+///
+/// Strict on purpose. The scheme must be `dakflare`, the host `pair`, and both
+/// `u` and `c` must be present and non-empty. Anything else is rejected rather
+/// than guessed at, so a mistyped link fails here with a readable message
+/// instead of as an opaque 401 from the Worker.
+pub fn parse_pair_link(input: &str) -> Result<PairLink, PairLinkError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(PairLinkError::Empty);
+    }
+
+    let Some((scheme, rest)) = input.split_once(':') else {
+        return Ok(PairLink {
+            base_url: None,
+            code: normalize_code(input)?,
+        });
+    };
+
+    if !scheme.eq_ignore_ascii_case("dakflare") {
+        return Err(PairLinkError::Scheme);
+    }
+    let Some(rest) = rest.strip_prefix("//") else {
+        return Err(PairLinkError::NotALink);
+    };
+
+    let (authority, tail) = match rest.find(['/', '?']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    if !authority.eq_ignore_ascii_case("pair") {
+        return Err(PairLinkError::Host);
+    }
+
+    // Only a bare `?query` (optionally behind one `/`) is a pairing link; a path
+    // segment means this is some other URL that merely looks similar.
+    let query = tail.strip_prefix('/').unwrap_or(tail);
+    let query = query.strip_prefix('?').ok_or(PairLinkError::NotALink)?;
+
+    let mut base_url = None;
+    let mut code = None;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(PairLinkError::NotALink);
+        };
+        let value = percent_decode(value)?;
+        match key {
+            "u" if base_url.is_none() => base_url = Some(value.trim().to_string()),
+            "c" if code.is_none() => code = Some(value),
+            _ => {}
+        }
+    }
+
+    let base_url = base_url
+        .filter(|value| !value.is_empty())
+        .ok_or(PairLinkError::MissingUrl)?;
+    let code = code.ok_or(PairLinkError::MissingCode)?;
+
+    Ok(PairLink {
+        base_url: Some(base_url),
+        code: normalize_code(&code)?,
+    })
+}
+
+fn normalize_code(input: &str) -> Result<String, PairLinkError> {
+    let code = input.trim();
+    if code.len() != 12 || !code.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PairLinkError::BadCode);
+    }
+    Ok(code.to_ascii_uppercase())
+}
+
+fn percent_decode(input: &str) -> Result<String, PairLinkError> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes
+                .get(index + 1)
+                .and_then(|b| (*b as char).to_digit(16))
+                .ok_or(PairLinkError::BadEncoding)?;
+            let low = bytes
+                .get(index + 2)
+                .and_then(|b| (*b as char).to_digit(16))
+                .ok_or(PairLinkError::BadEncoding)?;
+            out.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| PairLinkError::BadEncoding)
 }
 
 /// SHA-256 of the raw body bytes, lowercase hex.
@@ -608,6 +740,74 @@ mod tests {
     fn target_requires_a_url_scheme() {
         assert!(Target::new("https://example.workers.dev/", None).is_ok());
         assert!(Target::new("example.workers.dev", None).is_err());
+    }
+
+    #[test]
+    fn pairing_link_carries_the_worker_url_and_normalizes_the_code() {
+        let link = parse_pair_link(
+            "dakflare://pair?u=https%3A%2F%2Fdakflare.example.workers.dev&c=ab12cd34ef56",
+        )
+        .unwrap();
+        assert_eq!(
+            link.base_url.as_deref(),
+            Some("https://dakflare.example.workers.dev")
+        );
+        assert_eq!(link.code, "AB12CD34EF56");
+    }
+
+    #[test]
+    fn pairing_link_accepts_a_trailing_slash_and_unencoded_url() {
+        let link = parse_pair_link("dakflare://pair/?u=https://example.test/&c=001122334455").unwrap();
+        assert_eq!(link.base_url.as_deref(), Some("https://example.test/"));
+        assert_eq!(link.code, "001122334455");
+    }
+
+    #[test]
+    fn bare_codes_do_not_imply_a_target() {
+        let link = parse_pair_link("  ab12cd34ef56  ").unwrap();
+        assert_eq!(link.base_url, None);
+        assert_eq!(link.code, "AB12CD34EF56");
+    }
+
+    #[test]
+    fn pairing_links_are_strict() {
+        // Wrong scheme / host / path.
+        assert_eq!(
+            parse_pair_link("https://pair?u=https%3A%2F%2Fx&c=001122334455"),
+            Err(PairLinkError::Scheme)
+        );
+        assert_eq!(
+            parse_pair_link("dakflare://device?u=https%3A%2F%2Fx&c=001122334455"),
+            Err(PairLinkError::Host)
+        );
+        assert_eq!(
+            parse_pair_link("dakflare://pair/other?u=https%3A%2F%2Fx&c=001122334455"),
+            Err(PairLinkError::NotALink)
+        );
+        // Required parameters.
+        assert_eq!(
+            parse_pair_link("dakflare://pair?c=001122334455"),
+            Err(PairLinkError::MissingUrl)
+        );
+        assert_eq!(
+            parse_pair_link("dakflare://pair?u=https%3A%2F%2Fx"),
+            Err(PairLinkError::MissingCode)
+        );
+        assert_eq!(
+            parse_pair_link("dakflare://pair?u=&c=001122334455"),
+            Err(PairLinkError::MissingUrl)
+        );
+        // Code must be the 12-hex shape the Worker mints.
+        assert_eq!(
+            parse_pair_link("dakflare://pair?u=https%3A%2F%2Fx&c=1234"),
+            Err(PairLinkError::BadCode)
+        );
+        assert_eq!(parse_pair_link("nope"), Err(PairLinkError::BadCode));
+        assert_eq!(parse_pair_link("   "), Err(PairLinkError::Empty));
+        assert_eq!(
+            parse_pair_link("dakflare://pair?u=https%3A%2F%2Fx&c=%GG1122334455"),
+            Err(PairLinkError::BadEncoding)
+        );
     }
 }
 

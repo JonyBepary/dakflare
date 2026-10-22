@@ -32,11 +32,41 @@ export interface Device {
 	fcm_token: string | null;
 	paired_at: number;
 	last_seen: number;
+	/**
+	 * Not part of the current `/v1/devices` payload. Kept optional so the detail
+	 * panel can show an operator label the moment the API grows one, without a
+	 * second dashboard change.
+	 */
+	label?: string | null;
+	/** Also not reported by the gateway today; see `label`. */
+	sim_slot?: number | null;
 }
 
 export interface DeviceStatus {
 	ws_connected: boolean;
 	queue_depth: number;
+}
+
+/* ---------------------------------------------------------------- commands */
+
+export type CommandState =
+	| 'PENDING'
+	| 'DISPATCHED'
+	| 'ACKED_BY_DEVICE'
+	| 'SENT'
+	| 'DELIVERED'
+	| 'FAILED'
+	| 'EXPIRED';
+
+/** `GET /v1/sms/commands/:command_id` → `{ command }`. Unknown ids return `null`. */
+export interface CommandInfo {
+	command_id: string;
+	to: string;
+	body: string;
+	priority: string;
+	state: CommandState | string;
+	created_at: number;
+	expires_at: number;
 }
 
 export interface Message {

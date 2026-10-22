@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
 	import { describeError, getDevices, getDeviceStatus, getMessages } from '$lib/api';
 	import type { Device, DeviceStatus, Message } from '$lib/types';
@@ -11,6 +11,7 @@
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
+	import SendSmsForm from '$lib/components/SendSmsForm.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	const PAGE_SIZE = 50;
@@ -28,6 +29,10 @@
 	let messagesError = $state<string | null>(null);
 	let hasMore = $state(false);
 	let expanded = $state<Set<string>>(new Set());
+
+	let composeOpen = $state(false);
+	let composeDevice = $state('');
+	let composeButton = $state<HTMLButtonElement | null>(null);
 
 	const selectedDevice = $derived(devices.find((device) => device.device_id === selected) ?? null);
 	const shortDevice = $derived.by(() => {
@@ -125,6 +130,28 @@
 		expanded = next;
 	}
 
+	async function openCompose(): Promise<void> {
+		if (devices.length === 0) return;
+		if (!composeDevice) composeDevice = selected;
+		composeOpen = true;
+		await tick();
+		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		document
+			.getElementById('compose-panel')
+			?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+	}
+
+	function closeCompose(): void {
+		composeOpen = false;
+		void tick().then(() => composeButton?.focus());
+	}
+
+	/** Keep the log in step with a newly queued command. */
+	async function handleQueued(result: { command_id: string; device_id: string }): Promise<void> {
+		if (result.device_id === selected) await loadMessages(true);
+		else await chooseDevice(result.device_id);
+	}
+
 	onMount(() => {
 		void (async () => {
 			await loadDevices();
@@ -135,6 +162,8 @@
 					? requested
 					: devices[0].device_id;
 			syncUrl();
+			composeDevice = selected;
+			if (page.url.searchParams.get('compose') === '1') composeOpen = true;
 			await loadMessages(true);
 			void loadStatus();
 		})();
@@ -151,6 +180,17 @@
 		title="Message log"
 		description="Newest first, both directions, straight from the D1 ledger. Bodies are retained only for the configured window."
 	>
+		<button
+			type="button"
+			class="btn btn-primary"
+			bind:this={composeButton}
+			onclick={() => void openCompose()}
+			disabled={loadingDevices || devices.length === 0}
+			aria-expanded={composeOpen}
+			aria-controls={composeOpen ? 'compose-panel' : undefined}
+		>
+			<Icon name="send" size={14} /> Compose
+		</button>
 		<button
 			type="button"
 			class="btn"
@@ -199,6 +239,34 @@
 			</EmptyState>
 		</section>
 	{:else}
+		{#if composeOpen}
+			<section class="panel compose-panel" id="compose-panel" aria-labelledby="compose-heading">
+				<div class="panel-head">
+					<h2 class="panel-title" id="compose-heading">
+						<Icon name="send" size={14} /> Compose message
+					</h2>
+					<span class="spacer"></span>
+					<span class="panel-meta">outbound · queued on the device</span>
+					<button
+						type="button"
+						class="btn btn-ghost btn-icon btn-sm"
+						onclick={closeCompose}
+						aria-label="Close compose panel"
+					>
+						<Icon name="x" size={14} />
+					</button>
+				</div>
+				<div class="panel-body">
+					<SendSmsForm
+						devices={devices}
+						bind:deviceId={composeDevice}
+						onqueued={(result) => void handleQueued(result)}
+						autofocus
+					/>
+				</div>
+			</section>
+		{/if}
+
 		<section class="panel">
 			<div class="log-toolbar">
 				<div class="device-picker">
@@ -338,6 +406,28 @@
 </div>
 
 <style>
+	.compose-panel {
+		margin-bottom: var(--s-4);
+		border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+		scroll-margin-top: 16px;
+	}
+
+	.compose-panel .panel-head {
+		border-bottom-color: color-mix(in srgb, var(--accent) 20%, var(--line));
+	}
+
+	@media (max-width: 900px) {
+		.compose-panel {
+			scroll-margin-top: 128px;
+		}
+	}
+
+	@media (max-width: 520px) {
+		.compose-panel .panel-meta {
+			display: none;
+		}
+	}
+
 	.log-toolbar {
 		display: flex;
 		align-items: flex-end;

@@ -26,6 +26,7 @@
 		"#lib/*": "./src/lib/*"
 	},
 	"dependencies": {
-		"@xyflow/svelte": "^1.7.0"
+		"@xyflow/svelte": "^1.7.0",
+		"qrcode-generator": "^2.0.4"
 	}
 }

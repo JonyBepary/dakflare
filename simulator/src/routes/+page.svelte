@@ -36,7 +36,15 @@
 	let activity = $state<Record<string, string>>({});
 	let busy = $state<Record<string, boolean>>({});
 
+	let codeDeviceId = $state('');
+	let codeInput = $state('');
+	let pairingByCode = $state(false);
+	let pairNotice = $state<{ ok: boolean; text: string } | null>(null);
+
 	const configured = $derived(Boolean(target.base_url));
+	const canPairByCode = $derived(
+		Boolean(codeDeviceId) && codeInput.trim().length > 0 && !pairingByCode
+	);
 
 	type Message = {
 		id: string;
@@ -61,6 +69,9 @@
 	async function refresh() {
 		try {
 			devices = await invoke<Device[]>('list_devices');
+			if (!devices.some((d) => d.device_id === codeDeviceId)) {
+				codeDeviceId = devices[0]?.device_id ?? '';
+			}
 			error = '';
 		} catch (e) {
 			error = String(e);
@@ -118,6 +129,30 @@
 			error = String(e);
 		} finally {
 			creating = false;
+		}
+	}
+
+	async function pairWithCode(event: SubmitEvent) {
+		event.preventDefault();
+		const input = codeInput.trim();
+		if (!codeDeviceId || !input) return;
+
+		pairingByCode = true;
+		pairNotice = null;
+		try {
+			const message = await invoke<string>('pair_with_code', {
+				deviceId: codeDeviceId,
+				code: input
+			});
+			pairNotice = { ok: true, text: message };
+			// The code is spent; leaving it in the field invites a confusing retry.
+			codeInput = '';
+			// A link may have set the target, so keep the header in sync.
+			await loadTarget();
+		} catch (e) {
+			pairNotice = { ok: false, text: String(e) };
+		} finally {
+			pairingByCode = false;
 		}
 	}
 
@@ -270,7 +305,7 @@
 			</div>
 			<div class="field" style="margin-top: 0;">
 				<label for="admin-token">
-					Admin token {target.has_admin_token ? '(stored)' : '(needed to pair and clean up)'}
+					Admin token {target.has_admin_token ? '(stored)' : '(self-pair, purge and revoke only)'}
 				</label>
 				<input
 					id="admin-token"
@@ -295,6 +330,58 @@
 			</p>
 		{/if}
 	</form>
+</section>
+
+<section class="panel" style="margin-bottom: 16px;">
+	<h2>Pair with code</h2>
+	<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
+		Real onboarding: the operator mints a one-time code in the dashboard. Paste the code — or the
+		whole <code>dakflare://pair?u=…&amp;c=…</code> link, whose worker URL is saved as the target first.
+		No admin token is needed.
+	</p>
+
+	<form onsubmit={pairWithCode}>
+		<div class="grid" style="grid-template-columns: 220px minmax(0,1fr); margin-top: 10px;">
+			<div class="field" style="margin-top: 0;">
+				<label for="pair-device">Device</label>
+				<select id="pair-device" bind:value={codeDeviceId} disabled={devices.length === 0}>
+					{#each devices as device (device.device_id)}
+						<option value={device.device_id}>{device.label} · {device.device_id}</option>
+					{/each}
+				</select>
+			</div>
+			<div class="field" style="margin-top: 0;">
+				<label for="pair-code">Code or link</label>
+				<input
+					id="pair-code"
+					bind:value={codeInput}
+					placeholder="AB12CD34EF56 or dakflare://pair?u=…&c=…"
+					autocomplete="off"
+					spellcheck="false"
+					disabled={devices.length === 0}
+				/>
+			</div>
+		</div>
+
+		<div class="row" style="margin-top: 12px; justify-content: space-between;">
+			<small style="color: var(--ink-3)">
+				Single-use and short-lived. If it fails, mint a fresh code and retry.
+			</small>
+			<button class="primary" type="submit" disabled={!canPairByCode}>
+				{pairingByCode ? 'Pairing…' : 'Pair with code'}
+			</button>
+		</div>
+	</form>
+
+	{#if pairNotice}
+		<div
+			class={pairNotice.ok ? 'notice-ok' : 'error'}
+			role={pairNotice.ok ? 'status' : 'alert'}
+			aria-live="polite"
+		>
+			{pairNotice.text}
+		</div>
+	{/if}
 </section>
 
 <div class="grid">
@@ -347,6 +434,10 @@
 			<h2>Devices {loading ? '' : `· ${devices.length}`}</h2>
 			<button onclick={refresh} disabled={loading}>Refresh</button>
 		</div>
+		<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
+			Real phones onboard with a dashboard code above. <strong>Self-pair (admin)</strong> mints a
+			code locally with the stored admin token — lab use only.
+		</p>
 
 		{#if loading}
 			<p class="empty">Opening the local database…</p>
@@ -378,12 +469,13 @@
 					<div class="row" style="margin-top: 12px;">
 						<button
 							disabled={!configured || busy[device.device_id]}
+							title="Mints a code with the stored admin token. Real onboarding uses a dashboard code."
 							onclick={() =>
 								act(device.device_id, 'pair', async () =>
 									invoke<string>('pair_device', { deviceId: device.device_id })
 								)}
 						>
-							Pair
+							Self-pair (admin)
 						</button>
 						<button
 							disabled={!configured || busy[device.device_id]}

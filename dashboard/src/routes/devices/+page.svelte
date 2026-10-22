@@ -7,10 +7,12 @@
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
+	import DeviceDetail from '$lib/components/DeviceDetail.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import QrCode from '$lib/components/QrCode.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
@@ -43,6 +45,13 @@
 	let revoking = $state(false);
 	let revokeError = $state<string | null>(null);
 	let revokedNotice = $state<string | null>(null);
+
+	let detailOpen = $state(false);
+	let detailId = $state('');
+
+	const detailDevice = $derived(
+		devices.find((device) => device.device_id === detailId) ?? null
+	);
 
 	const scopeError = $derived.by(() => {
 		if (purpose === 'rotate' && !scope) return 'Choose the device whose key will be rotated.';
@@ -124,6 +133,36 @@
 		await openMint('rotate', device.device_id);
 	}
 
+	function syncDetailUrl(id: string | null): void {
+		const url = new URL(window.location.href);
+		if (id) url.searchParams.set('device', id);
+		else url.searchParams.delete('device');
+		history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+	}
+
+	function openDetail(id: string): void {
+		detailId = id;
+		detailOpen = true;
+		syncDetailUrl(id);
+	}
+
+	function closeDetail(): void {
+		detailOpen = false;
+		syncDetailUrl(null);
+	}
+
+	async function mintForDevice(id: string): Promise<void> {
+		closeDetail();
+		await openMint('enroll', id);
+	}
+
+	function handleRevoked(id: string): void {
+		devices = devices.filter((device) => device.device_id !== id);
+		revokedNotice = `Revoked ${id}. Its key no longer authenticates.`;
+		detailOpen = false;
+		syncDetailUrl(null);
+	}
+
 	async function mint() {
 		if (minting || scopeError) return;
 		minting = true;
@@ -164,12 +203,19 @@
 		origin = window.location.origin;
 		const requestedPurpose = page.url.searchParams.get('mint');
 		const requestedDevice = page.url.searchParams.get('device') ?? '';
-		if (requestedPurpose === 'rotate' || requestedPurpose === 'enroll') {
-			void openMint(requestedPurpose, requestedDevice, false);
-		} else if (requestedDevice) {
-			void openMint('rotate', requestedDevice, false);
-		}
-		void load();
+		void (async () => {
+			await load();
+			if (requestedPurpose === 'rotate' || requestedPurpose === 'enroll') {
+				await openMint(requestedPurpose, requestedDevice, false);
+			} else if (
+				requestedDevice &&
+				devices.some((device) => device.device_id === requestedDevice)
+			) {
+				// `?device=` is the static SPA's stand-in for a detail route: no
+				// dynamic segment, no extra HTML shell, and the drawer is shareable.
+				openDetail(requestedDevice);
+			}
+		})();
 	});
 </script>
 
@@ -200,7 +246,9 @@
 
 	<div class="stack">
 		{#if revokedNotice}
-			<Notice tone="ok" title="Device revoked">{revokedNotice}</Notice>
+			<div aria-live="polite">
+				<Notice tone="ok" title="Device revoked">{revokedNotice}</Notice>
+			</div>
 		{/if}
 
 		{#if mintOpen}
@@ -334,29 +382,41 @@
 										{formatClock(minted.expires_at)}
 									</span>
 								</div>
-								<div class="code-line">
-									<code class="pair-code">{minted.pairing_code}</code>
-									<CopyButton value={minted.pairing_code} label="Copy code" />
-								</div>
-								<div class="field deep-link">
-									<label class="label" for="deep-link">Deep link</label>
-									<div class="input-row">
-										<input
-											id="deep-link"
-											class="input input-mono"
-											readonly
+								<div class="mint-result-body">
+									<div class="mint-credential">
+										<div class="code-line">
+											<code class="pair-code">{minted.pairing_code}</code>
+											<CopyButton value={minted.pairing_code} label="Copy code" />
+										</div>
+										<div class="field deep-link">
+											<label class="label" for="deep-link">Deep link</label>
+											<div class="input-row">
+												<input
+													id="deep-link"
+													class="input input-mono"
+													readonly
+													value={deepLink}
+													aria-describedby="deep-link-hint"
+												/>
+												<CopyButton value={deepLink} label="Copy link" />
+											</div>
+										</div>
+										<p class="hint" id="deep-link-hint">
+											{minted.device_id
+												? `Bound to ${minted.device_id}. Open the link on that device.`
+												: 'Unscoped: the first device to redeem it is registered.'}
+											Single-use; it disappears after one successful pairing.
+										</p>
+									</div>
+									<div class="mint-qr">
+										<QrCode
 											value={deepLink}
-											aria-describedby="deep-link-hint"
+											size={184}
+											label={`Pairing QR code for ${minted.pairing_code}`}
+											caption="Scan to pair"
 										/>
-										<CopyButton value={deepLink} label="Copy link" />
 									</div>
 								</div>
-								<p class="hint" id="deep-link-hint">
-									{minted.device_id
-										? `Bound to ${minted.device_id}. Open the link on that device.`
-										: 'Unscoped: the first device to redeem it is registered.'}
-									Single-use; it disappears after one successful pairing.
-								</p>
 							</div>
 						</div>
 					{/if}
@@ -426,7 +486,15 @@
 								<tr>
 									<td>
 										<div class="device-cell">
-											<span class="mono device-id">{device.device_id}</span>
+											<button
+												type="button"
+												class="device-open"
+												onclick={() => openDetail(device.device_id)}
+												aria-label={`Open details for ${device.device_id}`}
+												title="Open device details"
+											>
+												<span class="mono device-id">{device.device_id}</span>
+											</button>
 											<CopyButton value={device.device_id} label="Copy device id" iconOnly />
 										</div>
 									</td>
@@ -497,7 +565,15 @@
 						{@const known = device.device_id in statuses}
 						<li class="device-card">
 							<div class="card-head">
-								<span class="mono device-id">{device.device_id}</span>
+								<button
+									type="button"
+									class="device-open"
+									onclick={() => openDetail(device.device_id)}
+									aria-label={`Open details for ${device.device_id}`}
+									title="Open device details"
+								>
+									<span class="mono device-id">{device.device_id}</span>
+								</button>
 								<CopyButton value={device.device_id} label="Copy device id" iconOnly />
 							</div>
 							<div class="card-status">
@@ -539,6 +615,14 @@
 								<button
 									type="button"
 									class="btn btn-sm"
+									onclick={() => openDetail(device.device_id)}
+									aria-label={`Open details for ${device.device_id}`}
+								>
+									<Icon name="info" size={12} /> Details
+								</button>
+								<button
+									type="button"
+									class="btn btn-sm"
 									onclick={() => void startRotate(device)}
 									aria-label={`Rotate key for ${device.device_id}`}
 								>
@@ -560,8 +644,9 @@
 					{/each}
 				</ul>
 				<p class="panel-note">
-					Revocation destroys the device's stored public key in its Durable Object and removes it
-					from D1. A revoked device must be enrolled again.
+					Select a device id to open its detail panel. Revocation destroys the device's stored
+					public key in its Durable Object and removes it from D1; a revoked device must be
+					enrolled again.
 				</p>
 			</section>
 		{/if}
@@ -593,6 +678,15 @@
 		</p>
 	{/if}
 </ConfirmDialog>
+
+<DeviceDetail
+	open={detailOpen}
+	deviceId={detailId}
+	device={detailDevice}
+	onclose={closeDetail}
+	onrevoked={handleRevoked}
+	onmint={(id) => void mintForDevice(id)}
+/>
 
 <style>
 	.mint-panel {
@@ -631,6 +725,46 @@
 		color: var(--ink-3);
 	}
 
+	.mint-result-body {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: var(--s-5);
+		align-items: start;
+		margin-top: var(--s-3);
+	}
+
+	.mint-credential {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s-3);
+		min-width: 0;
+	}
+
+	.mint-credential .code-line {
+		margin-top: 0;
+	}
+
+	.mint-credential .deep-link {
+		margin-bottom: 0;
+	}
+
+	.mint-qr {
+		display: flex;
+		justify-content: center;
+	}
+
+	@media (max-width: 760px) {
+		.mint-result-body {
+			grid-template-columns: minmax(0, 1fr);
+			gap: var(--s-4);
+		}
+
+		.mint-qr {
+			justify-content: flex-start;
+			padding-top: 2px;
+		}
+	}
+
 	.code-line {
 		display: flex;
 		align-items: center;
@@ -663,6 +797,45 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
+	}
+
+	.device-open {
+		display: inline-flex;
+		flex: 1;
+		align-items: center;
+		gap: 5px;
+		min-width: 0;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--ink);
+		text-align: left;
+		border-radius: 2px;
+	}
+
+	.device-open::after {
+		content: '›';
+		font-family: var(--font-mono);
+		font-size: 13px;
+		line-height: 1;
+		color: var(--ink-3);
+		opacity: 0.55;
+		transition:
+			color 140ms ease,
+			transform 140ms ease,
+			opacity 140ms ease;
+	}
+
+	.device-open:hover::after {
+		color: var(--accent);
+		opacity: 1;
+		transform: translateX(1px);
+	}
+
+	.device-open:hover .device-id {
+		color: var(--accent);
+		text-decoration: underline;
+		text-underline-offset: 3px;
 	}
 
 	.device-id {

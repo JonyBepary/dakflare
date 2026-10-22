@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    Device, DeviceClient, Message, NewDevice, Store, Target, drain_outbox, inject_inbound,
+    Device, DeviceClient, Message, NewDevice, ProtocolError, Store, Target, drain_outbox,
+    inject_inbound, parse_pair_link,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -163,6 +164,10 @@ async fn delete_device(state: State<'_, AppState>, device_id: String) -> Result<
 /* --------------------------------------------------------------- protocol */
 
 /// Mint an enrolment code with the admin token and pair this device with it.
+///
+/// Lab-only self-pairing: it exists so a simulator device can be enrolled
+/// without a dashboard. Real onboarding redeems an operator's code with
+/// [`pair_with_code`].
 #[tauri::command]
 async fn pair_device(
     state: State<'_, AppState>,
@@ -179,6 +184,71 @@ async fn pair_device(
         .await
         .map_err(|e| e.to_string())?;
     Ok(format!("Paired as {}", device.device_id))
+}
+
+/// Redeem an operator-minted pairing code. No admin token is read or required.
+///
+/// `code` is either the bare 12-character code or a
+/// `dakflare://pair?u=<worker-url>&c=<code>` link. When the link carries `u`,
+/// that URL is validated and saved as the target *before* pairing, so pasting
+/// the link is enough to onboard a fresh install.
+///
+/// The code is single-use server-side. A failure here leaves the local device
+/// row untouched, so the user can retry with a freshly minted code.
+#[tauri::command]
+async fn pair_with_code(
+    state: State<'_, AppState>,
+    device_id: String,
+    code: String,
+) -> Result<String, String> {
+    let link = parse_pair_link(&code).map_err(|e| e.to_string())?;
+
+    if let Some(base_url) = link.base_url.as_deref() {
+        let trimmed = base_url.trim().trim_end_matches('/');
+        Target::new(trimmed, None)
+            .map_err(|e| format!("The link's worker URL is not usable: {e}"))?;
+        state
+            .store
+            .set_setting("base_url", trimmed)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Both the target and the device key are enough: `pair` is authenticated by
+    // the pairing code alone, so a token-less target must work here.
+    let (client, device) = client_for(&state, &device_id).await?;
+    client
+        .pair(&link.code, &device.public_key_spki)
+        .await
+        .map_err(pair_failure)?;
+    Ok(format!("Paired as {}", device.device_id))
+}
+
+/// Translate the protocol error into something a person can act on.
+///
+/// Deliberately never includes the code (it is single-use) or the admin token.
+fn pair_failure(error: ProtocolError) -> String {
+    match error {
+        ProtocolError::Status {
+            status: 401, body, ..
+        } => format!(
+            "That code was not accepted. It may have expired, already been used, or belong to \
+             another device. Mint a new code in the dashboard and try again. ({body})"
+        ),
+        ProtocolError::Status { status: 409, .. } => {
+            "This device is already registered. Ask the operator for a rotation code, or revoke \
+             the device first."
+                .into()
+        }
+        ProtocolError::Status { status: 429, .. } => {
+            "Too many pairing attempts. Wait a minute, then try again.".into()
+        }
+        ProtocolError::Http(error) => format!(
+            "Could not reach the worker: {error}. Check the target URL and the connection, then \
+             retry."
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// One signed poll; returns the queued commands.
@@ -366,6 +436,7 @@ pub fn run() {
             create_device,
             delete_device,
             pair_device,
+            pair_with_code,
             poll_device,
             purge_messages,
             revoke_device,
