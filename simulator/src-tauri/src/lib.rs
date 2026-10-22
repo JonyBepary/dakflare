@@ -1,4 +1,4 @@
-//! Tauri shell for the DakFlare device simulator.
+//! Tauri shell for the DakFlare device app.
 //!
 //! Everything interesting lives in `dakflare-core`: identity, the libSQL store and
 //! the protocol client. This file owns the app lifecycle and the command surface
@@ -30,7 +30,7 @@ async fn load_target(state: &AppState) -> Result<Target, String> {
         .await
         .map_err(|e| e.to_string())?
         .filter(|v| !v.trim().is_empty())
-        .ok_or("No target URL configured. Set one in Target first.")?;
+        .ok_or("No target URL configured. Set the Worker URL in Target deployment first.")?;
 
     let token = state
         .store
@@ -163,9 +163,19 @@ async fn delete_device(state: State<'_, AppState>, device_id: String) -> Result<
 
 /* --------------------------------------------------------------- protocol */
 
+/// The identity hints the device row already holds, in the shape the pair body
+/// wants: the label when it is meaningful, and the SIM slot only when it is one
+/// the contract permits (0–2). Unknown values become `None` / `null`, never a
+/// fabricated default.
+fn identity_hints(device: &Device) -> (Option<&str>, Option<i64>) {
+    let label = (!device.label.trim().is_empty()).then_some(device.label.as_str());
+    let sim_slot = (0..=2).contains(&device.sim_slot).then_some(device.sim_slot);
+    (label, sim_slot)
+}
+
 /// Mint an enrolment code with the admin token and pair this device with it.
 ///
-/// Lab-only self-pairing: it exists so a simulator device can be enrolled
+/// Lab-only self-pairing: it exists so a device identity can be enrolled
 /// without a dashboard. Real onboarding redeems an operator's code with
 /// [`pair_with_code`].
 #[tauri::command]
@@ -179,8 +189,9 @@ async fn pair_device(
         .mint_pairing_code(ttl_ms.unwrap_or(120_000))
         .await
         .map_err(|e| e.to_string())?;
+    let (label, sim_slot) = identity_hints(&device);
     client
-        .pair(&code, &device.public_key_spki)
+        .pair_with_identity(&code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(|e| e.to_string())?;
     Ok(format!("Paired as {}", device.device_id))
@@ -217,8 +228,9 @@ async fn pair_with_code(
     // Both the target and the device key are enough: `pair` is authenticated by
     // the pairing code alone, so a token-less target must work here.
     let (client, device) = client_for(&state, &device_id).await?;
+    let (label, sim_slot) = identity_hints(&device);
     client
-        .pair(&link.code, &device.public_key_spki)
+        .pair_with_identity(&link.code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(pair_failure)?;
     Ok(format!("Paired as {}", device.device_id))

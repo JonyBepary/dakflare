@@ -15,7 +15,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -243,6 +243,74 @@ pub struct DeviceClient {
     private_key_pkcs8_pem: String,
 }
 
+/// Body of `POST /v1/device/pair`.
+///
+/// The three original fields are unchanged. `label` and `sim_slot` are the
+/// identity hints added in contract §11.12: both are optional, so a server that
+/// predates them ignores the extra keys, and an older payload without them still
+/// deserializes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairRequest {
+    pub pairing_code: String,
+    pub device_id: String,
+    pub public_key_spki: String,
+    /// Omitted when unknown, never invented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Explicit `null` when unknown, so the field is always on the wire.
+    #[serde(default)]
+    pub sim_slot: Option<i64>,
+}
+
+impl PairRequest {
+    pub fn new(
+        pairing_code: impl Into<String>,
+        device_id: impl Into<String>,
+        public_key_spki: impl Into<String>,
+    ) -> Self {
+        Self {
+            pairing_code: pairing_code.into(),
+            device_id: device_id.into(),
+            public_key_spki: public_key_spki.into(),
+            label: None,
+            sim_slot: None,
+        }
+    }
+
+    /// Attach the device row's label and SIM slot.
+    ///
+    /// The label is trimmed and capped at 64 characters (contract §11.12); an
+    /// empty label becomes `None`. A slot outside 0–2 becomes `None`, so the
+    /// wire only ever carries a value the contract permits.
+    pub fn with_identity(mut self, label: Option<&str>, sim_slot: Option<i64>) -> Self {
+        self.label = label.and_then(normalize_label);
+        self.sim_slot = sim_slot.filter(|slot| (0..=2).contains(slot));
+        self
+    }
+}
+
+fn normalize_label(label: &str) -> Option<String> {
+    // Trim first, then cap: otherwise leading whitespace would eat into the
+    // 64-character budget. Control characters are dropped, not escaped. The cap
+    // counts UTF-16 code units so it matches the Worker's JavaScript
+    // `label.length > 64` check for astral characters.
+    let mut cleaned = String::new();
+    let mut units = 0usize;
+    for c in label.trim().chars() {
+        if c.is_control() {
+            continue;
+        }
+        let width = c.len_utf16();
+        if units + width > 64 {
+            break;
+        }
+        cleaned.push(c);
+        units += width;
+    }
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 impl DeviceClient {
     pub fn new(
         target: Target,
@@ -299,11 +367,23 @@ impl DeviceClient {
         pairing_code: &str,
         public_key_spki_b64: &str,
     ) -> Result<(), ProtocolError> {
-        let body = json!({
-            "pairing_code": pairing_code,
-            "device_id": self.device_id,
-            "public_key_spki": public_key_spki_b64,
-        });
+        self.pair_with_identity(pairing_code, public_key_spki_b64, None, None)
+            .await
+    }
+
+    /// Pair with the identity hints the device row already holds.
+    ///
+    /// Used by both onboarding paths (operator code and lab self-pair). The
+    /// code alone authenticates the request; no admin token is involved.
+    pub async fn pair_with_identity(
+        &self,
+        pairing_code: &str,
+        public_key_spki_b64: &str,
+        label: Option<&str>,
+        sim_slot: Option<i64>,
+    ) -> Result<(), ProtocolError> {
+        let body = PairRequest::new(pairing_code, self.device_id.as_str(), public_key_spki_b64)
+            .with_identity(label, sim_slot);
         let res = self
             .http
             .post(self.target.url("/v1/device/pair"))
@@ -740,6 +820,76 @@ mod tests {
     fn target_requires_a_url_scheme() {
         assert!(Target::new("https://example.workers.dev/", None).is_ok());
         assert!(Target::new("example.workers.dev", None).is_err());
+    }
+
+    #[test]
+    fn pair_request_keeps_the_wire_fields_and_carries_the_label() {
+        let request = PairRequest::new("AB12CD34EF56", "device_01", "spki-b64")
+            .with_identity(Some("  Pixel 8 · reception  "), Some(1));
+        let value = serde_json::to_value(&request).unwrap();
+
+        // The original contract fields are untouched.
+        assert_eq!(value["pairing_code"], "AB12CD34EF56");
+        assert_eq!(value["device_id"], "device_01");
+        assert_eq!(value["public_key_spki"], "spki-b64");
+        // Label trimmed; SIM slot passed through when in range.
+        assert_eq!(value["label"], "Pixel 8 · reception");
+        assert_eq!(value["sim_slot"], 1);
+    }
+
+    #[test]
+    fn pair_request_nulls_an_unknown_sim_slot() {
+        let value =
+            serde_json::to_value(PairRequest::new("AB12CD34EF56", "device_01", "spki-b64")).unwrap();
+
+        // The field is on the wire, explicitly null, rather than omitted.
+        assert!(value.get("sim_slot").is_some());
+        assert!(value["sim_slot"].is_null());
+        // An unknown label is omitted, not sent as an empty string.
+        assert!(value.get("label").is_none());
+    }
+
+    #[test]
+    fn pair_request_trims_caps_and_nulls_out_of_range_values() {
+        let long_label = format!("  {}  ", "L".repeat(80));
+        let request = PairRequest::new("AB12CD34EF56", "device_01", "spki-b64")
+            .with_identity(Some(&long_label), Some(3));
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(value["label"].as_str().unwrap().chars().count(), 64);
+        assert!(value["sim_slot"].is_null());
+
+        let blank = PairRequest::new("AB12CD34EF56", "device_01", "spki-b64")
+            .with_identity(Some("   "), None);
+        assert_eq!(blank.label, None);
+
+        // Astral characters count as two UTF-16 units, matching the Worker's
+        // `label.length > 64` check, so a valid request is never rejected as long.
+        let emoji = "😀".repeat(40);
+        let request = PairRequest::new("AB12CD34EF56", "device_01", "spki-b64")
+            .with_identity(Some(&emoji), None);
+        let units = request
+            .label
+            .as_deref()
+            .unwrap()
+            .encode_utf16()
+            .count();
+        assert!(units <= 64, "label was {units} UTF-16 units");
+    }
+
+    #[test]
+    fn pair_request_deserializes_payloads_from_before_the_identity_hints() {
+        // A body produced by an older client: no `label`, no `sim_slot`.
+        let request: PairRequest = serde_json::from_str(
+            r#"{"pairing_code":"AB12CD34EF56","device_id":"device_01","public_key_spki":"spki-b64"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(request.pairing_code, "AB12CD34EF56");
+        assert_eq!(request.device_id, "device_01");
+        assert_eq!(request.public_key_spki, "spki-b64");
+        assert_eq!(request.label, None);
+        assert_eq!(request.sim_slot, None);
     }
 
     #[test]

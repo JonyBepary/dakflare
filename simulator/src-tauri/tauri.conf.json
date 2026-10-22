@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DakFlare Simulator",
+  "productName": "DakFlare Device",
   "version": "0.1.0",
   "identifier": "dev.dakflare.simulator",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "DakFlare Simulator",
+        "title": "DakFlare Device",
         "width": 1200,
         "height": 820
       }

@@ -285,6 +285,9 @@ export class DeviceGateway extends DurableObject<Env> {
     if (url.pathname === "/__command") {
       return this.handleCommandLookup(url);
     }
+    if (url.pathname === "/__commands") {
+      return this.handleCommands(url);
+    }
 
     return Response.json({ error: "not_found" }, { status: 404 });
   }
@@ -602,7 +605,32 @@ export class DeviceGateway extends DurableObject<Env> {
     return Response.json({ ok: true });
   }
 
+  /**
+   * Arm the offline watch from any authenticated contact, not only a WebSocket.
+   *
+   * The app that ships today is poll-only. If the watch were armed only on socket
+   * connect, a phone that never connects would never raise `device_offline`, and
+   * the alert banner would be dead code for exactly the deployment it was built
+   * for. Polling re-arms the same single task; when polling stops, the task fires
+   * one `OFFLINE_ALERT_MS` later. The half-window guard keeps that to one write
+   * per window while tolerating a poll interval of several minutes.
+   */
+  private ensureOfflineWatch(): void {
+    const now = Date.now();
+    const row = this.ctx.storage.sql
+      .exec(`SELECT run_at FROM scheduled_tasks WHERE id = 'offline_alert'`)
+      .toArray()[0] as { run_at?: number } | undefined;
+    if (row && Number(row.run_at) - now > this.timings.offlineAlertMs / 2) return;
+    this.scheduleTask("offline_alert", now + this.timings.offlineAlertMs, "offline_alert", "{}");
+  }
+
   private handlePending(): Response {
+    // A poll-only device never opens a socket, so the connect path cannot be the
+    // only place that arms the silence watch. Re-arming is throttled to once a
+    // minute of headroom: a device polling every few seconds must not write a
+    // scheduled task (and reset the DO alarm) on every request.
+    this.ensureOfflineWatch();
+
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
@@ -748,6 +776,40 @@ export class DeviceGateway extends DurableObject<Env> {
         created_at: row.created_at,
         expires_at: row.expires_at,
       },
+    });
+  }
+
+  /**
+   * `GET /__commands?limit=N` — newest-first queue view for the operator console.
+   *
+   * `limit` is clamped here, in the DO, so the admin proxy cannot widen it by
+   * passing a different value. An unknown device simply has no rows.
+   */
+  private handleCommands(url: URL): Response {
+    const raw = url.searchParams.get("limit");
+    const parsed = raw === null || raw.trim() === "" ? 20 : Number(raw);
+    const limit = Number.isFinite(parsed) ? Math.min(50, Math.max(1, Math.trunc(parsed))) : 20;
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
+           FROM commands
+          ORDER BY created_at DESC, command_id DESC
+          LIMIT ?`,
+        limit
+      )
+      .toArray() as unknown as CommandRow[];
+
+    return Response.json({
+      commands: rows.map((row) => ({
+        command_id: row.command_id,
+        to_e164: row.to_e164,
+        body: row.body,
+        priority: row.priority,
+        state: row.state,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+      })),
     });
   }
 
@@ -1130,11 +1192,88 @@ export class DeviceGateway extends DurableObject<Env> {
         }
       }
       console.warn(`[offline_alert] device silent for > ${this.timings.offlineAlertMs} ms`);
+      await this.raiseOfflineAlert(now);
       return "consumed";
     }
 
     // Unknown kind: nothing to do, and keeping it would retry forever.
     return "consumed";
+  }
+
+  /**
+   * Persist an offline alert, then deliver it out-of-band if configured.
+   *
+   * `INSERT OR IGNORE` plus the partial unique index keeps one open alert per
+   * (device, kind): a reconnect that goes silent again does not stack duplicates,
+   * but acknowledging the first one frees the slot for a genuinely new outage.
+   * The webhook fires only for a newly inserted row, so a deduped alert cannot
+   * re-notify with a fresh `raised_at`.
+   */
+  private async raiseOfflineAlert(now: number): Promise<void> {
+    const device = this.ctx.storage.sql
+      .exec(`SELECT device_id FROM devices LIMIT 1`)
+      .toArray()[0] as { device_id?: string } | undefined;
+    const deviceId = device?.device_id;
+    if (!deviceId) return;
+
+    // Prefer D1's authenticated `last_seen`; fall back to this socket's evidence.
+    let lastSeenAt: number | null = null;
+    try {
+      const row = await this.env.DB.prepare(`SELECT last_seen FROM devices WHERE device_id = ?`)
+        .bind(deviceId)
+        .first<{ last_seen: number }>();
+      const value = Number(row?.last_seen ?? Number.NaN);
+      if (Number.isFinite(value)) lastSeenAt = value;
+    } catch (error) {
+      console.error(`[offline_alert] could not read last_seen: ${String(error)}`);
+    }
+    if (lastSeenAt === null) {
+      const ws = this.ctx.getWebSockets()[0];
+      if (ws) lastSeenAt = this.socketLastSeen(ws, readAttachment(ws));
+    }
+
+    const detail =
+      lastSeenAt === null
+        ? "device silent; last_seen unknown"
+        : `device silent for ${Math.max(0, now - lastSeenAt)} ms (last_seen ${new Date(
+            lastSeenAt
+          ).toISOString()})`;
+
+    let inserted = false;
+    try {
+      const result = await this.env.DB.prepare(
+        `INSERT OR IGNORE INTO alerts (id, device_id, kind, raised_at, acknowledged_at, detail)
+         VALUES (?, ?, 'device_offline', ?, NULL, ?)`
+      )
+        .bind(crypto.randomUUID(), deviceId, now, detail)
+        .run();
+      inserted = Number(result.meta?.changes ?? 0) > 0;
+    } catch (error) {
+      // Losing the durable alert must not make the alarm retry forever.
+      console.error(`[offline_alert] could not persist alert: ${String(error)}`);
+      return;
+    }
+
+    if (!inserted) return;
+    const webhook = this.env.ALERT_WEBHOOK_URL;
+    if (!webhook) return;
+
+    try {
+      await fetch(webhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          kind: "device_offline",
+          raised_at: now,
+          detail,
+        }),
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch (error) {
+      // Out-of-band delivery is best-effort; D1 already has the fact.
+      console.error(`[offline_alert] webhook failed: ${String(error)}`);
+    }
   }
 
   private bumpAttempts(id: string): number {

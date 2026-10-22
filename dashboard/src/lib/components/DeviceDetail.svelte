@@ -2,12 +2,15 @@
 	import { tick } from 'svelte';
 	import {
 		describeError,
+		getDeviceCommands,
 		getDeviceStatus,
 		getMessages,
 		purgeMessages,
 		revokeDevice
 	} from '$lib/api';
-	import type { Device, DeviceStatus, Message } from '$lib/types';
+	import type { Device, DeviceCommand, DeviceStatus, Message } from '$lib/types';
+	import { commandStateNote, commandStateTone, isTerminalCommand } from '$lib/commands';
+	import { deviceLabel, devicePresence, devicePrimary, wakeMode } from '$lib/presence';
 	import { formatAbsolute, formatClock, formatDate } from '$lib/format';
 	import Badge from './Badge.svelte';
 	import CommandTracker from './CommandTracker.svelte';
@@ -16,6 +19,7 @@
 	import EmptyState from './EmptyState.svelte';
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
+	import PresenceChip from './PresenceChip.svelte';
 	import RelativeTime from './RelativeTime.svelte';
 	import SendSmsForm from './SendSmsForm.svelte';
 	import Spinner from './Spinner.svelte';
@@ -40,7 +44,8 @@
 	const titleId = `device-detail-title-${uid}`;
 
 	const MESSAGE_LIMIT = 20;
-	const COMMAND_LIMIT = 6;
+	const COMMAND_LIMIT = 20;
+	const COMMAND_POLL_MS = 5_000;
 
 	let dialog = $state<HTMLDialogElement | null>(null);
 	let closeButton = $state<HTMLButtonElement | null>(null);
@@ -49,6 +54,12 @@
 	let statusError = $state<string | null>(null);
 	let messages = $state<Message[]>([]);
 	let messagesError = $state<string | null>(null);
+	let commands = $state<DeviceCommand[]>([]);
+	let commandsError = $state<string | null>(null);
+	let commandsLoading = $state(false);
+	let trackedCommands = $state<Set<string>>(new Set());
+	let commandVersion = 0;
+	let commandInFlight = false;
 	let loading = $state(false);
 	let loadedFor = $state<string | null>(null);
 
@@ -64,17 +75,14 @@
 	let purgeError = $state<string | null>(null);
 
 	const label = $derived(device?.label?.trim() || 'Unlabeled device');
-
-	/**
-	 * Outbound rows written by this dashboard use the command id as both message
-	 * id and local id, so they can be polled directly. SMS the phone reported
-	 * itself keep their own local id and have no command to follow.
-	 */
-	const recentCommands = $derived(
-		messages
-			.filter((message) => message.direction === 'out' && message.local_id === message.id)
-			.slice(0, COMMAND_LIMIT)
+	const presence = $derived(
+		device ? devicePresence(device, status?.ws_connected === true) : 'unknown'
 	);
+	const wake = $derived(device ? wakeMode(device) : null);
+	const simSlot = $derived.by(() => {
+		const slot = device?.sim_slot;
+		return typeof slot === 'number' && slot >= 0 && slot <= 2 ? `SIM ${slot + 1}` : null;
+	});
 
 	$effect(() => {
 		const el = dialog;
@@ -102,7 +110,24 @@
 		purgeError = null;
 		status = null;
 		messages = [];
+		commands = [];
+		commandsError = null;
+		commandsLoading = false;
+		trackedCommands = new Set();
+		commandVersion += 1;
+		commandInFlight = false;
 		void loadAll(deviceId, true);
+	});
+
+	$effect(() => {
+		if (!open) return;
+		const id = deviceId;
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible' && id === deviceId) {
+				void loadCommands(id);
+			}
+		}, COMMAND_POLL_MS);
+		return () => clearInterval(timer);
 	});
 
 	$effect(() => {
@@ -138,6 +163,36 @@
 			messagesError = describeError(messagesResult.reason);
 		}
 		loading = false;
+		void loadCommands(id, initial);
+	}
+
+	async function loadCommands(id = deviceId, initial = false): Promise<void> {
+		if (!id || (commandInFlight && !initial)) return;
+		const version = ++commandVersion;
+		commandInFlight = true;
+		if (initial || commands.length === 0) commandsLoading = true;
+		try {
+			const list = await getDeviceCommands(id, COMMAND_LIMIT);
+			if (version !== commandVersion || id !== deviceId) return;
+			commands = list;
+			commandsError = null;
+		} catch (failure) {
+			if (version === commandVersion && id === deviceId) {
+				commandsError = describeError(failure);
+			}
+		} finally {
+			if (version === commandVersion) {
+				commandsLoading = false;
+				commandInFlight = false;
+			}
+		}
+	}
+
+	function toggleCommandTracker(commandId: string): void {
+		const next = new Set(trackedCommands);
+		if (next.has(commandId)) next.delete(commandId);
+		else next.add(commandId);
+		trackedCommands = next;
 	}
 
 	async function confirmRevoke(): Promise<void> {
@@ -254,12 +309,8 @@
 				<div class="status-cell">
 					<span class="status-k">Link</span>
 					<span class="status-v">
-						{#if status}
-							<span
-								class="dot {status.ws_connected ? 'dot-ok dot-pulse' : ''}"
-								aria-hidden="true"
-							></span>
-							{status.ws_connected ? 'live' : 'idle'}
+						{#if device}
+							<PresenceChip {presence} />
 						{:else if statusError}
 							<span class="muted">unavailable</span>
 						{:else}
@@ -272,10 +323,20 @@
 					<span class="status-v mono">{status ? status.queue_depth : '—'}</span>
 				</div>
 				<div class="status-cell">
-					<span class="status-k">Last seen</span>
+					<span class="status-k">Last contact</span>
 					<span class="status-v">
 						{#if device}
-							<RelativeTime value={device.last_seen} />
+							<RelativeTime value={device.last_seen} fallback="never" />
+						{:else}
+							<span class="muted">—</span>
+						{/if}
+					</span>
+				</div>
+				<div class="status-cell">
+					<span class="status-k">Wake</span>
+					<span class="status-v">
+						{#if wake}
+							<Badge tone={wake === 'push' ? 'accent' : 'muted'}>{wake}</Badge>
 						{:else}
 							<span class="muted">—</span>
 						{/if}
@@ -307,10 +368,10 @@
 					<dt>Label</dt>
 					<dd>
 						{#if device?.label?.trim()}
-							{device.label}
+							{device.label.trim()}
 						{:else}
 							<span class="muted">Unlabeled</span>
-							<span class="hint"> · not stored by the gateway</span>
+							<span class="hint"> · not reported for this device</span>
 						{/if}
 					</dd>
 
@@ -324,30 +385,36 @@
 						{/if}
 					</dd>
 
-					<dt>Last seen</dt>
+					<dt>Last contact</dt>
 					<dd>
 						{#if device}
-							<RelativeTime value={device.last_seen} />
+							<RelativeTime value={device.last_seen} fallback="never" />
 							<span class="hint"> · {formatAbsolute(device.last_seen)}</span>
+							<span class="hint"> · authenticated contact, not pairing time</span>
 						{:else}
 							<span class="muted">—</span>
 						{/if}
 					</dd>
 
-					<dt>FCM token</dt>
+					<dt>Wake</dt>
 					<dd>
-						{#if device?.fcm_token}
-							<Badge tone="ok" dot>present</Badge>
+						{#if wake}
+							<Badge tone={wake === 'push' ? 'accent' : 'muted'}>{wake}</Badge>
+							<span class="hint">
+								·
+								{wake === 'push'
+									? 'FCM token present; the gateway can wake the phone.'
+									: 'no push token; the phone is reached on its next poll.'}
+							</span>
 						{:else}
-							<Badge tone="muted">none</Badge>
+							<span class="muted">—</span>
 						{/if}
-						<span class="hint"> · the token value is never shown</span>
 					</dd>
 
 					<dt>SIM slot</dt>
 					<dd>
-						{#if device?.sim_slot !== null && device?.sim_slot !== undefined}
-							<span class="mono">{device.sim_slot}</span>
+						{#if simSlot}
+							<span class="mono">{simSlot}</span>
 						{:else}
 							<span class="muted">Not reported</span>
 							<span class="hint"> · the device record carries no slot</span>
@@ -357,7 +424,7 @@
 
 				<p class="hint">
 					Queued commands are drained over the device's WebSocket, or on its next poll if the
-					link is idle.
+					device is not connected.
 				</p>
 			</section>
 
@@ -378,22 +445,56 @@
 
 			<section class="section" aria-labelledby={`commands-${uid}`}>
 				<div class="section-head">
-					<h3 class="section-title" id={`commands-${uid}`}>Recent commands</h3>
-					<span class="panel-meta">outbound · last {COMMAND_LIMIT}</span>
+					<h3 class="section-title" id={`commands-${uid}`}>Commands</h3>
+					<span class="panel-meta">
+						{#if commandsLoading && commands.length === 0}<Spinner />{:else}newest · last {COMMAND_LIMIT}{/if}
+					</span>
 				</div>
-				{#if recentCommands.length === 0}
-					<p class="hint">No outbound commands recorded for this device.</p>
+				{#if commandsError}
+					<p class="field-error">
+						Could not refresh commands. {commandsError}
+					</p>
+				{/if}
+				{#if commandsLoading && commands.length === 0}
+					<div class="cmd-skeletons" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Loading commands</span>
+						{#each ['a', 'b'] as key (key)}
+							<div class="skeleton" style="height: 46px"></div>
+						{/each}
+					</div>
+				{:else if commands.length === 0}
+					<p class="hint">No commands recorded for this device.</p>
 				{:else}
 					<ul class="cmd-list">
-						{#each recentCommands as command (command.id)}
+						{#each commands as command (command.command_id)}
 							<li class="cmd-row">
 								<div class="cmd-head">
-									<span class="mono cmd-peer">{command.peer}</span>
-									<span class="hint">· <RelativeTime value={command.received_at} /></span>
+									<span class="mono cmd-peer">{command.to_e164 || '(no recipient)'}</span>
+									<span title={commandStateNote(command.state)}>
+										<Badge
+											tone={commandStateTone(command.state)}
+											dot={!isTerminalCommand(command.state)}
+										>
+											{command.state}
+										</Badge>
+									</span>
+									<span class="hint">· <RelativeTime value={command.created_at} /></span>
 									<span class="spacer"></span>
-									<CommandTracker compact deviceId={deviceId} commandId={command.id} />
+									<button
+										type="button"
+										class="link-btn cmd-track-btn"
+										onclick={() => toggleCommandTracker(command.command_id)}
+										aria-expanded={trackedCommands.has(command.command_id)}
+									>
+										{trackedCommands.has(command.command_id) ? 'Hide' : 'Track'}
+									</button>
 								</div>
 								<p class="cmd-body">{command.body || '(empty message)'}</p>
+								{#if trackedCommands.has(command.command_id)}
+									<div class="cmd-tracker">
+										<CommandTracker compact deviceId={deviceId} commandId={command.command_id} />
+									</div>
+								{/if}
 							</li>
 						{/each}
 					</ul>
@@ -486,8 +587,10 @@
 	}}
 >
 	<p>
-		<span class="mono">{deviceId}</span> will stop authenticating immediately. Its public key is
-		destroyed in both stores and any queued command is abandoned.
+		<strong>{device ? devicePrimary(device) : deviceId}</strong>
+		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if}
+		will stop authenticating immediately. Its public key is destroyed in both stores and any
+		queued command is abandoned.
 	</p>
 	<p class="hint" style="margin-top: 10px">
 		To restore it, enroll the phone again with a new pairing code.
@@ -510,7 +613,9 @@
 	}}
 >
 	<p>
-		Every stored message and flow run for <span class="mono">{deviceId}</span> is deleted. This
+		Every stored message and flow run for
+		<strong>{device ? devicePrimary(device) : deviceId}</strong>
+		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if} is deleted. This
 		cannot be undone.
 	</p>
 	<p class="hint" style="margin-top: 10px">
@@ -638,7 +743,7 @@
 
 	.status-strip {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		border: 1px solid var(--line);
 		border-radius: var(--r-sm);
 		background: color-mix(in srgb, var(--surface-2) 45%, var(--surface));
@@ -761,6 +866,19 @@
 		text-overflow: ellipsis;
 	}
 
+	.cmd-track-btn {
+		font-size: 10.5px;
+	}
+
+	.cmd-tracker {
+		margin-top: 6px;
+	}
+
+	.cmd-skeletons {
+		display: grid;
+		gap: var(--s-2);
+	}
+
 	.dlog-skeletons {
 		display: grid;
 		gap: var(--s-2);
@@ -855,8 +973,21 @@
 			gap: var(--s-4);
 		}
 
+		.status-strip {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
 		.status-cell {
 			padding: 9px 10px;
+		}
+
+		.status-cell:nth-child(2) {
+			border-right: 0;
+		}
+
+		.status-cell:nth-child(3),
+		.status-cell:nth-child(4) {
+			border-top: 1px solid var(--line);
 		}
 
 		.status-v {

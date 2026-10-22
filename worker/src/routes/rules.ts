@@ -15,8 +15,10 @@
 import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
-import { MAX_BODY_BYTES } from "../lib/config";
+import { MAX_BODY_BYTES, MAX_BODY_CHARS, MAX_PEER_CHARS } from "../lib/config";
 import { lintRe2 } from "../lib/re2-compat";
+import { RE_DEVICE_ID } from "../auth/canonical";
+import { evaluateRules, type RuleRecord } from "../rules/evaluate";
 
 const ALLOWED_MATCHER_TYPES = new Set(["exact", "prefix", "suffix", "glob", "regex"]);
 const ALLOWED_BODY_TYPES = new Set(["keyword", "regex"]);
@@ -155,6 +157,64 @@ export async function handleRulesPost(req: Request, env: Env): Promise<Response>
     .run();
 
   return Response.json({ ok: true, id });
+}
+
+/**
+ * `POST /v1/admin/rules/test` — evaluate the matchers without side effects.
+ *
+ * `dryRun` makes the evaluator ignore cooldown and hit history, so the operator
+ * sees "would this pattern match?" rather than "is this rule currently allowed to
+ * reply?". The reply path uses the same `evaluateRules`, so the test cannot drift
+ * from what production does.
+ */
+export async function handleRulesTest(req: Request, env: Env): Promise<Response> {
+  const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+  const input = parsed.value;
+
+  const peer = input.peer;
+  if (typeof peer !== "string" || peer === "" || peer.length > MAX_PEER_CHARS) {
+    return err("bad_request", 400);
+  }
+  const body = input.body;
+  if (typeof body !== "string" || body.length > MAX_BODY_CHARS) {
+    return err("bad_request", 400);
+  }
+
+  let deviceId: string | null = null;
+  const rawDeviceId = input.device_id;
+  if (rawDeviceId !== undefined && rawDeviceId !== null && rawDeviceId !== "") {
+    if (typeof rawDeviceId !== "string" || !RE_DEVICE_ID.test(rawDeviceId)) {
+      return err("bad_request", 400);
+    }
+    deviceId = rawDeviceId;
+  }
+
+  // Every rule, not just the applicable enabled ones: the point of the test is to
+  // explain why a rule would not reply, and `disabled` / `device_mismatch` are two
+  // of those answers. The reply path still filters to enabled, in-scope rules.
+  const rows = await env.DB.prepare(
+    `SELECT id, name, enabled, priority, matcher_type, matcher_value,
+            body_type, body_value, reply_template, cooldown_s, max_per_hour,
+            sim_slot, allow_shortcode, device_id, updated_at
+       FROM rules
+      ORDER BY priority DESC, id ASC`
+  ).all<RuleRecord>();
+
+  const evaluations = evaluateRules(
+    rows.results ?? [],
+    { peer, body },
+    { deviceId: deviceId ?? "", now: Date.now(), dryRun: true, hits: [] }
+  );
+
+  return Response.json({
+    matches: evaluations.map((evaluation) => ({
+      rule_id: evaluation.rule_id,
+      name: evaluation.name,
+      matched: evaluation.matched,
+      reason: evaluation.reason,
+    })),
+  });
 }
 
 function readInt(value: unknown, fallback: number): number {

@@ -28,6 +28,13 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
+import { enqueueOutboundCommand } from "../lib/commands";
+import {
+  evaluateRules,
+  renderReplyTemplate,
+  type RuleHit,
+  type RuleRecord,
+} from "../rules/evaluate";
 import { RE_WORKFLOW_ID } from "../lib/workflow";
 import {
   MAX_ACK_IDS,
@@ -62,6 +69,15 @@ interface ValidatedMessage {
   /** "in" (default) or "out" for a message the DEVICE sent itself. */
   direction: "in" | "out";
 }
+
+/** A newly inserted inbound row, after D1 has confirmed the insert. */
+interface AcceptedInbound extends AcceptedMessage {
+  id: string;
+  autoReply: number;
+}
+
+/** Rules reply through the ordinary command queue; 24 h is the flow fallback's TTL. */
+const RULE_COMMAND_TTL_MS = 86_400_000;
 
 export async function handleIncomingBatch(
   _req: Request,
@@ -247,6 +263,7 @@ export async function handleIncomingBatch(
       return err("storage_unavailable", 503);
     }
     const acceptedMessages: AcceptedMessage[] = [];
+    const acceptedInbound: AcceptedInbound[] = [];
     for (let i = 0; i < results.length; i++) {
       // `meta.changes` is 0 when `ON CONFLICT DO NOTHING` skipped the row.
       if ((results[i].meta?.changes ?? 0) > 0) {
@@ -254,12 +271,16 @@ export async function handleIncomingBatch(
         const row = validated[i];
         // Outbound mirror rows are history, not triggers.
         if (row.direction === "in") {
-          acceptedMessages.push({
+          const acceptedRow: AcceptedInbound = {
+            id: row.id,
             localId: row.localId,
             sender: row.peer,
             body: row.body,
             receivedAt: row.receivedAt,
-          });
+            autoReply: row.autoReply,
+          };
+          acceptedMessages.push(acceptedRow);
+          acceptedInbound.push(acceptedRow);
         }
       } else {
         duplicates++;
@@ -292,12 +313,30 @@ export async function handleIncomingBatch(
       }
     }
 
+    // §11.11: rules run BEFORE flows, for rows the device did not already answer.
+    // A message is answered at most once by automation, so the local ids a rule
+    // replied to are removed from the flow fallback below.
+    let flowMessages = acceptedMessages;
+    const ruleCandidates = acceptedInbound.filter((message) => message.autoReply === 0);
+    if (ruleCandidates.length > 0) {
+      try {
+        const replied = await applyRules(env, deviceId, ruleCandidates, now);
+        if (replied.size > 0) {
+          flowMessages = acceptedMessages.filter((message) => !replied.has(message.localId));
+        }
+      } catch (error) {
+        // A rule-engine failure must not fail the upload; the messages are durable.
+        // Leaving flows unchanged is the conservative fallback (no rule replied).
+        console.error(`[rules] pipeline failed for ${deviceId}: ${String(error)}`);
+      }
+    }
+
     // Flow fallback, only for rows that were actually inserted. A retried batch
     // is all duplicates, so it cannot send a second reply. A failure here must
     // not fail the upload: the messages are already durable.
-    if (acceptedMessages.length > 0) {
+    if (flowMessages.length > 0) {
       try {
-        const enqueued = await dispatchFlows(env, deviceId, acceptedMessages);
+        const enqueued = await dispatchFlows(env, deviceId, flowMessages);
         if (enqueued > 0) console.log(`[flow] enqueued ${enqueued} command(s) for ${deviceId}`);
       } catch (error) {
         console.error(`[flow] dispatch failed for ${deviceId}: ${String(error)}`);
@@ -358,7 +397,8 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
   if (!Number.isFinite(before)) return err("bad_request", 400);
 
   const rows = await env.DB.prepare(
-    `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply
+    `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply,
+            reply_source, reply_ref, reply_command_id
        FROM messages
       WHERE device_id = ? AND received_at < ?
       ORDER BY received_at DESC, id DESC
@@ -368,6 +408,110 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
     .all();
 
   return Response.json({ messages: rows.results ?? [], limit });
+}
+
+/**
+ * §11.11: evaluate Rules for newly accepted inbound messages and queue the first
+ * reply. Returns the local ids that received a rule reply, so flows can skip them.
+ *
+ * Rules are ordered `priority DESC, id`; the first one that matches and is inside
+ * both limits replies, and evaluation stops for that message. A hit is appended to
+ * the in-memory history immediately, so two matching messages in one batch cannot
+ * both bypass a cooldown or an hourly cap.
+ */
+async function applyRules(
+  env: Env,
+  deviceId: string,
+  messages: AcceptedInbound[],
+  now: number
+): Promise<Set<string>> {
+  const replied = new Set<string>();
+  if (messages.length === 0) return replied;
+
+  const rows = await env.DB.prepare(
+    `SELECT id, name, enabled, priority, matcher_type, matcher_value,
+            body_type, body_value, reply_template, cooldown_s, max_per_hour,
+            sim_slot, allow_shortcode, device_id, updated_at
+       FROM rules
+      WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)
+      ORDER BY priority DESC, id ASC`
+  )
+    .bind(deviceId)
+    .all<RuleRecord>();
+  const rules = rows.results ?? [];
+  if (rules.length === 0) return replied;
+
+  // Cooldown may be longer than the hourly window, so look back far enough for
+  // whichever limit is stricter. The query is device-first and indexed.
+  const lookbackMs = rules.reduce(
+    (longest, rule) => Math.max(longest, Math.max(0, rule.cooldown_s) * 1000),
+    3_600_000
+  );
+  const hitRows = await env.DB.prepare(
+    `SELECT rule_id, device_id, replied_at
+       FROM rule_hits
+      WHERE device_id = ? AND replied_at >= ?`
+  )
+    .bind(deviceId, now - lookbackMs)
+    .all<RuleHit>();
+  const hits: RuleHit[] = [...(hitRows.results ?? [])];
+
+  for (const message of messages) {
+    const evaluations = evaluateRules(
+      rules,
+      { peer: message.sender, body: message.body },
+      { deviceId, now, hits }
+    );
+
+    for (const evaluation of evaluations) {
+      if (!evaluation.matched) continue;
+
+      const replyBody = renderReplyTemplate(evaluation.rule.reply_template, {
+        sender: message.sender,
+        body: message.body,
+        matched: evaluation.matched_text,
+      }).slice(0, MAX_BODY_CHARS);
+      // The console documents an empty template as "match without sending a reply".
+      if (replyBody.trim() === "") continue;
+
+      const commandId = crypto.randomUUID();
+      const queued = await enqueueOutboundCommand(env, {
+        deviceId,
+        commandId,
+        to: message.sender,
+        body: replyBody,
+        priority: "normal",
+        expiresAt: now + RULE_COMMAND_TTL_MS,
+      });
+      // A DO failure is not a reason to try lower-priority rules: the queue as a
+      // whole is unavailable. Leave the message unanswered so flows may still run.
+      if (!queued) break;
+
+      try {
+        await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE messages
+                SET auto_reply = 1, reply_source = 'rule',
+                    reply_ref = ?, reply_command_id = ?
+              WHERE device_id = ? AND local_id = ?`
+          ).bind(evaluation.rule_id, commandId, deviceId, message.localId),
+          env.DB.prepare(
+            `INSERT INTO rule_hits (rule_id, device_id, replied_at) VALUES (?, ?, ?)`
+          ).bind(evaluation.rule_id, deviceId, now),
+        ]);
+      } catch (error) {
+        // The command is already queued. The in-memory hit below still prevents a
+        // second reply through flows or later messages in this batch.
+        console.error(`[rules] could not record reply for ${message.localId}: ${String(error)}`);
+      }
+
+      hits.push({ rule_id: evaluation.rule_id, device_id: deviceId, replied_at: now });
+      replied.add(message.localId);
+      break;
+    }
+  }
+
+  return replied;
 }
 
 /** Default 50, hard maximum 200. */

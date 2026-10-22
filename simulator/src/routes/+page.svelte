@@ -281,7 +281,7 @@
 </script>
 
 <svelte:head>
-	<title>DakFlare Simulator</title>
+	<title>DakFlare device</title>
 </svelte:head>
 
 <section class="panel" style="margin-bottom: 16px;">
@@ -293,19 +293,34 @@
 	</div>
 
 	<form onsubmit={saveTarget}>
-		<div class="grid" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr); margin-top: 10px;">
-			<div class="field" style="margin-top: 0;">
-				<label for="base-url">Worker URL</label>
-				<input
-					id="base-url"
-					bind:value={baseUrl}
-					placeholder="https://dakflare-worker.<account>.workers.dev"
-					autocomplete="off"
-				/>
-			</div>
+		<div class="field" style="margin-top: 10px; max-width: 540px;">
+			<label for="base-url">Worker URL</label>
+			<input
+				id="base-url"
+				bind:value={baseUrl}
+				placeholder="https://dakflare-worker.<account>.workers.dev"
+				autocomplete="off"
+			/>
+		</div>
+		<div class="row" style="margin-top: 12px; justify-content: space-between;">
+			<small style="color: var(--ink-3)">
+				A pairing link sets this for you. Enter it by hand only when you are typing a bare
+				code.
+			</small>
+			<button class="primary" type="submit" disabled={savingTarget}>
+				{savingTarget ? 'Saving…' : 'Save target'}
+			</button>
+		</div>
+
+		<details class="advanced">
+			<summary>Admin overrides (lab)</summary>
+			<p>
+				Not needed to pair. These credentials are only for self-pair, purge and revoke on a
+				lab deployment.
+			</p>
 			<div class="field" style="margin-top: 0;">
 				<label for="admin-token">
-					Admin token {target.has_admin_token ? '(stored)' : '(self-pair, purge and revoke only)'}
+					Admin token {target.has_admin_token ? '(stored)' : '(not stored)'}
 				</label>
 				<input
 					id="admin-token"
@@ -314,16 +329,10 @@
 					placeholder={target.has_admin_token ? 'leave blank to keep' : 'ADMIN_TOKEN'}
 					autocomplete="off"
 				/>
+				<small>Stored in this app's local database. It is never sent when pairing with a code.</small>
 			</div>
-		</div>
-		<div class="row" style="margin-top: 12px; justify-content: space-between;">
-			<small style="color: var(--ink-3)">
-				Stored locally in plain text for now; Tauri stronghold comes with the real build.
-			</small>
-			<button class="primary" type="submit" disabled={savingTarget}>
-				{savingTarget ? 'Saving…' : 'Save target'}
-			</button>
-		</div>
+		</details>
+
 		{#if targetNotice}
 			<p style="margin: 8px 0 0; font-size: 12px; color: var(--ink-3);" aria-live="polite">
 				{targetNotice}
@@ -386,15 +395,19 @@
 
 <div class="grid">
 	<section class="panel">
-		<h2>New simulated device</h2>
+		<h2>Device identity</h2>
 		<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
-			Generates a fresh P-256 keypair. The public half is what pairing registers; the private half stays local.
+			This creates a real P-256 keypair. The public half registers with the deployment at
+			pairing; the private half stays on this device and never leaves it.
+		</p>
+		<p style="color: var(--ink-3); font-size: 12px; margin: 4px 0 0;">
+			The carrier is simulated until the native SMS layer ships.
 		</p>
 
 		<form onsubmit={create}>
 			<div class="field">
 				<label for="label">Label</label>
-				<input id="label" bind:value={label} placeholder="Pixel 8 · lab" autocomplete="off" />
+				<input id="label" bind:value={label} placeholder="Pixel 8 · reception" autocomplete="off" />
 			</div>
 
 			<div class="field">
@@ -419,7 +432,7 @@
 
 			<div style="margin-top: 16px;">
 				<button class="primary" type="submit" disabled={creating}>
-					{creating ? 'Generating…' : 'Create device'}
+					{creating ? 'Generating…' : 'Create identity'}
 				</button>
 			</div>
 		</form>
@@ -435,15 +448,15 @@
 			<button onclick={refresh} disabled={loading}>Refresh</button>
 		</div>
 		<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
-			Real phones onboard with a dashboard code above. <strong>Self-pair (admin)</strong> mints a
-			code locally with the stored admin token — lab use only.
+			Pair a phone with a one-time dashboard code above. <strong>Self-pair (lab)</strong> mints a
+			code with the stored admin token instead, for a deployment without a console.
 		</p>
 
 		{#if loading}
 			<p class="empty">Opening the local database…</p>
 		{:else if devices.length === 0}
 			<p class="empty">
-				No devices yet. Create one to get a device id and a signing key, then pair it.
+				No device identity yet. Create one to generate a signing key, then pair it with a code.
 			</p>
 		{:else}
 			{#each devices as device (device.device_id)}
@@ -469,13 +482,13 @@
 					<div class="row" style="margin-top: 12px;">
 						<button
 							disabled={!configured || busy[device.device_id]}
-							title="Mints a code with the stored admin token. Real onboarding uses a dashboard code."
+							title="Mints a code with the stored admin token. Pair with code is the normal path."
 							onclick={() =>
 								act(device.device_id, 'pair', async () =>
 									invoke<string>('pair_device', { deviceId: device.device_id })
 								)}
 						>
-							Self-pair (admin)
+							Self-pair (lab)
 						</button>
 						<button
 							disabled={!configured || busy[device.device_id]}
@@ -552,13 +565,13 @@
 
 <section class="panel" style="margin-top: 16px;">
 	<div class="row" style="justify-content: space-between;">
-		<h2>Carrier <span style="color: var(--ink-3); text-transform: none; letter-spacing: 0;">· simulated radio</span></h2>
+		<h2>Carrier</h2>
 		<span class="pill">{offline ? 'offline' : 'online'}</span>
 	</div>
 
 	<p style="color: var(--ink-3); font-size: 12px; margin: 6px 0 0;">
-		Inbound is injected here instead of arriving from a radio; outbound is captured from the
-		command queue instead of being handed to SmsManager.
+		Inbound messages are injected here and outbound commands are captured from the queue; the
+		native SMS layer is not wired up yet.
 	</p>
 
 	<div class="grid" style="grid-template-columns: 220px minmax(0,1fr); margin-top: 12px;">

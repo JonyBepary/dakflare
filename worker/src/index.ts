@@ -18,7 +18,7 @@ import { handleWs } from "./routes/ws";
 import { handleIncomingBatch, handleMessagesList, handleMessagesPurge } from "./routes/incoming";
 import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
-import { handleRulesGet, handleRulesPost } from "./routes/rules";
+import { handleRulesGet, handleRulesPost, handleRulesTest } from "./routes/rules";
 import {
   handleDeviceFlows,
   handleWorkflowDelete,
@@ -28,10 +28,12 @@ import {
 } from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
+  handleDeviceCommands,
   handleDeviceRevoke,
   handleRuleDelete,
   handleRulesListAdmin,
 } from "./routes/admin";
+import { handleAlertAck, handleAlertsList } from "./routes/alerts";
 import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
@@ -92,6 +94,11 @@ export interface Env {
   AUTH_FAIL_LIMITER?: RateLimit;
   /** Per-device daily inbound row budget, read by the DO's `write_budget` table. */
   INCOMING_ROWS_PER_DAY?: string;
+  /**
+   * Optional out-of-band delivery for operator alerts. When set, the DO POSTs the
+   * alert JSON to it, best-effort: a webhook outage must never fail the alarm.
+   */
+  ALERT_WEBHOOK_URL?: string;
 }
 
 type DeviceHandler = (
@@ -157,8 +164,39 @@ async function withAdmin(
   return handler();
 }
 
+/**
+ * Advance `devices.last_seen` after an authenticated device request.
+ *
+ * §11.12: this is authenticated contact, not pairing time. It is deliberately
+ * fire-and-forget (`ctx.waitUntil`) and conditional on being at least 60 s stale,
+ * so it never delays a response and cannot turn a D1 hiccup into a device failure.
+ * Every failure mode is swallowed; a stale liveness value is worse than a failed
+ * request only if the request itself fails.
+ */
+function recordDeviceContact(ctx: ExecutionContext, env: Env, deviceId: string): void {
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const now = Date.now();
+        await env.DB.prepare(
+          `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
+        )
+          .bind(now, deviceId, now - 60_000)
+          .run();
+      } catch {
+        // Presence is diagnostic. Never surface it.
+      }
+    })()
+  );
+}
+
 /** `withDevice` — §3.2 runs entirely inside `verifyDeviceSignature`. */
-async function withDevice(req: Request, env: Env, handler: DeviceHandler): Promise<Response> {
+async function withDevice(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  handler: DeviceHandler
+): Promise<Response> {
   const result = await verifyDeviceSignature(req, env);
   if (!result.ok) {
     // Count FAILURES only, and only where the edge tells us who is calling. A
@@ -184,6 +222,9 @@ async function withDevice(req: Request, env: Env, handler: DeviceHandler): Promi
     if (!success) return err("rate_limited", 429);
   }
 
+  // Authenticated contact, after every gate that could reject the request.
+  recordDeviceContact(ctx, env, result.deviceId);
+
   return handler(req, env, result.deviceId, result.body);
 }
 
@@ -202,7 +243,7 @@ export default {
     ctx.waitUntil(runRetention(env));
   },
 
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const { pathname } = url;
     const method = req.method.toUpperCase();
@@ -236,8 +277,28 @@ export default {
       return withAdmin(req, env, () => handleDeviceRevoke(env, target));
     }
 
+    const deviceCommandsMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/commands$/);
+    if (method === "GET" && deviceCommandsMatch) {
+      // Decoding happens INSIDE `withAdmin`, so a malformed escape is an
+      // authenticated caller's error, not an unauthenticated throw.
+      return withAdmin(req, env, () =>
+        handleDeviceCommands(env, decodeURIComponent(deviceCommandsMatch[1]), url)
+      );
+    }
+
+    if (method === "GET" && pathname === "/v1/admin/alerts") {
+      return withAdmin(req, env, () => handleAlertsList(env, url));
+    }
+    const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
+    if (method === "POST" && alertAckMatch) {
+      return withAdmin(req, env, () => handleAlertAck(env, decodeURIComponent(alertAckMatch[1])));
+    }
+
     if (method === "GET" && pathname === "/v1/admin/rules") {
       return withAdmin(req, env, () => handleRulesListAdmin(env));
+    }
+    if (method === "POST" && pathname === "/v1/admin/rules/test") {
+      return withAdmin(req, env, () => handleRulesTest(req, env));
     }
     const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
     if (method === "DELETE" && ruleDeleteMatch) {
@@ -299,24 +360,24 @@ export default {
 
     /* ---- ECDSA-authenticated device routes ----------------------------- */
     if (method === "GET" && pathname === "/v1/device/ws") {
-      return withDevice(req, env, (r, e, deviceId) => handleWs(r, e, deviceId));
+      return withDevice(req, env, ctx, (r, e, deviceId) => handleWs(r, e, deviceId));
     }
     if (method === "POST" && pathname === "/v1/sms/incoming/batch") {
-      return withDevice(req, env, (r, e, deviceId, body) =>
+      return withDevice(req, env, ctx, (r, e, deviceId, body) =>
         handleIncomingBatch(r, e, deviceId, body)
       );
     }
     if (method === "POST" && pathname === "/v1/sms/outgoing/poll") {
-      return withDevice(req, env, (r, e, deviceId, body) => handlePoll(r, e, deviceId, body));
+      return withDevice(req, env, ctx, (r, e, deviceId, body) => handlePoll(r, e, deviceId, body));
     }
     if (method === "POST" && pathname === "/v1/sms/status/batch") {
-      return withDevice(req, env, (r, e, deviceId, body) => handleStatusBatch(r, e, deviceId, body));
+      return withDevice(req, env, ctx, (r, e, deviceId, body) => handleStatusBatch(r, e, deviceId, body));
     }
     if (method === "GET" && pathname === "/v1/rules") {
-      return withDevice(req, env, (r, e, deviceId) => handleRulesGet(r, e, deviceId));
+      return withDevice(req, env, ctx, (r, e, deviceId) => handleRulesGet(r, e, deviceId));
     }
     if (method === "GET" && pathname === "/v1/flows") {
-      return withDevice(req, env, (_r, e, deviceId) => handleDeviceFlows(e, deviceId));
+      return withDevice(req, env, ctx, (_r, e, deviceId) => handleDeviceFlows(e, deviceId));
     }
 
     /* ---- admin session (cookie) ---------------------------------------- */

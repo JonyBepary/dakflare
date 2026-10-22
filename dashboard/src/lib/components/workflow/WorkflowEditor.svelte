@@ -39,6 +39,7 @@
 	import { WORKFLOW_UI, type WorkflowCanvasUi } from '$lib/workflow/context';
 	import {
 		NODE_LIMIT,
+		NODE_META,
 		RE_DEVICE_ID,
 		createDraft,
 		createEdge,
@@ -46,6 +47,7 @@
 		createWorkflowId,
 		fromGraph,
 		mapServerIssues,
+		nodeSummary,
 		toGraph,
 		validateWorkflow,
 		type EditorIssue,
@@ -164,7 +166,7 @@
 		if (notFound) return 'This workflow may have been deleted from the gateway.';
 		if (loadError) return 'The saved graph could not be read.';
 		const scope = deviceId ? `Scoped to ${deviceId}` : 'Fleet-wide scope';
-		return `${scope} · ${nodeCount} ${nodeCount === 1 ? 'step' : 'steps'} · preview only, no messages are sent`;
+		return `${scope} · ${nodeCount} ${nodeCount === 1 ? 'step' : 'steps'} · runs on the phone first, with a Worker fallback`;
 	});
 	const saveState = $derived.by(() => {
 		if (saving) return 'Saving…';
@@ -567,19 +569,21 @@
 <div class="page editor-page">
 	<PageHeader eyebrow="Automation" title={pageTitle} description={pageDescription}>
 		{#if !loading && !notFound && !loadError}
-			<Badge tone={enabled ? 'ok' : 'muted'} dot>{enabled ? 'enabled' : 'paused'}</Badge>
-			{#if version !== null}
-				<span class="mono version-chip">v{version}</span>
-			{/if}
-			<button
-				type="button"
-				class="btn btn-sm"
-				onclick={() => selectOnly(null)}
-				aria-pressed={selectedNode === null}
-				title="Show the settings for this flow"
-			>
-				<Icon name="workflow" size={12} /> Flow settings
-			</button>
+			<span class="head-extras">
+				<Badge tone={enabled ? 'ok' : 'muted'} dot>{enabled ? 'enabled' : 'paused'}</Badge>
+				{#if version !== null}
+					<span class="mono version-chip">v{version}</span>
+				{/if}
+				<button
+					type="button"
+					class="btn btn-sm"
+					onclick={() => selectOnly(null)}
+					aria-pressed={selectedNode === null}
+					title="Show the settings for this flow"
+				>
+					<Icon name="workflow" size={12} /> Flow settings
+				</button>
+			</span>
 		{/if}
 	</PageHeader>
 
@@ -619,6 +623,41 @@
 			</div>
 		</section>
 	{:else}
+		<div class="mobile-defer panel" aria-labelledby="mobile-defer-title">
+			<div class="panel-body mobile-defer-body">
+				<span class="empty-mark"><Icon name="workflow" size={18} /></span>
+				<h2 id="mobile-defer-title">Workflow editing needs a larger screen</h2>
+				<p>
+					The canvas, drag-to-connect and inspector need a wider viewport. Open this workflow on a
+					desktop to change it.
+				</p>
+				<div class="defer-summary">
+					<p class="eyebrow">{nodeCount} {nodeCount === 1 ? 'step' : 'steps'} · read-only</p>
+					{#if nodes.length === 0}
+						<p class="hint">This flow has no steps yet.</p>
+					{:else}
+						<ol class="defer-list">
+							{#each nodes as node, index (node.id)}
+								<li>
+									<span class="defer-index mono">{index + 1}</span>
+									<span class="defer-step">
+										<strong>{NODE_META[node.type].title}</strong>
+										<small>{nodeSummary(node)}</small>
+									</span>
+								</li>
+							{/each}
+						</ol>
+					{/if}
+				</div>
+				<div class="row">
+					<a class="btn" href={ROUTES.workflows}>
+						<Icon name="arrow-down-left" size={13} /> Back to workflows
+					</a>
+					{#if !id}<span class="hint">This draft is not saved yet.</span>{/if}
+				</div>
+			</div>
+		</div>
+
 		<div class="editor-grid">
 			<div class="palette-col">
 				<FlowPalette {nodeCount} {hasTrigger} onadd={addNode} />
@@ -809,6 +848,88 @@
 <style>
 	.editor-page {
 		min-width: 0;
+	}
+
+	.head-extras {
+		display: contents;
+	}
+
+	.mobile-defer {
+		display: none;
+	}
+
+	.mobile-defer-body {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: var(--s-3);
+	}
+
+	.mobile-defer-body h2 {
+		font-size: var(--text-lg);
+	}
+
+	.mobile-defer-body > p {
+		max-width: 46ch;
+		font-size: var(--text-base);
+		line-height: 1.55;
+		color: var(--ink-3);
+	}
+
+	.defer-summary {
+		width: 100%;
+		padding: var(--s-3);
+		border: 1px solid var(--line);
+		border-radius: var(--r-sm);
+		background: var(--surface-2);
+	}
+
+	.defer-list {
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+		margin: var(--s-2) 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.defer-list li {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--s-2);
+	}
+
+	.defer-index {
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		flex: none;
+		margin-top: 1px;
+		border: 1px solid var(--line);
+		border-radius: 3px;
+		font-size: 9px;
+		color: var(--ink-3);
+		background: var(--surface);
+	}
+
+	.defer-step {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	.defer-step strong {
+		font-size: var(--text-base);
+		font-weight: 500;
+	}
+
+	.defer-step small {
+		font-size: 11px;
+		line-height: 1.4;
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
 	}
 
 	.version-chip {
@@ -1045,11 +1166,24 @@
 		}
 	}
 
+	@media (max-width: 720px) {
+		.mobile-defer {
+			display: block;
+		}
+
+		.editor-grid {
+			display: none;
+		}
+
+		.head-extras {
+			display: none;
+		}
+	}
+
 	@media (max-width: 760px) {
 		.editor-grid {
 			grid-template-columns: minmax(0, 1fr);
 		}
-
 		.canvas-shell {
 			height: 460px;
 		}

@@ -1,15 +1,18 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
 	import { createRule, deleteRule, describeError, getDevices, getRules } from '$lib/api';
 	import type { BodyType, Device, MatcherType, Rule } from '$lib/types';
 	import { utf8Bytes } from '$lib/format';
+	import { deviceLabel, deviceOptionLabel, devicePrimary } from '$lib/presence';
+	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import RuleTestPanel from '$lib/components/RuleTestPanel.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	interface FormModel {
@@ -71,7 +74,7 @@
 		{
 			value: 'regex',
 			label: 'Regex',
-			hint: 'RE2 subset only — the pattern must compile on the device.',
+			hint: 'RE2 subset only — the gateway rejects a pattern it cannot compile.',
 			placeholder: '^(STOP|UNSUBSCRIBE)$'
 		}
 	];
@@ -106,6 +109,10 @@
 	let fieldErrors = $state<Record<string, string>>({});
 	let formError = $state<string | null>(null);
 	let submitting = $state(false);
+	let limitsOpen = $state(false);
+
+	let listTestOpen = $state(false);
+	let listTestScope = $state('');
 
 	let deleteTarget = $state<Rule | null>(null);
 	let deleting = $state(false);
@@ -116,6 +123,35 @@
 	const replyBytes = $derived(utf8Bytes(form.reply_template));
 	const matcherBytes = $derived(utf8Bytes(form.matcher_value));
 	const bodyBytes = $derived(utf8Bytes(form.body_value));
+	const limitSummary = $derived(
+		[
+			form.enabled ? null : 'Paused',
+			`prio ${Number.isFinite(form.priority) ? Math.trunc(form.priority) : 0}`,
+			form.cooldown_s === 0 ? 'no cooldown' : `1 reply / ${Math.trunc(form.cooldown_s)} s`,
+			`max ${Number.isFinite(form.max_per_hour) ? Math.trunc(form.max_per_hour) : 0} / h`
+		]
+			.filter(Boolean)
+			.join(' · ')
+	);
+
+	function findDevice(id: string | null): Device | null {
+		if (!id) return null;
+		return devices.find((device) => device.device_id === id) ?? null;
+	}
+
+	function scopeName(id: string | null): string | null {
+		if (!id) return null;
+		const device = findDevice(id);
+		return device ? devicePrimary(device) : id;
+	}
+
+	function scopeDetail(id: string | null): string {
+		if (!id) return 'every device';
+		const device = findDevice(id);
+		if (!device) return id;
+		const label = deviceLabel(device);
+		return label ? `${label} (${id})` : id;
+	}
 
 	async function loadRules(initial = false) {
 		if (!initial) refreshing = true;
@@ -141,14 +177,28 @@
 
 	function openForm() {
 		formOpen = true;
+		listTestOpen = false;
 		formError = null;
 		fieldErrors = {};
+		limitsOpen = false;
+	}
+
+	async function openListTest(rule: Rule) {
+		formOpen = false;
+		listTestScope = rule.device_id ?? '';
+		listTestOpen = true;
+		await tick();
+		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		document
+			.getElementById('rule-test-panel')
+			?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
 	}
 
 	function resetForm() {
 		form = defaultForm();
 		fieldErrors = {};
 		formError = null;
+		limitsOpen = false;
 	}
 
 	function validate(): boolean {
@@ -181,8 +231,14 @@
 				max_per_hour: 'rule-max',
 				sim_slot: 'rule-sim'
 			};
+			if (['priority', 'cooldown_s', 'max_per_hour', 'sim_slot'].some((key) => key in next)) {
+				limitsOpen = true;
+			}
 			const first = Object.keys(ids).find((key) => key in next);
-			if (first) document.getElementById(ids[first])?.focus();
+			if (first) {
+				const targetId = ids[first];
+				void tick().then(() => document.getElementById(targetId)?.focus());
+			}
 		}
 		return Object.keys(next).length === 0;
 	}
@@ -214,7 +270,7 @@
 				sim_slot: Math.trunc(form.sim_slot),
 				allow_shortcode: form.allow_shortcode
 			});
-			flash = `Rule “${name}” saved${form.device_id ? ` for ${form.device_id}` : ' as a global rule'}.`;
+			flash = `Rule “${name}” saved${form.device_id ? ` for ${scopeName(form.device_id)}` : ' as a global rule'}.`;
 			formOpen = false;
 			resetForm();
 			await loadRules();
@@ -257,7 +313,7 @@
 	<PageHeader
 		eyebrow="Automation"
 		title="Auto-reply rules"
-		description="A rule matches the sender and message body, then optionally replies once within its rate limits."
+		description="Rules are evaluated by the gateway as messages sync, so they need connectivity. Use one rule for a single rate-limited reply."
 	>
 		<button
 			type="button"
@@ -281,10 +337,24 @@
 		</button>
 	</PageHeader>
 
+	<AutomationHeader active="rules" />
+
 	<div class="stack">
 		{#if flash}
 			<div aria-live="polite">
 				<Notice tone="ok">{flash}</Notice>
+			</div>
+		{/if}
+
+		{#if listTestOpen}
+			<div id="rule-test-panel">
+				<RuleTestPanel
+					rules={rules}
+					devices={devices}
+					scope={listTestScope}
+					startOpen
+					onclose={() => (listTestOpen = false)}
+				/>
 			</div>
 		{/if}
 
@@ -294,290 +364,366 @@
 					<h2 id="rule-form-heading" class="panel-title">
 						<Icon name="filter" size={14} /> New rule
 					</h2>
-					<span class="panel-meta">matcher → reply</span>
+					<div class="head-actions">
+						<span class="panel-meta">matcher → reply</span>
+						<button
+							type="submit"
+							form="rule-form-body"
+							class="btn btn-primary btn-sm"
+							disabled={submitting}
+							aria-busy={submitting}
+						>
+							{#if submitting}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+							Save rule
+						</button>
+						<button
+							type="button"
+							class="btn btn-sm"
+							onclick={() => (formOpen = false)}
+							disabled={submitting}
+						>
+							Cancel
+						</button>
+					</div>
 				</div>
 				<div class="panel-body">
 					<form
-						class="form-grid"
+						id="rule-form-body"
+						class="rule-form"
 						onsubmit={(event) => {
 							event.preventDefault();
 							void submitRule();
 						}}
 						novalidate
 					>
-						<div class="form-section">
-							<span class="eyebrow">Identity</span>
-						</div>
-
-						<div class="field span-2">
-							<label class="label" for="rule-name">Name</label>
-							<input
-								id="rule-name"
-								class="input"
-								bind:value={form.name}
-								placeholder="Stop requests"
-								aria-invalid={fieldErrors.name ? 'true' : undefined}
-								aria-describedby={fieldErrors.name ? 'rule-name-error' : undefined}
-							/>
-							{#if fieldErrors.name}
-								<p class="field-error" id="rule-name-error">{fieldErrors.name}</p>
-							{/if}
-						</div>
-
-						<div class="field">
-							<label class="label" for="rule-scope">Scope</label>
-							<select
-								id="rule-scope"
-								class="input input-mono"
-								bind:value={form.device_id}
-								aria-describedby="rule-scope-hint"
-							>
-								<option value="">Global — every device</option>
-								{#each devices as device (device.device_id)}
-									<option value={device.device_id}>{device.device_id}</option>
-								{/each}
-							</select>
-							<p class="hint" id="rule-scope-hint">Global rules apply to the whole fleet.</p>
-						</div>
-
-						<div class="form-section">
-							<span class="eyebrow">Sender matcher</span>
-						</div>
-
-						<div class="field">
-							<label class="label" for="matcher-type">Match type</label>
-							<select
-								id="matcher-type"
-								class="input"
-								bind:value={form.matcher_type}
-								aria-describedby="matcher-type-hint"
-							>
-								{#each MATCHERS as matcher (matcher.value)}
-									<option value={matcher.value}>{matcher.label}</option>
-								{/each}
-							</select>
-							<p class="hint" id="matcher-type-hint">{matcherHint.hint}</p>
-						</div>
-
-						<div class="field span-2">
-							<label class="label" for="matcher-value">Sender value</label>
-							<input
-								id="matcher-value"
-								class="input input-mono"
-								bind:value={form.matcher_value}
-								placeholder={matcherHint.placeholder}
-								autocomplete="off"
-								spellcheck="false"
-								aria-invalid={fieldErrors.matcher_value ? 'true' : undefined}
-								aria-describedby="matcher-value-hint matcher-counter"
-							/>
-							<div class="field-foot">
-								{#if fieldErrors.matcher_value}
-									<p class="field-error" id="matcher-value-hint">{fieldErrors.matcher_value}</p>
-								{:else}
-									<span class="hint" id="matcher-value-hint">
-										Phone number, shortcode or pattern.
-									</span>
-								{/if}
-								<span class="counter mono" class:over={matcherBytes > 512}>{matcherBytes}/512</span>
+						<section class="rule-section" aria-labelledby="rule-match-heading">
+							<div class="rule-section-head">
+								<h3 class="eyebrow" id="rule-match-heading">Match</h3>
+								<p class="hint">Who the message is from and what it says.</p>
 							</div>
-							<span class="sr-only" id="matcher-counter">Sender pattern, maximum 512 bytes</span>
-						</div>
 
-						<div class="form-section">
-							<span class="eyebrow">Message matcher</span>
-						</div>
+							<div class="form-grid">
+								<div class="field span-2">
+									<label class="label" for="rule-name">Name</label>
+									<input
+										id="rule-name"
+										class="input"
+										bind:value={form.name}
+										placeholder="Stop requests"
+										aria-invalid={fieldErrors.name ? 'true' : undefined}
+										aria-describedby={fieldErrors.name ? 'rule-name-error' : undefined}
+									/>
+									{#if fieldErrors.name}
+										<p class="field-error" id="rule-name-error">{fieldErrors.name}</p>
+									{/if}
+								</div>
 
-						<div class="field">
-							<label class="label" for="body-type">Match type</label>
-							<select
-								id="body-type"
-								class="input"
-								bind:value={form.body_type}
-								aria-describedby="body-type-hint"
-							>
-								{#each BODY_TYPES as item (item.value)}
-									<option value={item.value}>{item.label}</option>
-								{/each}
-							</select>
-							<p class="hint" id="body-type-hint">{bodyHint.hint}</p>
-						</div>
-
-						<div class="field span-2">
-							<label class="label" for="body-value">Message value</label>
-							<input
-								id="body-value"
-								class="input input-mono"
-								bind:value={form.body_value}
-								placeholder={bodyHint.placeholder}
-								autocomplete="off"
-								spellcheck="false"
-								aria-invalid={fieldErrors.body_value ? 'true' : undefined}
-								aria-describedby="body-value-hint"
-							/>
-							<div class="field-foot">
-								{#if fieldErrors.body_value}
-									<p class="field-error" id="body-value-hint">{fieldErrors.body_value}</p>
-								{:else}
-									<span class="hint" id="body-value-hint">
-										Matched against the full inbound body.
-									</span>
-								{/if}
-								<span class="counter mono" class:over={bodyBytes > 512}>{bodyBytes}/512</span>
-							</div>
-						</div>
-
-						<div class="form-section">
-							<span class="eyebrow">Reply</span>
-						</div>
-
-						<div class="field span-3">
-							<label class="label" for="reply-template">
-								Reply template <span class="optional">optional</span>
-							</label>
-							<textarea
-								id="reply-template"
-								class="input"
-								bind:value={form.reply_template}
-								placeholder="Reply sent back to the sender…"
-								rows="3"
-								aria-invalid={fieldErrors.reply_template ? 'true' : undefined}
-								aria-describedby="reply-template-hint"
-							></textarea>
-							<div class="field-foot">
-								{#if fieldErrors.reply_template}
-									<p class="field-error" id="reply-template-hint">{fieldErrors.reply_template}</p>
-								{:else}
-									<span class="hint" id="reply-template-hint">
-										Leave empty to match without sending a reply.
-									</span>
-								{/if}
-								<span class="counter mono" class:over={replyBytes > 1000}>{replyBytes}/1000</span>
-							</div>
-						</div>
-
-						<div class="form-section">
-							<span class="eyebrow">Limits and targeting</span>
-						</div>
-
-						<div class="field">
-							<label class="label" for="rule-priority">Priority</label>
-							<input
-								id="rule-priority"
-								class="input input-mono input-num"
-								type="number"
-								bind:value={form.priority}
-								step="1"
-								aria-invalid={fieldErrors.priority ? 'true' : undefined}
-								aria-describedby="rule-priority-hint"
-							/>
-							{#if fieldErrors.priority}
-								<p class="field-error" id="rule-priority-hint">{fieldErrors.priority}</p>
-							{:else}
-								<p class="hint" id="rule-priority-hint">Higher wins when several rules match.</p>
-							{/if}
-						</div>
-
-						<div class="field">
-							<label class="label" for="rule-cooldown">Cooldown (seconds)</label>
-							<input
-								id="rule-cooldown"
-								class="input input-mono input-num"
-								type="number"
-								bind:value={form.cooldown_s}
-								min="0"
-								step="1"
-								aria-invalid={fieldErrors.cooldown_s ? 'true' : undefined}
-								aria-describedby="rule-cooldown-hint"
-							/>
-							{#if fieldErrors.cooldown_s}
-								<p class="field-error" id="rule-cooldown-hint">{fieldErrors.cooldown_s}</p>
-							{:else}
-								<p class="hint" id="rule-cooldown-hint">Minimum gap between auto replies.</p>
-							{/if}
-						</div>
-
-						<div class="field">
-							<label class="label" for="rule-max">Max replies / hour</label>
-							<input
-								id="rule-max"
-								class="input input-mono input-num"
-								type="number"
-								bind:value={form.max_per_hour}
-								min="0"
-								step="1"
-								aria-invalid={fieldErrors.max_per_hour ? 'true' : undefined}
-								aria-describedby="rule-max-hint"
-							/>
-							{#if fieldErrors.max_per_hour}
-								<p class="field-error" id="rule-max-hint">{fieldErrors.max_per_hour}</p>
-							{:else}
-								<p class="hint" id="rule-max-hint">Per device and rule.</p>
-							{/if}
-						</div>
-
-						<div class="field">
-							<label class="label" for="rule-sim">SIM slot</label>
-							<input
-								id="rule-sim"
-								class="input input-mono input-num"
-								type="number"
-								bind:value={form.sim_slot}
-								min="0"
-								step="1"
-								aria-invalid={fieldErrors.sim_slot ? 'true' : undefined}
-								aria-describedby="rule-sim-hint"
-							/>
-							{#if fieldErrors.sim_slot}
-								<p class="field-error" id="rule-sim-hint">{fieldErrors.sim_slot}</p>
-							{:else}
-								<p class="hint" id="rule-sim-hint">0 uses the device default.</p>
-							{/if}
-						</div>
-
-						<div class="toggles span-2">
-							<label class="check">
-								<input
-									id="rule-enabled"
-									type="checkbox"
-									bind:checked={form.enabled}
-									aria-describedby="rule-enabled-hint"
-								/>
-								<span>
-									Enabled
-									<span class="hint" id="rule-enabled-hint" aria-hidden="true" style="display: block">
-										Disabled rules are stored but never matched.
-									</span>
-								</span>
-							</label>
-							<label class="check">
-								<input
-									id="rule-allow-shortcode"
-									type="checkbox"
-									bind:checked={form.allow_shortcode}
-									aria-describedby="rule-allow-shortcode-hint"
-								/>
-								<span>
-									Allow shortcode replies
-									<span
-										class="hint"
-										id="rule-allow-shortcode-hint"
-										aria-hidden="true"
-										style="display: block"
+								<div class="field">
+									<label class="label" for="rule-scope">Scope</label>
+									<select
+										id="rule-scope"
+										class="input input-mono"
+										bind:value={form.device_id}
+										aria-describedby="rule-scope-hint"
 									>
-										Shortcode replies can be billable on the device.
-									</span>
-								</span>
-							</label>
-						</div>
+										<option value="">Global — every device</option>
+										{#each devices as device (device.device_id)}
+											<option value={device.device_id}>{deviceOptionLabel(device)}</option>
+										{/each}
+									</select>
+									<p class="hint" id="rule-scope-hint">
+										Global rules apply to the whole fleet; a scoped rule only sees that device.
+									</p>
+								</div>
+
+								<div class="field">
+									<label class="label" for="matcher-type">Sender match type</label>
+									<select
+										id="matcher-type"
+										class="input"
+										bind:value={form.matcher_type}
+										aria-describedby="matcher-type-hint"
+									>
+										{#each MATCHERS as matcher (matcher.value)}
+											<option value={matcher.value}>{matcher.label}</option>
+										{/each}
+									</select>
+									<p class="hint" id="matcher-type-hint">{matcherHint.hint}</p>
+								</div>
+
+								<div class="field span-2">
+									<label class="label" for="matcher-value">Sender value</label>
+									<input
+										id="matcher-value"
+										class="input input-mono"
+										bind:value={form.matcher_value}
+										placeholder={matcherHint.placeholder}
+										autocomplete="off"
+										spellcheck="false"
+										aria-invalid={fieldErrors.matcher_value ? 'true' : undefined}
+										aria-describedby="matcher-value-hint matcher-counter"
+									/>
+									<div class="field-foot">
+										{#if fieldErrors.matcher_value}
+											<p class="field-error" id="matcher-value-hint">
+												{fieldErrors.matcher_value}
+											</p>
+										{:else}
+											<span class="hint" id="matcher-value-hint">
+												Phone number, shortcode or pattern.
+											</span>
+										{/if}
+										<span class="counter mono" class:over={matcherBytes > 512}>
+											{matcherBytes}/512
+										</span>
+									</div>
+									<span class="sr-only" id="matcher-counter">Sender pattern, maximum 512 bytes</span>
+								</div>
+
+								<div class="field">
+									<label class="label" for="body-type">Message match type</label>
+									<select
+										id="body-type"
+										class="input"
+										bind:value={form.body_type}
+										aria-describedby="body-type-hint"
+									>
+										{#each BODY_TYPES as item (item.value)}
+											<option value={item.value}>{item.label}</option>
+										{/each}
+									</select>
+									<p class="hint" id="body-type-hint">{bodyHint.hint}</p>
+								</div>
+
+								<div class="field span-2">
+									<label class="label" for="body-value">Message value</label>
+									<input
+										id="body-value"
+										class="input input-mono"
+										bind:value={form.body_value}
+										placeholder={bodyHint.placeholder}
+										autocomplete="off"
+										spellcheck="false"
+										aria-invalid={fieldErrors.body_value ? 'true' : undefined}
+										aria-describedby="body-value-hint"
+									/>
+									<div class="field-foot">
+										{#if fieldErrors.body_value}
+											<p class="field-error" id="body-value-hint">{fieldErrors.body_value}</p>
+										{:else}
+											<span class="hint" id="body-value-hint">
+												Matched against the full inbound body.
+											</span>
+										{/if}
+										<span class="counter mono" class:over={bodyBytes > 512}>{bodyBytes}/512</span>
+									</div>
+								</div>
+							</div>
+						</section>
+
+						<section class="rule-section" aria-labelledby="rule-reply-heading">
+							<div class="rule-section-head">
+								<h3 class="eyebrow" id="rule-reply-heading">Reply</h3>
+								<p class="hint" id="rule-reply-help">
+									<code>{'{sender}'}</code>, <code>{'{body}'}</code> and
+									<code>{'{matched}'}</code> are filled in when the reply is sent; everything else is
+									plain text.
+								</p>
+							</div>
+
+							<div class="form-grid">
+								<div class="field span-3">
+									<label class="label" for="reply-template">
+										Reply template <span class="optional">optional</span>
+									</label>
+									<textarea
+										id="reply-template"
+										class="input"
+										bind:value={form.reply_template}
+										placeholder="Reply sent back to the sender…"
+										rows="3"
+										aria-invalid={fieldErrors.reply_template ? 'true' : undefined}
+										aria-describedby="rule-reply-help reply-template-hint"
+									></textarea>
+									<div class="field-foot">
+										{#if fieldErrors.reply_template}
+											<p class="field-error" id="reply-template-hint">
+												{fieldErrors.reply_template}
+											</p>
+										{:else}
+											<span class="hint" id="reply-template-hint">
+												Leave empty to match without sending a reply.
+											</span>
+										{/if}
+										<span class="counter mono" class:over={replyBytes > 1000}>
+											{replyBytes}/1000
+										</span>
+									</div>
+								</div>
+							</div>
+
+							<p class="suppress-note">
+								A matched rule suppresses every workflow for that message.
+							</p>
+						</section>
+
+						<section class="rule-section" aria-labelledby="rule-limits-heading">
+							<div class="rule-section-head rule-limits-head">
+								<div>
+									<h3 class="eyebrow" id="rule-limits-heading">Limits &amp; targeting</h3>
+									<p class="hint">
+										{limitsOpen
+											? 'Enforced per rule and device.'
+											: 'The saved values apply until you open this section.'}
+									</p>
+								</div>
+								<button
+									type="button"
+									class="limit-toggle"
+									onclick={() => (limitsOpen = !limitsOpen)}
+									aria-expanded={limitsOpen}
+									aria-controls="rule-limits"
+								>
+									<span class="mono">{limitSummary}</span>
+									<span class="limit-toggle-action">{limitsOpen ? 'Hide' : 'Edit'}</span>
+									<Icon name={limitsOpen ? 'chevron-up' : 'chevron-down'} size={13} />
+								</button>
+							</div>
+
+							{#if limitsOpen}
+								<div class="form-grid" id="rule-limits">
+									<div class="field">
+										<label class="label" for="rule-priority">Priority</label>
+										<input
+											id="rule-priority"
+											class="input input-mono input-num"
+											type="number"
+											bind:value={form.priority}
+											step="1"
+											aria-invalid={fieldErrors.priority ? 'true' : undefined}
+											aria-describedby="rule-priority-hint"
+										/>
+										{#if fieldErrors.priority}
+											<p class="field-error" id="rule-priority-hint">{fieldErrors.priority}</p>
+										{:else}
+											<p class="hint" id="rule-priority-hint">
+												Higher wins when several rules match.
+											</p>
+										{/if}
+									</div>
+
+									<div class="field">
+										<label class="label" for="rule-cooldown">Cooldown (seconds)</label>
+										<input
+											id="rule-cooldown"
+											class="input input-mono input-num"
+											type="number"
+											bind:value={form.cooldown_s}
+											min="0"
+											step="1"
+											aria-invalid={fieldErrors.cooldown_s ? 'true' : undefined}
+											aria-describedby="rule-cooldown-hint"
+										/>
+										{#if fieldErrors.cooldown_s}
+											<p class="field-error" id="rule-cooldown-hint">{fieldErrors.cooldown_s}</p>
+										{:else}
+											<p class="hint" id="rule-cooldown-hint">
+												Enforced per rule and device: the minimum gap between auto replies.
+											</p>
+										{/if}
+									</div>
+
+									<div class="field">
+										<label class="label" for="rule-max">Max replies / hour</label>
+										<input
+											id="rule-max"
+											class="input input-mono input-num"
+											type="number"
+											bind:value={form.max_per_hour}
+											min="0"
+											step="1"
+											aria-invalid={fieldErrors.max_per_hour ? 'true' : undefined}
+											aria-describedby="rule-max-hint"
+										/>
+										{#if fieldErrors.max_per_hour}
+											<p class="field-error" id="rule-max-hint">{fieldErrors.max_per_hour}</p>
+										{:else}
+											<p class="hint" id="rule-max-hint">
+												Enforced per rule and device, in a rolling hour.
+											</p>
+										{/if}
+									</div>
+
+									<div class="field">
+										<label class="label" for="rule-sim">SIM slot</label>
+										<input
+											id="rule-sim"
+											class="input input-mono input-num"
+											type="number"
+											bind:value={form.sim_slot}
+											min="0"
+											step="1"
+											aria-invalid={fieldErrors.sim_slot ? 'true' : undefined}
+											aria-describedby="rule-sim-hint"
+										/>
+										{#if fieldErrors.sim_slot}
+											<p class="field-error" id="rule-sim-hint">{fieldErrors.sim_slot}</p>
+										{:else}
+											<p class="hint" id="rule-sim-hint">0 uses the device default.</p>
+										{/if}
+									</div>
+
+									<div class="toggles span-2">
+										<label class="check">
+											<input
+												id="rule-enabled"
+												type="checkbox"
+												bind:checked={form.enabled}
+												aria-describedby="rule-enabled-hint"
+											/>
+											<span>
+												Enabled
+												<span
+													class="hint"
+													id="rule-enabled-hint"
+													aria-hidden="true"
+													style="display: block"
+												>
+													Disabled rules are stored but never matched.
+												</span>
+											</span>
+										</label>
+										<label class="check">
+											<input
+												id="rule-allow-shortcode"
+												type="checkbox"
+												bind:checked={form.allow_shortcode}
+												aria-describedby="rule-allow-shortcode-hint"
+											/>
+											<span>
+												Allow shortcode replies
+												<span
+													class="hint"
+													id="rule-allow-shortcode-hint"
+													aria-hidden="true"
+													style="display: block"
+												>
+													Shortcode replies can be billable on the device.
+												</span>
+											</span>
+										</label>
+									</div>
+								</div>
+							{/if}
+						</section>
 
 						{#if formError}
-							<div class="span-3" role="alert">
+							<div role="alert">
 								<Notice tone="danger" title="Rule not saved">{formError}</Notice>
 							</div>
 						{/if}
 
-						<div class="form-foot">
+						<div class="form-foot rule-actions">
 							<button type="submit" class="btn btn-primary" disabled={submitting} aria-busy={submitting}>
 								{#if submitting}<Spinner />{:else}<Icon name="check" size={14} />{/if}
 								Save rule
@@ -594,6 +740,15 @@
 							<span class="hint">Upserts by id; a new id is generated on save.</span>
 						</div>
 					</form>
+
+					<div class="form-test">
+						<RuleTestPanel
+							rules={rules}
+							devices={devices}
+							scope={form.device_id}
+							draftNotice
+						/>
+					</div>
 				</div>
 			</section>
 		{/if}
@@ -624,7 +779,7 @@
 				<EmptyState
 					icon="filter"
 					title="No rules yet"
-					description="A rule pairs a sender matcher and a message matcher with an optional reply. Until one exists, inbound SMS is stored but never answered automatically."
+					description="A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically."
 				>
 					<button type="button" class="btn btn-primary" onclick={openForm}>
 						<Icon name="plus" size={14} /> Create the first rule
@@ -661,7 +816,11 @@
 										<span class="cell-main">{rule.name}</span>
 										<span class="cell-sub">
 											{#if rule.device_id}
-												<span class="mono scope">{rule.device_id}</span>
+												{@const scoped = findDevice(rule.device_id)}
+												<span class="scope-name">{scopeName(rule.device_id)}</span>
+												{#if scoped && deviceLabel(scoped)}
+													<span class="mono scope">{rule.device_id}</span>
+												{/if}
 											{:else}
 												<Badge tone="accent">global</Badge>
 											{/if}
@@ -703,6 +862,14 @@
 										<div class="cell-actions">
 											<button
 												type="button"
+												class="btn btn-ghost btn-sm"
+												onclick={() => void openListTest(rule)}
+												aria-label={`Test rule ${rule.name}`}
+											>
+												<Icon name="activity" size={12} /> Test
+											</button>
+											<button
+												type="button"
 												class="btn btn-danger-ghost btn-sm"
 												onclick={() => {
 													deleteError = null;
@@ -733,7 +900,11 @@
 							</div>
 							<div class="rule-scope">
 								{#if rule.device_id}
-									<span class="mono">{rule.device_id}</span>
+									{@const scoped = findDevice(rule.device_id)}
+									<span class="scope-name">{scopeName(rule.device_id)}</span>
+									{#if scoped && deviceLabel(scoped)}
+										<span class="mono">{rule.device_id}</span>
+									{/if}
 								{:else}
 									<Badge tone="accent">global</Badge>
 								{/if}
@@ -774,6 +945,14 @@
 							<div class="card-actions">
 								<button
 									type="button"
+									class="btn btn-sm"
+									onclick={() => void openListTest(rule)}
+									aria-label={`Test rule ${rule.name}`}
+								>
+									<Icon name="activity" size={12} /> Test
+								</button>
+								<button
+									type="button"
 									class="btn btn-danger btn-sm"
 									onclick={() => {
 										deleteError = null;
@@ -788,8 +967,8 @@
 					{/each}
 				</ul>
 				<p class="panel-note">
-					Patterns are validated against the RE2 subset before they reach a device. A rule can be
-					global or scoped to one device.
+					Patterns are validated against the RE2 subset when you save. The gateway matches rules
+					as messages sync; it does not send them to the phone.
 				</p>
 			</section>
 		{/if}
@@ -814,7 +993,8 @@
 	{#if deleteTarget}
 		<p>
 			<span class="mono">{deleteTarget.name}</span> will be removed from{' '}
-			{deleteTarget.device_id ? `device ${deleteTarget.device_id}` : 'every device'} immediately.
+			{deleteTarget.device_id ? `device ${scopeDetail(deleteTarget.device_id)}` : 'every device'}
+			immediately.
 		</p>
 		<p class="hint" style="margin-top: 10px">
 			Replies already queued on a device are not recalled.
@@ -825,6 +1005,93 @@
 <style>
 	.form-panel {
 		border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+	}
+
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--s-2);
+		flex-wrap: wrap;
+	}
+
+	.form-test {
+		margin-top: var(--s-4);
+	}
+
+	.rule-form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s-4);
+	}
+
+	.rule-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s-3);
+		padding-top: var(--s-4);
+		border-top: 1px solid var(--line);
+	}
+
+	.rule-section:first-child {
+		padding-top: 0;
+		border-top: 0;
+	}
+
+	.rule-section-head {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+
+	.rule-limits-head {
+		flex-direction: row;
+		align-items: flex-start;
+		justify-content: space-between;
+		flex-wrap: wrap;
+	}
+
+	.rule-limits-head > div {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+
+	.limit-toggle {
+		display: inline-flex;
+		align-items: center;
+		justify-content: flex-start;
+		gap: 8px;
+		min-height: 32px;
+		padding: 4px 9px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--r-sm);
+		background: var(--surface);
+		color: var(--ink-2);
+		font-size: var(--text-sm);
+	}
+
+	.limit-toggle:hover {
+		background: var(--surface-2);
+	}
+
+	.limit-toggle .mono {
+		font-size: 10.5px;
+		color: var(--ink-2);
+	}
+
+	.limit-toggle-action {
+		color: var(--accent);
+		font-weight: 500;
+	}
+
+	.suppress-note {
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--ink-3);
+	}
+
+	.rule-actions {
+		flex-wrap: wrap;
 	}
 
 	.field-foot {
@@ -856,6 +1123,10 @@
 		table-layout: fixed;
 	}
 
+	.rules-table .cell-actions {
+		gap: 4px;
+	}
+
 	.rules-table th:nth-child(1) {
 		width: 18%;
 	}
@@ -869,19 +1140,19 @@
 	}
 
 	.rules-table th:nth-child(4) {
-		width: 23%;
+		width: 20%;
 	}
 
 	.rules-table th:nth-child(5) {
-		width: 12%;
+		width: 11%;
 	}
 
 	.rules-table th:nth-child(6) {
-		width: 7%;
+		width: 6%;
 	}
 
 	.rules-table th:nth-child(7) {
-		width: 10%;
+		width: 15%;
 	}
 
 	.input-num {
@@ -998,8 +1269,16 @@
 	}
 
 	.scope {
+		display: block;
 		font-size: 10px;
 		color: var(--ink-3);
+		overflow-wrap: anywhere;
+	}
+
+	.scope-name {
+		display: block;
+		font-size: 11px;
+		color: var(--ink-2);
 		overflow-wrap: anywhere;
 	}
 
@@ -1039,6 +1318,30 @@
 		.toggles {
 			flex-direction: column;
 			gap: var(--s-3);
+		}
+
+		.head-actions {
+			width: 100%;
+			flex: 1 1 100%;
+		}
+
+		.form-panel .panel-head {
+			flex-wrap: wrap;
+		}
+
+		.form-panel .panel-title {
+			flex: 1 0 auto;
+			white-space: nowrap;
+		}
+
+		.head-actions .panel-meta {
+			display: none;
+		}
+
+		.limit-toggle {
+			min-height: 44px;
+			width: 100%;
+			justify-content: space-between;
 		}
 	}
 </style>

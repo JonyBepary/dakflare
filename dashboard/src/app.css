@@ -1498,6 +1498,13 @@ select.input {
 		scrollbar-width: none;
 		flex: 1;
 		min-width: 0;
+		mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 16px), transparent 100%);
+		-webkit-mask-image: linear-gradient(
+			to right,
+			#000 0,
+			#000 calc(100% - 16px),
+			transparent 100%
+		);
 	}
 
 	.mobile-nav::-webkit-scrollbar {
@@ -1554,8 +1561,8 @@ select.input {
 	}
 
 	.mobile-bar {
-		flex-wrap: wrap;
-		row-gap: 8px;
+		flex-wrap: nowrap;
+		row-gap: 0;
 	}
 
 	.mobile-bar .brand-sub {
@@ -1564,31 +1571,64 @@ select.input {
 
 	.mobile-bar .brand {
 		padding: 0;
+		flex: none;
 	}
 
 	.mobile-bar > .row {
 		margin-left: auto;
+		flex: none;
 	}
 
+	/* The nav scrolls sideways; it must never wrap into a second row that pushes
+	   the page down, and it must not force the bar wider than the viewport. */
 	.mobile-nav {
-		order: 4;
-		flex-basis: 100%;
-		flex-wrap: wrap;
-		overflow: visible;
+		flex: 1 1 auto;
+		min-width: 0;
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		overflow-y: hidden;
 		justify-content: flex-start;
-		column-gap: 2px;
-		row-gap: 2px;
+		gap: 2px;
+		padding-right: 120px;
+		-webkit-overflow-scrolling: touch;
 	}
 
 	.mobile-nav .nav-link {
 		flex: 0 0 auto;
 		justify-content: center;
-		padding: 5px 6px;
+		min-height: 44px;
+		padding: 8px 10px;
 		gap: 5px;
+	}
+
+	.mobile-bar .btn-icon.btn-sm {
+		min-width: 44px;
+		min-height: 44px;
 	}
 
 	.page-actions {
 		width: 100%;
+	}
+
+	/* Primary actions meet the 44px touch target; compact row actions stay
+	   compact but still clear of the 36px minimum. */
+	.btn {
+		height: auto;
+		min-height: 40px;
+		padding-inline: 13px;
+	}
+
+	.btn-sm {
+		min-height: 36px;
+	}
+
+	.btn-primary,
+	.btn-primary.btn-sm {
+		min-height: 44px;
+	}
+
+	.input {
+		min-height: 40px;
 	}
 }
 

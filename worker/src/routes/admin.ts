@@ -17,6 +17,7 @@
 
 import type { Env } from "../index";
 import { err } from "../lib/errors";
+import { internalError } from "./pair";
 
 /** `DELETE /v1/admin/devices/:device_id` — revoke a device in D1 and in its DO. */
 export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Response> {
@@ -42,6 +43,35 @@ export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Re
     .run();
 
   return Response.json({ ok: true, d1_deleted: Number(d1.meta?.changes ?? 0) });
+}
+
+/**
+ * `GET /v1/admin/devices/:device_id/commands?limit=` — the device's queue.
+ *
+ * Proxied to the Durable Object because that is the only place command state
+ * lives. An unknown device is not an error: its object simply has no commands,
+ * which is exactly what the console should show.
+ */
+export async function handleDeviceCommands(
+  env: Env,
+  deviceId: string,
+  requestUrl: URL
+): Promise<Response> {
+  const limit = requestUrl.searchParams.get("limit");
+  // Re-encode rather than interpolate: `limit` is untrusted even on an admin route.
+  const query = limit === null ? "" : `?limit=${encodeURIComponent(limit)}`;
+  try {
+    const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
+    const res = await stub.fetch(`https://do/__commands${query}`, { method: "GET" });
+    if (!res.ok) return internalError();
+    return new Response(res.body, {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    console.error(`[commands] DO unreachable for ${deviceId}: ${String(error)}`);
+    return internalError();
+  }
 }
 
 /** `GET /v1/admin/rules` — every rule, including disabled and other devices'. */

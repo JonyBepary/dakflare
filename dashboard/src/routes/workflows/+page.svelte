@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { deleteWorkflow, describeError, getWorkflows } from '$lib/api';
+	import { deleteWorkflow, describeError, getDevices, getWorkflows } from '$lib/api';
 	import { formatAbsolute } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
-	import type { WorkflowSummary } from '$lib/types';
+	import type { Device, WorkflowSummary } from '$lib/types';
+	import { deviceLabel, devicePrimary } from '$lib/presence';
+	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
@@ -14,6 +16,7 @@
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	let workflows = $state<WorkflowSummary[]>([]);
+	let devices = $state<Device[]>([]);
 	let loading = $state(true);
 	let refreshing = $state(false);
 	let error = $state<string | null>(null);
@@ -66,8 +69,29 @@
 		return `${ROUTES.workflowEdit}?id=${encodeURIComponent(workflow.id)}`;
 	}
 
+	async function loadDevices() {
+		try {
+			devices = await getDevices();
+		} catch {
+			// Labels are a convenience; the scope id is still shown without them.
+			devices = [];
+		}
+	}
+
+	function findDevice(id: string | null): Device | null {
+		if (!id) return null;
+		return devices.find((device) => device.device_id === id) ?? null;
+	}
+
+	function scopeName(id: string | null): string {
+		if (!id) return 'global';
+		const device = findDevice(id);
+		return device ? devicePrimary(device) : id;
+	}
+
 	onMount(() => {
 		void load(true);
+		void loadDevices();
 	});
 </script>
 
@@ -79,7 +103,7 @@
 	<PageHeader
 		eyebrow="Automation"
 		title="Workflows"
-		description="Multi-step message flows: match an incoming text, pull values out of it, branch, and reply. Build one on the canvas, then preview it without sending anything."
+		description="Flows run on the phone first: they answer immediately and keep working when the gateway is unreachable. The Worker runs one only when the phone did not report a run."
 	>
 		<button
 			type="button"
@@ -95,6 +119,8 @@
 			<Icon name="plus" size={14} /> New workflow
 		</a>
 	</PageHeader>
+
+	<AutomationHeader active="workflows" />
 
 	<div class="stack">
 		{#if notice}
@@ -127,7 +153,7 @@
 				<EmptyState
 					icon="workflow"
 					title="No workflows yet"
-					description="A workflow begins when a message arrives. Start with a trigger on the canvas, connect the steps, and save it for later."
+					description="A workflow begins when a message arrives. Add a trigger, connect the steps and save it; paired phones receive it on their next flow sync."
 				>
 					<a class="btn btn-primary" href={ROUTES.workflowEdit}>
 						<Icon name="plus" size={14} /> New workflow
@@ -169,8 +195,16 @@
 									</td>
 									<td>
 										{#if workflow.device_id}
+											{@const scoped = findDevice(workflow.device_id)}
 											<span class="badge badge-muted">device</span>
-											<span class="cell-sub mono">{workflow.device_id}</span>
+											<span class="cell-sub">
+												{#if scoped && deviceLabel(scoped)}
+													<span class="scope-name">{devicePrimary(scoped)}</span>
+													<span class="mono scope-id">{workflow.device_id}</span>
+												{:else}
+													<span class="mono scope-id">{workflow.device_id}</span>
+												{/if}
+											</span>
 										{:else}
 											<span class="badge badge-muted">global</span>
 											<span class="cell-sub">every paired device</span>
@@ -226,8 +260,18 @@
 							<dl class="card-kv">
 								<div>
 									<dt>Scope</dt>
-									<dd class="mono">
-										{workflow.device_id ?? 'global — every device'}
+									<dd>
+										{#if workflow.device_id}
+											{@const scoped = findDevice(workflow.device_id)}
+											{#if scoped && deviceLabel(scoped)}
+												<span class="scope-name">{devicePrimary(scoped)}</span>
+												<span class="mono scope-id">{workflow.device_id}</span>
+											{:else}
+												<span class="mono scope-id">{workflow.device_id}</span>
+											{/if}
+										{:else}
+											<span class="mono">global — every device</span>
+										{/if}
 									</dd>
 								</div>
 								<div>
@@ -260,8 +304,9 @@
 				</ul>
 
 				<p class="panel-note">
-					Workflow graphs are saved and validated, but not executed yet. Open a flow and use
-					<strong>Simulate</strong> to preview the path and the messages it would send.
+					Saved flows are delivered to paired phones and run there when a message matches. The
+					Worker runs a flow only when the phone did not report a run; <strong>Simulate</strong>
+					previews the path without sending anything.
 				</p>
 			</section>
 		{/if}
@@ -290,7 +335,7 @@
 		</p>
 		<p class="hint" style="margin-top: 10px">
 			{deleteTarget.node_count} {deleteTarget.node_count === 1 ? 'step' : 'steps'} · scope
-			{deleteTarget.device_id ?? 'global'}
+			{scopeName(deleteTarget.device_id)}
 		</p>
 	{/if}
 </ConfirmDialog>
@@ -313,12 +358,26 @@
 		min-width: 760px;
 	}
 
+	.scope-name {
+		display: block;
+		font-size: 11px;
+		color: var(--ink-2);
+		overflow-wrap: anywhere;
+	}
+
+	.scope-id {
+		display: block;
+		font-size: 10px;
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
+	}
+
 	.flows-table th:nth-child(1) {
-		width: 30%;
+		width: 27%;
 	}
 
 	.flows-table th:nth-child(2) {
-		width: 24%;
+		width: 23%;
 	}
 
 	.flows-table th:nth-child(3) {
@@ -330,7 +389,7 @@
 	}
 
 	.flows-table th:nth-child(5) {
-		width: 16%;
+		width: 20%;
 	}
 
 	.flow-cards {

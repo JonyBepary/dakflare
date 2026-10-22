@@ -135,3 +135,21 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .dialog h3 { margin: 0 0 6px; font-size: 15px; }
 .dialog p { margin: 0 0 14px; color: var(--ink-2); font-size: 13px; }
 .dialog .row { justify-content: flex-end; }
+
+/* The admin credential is a lab override, not part of onboarding. */
+details.advanced {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+details.advanced summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+details.advanced[open] summary { margin-bottom: 6px; }
+details.advanced p {
+  margin: 0 0 4px;
+  color: var(--ink-3);
+  font-size: 12px;
+}

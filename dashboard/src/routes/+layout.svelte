@@ -8,6 +8,7 @@
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import Brand from '$lib/components/Brand.svelte';
+	import AlertBanner from '$lib/components/AlertBanner.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Notice from '$lib/components/Notice.svelte';
@@ -15,18 +16,26 @@
 
 	let { children } = $props();
 
-	type NavItem = { href: string; label: string; icon: IconName };
+	type NavItem = { href: string; label: string; icon: IconName; match?: string[] };
 
+	// Rules and workflows are two authored forms of one automation pipeline. The
+	// segmented control on those pages switches between them, so the rail carries
+	// a single entry instead of implying two unrelated features.
 	const nav: NavItem[] = [
 		{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
 		{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone' },
 		{ href: ROUTES.messages, label: 'Messages', icon: 'message' },
-		{ href: ROUTES.rules, label: 'Rules', icon: 'filter' },
-		{ href: ROUTES.workflows, label: 'Workflows', icon: 'workflow' }
+		{
+			href: ROUTES.rules,
+			label: 'Automation',
+			icon: 'workflow',
+			match: [ROUTES.rules, ROUTES.workflows]
+		}
 	];
 
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');
 	let loggingOut = $state(false);
+	let mobileNav = $state<HTMLElement | null>(null);
 
 	const isLogin = $derived(
 		page.url.pathname === ROUTES.login || page.url.pathname === `${ROUTES.login}/`
@@ -39,7 +48,11 @@
 				page.url.pathname === item.href.replace(/\/$/, '')
 			);
 		}
-		return page.url.pathname === item.href || page.url.pathname.startsWith(`${item.href}/`);
+		const prefixes = item.match ?? [item.href];
+		return prefixes.some(
+			(prefix) =>
+				page.url.pathname === prefix || page.url.pathname.startsWith(`${prefix}/`)
+		);
 	}
 
 	function loginUrl(next?: string): string {
@@ -88,6 +101,21 @@
 		setUnauthorizedHandler(handleUnauthorized);
 		void bootSession();
 		return () => setUnauthorizedHandler(null);
+	});
+
+	// Keep the current section in view inside the horizontally scrolling mobile
+	// nav. The rail shows everything; the phone shows the active item at the left
+	// edge with the next one fading in, instead of a row that starts at Overview.
+	$effect(() => {
+		void page.url.pathname;
+		const navEl = mobileNav;
+		if (!navEl) return;
+		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
+		if (!active) return;
+		const navRect = navEl.getBoundingClientRect();
+		const activeRect = active.getBoundingClientRect();
+		const left = activeRect.left - navRect.left + navEl.scrollLeft - 4;
+		navEl.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
 	});
 </script>
 
@@ -161,7 +189,7 @@
 		<div class="main-wrap">
 			<header class="mobile-bar">
 				<Brand />
-				<nav class="mobile-nav" aria-label="Main">
+				<nav class="mobile-nav" aria-label="Main" bind:this={mobileNav}>
 					{#each nav as item (item.href)}
 						<a
 							class="nav-link"
@@ -189,6 +217,7 @@
 			</header>
 
 			<main class="main">
+				<AlertBanner />
 				{@render children()}
 			</main>
 		</div>

@@ -25,6 +25,7 @@ import {
   clampExpiresInS,
 } from "../lib/config";
 import { internalError } from "./pair";
+import { enqueueOutboundCommand } from "../lib/commands";
 
 interface CommandPayload {
   command_id: string;
@@ -58,27 +59,18 @@ export async function handleSend(req: Request, env: Env): Promise<Response> {
   const expiresAt = Date.now() + clampExpiresInS(input.expires_in_s) * 1000;
   const priority = readPriority(input.priority);
 
-  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
-  let res: Response;
-  try {
-    res = await stub.fetch("https://do/__enqueue", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        command_id: commandId,
-        to,
-        body,
-        priority,
-        expires_at: expiresAt,
-      }),
-    });
-  } catch (error) {
-    console.error(`[send] DO unreachable: ${String(error)}`);
-    return internalError();
-  }
-  if (!res.ok) return internalError();
+  // Shared with the rules pipeline so the command id / message row pairing cannot
+  // drift between an operator send and an automated reply.
+  const queued = await enqueueOutboundCommand(env, {
+    deviceId,
+    commandId,
+    to,
+    body,
+    priority,
+    expiresAt,
+  });
+  if (!queued) return internalError();
 
-  await persistOutbound(env, deviceId, commandId, to, body);
   return Response.json({ command_id: commandId });
 }
 
@@ -147,29 +139,6 @@ export async function handleSendBatch(req: Request, env: Env): Promise<Response>
   );
 
   return Response.json({ command_ids: prepared.map((c) => c.command_id) });
-}
-
-async function persistOutbound(
-  env: Env,
-  deviceId: string,
-  commandId: string,
-  to: string,
-  body: string
-): Promise<void> {
-  try {
-    await env.DB.prepare(
-      `INSERT INTO messages
-         (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
-       VALUES (?, ?, ?, 'out', ?, ?, ?, 0)
-       ON CONFLICT(device_id, local_id) DO NOTHING`
-    )
-      .bind(commandId, deviceId, commandId, to, body, Date.now())
-      .run();
-  } catch (error) {
-    // The command is already queued in the DO; a bookkeeping failure must not
-    // turn a successful send into a 500.
-    console.error(`[send] outbound message persist failed: ${String(error)}`);
-  }
 }
 
 function readPriority(value: unknown): string {

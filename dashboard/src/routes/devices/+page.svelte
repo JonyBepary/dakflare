@@ -3,7 +3,16 @@
 	import { page } from '$app/state';
 	import { describeError, getDevices, getDeviceStatus, mintPairingCode, revokeDevice } from '$lib/api';
 	import type { Device, DeviceStatus, PairingCode } from '$lib/types';
+	import {
+		deviceLabel,
+		deviceOptionLabel,
+		devicePresence,
+		devicePrimary,
+		deviceSecondary,
+		wakeMode
+	} from '$lib/presence';
 	import { formatAbsolute, formatClock, formatDate, formatDuration } from '$lib/format';
+	import { ROUTES } from '$lib/paths';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
@@ -12,6 +21,7 @@
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import PresenceChip from '$lib/components/PresenceChip.svelte';
 	import QrCode from '$lib/components/QrCode.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -41,6 +51,29 @@
 	let minted = $state<PairingCode | null>(null);
 	let origin = $state('');
 
+	/* Pairing watch: minting is only half the action. Snapshot the fleet before
+	   the request, then look for the redeemed device until it appears, the code
+	   expires, or ten minutes pass. */
+	type PairWait = 'idle' | 'waiting' | 'paired' | 'expired' | 'timed-out';
+	interface WatchContext {
+		code: PairingCode;
+		snapshot: Map<string, number>;
+	}
+
+	let waitState = $state<PairWait>('idle');
+	let waitNow = $state(Date.now());
+	let waitBusy = $state(false);
+	let paired = $state<Device | null>(null);
+	let watchContext: WatchContext | null = null;
+	let watchTimer: ReturnType<typeof setInterval> | null = null;
+	let watchGeneration = 0;
+	let polling = false;
+	let lastPoll = 0;
+	let waitStartedAt = 0;
+
+	const PAIR_POLL_MS = 2_000;
+	const PAIR_WATCH_MAX_MS = 10 * 60_000;
+
 	let revokeTarget = $state<Device | null>(null);
 	let revoking = $state(false);
 	let revokeError = $state<string | null>(null);
@@ -64,6 +97,21 @@
 	const deepLink = $derived(
 		minted ? `dakflare://pair?u=${origin}&c=${minted.pairing_code}` : ''
 	);
+
+	const remainingMs = $derived(minted ? Math.max(0, minted.expires_at - waitNow) : 0);
+	const waitCountdown = $derived(formatCountdown(remainingMs));
+	const pairedHref = $derived(
+		paired ? `${ROUTES.devices}?device=${encodeURIComponent(paired.device_id)}` : ROUTES.devices
+	);
+
+	function formatCountdown(ms: number): string {
+		const total = Math.max(0, Math.ceil(ms / 1000));
+		const hours = Math.floor(total / 3600);
+		const minutes = Math.floor((total % 3600) / 60);
+		const seconds = total % 60;
+		if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+		return `${minutes}:${String(seconds).padStart(2, '0')}`;
+	}
 
 	const selectedScope = $derived(devices.find((device) => device.device_id === scope) ?? null);
 
@@ -115,6 +163,10 @@
 		deviceId = '',
 		scroll = true
 	) {
+		stopWatching();
+		waitState = 'idle';
+		paired = null;
+		watchContext = null;
 		mintOpen = true;
 		purpose = nextPurpose;
 		scope = deviceId;
@@ -126,6 +178,103 @@
 			document
 				.getElementById('mint-panel')
 				?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+		}
+	}
+
+	function closeMint() {
+		stopWatching();
+		waitState = 'idle';
+		paired = null;
+		watchContext = null;
+		minted = null;
+		mintOpen = false;
+	}
+
+	function stopWatching() {
+		watchGeneration += 1;
+		if (watchTimer !== null) {
+			clearInterval(watchTimer);
+			watchTimer = null;
+		}
+		polling = false;
+	}
+
+	/** Fleet ids and their last contact at the moment the code was minted. */
+	function fleetSnapshot(): Map<string, number> {
+		return new Map(devices.map((device) => [device.device_id, device.last_seen ?? 0]));
+	}
+
+	function startWatching(code: PairingCode, snapshot: Map<string, number>) {
+		stopWatching();
+		const generation = watchGeneration;
+		watchContext = { code, snapshot };
+		paired = null;
+		waitState = 'waiting';
+		waitNow = Date.now();
+		waitStartedAt = Date.now();
+		lastPoll = 0;
+		watchTimer = setInterval(() => {
+			if (generation !== watchGeneration) return;
+			waitNow = Date.now();
+			if (waitNow >= code.expires_at) {
+				waitState = 'expired';
+				stopWatching();
+				return;
+			}
+			if (waitNow - waitStartedAt >= PAIR_WATCH_MAX_MS) {
+				waitState = 'timed-out';
+				stopWatching();
+				return;
+			}
+			if (document.hidden) return;
+			if (waitNow - lastPoll < PAIR_POLL_MS) return;
+			void checkForPair(generation);
+		}, 1_000);
+	}
+
+	/**
+	 * One fleet read. A scoped code is redeemed by its expected device id (the
+	 * same row for a rotation, whose `last_seen` advances); an unscoped code is
+	 * redeemed by any id that was not in the snapshot.
+	 */
+	async function checkForPair(generation: number): Promise<void> {
+		const context = watchContext;
+		if (!context || polling) return;
+		polling = true;
+		lastPoll = Date.now();
+		try {
+			const list = await getDevices();
+			if (generation !== watchGeneration) return;
+			const expected = context.code.device_id;
+			const match = expected
+				? list.find(
+						(device) =>
+							device.device_id === expected &&
+							(!context.snapshot.has(expected) ||
+								(device.last_seen ?? 0) !== context.snapshot.get(expected))
+					)
+				: list.find((device) => !context.snapshot.has(device.device_id));
+			if (!match) return;
+			devices = list;
+			void loadStatuses(list);
+			paired = match;
+			waitState = 'paired';
+			stopWatching();
+		} catch {
+			// A transient read failure is not a pairing failure; the next tick retries.
+		} finally {
+			polling = false;
+		}
+	}
+
+	async function checkNow() {
+		if (waitBusy) return;
+		waitBusy = true;
+		waitNow = Date.now();
+		try {
+			await checkForPair(watchGeneration);
+		} finally {
+			waitBusy = false;
 		}
 	}
 
@@ -157,14 +306,22 @@
 	}
 
 	function handleRevoked(id: string): void {
+		const revoked = devices.find((device) => device.device_id === id);
 		devices = devices.filter((device) => device.device_id !== id);
-		revokedNotice = `Revoked ${id}. Its key no longer authenticates.`;
+		const name = revoked ? devicePrimary(revoked) : id;
+		const alsoId = revoked && deviceLabel(revoked) ? ` (${id})` : '';
+		revokedNotice = `Revoked ${name}${alsoId}. Its key no longer authenticates.`;
 		detailOpen = false;
 		syncDetailUrl(null);
 	}
 
 	async function mint() {
 		if (minting || scopeError) return;
+		const snapshot = fleetSnapshot();
+		stopWatching();
+		waitState = 'idle';
+		paired = null;
+		watchContext = null;
 		minting = true;
 		mintError = null;
 		minted = null;
@@ -175,6 +332,7 @@
 				device_id: scope ? scope : null
 			});
 			minted = result;
+			startWatching(result, snapshot);
 		} catch (failure) {
 			mintError = describeError(failure);
 		} finally {
@@ -190,7 +348,9 @@
 		try {
 			await revokeDevice(target.device_id);
 			devices = devices.filter((device) => device.device_id !== target.device_id);
-			revokedNotice = `Revoked ${target.device_id}. Its key no longer authenticates.`;
+			const name = devicePrimary(target);
+			const alsoId = deviceLabel(target) ? ` (${target.device_id})` : '';
+			revokedNotice = `Revoked ${name}${alsoId}. Its key no longer authenticates.`;
 			revokeTarget = null;
 		} catch (failure) {
 			revokeError = describeError(failure);
@@ -216,6 +376,7 @@
 				openDetail(requestedDevice);
 			}
 		})();
+		return () => stopWatching();
 	});
 </script>
 
@@ -227,7 +388,7 @@
 	<PageHeader
 		eyebrow="Fleet"
 		title="Paired devices"
-		description="Every phone registered with this gateway, its live link state, and whether it holds a push token."
+		description="Every phone registered with this gateway. Presence comes from the live link and the last authenticated contact; wake capability is listed separately."
 	>
 		<button
 			type="button"
@@ -244,6 +405,14 @@
 		</button>
 	</PageHeader>
 
+	<p class="presence-legend">
+		<span class="legend-live">live</span> connected now · <span class="legend-ok">synced</span>
+		last contact within 15 min · <span class="legend-warn">stale</span> within 24 h ·
+		<span class="legend-danger">offline</span> over 24 h · <span class="muted">unknown</span>
+		no contact recorded. Wake is <span class="mono">push</span> with an FCM token, otherwise
+		<span class="mono">poll-only</span>.
+	</p>
+
 	<div class="stack">
 		{#if revokedNotice}
 			<div aria-live="polite">
@@ -258,7 +427,7 @@
 					<button
 						type="button"
 						class="btn btn-ghost btn-icon btn-sm"
-						onclick={() => (mintOpen = false)}
+						onclick={closeMint}
 						aria-label="Close pairing form"
 					>
 						<Icon name="x" size={14} />
@@ -307,7 +476,7 @@
 								>
 									<option value="">Select a device…</option>
 									{#each devices as device (device.device_id)}
-										<option value={device.device_id}>{device.device_id}</option>
+										<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 									{/each}
 								</select>
 								{#if devices.length === 0}
@@ -358,9 +527,7 @@
 								{ttl === 86_400_000 ? 'Mint 24-hour code' : `Mint ${formatDuration(ttl)} code`}
 							</button>
 							<span class="spacer"></span>
-							<button type="button" class="btn btn-ghost" onclick={() => (mintOpen = false)}>
-								Close
-							</button>
+							<button type="button" class="btn btn-ghost" onclick={closeMint}>Close</button>
 						</div>
 					</form>
 
@@ -371,53 +538,161 @@
 					{/if}
 
 					{#if minted}
-						<div class="mint-feedback" aria-live="polite">
-							<div class="mint-result">
-								<div class="mint-result-head">
-									<span class="eyebrow">
-										{minted.purpose === 'rotate' ? 'Rotation code' : 'Enrollment code'}
-									</span>
-									<span class="mono mint-expiry">
-										expires <RelativeTime value={minted.expires_at} className="mono" /> ·{' '}
-										{formatClock(minted.expires_at)}
-									</span>
-								</div>
-								<div class="mint-result-body">
-									<div class="mint-credential">
-										<div class="code-line">
-											<code class="pair-code">{minted.pairing_code}</code>
-											<CopyButton value={minted.pairing_code} label="Copy code" />
-										</div>
-										<div class="field deep-link">
-											<label class="label" for="deep-link">Deep link</label>
-											<div class="input-row">
-												<input
-													id="deep-link"
-													class="input input-mono"
-													readonly
-													value={deepLink}
-													aria-describedby="deep-link-hint"
-												/>
-												<CopyButton value={deepLink} label="Copy link" />
-											</div>
-										</div>
-										<p class="hint" id="deep-link-hint">
-											{minted.device_id
-												? `Bound to ${minted.device_id}. Open the link on that device.`
-												: 'Unscoped: the first device to redeem it is registered.'}
-											Single-use; it disappears after one successful pairing.
+						<div class="mint-feedback">
+							{#if waitState === 'paired' && paired}
+								{@const matched = paired}
+								<div class="pair-state pair-state-ok" aria-live="polite">
+									<span class="pair-state-mark"><Icon name="check" size={16} /></span>
+									<div class="pair-state-body">
+										<p class="eyebrow">
+											{minted.purpose === 'rotate' ? 'Key rotated' : 'Pairing complete'}
 										</p>
-									</div>
-									<div class="mint-qr">
-										<QrCode
-											value={deepLink}
-											size={184}
-											label={`Pairing QR code for ${minted.pairing_code}`}
-											caption="Scan to pair"
-										/>
+										<h3>
+											{minted.purpose === 'rotate' ? 'Key rotated for' : 'Paired as'}
+											{deviceLabel(matched) ?? matched.device_id}
+										</h3>
+										{#if deviceLabel(matched)}
+											<p class="mono pair-id">{matched.device_id}</p>
+										{/if}
+										<p class="hint">
+											The phone is in the fleet. This code was single-use and can no longer be
+											redeemed.
+										</p>
+										<div class="row">
+											<a
+												class="btn btn-primary btn-sm"
+												href={pairedHref}
+												onclick={(event) => {
+													if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+													event.preventDefault();
+													openDetail(matched.device_id);
+												}}
+											>
+												<Icon name="smartphone" size={12} /> Open device
+											</a>
+											<button type="button" class="btn btn-sm" onclick={closeMint}>Done</button>
+										</div>
 									</div>
 								</div>
-							</div>
+							{:else if waitState === 'expired'}
+								<div class="pair-state pair-state-expired" aria-live="polite">
+									<span class="pair-state-mark"><Icon name="clock" size={16} /></span>
+									<div class="pair-state-body">
+										<p class="eyebrow">Pairing code</p>
+										<h3>Code expired — mint a new one</h3>
+										<p class="hint">
+											This code can no longer register a phone. A fresh code replaces it; the old
+											one is not left looking valid.
+										</p>
+										<div class="row">
+											<button
+												type="button"
+												class="btn btn-primary btn-sm"
+												onclick={() => void mint()}
+												disabled={minting}
+												aria-busy={minting}
+											>
+												{#if minting}<Spinner />{:else}<Icon name="key" size={12} />{/if}
+												Mint a new code
+											</button>
+											<button type="button" class="btn btn-sm" onclick={closeMint}>Close</button>
+										</div>
+									</div>
+								</div>
+							{:else}
+								<div class="mint-result">
+									<div class="mint-result-head">
+										<span class="eyebrow">
+											{minted.purpose === 'rotate' ? 'Rotation code' : 'Enrollment code'}
+										</span>
+										<span class="mono mint-expiry">
+											expires <RelativeTime value={minted.expires_at} className="mono" /> ·{' '}
+											{formatClock(minted.expires_at)}
+										</span>
+									</div>
+									<div class="mint-result-body">
+										<div class="mint-credential">
+											<div class="code-line">
+												<code class="pair-code">{minted.pairing_code}</code>
+												<CopyButton value={minted.pairing_code} label="Copy code" />
+											</div>
+											<div class="field deep-link">
+												<label class="label" for="deep-link">Deep link</label>
+												<div class="input-row">
+													<input
+														id="deep-link"
+														class="input input-mono"
+														readonly
+														value={deepLink}
+														aria-describedby="deep-link-hint"
+													/>
+													<CopyButton value={deepLink} label="Copy link" />
+												</div>
+											</div>
+											<p class="hint" id="deep-link-hint">
+												{minted.device_id
+													? `Bound to ${minted.device_id}. Open the link on that device.`
+													: 'Unscoped: the first device to redeem it is registered.'}
+												Single-use; it disappears after one successful pairing.
+											</p>
+										</div>
+										<div class="mint-qr">
+											<QrCode
+												value={deepLink}
+												size={184}
+												label={`Pairing QR code for ${minted.pairing_code}`}
+												caption="Scan to pair"
+											/>
+										</div>
+									</div>
+								</div>
+
+								{#if waitState === 'waiting'}
+									<div class="pair-watch">
+										<Spinner />
+										<div class="pair-watch-copy">
+											<strong>Waiting for the phone…</strong>
+											<span class="hint">
+												Checked every 2 seconds while this tab is visible.
+												<span class="mono">{waitCountdown}</span> left.
+											</span>
+										</div>
+										<span class="spacer"></span>
+										<button
+											type="button"
+											class="btn btn-sm"
+											onclick={() => void checkNow()}
+											disabled={waitBusy}
+											aria-busy={waitBusy}
+										>
+											{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+											Check now
+										</button>
+									</div>
+								{:else if waitState === 'timed-out'}
+									<div class="pair-watch pair-watch-stopped">
+										<Icon name="clock" size={15} />
+										<div class="pair-watch-copy">
+											<strong>Still waiting for the phone</strong>
+											<span class="hint">
+												Automatic checks stopped after 10 minutes. The code is valid for another
+												<span class="mono">{waitCountdown}</span> if it was not redeemed.
+											</span>
+										</div>
+										<span class="spacer"></span>
+										<button
+											type="button"
+											class="btn btn-sm"
+											onclick={() => void checkNow()}
+											disabled={waitBusy}
+											aria-busy={waitBusy}
+										>
+											{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+											Check now
+										</button>
+									</div>
+								{/if}
+							{/if}
 						</div>
 					{/if}
 				</div>
@@ -468,21 +743,21 @@
 				</div>
 				<div class="table-scroll desktop-only">
 					<table class="table fleet-table">
-						<caption class="sr-only">Paired devices and their link state</caption>
+						<caption class="sr-only">Paired devices, their reachability and wake capability</caption>
 						<thead>
 							<tr>
 								<th scope="col">Device</th>
-								<th scope="col">Link</th>
+								<th scope="col">State</th>
 								<th scope="col">Last seen</th>
 								<th scope="col">Paired</th>
-								<th scope="col">FCM</th>
+								<th scope="col">Wake</th>
 								<th scope="col"><span class="sr-only">Actions</span></th>
 							</tr>
 						</thead>
 						<tbody>
 							{#each devices as device (device.device_id)}
 								{@const status = statuses[device.device_id]}
-								{@const known = device.device_id in statuses}
+								{@const presence = devicePresence(device, status?.ws_connected === true)}
 								<tr>
 									<td>
 										<div class="device-cell">
@@ -490,33 +765,29 @@
 												type="button"
 												class="device-open"
 												onclick={() => openDetail(device.device_id)}
-												aria-label={`Open details for ${device.device_id}`}
+												aria-label={`Open details for ${devicePrimary(device)}`}
 												title="Open device details"
 											>
-												<span class="mono device-id">{device.device_id}</span>
+												<span class="device-label">
+													{#if deviceLabel(device)}
+														<span class="device-name">{deviceLabel(device)}</span>
+													{/if}
+													<span class="mono device-id">{device.device_id}</span>
+												</span>
 											</button>
 											<CopyButton value={device.device_id} label="Copy device id" iconOnly />
 										</div>
 									</td>
 									<td>
-										{#if !known}
-											<span class="muted mono">—</span>
-										{:else if status}
-											<span class="link-state">
-												<span
-													class="dot {status.ws_connected ? 'dot-ok dot-pulse' : ''}"
-													aria-hidden="true"
-												></span>
-												{status.ws_connected ? 'live' : 'idle'}
-											</span>
-											<span class="cell-sub mono">queue {status.queue_depth}</span>
-										{:else}
-											<span class="link-state"><span class="dot" aria-hidden="true"></span>unknown</span>
-											<span class="cell-sub">status unavailable</span>
+										<PresenceChip {presence} queue={status?.queue_depth ?? null} />
+										{#if status === null && !statusesLoading}
+											<span class="cell-sub">socket state unavailable</span>
 										{/if}
 									</td>
 									<td>
-										<span class="cell-main"><RelativeTime value={device.last_seen} /></span>
+										<span class="cell-main">
+											<RelativeTime value={device.last_seen} fallback="never" />
+										</span>
 										<span class="cell-sub">{formatAbsolute(device.last_seen)}</span>
 									</td>
 									<td>
@@ -524,11 +795,7 @@
 										<span class="cell-sub">{formatClock(device.paired_at)}</span>
 									</td>
 									<td>
-										{#if device.fcm_token}
-											<Badge tone="ok" dot>token</Badge>
-										{:else}
-											<Badge tone="muted">none</Badge>
-										{/if}
+										<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
 									</td>
 									<td>
 										<div class="cell-actions">
@@ -536,7 +803,7 @@
 												type="button"
 												class="btn btn-ghost btn-sm"
 												onclick={() => void startRotate(device)}
-												aria-label={`Rotate key for ${device.device_id}`}
+												aria-label={`Rotate key for ${devicePrimary(device)}`}
 											>
 												<Icon name="key" size={12} /> Rotate
 											</button>
@@ -547,7 +814,7 @@
 													revokeError = null;
 													revokeTarget = device;
 												}}
-												aria-label={`Revoke ${device.device_id}`}
+												aria-label={`Revoke ${devicePrimary(device)}`}
 											>
 												<Icon name="trash" size={12} /> Revoke
 											</button>
@@ -562,47 +829,38 @@
 				<ul class="device-cards">
 					{#each devices as device (device.device_id)}
 						{@const status = statuses[device.device_id]}
-						{@const known = device.device_id in statuses}
+						{@const presence = devicePresence(device, status?.ws_connected === true)}
 						<li class="device-card">
 							<div class="card-head">
 								<button
 									type="button"
 									class="device-open"
 									onclick={() => openDetail(device.device_id)}
-									aria-label={`Open details for ${device.device_id}`}
+									aria-label={`Open details for ${devicePrimary(device)}`}
 									title="Open device details"
 								>
-									<span class="mono device-id">{device.device_id}</span>
+									<span class="device-label">
+										{#if deviceLabel(device)}
+											<span class="device-name">{deviceLabel(device)}</span>
+										{/if}
+										<span class="mono device-id">{device.device_id}</span>
+									</span>
 								</button>
 								<CopyButton value={device.device_id} label="Copy device id" iconOnly />
 							</div>
 							<div class="card-status">
-								{#if !known}
-									<span class="mono muted">status unknown</span>
-								{:else if status}
-									<span class="link-state">
-										<span
-											class="dot {status.ws_connected ? 'dot-ok dot-pulse' : ''}"
-											aria-hidden="true"
-										></span>
-										{status.ws_connected ? 'live' : 'idle'}
-									</span>
-									<span class="mono muted">queue {status.queue_depth}</span>
-								{:else}
-									<span class="link-state"><span class="dot" aria-hidden="true"></span>unknown</span>
+								<PresenceChip {presence} queue={status?.queue_depth ?? null} />
+								{#if status === null && !statusesLoading}
+									<span class="mono muted">socket state unavailable</span>
 								{/if}
 								<span class="spacer"></span>
-								{#if device.fcm_token}
-									<Badge tone="ok" dot>push token</Badge>
-								{:else}
-									<Badge tone="muted">no push token</Badge>
-								{/if}
+								<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
 							</div>
 							<dl class="card-kv">
 								<div>
 									<dt>Last seen</dt>
 									<dd>
-										<RelativeTime value={device.last_seen} />
+										<RelativeTime value={device.last_seen} fallback="never" />
 										<span class="muted"> · {formatAbsolute(device.last_seen)}</span>
 									</dd>
 								</div>
@@ -616,7 +874,7 @@
 									type="button"
 									class="btn btn-sm"
 									onclick={() => openDetail(device.device_id)}
-									aria-label={`Open details for ${device.device_id}`}
+									aria-label={`Open details for ${devicePrimary(device)}`}
 								>
 									<Icon name="info" size={12} /> Details
 								</button>
@@ -624,7 +882,7 @@
 									type="button"
 									class="btn btn-sm"
 									onclick={() => void startRotate(device)}
-									aria-label={`Rotate key for ${device.device_id}`}
+									aria-label={`Rotate key for ${devicePrimary(device)}`}
 								>
 									<Icon name="key" size={12} /> Rotate key
 								</button>
@@ -635,7 +893,7 @@
 										revokeError = null;
 										revokeTarget = device;
 									}}
-									aria-label={`Revoke ${device.device_id}`}
+									aria-label={`Revoke ${devicePrimary(device)}`}
 								>
 									<Icon name="trash" size={12} /> Revoke
 								</button>
@@ -644,9 +902,8 @@
 					{/each}
 				</ul>
 				<p class="panel-note">
-					Select a device id to open its detail panel. Revocation destroys the device's stored
-					public key in its Durable Object and removes it from D1; a revoked device must be
-					enrolled again.
+					Select a device to open its detail panel. Revocation destroys the device's stored public
+					key in its Durable Object and removes it from D1; a revoked device must be enrolled again.
 				</p>
 			</section>
 		{/if}
@@ -670,8 +927,10 @@
 >
 	{#if revokeTarget}
 		<p>
-			<span class="mono">{revokeTarget.device_id}</span> will stop authenticating immediately. Its
-			public key is destroyed in both stores and any queued command is abandoned.
+			<strong>{devicePrimary(revokeTarget)}</strong>
+			{#if deviceLabel(revokeTarget)}(<span class="mono">{revokeTarget.device_id}</span>){/if}
+			will stop authenticating immediately. Its public key is destroyed in both stores and any
+			queued command is abandoned.
 		</p>
 		<p class="hint" style="margin-top: 10px">
 			To restore it, enroll the phone again with a new pairing code.
@@ -689,6 +948,29 @@
 />
 
 <style>
+	.presence-legend {
+		margin: -4px 0 var(--s-4);
+		font-size: 11.5px;
+		line-height: 1.6;
+		color: var(--ink-3);
+	}
+
+	.legend-live,
+	.legend-ok {
+		font-family: var(--font-mono);
+		color: var(--ok);
+	}
+
+	.legend-warn {
+		font-family: var(--font-mono);
+		color: var(--warn);
+	}
+
+	.legend-danger {
+		font-family: var(--font-mono);
+		color: var(--danger);
+	}
+
 	.mint-panel {
 		border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
 		scroll-margin-top: 16px;
@@ -702,6 +984,89 @@
 
 	.mint-feedback {
 		margin-top: var(--s-4);
+	}
+
+	.pair-watch {
+		display: flex;
+		align-items: center;
+		gap: var(--s-3);
+		flex-wrap: wrap;
+		margin-top: var(--s-3);
+		padding: 10px var(--s-3);
+		border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+		border-radius: var(--r-sm);
+		background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+	}
+
+	.pair-watch-stopped {
+		border-color: color-mix(in srgb, var(--warn) 28%, var(--line));
+		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
+	}
+
+	.pair-watch-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.pair-watch-copy strong {
+		font-size: var(--text-base);
+		font-weight: 600;
+	}
+
+	.pair-state {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--s-3);
+		padding: var(--s-4);
+		border: 1px solid var(--line);
+		border-left-width: 2px;
+		border-radius: var(--r-sm);
+	}
+
+	.pair-state-ok {
+		border-left-color: var(--ok);
+		background: color-mix(in srgb, var(--ok) 6%, var(--surface));
+	}
+
+	.pair-state-expired {
+		border-left-color: var(--warn);
+		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
+	}
+
+	.pair-state-mark {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		flex: none;
+		border: 1px solid var(--line);
+		border-radius: var(--r-sm);
+		background: var(--surface);
+		color: var(--ok);
+	}
+
+	.pair-state-expired .pair-state-mark {
+		color: var(--warn);
+	}
+
+	.pair-state-body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s-2);
+		min-width: 0;
+	}
+
+	.pair-state-body h3 {
+		font-size: var(--text-md);
+		overflow-wrap: anywhere;
+	}
+
+	.pair-id {
+		font-size: 10.5px;
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
 	}
 
 	.mint-result {
@@ -838,20 +1203,24 @@
 		text-underline-offset: 3px;
 	}
 
-	.device-id {
-		font-size: var(--text-sm);
+	.device-label {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	.device-name {
+		font-size: var(--text-base);
+		font-weight: 500;
+		line-height: 1.35;
 		overflow-wrap: anywhere;
 	}
 
-	.link-state {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-family: var(--font-mono);
-		font-size: 10.5px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--ink-2);
+	.device-id {
+		font-size: var(--text-sm);
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
 	}
 
 	.status-loading {

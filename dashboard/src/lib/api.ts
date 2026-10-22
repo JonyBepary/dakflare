@@ -8,8 +8,10 @@
  */
 
 import type {
+	Alert,
 	CommandInfo,
 	Device,
+	DeviceCommand,
 	DeviceStatus,
 	Health,
 	HealthResult,
@@ -17,6 +19,7 @@ import type {
 	PairingCode,
 	Rule,
 	RuleInput,
+	RuleTestResult,
 	SessionInfo,
 	Workflow,
 	WorkflowIssue,
@@ -198,6 +201,37 @@ export async function getRules(): Promise<Rule[]> {
 	return data.rules ?? [];
 }
 
+/* ------------------------------------------------------------------ alerts */
+
+export async function getAlerts(all = false): Promise<Alert[]> {
+	const data = await get<{ alerts: Alert[] }>(
+		`/v1/admin/alerts${all ? '?all=1' : ''}`
+	);
+	return data.alerts ?? [];
+}
+
+export async function acknowledgeAlert(
+	alertId: string
+): Promise<{ ok: boolean; id: string; acknowledged_at: number }> {
+	return get<{ ok: true; id: string; acknowledged_at: number }>(
+		`/v1/admin/alerts/${encodeURIComponent(alertId)}/ack`,
+		{ method: 'POST' }
+	);
+}
+
+/* ----------------------------------------------------------- device history */
+
+export async function getDeviceCommands(
+	deviceId: string,
+	limit = 20
+): Promise<DeviceCommand[]> {
+	const params = new URLSearchParams({ limit: String(limit) });
+	const data = await get<{ commands: DeviceCommand[] }>(
+		`/v1/admin/devices/${encodeURIComponent(deviceId)}/commands?${params.toString()}`
+	);
+	return data.commands ?? [];
+}
+
 /* --------------------------------------------------------------- outbound */
 
 export async function sendSms(input: {
@@ -301,4 +335,16 @@ export async function createRule(input: RuleInput): Promise<{ ok: boolean; id: s
 
 export async function deleteRule(ruleId: string): Promise<{ ok: boolean; deleted: number }> {
 	return get(`/v1/admin/rules/${encodeURIComponent(ruleId)}`, { method: 'DELETE' });
+}
+
+/** Dry-run the saved rules against one sample message. Nothing is sent or written. */
+export async function testRules(input: {
+	device_id?: string;
+	peer: string;
+	body: string;
+}): Promise<RuleTestResult> {
+	return get<RuleTestResult>('/v1/admin/rules/test', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
 }

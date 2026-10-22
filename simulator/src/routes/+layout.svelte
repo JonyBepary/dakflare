@@ -20,7 +20,7 @@
 	<header class="topbar">
 		<div class="brand">
 			<strong>DAKFLARE</strong>
-			<span>device simulator</span>
+			<span>device app</span>
 		</div>
 		<div class="meta">
 			{schemaVersion === null ? 'backend unavailable' : `local schema v${schemaVersion}`}

@@ -1,7 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { describeError, getHealth } from '$lib/api';
-	import type { Health } from '$lib/types';
+	import {
+		describeError,
+		getDeviceStatus,
+		getDevices,
+		getHealth
+	} from '$lib/api';
+	import type { Device, DeviceStatus, Health } from '$lib/types';
+	import { devicePresence, presenceCounts, type DevicePresence } from '$lib/presence';
+	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
 	import { formatAbsolute, formatClock, formatCount } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import Badge from '$lib/components/Badge.svelte';
@@ -33,6 +40,46 @@
 	let error = $state<string | null>(null);
 	let checkedAt = $state<number | null>(null);
 
+	let devices = $state<Device[]>([]);
+	let fleetStatuses = $state<Record<string, DeviceStatus | null>>({});
+	let fleetLoading = $state(true);
+	let fleetError = $state<string | null>(null);
+
+	const fleetStates = $derived(
+		devices.map((device) =>
+			devicePresence(device, fleetStatuses[device.device_id]?.ws_connected === true)
+		)
+	);
+	const fleetCounts = $derived(presenceCounts(fleetStates));
+	const answering = $derived(fleetCounts.live + fleetCounts.synced);
+
+	const fleetTone = $derived.by<'ok' | 'warn' | 'danger' | 'muted'>(() => {
+		if (fleetLoading) return 'muted';
+		if (fleetError) return 'warn';
+		if (devices.length === 0) return 'muted';
+		if (answering === 0) return 'danger';
+		if (answering < devices.length) return 'warn';
+		return 'ok';
+	});
+
+	const fleetSummary = $derived.by(() => {
+		if (fleetLoading) return 'Checking fleet reachability…';
+		if (fleetError) return 'Fleet state unavailable';
+		if (devices.length === 0) return 'No devices paired yet';
+		return `${answering} of ${devices.length} ${devices.length === 1 ? 'device' : 'devices'} answering`;
+	});
+
+	const fleetBreakdown = $derived.by(() => {
+		if (fleetError || fleetLoading || devices.length === 0) return '';
+		const order: DevicePresence[] = ['live', 'synced', 'stale', 'offline', 'unknown'];
+		return order
+			.filter((state) => fleetCounts[state] > 0)
+			.map((state) => `${fleetCounts[state]} ${state}`)
+			.join(' · ');
+	});
+
+	const openAlerts = $derived(health?.open_alerts ?? health?.counts?.open_alerts ?? 0);
+
 	const missingCapabilities = $derived(
 		(health?.missing_bindings ?? []).filter((key) => !OPTIONAL_BINDINGS.has(key))
 	);
@@ -51,7 +98,7 @@
 		if (health.db_error) return 'Database unreachable';
 		if (!health.schema_ready) return 'Schema not ready';
 		if (missingCapabilities.length > 0) return 'Reduced configuration';
-		return health.ok ? 'All systems nominal' : 'Degraded';
+		return health.ok ? 'Deployment nominal' : 'Degraded';
 	});
 
 	const subline = $derived.by(() => {
@@ -62,10 +109,10 @@
 			return `${missingCapabilities.length} ${missingCapabilities.length === 1 ? 'capability is' : 'capabilities are'} not attached. Core routing still works; the affected safeguards are skipped.`;
 		}
 		if (!health.ok) return 'The gateway answered, but its own readiness check did not pass.';
-		const devices = health.counts?.devices ?? 0;
-		return devices === 0
-			? 'The gateway is healthy and waiting for its first device.'
-			: `Serving ${formatCount(devices)} paired ${devices === 1 ? 'device' : 'devices'}.`;
+		const count = health.counts?.devices ?? 0;
+		return count === 0
+			? 'The gateway, schema and bindings are healthy; no device is paired yet.'
+			: 'The gateway, schema and bindings are healthy. Fleet reachability is reported separately below.';
 	});
 
 	type BindingRow = {
@@ -109,8 +156,49 @@
 		}
 	}
 
+	/**
+	 * Fleet reachability is a separate read from deployment health. A health
+	 * failure must not hide a dead fleet, and a healthy Worker must not imply a
+	 * reachable phone.
+	 */
+	async function loadFleet() {
+		fleetLoading = true;
+		fleetError = null;
+		try {
+			const list = await getDevices();
+			const pairs = await Promise.all(
+				list.map(async (device) => {
+					try {
+						return [device.device_id, await getDeviceStatus(device.device_id)] as const;
+					} catch {
+						return [device.device_id, null] as const;
+					}
+				})
+			);
+			devices = list;
+			fleetStatuses = Object.fromEntries(pairs);
+		} catch (failure) {
+			devices = [];
+			fleetStatuses = {};
+			fleetError = describeError(failure);
+		} finally {
+			fleetLoading = false;
+		}
+	}
+
+	function refreshAll() {
+		void load();
+		void loadFleet();
+	}
+
 	onMount(() => {
 		void load();
+		void loadFleet();
+		const onAlertsChanged = () => {
+			void load();
+		};
+		window.addEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+		return () => window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
 	});
 </script>
 
@@ -132,7 +220,7 @@
 		<button
 			type="button"
 			class="btn"
-			onclick={() => void load()}
+			onclick={refreshAll}
 			disabled={loading || refreshing}
 			aria-busy={refreshing}
 		>
@@ -193,6 +281,30 @@
 							<span class="badge badge-warn">not ready</span>
 						{/if}
 					</div>
+					<div class="status-metric">
+						<span class="eyebrow">Open alerts</span>
+						{#if openAlerts > 0}
+							<span class="badge badge-danger">{openAlerts} open</span>
+						{:else}
+							<span class="mono">0</span>
+						{/if}
+					</div>
+				</div>
+				<div class="fleet-line fleet-{fleetTone}">
+					<span
+						class="dot"
+						class:dot-ok={fleetTone === 'ok'}
+						class:dot-warn={fleetTone === 'warn'}
+						class:dot-danger={fleetTone === 'danger'}
+						aria-hidden="true"
+					></span>
+					<span class="eyebrow">Fleet</span>
+					<span class="fleet-summary">{fleetSummary}</span>
+					{#if fleetBreakdown}
+						<span class="fleet-breakdown mono">{fleetBreakdown}</span>
+					{/if}
+					<span class="spacer"></span>
+					<a class="fleet-link" href={ROUTES.devices}>View devices</a>
 				</div>
 			</section>
 
@@ -328,7 +440,8 @@
 						</ul>
 						<p class="panel-note">
 							FCM is expected to be absent in local and polling-only deployments. Without it the
-							gateway cannot send wake-up pushes; the device still polls its socket.
+							gateway cannot send wake-up pushes; the phone still reaches the gateway on its next
+							poll or socket connection.
 						</p>
 					</section>
 				</div>
@@ -384,6 +497,16 @@
 										<span class="muted">none</span>
 									{/if}
 								</dd>
+								<dt>Open alerts</dt>
+								<dd>
+									{#if openAlerts > 0}
+										<Badge tone="danger">{openAlerts} open</Badge>
+									{:else}
+										<span class="muted">none</span>
+									{/if}
+								</dd>
+								<dt>Auto-replies</dt>
+								<dd><a href={ROUTES.messages}>See rule replies in the message log</a></dd>
 								<dt>Checked</dt>
 								<dd>{formatClock(checkedAt)}</dd>
 								<dt>Database</dt>
@@ -503,6 +626,50 @@
 
 	.status-metric > .mono {
 		font-size: var(--text-sm);
+	}
+
+	.fleet-line {
+		display: flex;
+		align-items: center;
+		gap: var(--s-2);
+		flex-basis: 100%;
+		flex-wrap: wrap;
+		margin-top: var(--s-4);
+		padding-top: var(--s-3);
+		border-top: 1px solid var(--line);
+		font-size: var(--text-base);
+	}
+
+	.fleet-summary {
+		font-weight: 600;
+		color: var(--ink);
+	}
+
+	.fleet-ok .fleet-summary {
+		color: var(--ok);
+	}
+
+	.fleet-warn .fleet-summary {
+		color: var(--warn);
+	}
+
+	.fleet-danger .fleet-summary {
+		color: var(--danger);
+	}
+
+	.fleet-muted .fleet-summary {
+		color: var(--ink-3);
+		font-weight: 500;
+	}
+
+	.fleet-breakdown {
+		font-size: 10px;
+		color: var(--ink-3);
+	}
+
+	.fleet-link {
+		font-size: var(--text-sm);
+		white-space: nowrap;
 	}
 
 	.cols {

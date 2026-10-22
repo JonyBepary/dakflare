@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import { describeError, getDevices, sendSms } from '$lib/api';
 	import type { Device } from '$lib/types';
+	import { deviceOptionLabel } from '$lib/presence';
 	import CommandTracker from './CommandTracker.svelte';
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
@@ -161,7 +162,7 @@
 						disabled={awaitingFleet || sending}
 					>
 						{#each options as device (device.device_id)}
-							<option value={device.device_id}>{device.device_id}</option>
+							<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 						{/each}
 					</select>
 				</div>
@@ -219,7 +220,7 @@
 						Send SMS
 					</button>
 					<span class="spacer"></span>
-					<span class="hint">Queued as a command on the device's live link.</span>
+					<span class="hint">Queued as a command for the device.</span>
 				</div>
 			</div>
 		</form>

@@ -628,3 +628,40 @@ batch cannot inflate the run log, and a replayed message cannot send a second
 reply. If a device uploads without reporting a run (app killed mid-flow, flows
 not yet synced), the fallback produces the reply as a queued command, delivered
 on the next poll.
+
+### 11.11 Gateway rules run before flows, and a message is answered once
+
+Rules are evaluated in the Worker for each **newly accepted** inbound row whose
+device report did not already send a reply (`auto_reply_sent` false). Order is
+`priority DESC`, then `id` for a stable tiebreak.
+
+A rule matches when both its sender matcher (`exact`, `prefix`, `suffix`, `glob`,
+`regex`) and its body matcher (`keyword`, `regex`) match, the sender passes the
+shortcode/mask filter, and the rule is inside both its `cooldown_s` window and
+its `max_per_hour` cap for that `(rule_id, device_id)`. The first such rule
+replies; evaluation stops. `priority` is therefore a precedence, not a score.
+
+The reply is an ordinary command (`reply_command_id`) and the inbound row records
+`auto_reply = 1`, `reply_source = 'rule'`, `reply_ref = <rule id>`. If any rule
+replied, flows are **not** run for that message. If no rule replied, §11.9 runs
+unchanged. If the device already replied itself, `auto_reply_sent` is true and
+neither engine runs.
+
+Consequence: automation answers a message at most once, and the operator log can
+always name the model that answered it. Rules are deliberately gateway-side and
+require connectivity; flows remain device-primary under §11.9.
+
+`POST /v1/admin/rules/test` evaluates the same matcher without side effects and
+reports, per rule, why it did not reply (`disabled`, `device_mismatch`,
+`sender_mismatch`, `body_mismatch`, `shortcode_blocked`, `cooldown`, `hourly_cap`).
+
+### 11.12 `last_seen` is authenticated contact, not pairing time
+
+`devices.last_seen` is advanced by any successfully authenticated device request,
+at most once per 60 s per device. It is not `paired_at` and must never be rendered
+as if it were: a device paired last week and silent since is `offline`, not
+"last seen last week" in the sense of liveness.
+
+`GET /v1/devices` returns `label`, `sim_slot`, `paired_at` and this `last_seen`.
+`label` is optional (≤ 64 characters, trimmed, control characters rejected);
+`sim_slot` is 0–2 or null. Both are supplied by the device at pairing when known.

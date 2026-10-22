@@ -24,6 +24,7 @@ interface HealthCounts {
   messages: number;
   rules: number;
   pairing_codes: number;
+  open_alerts: number;
 }
 
 export async function handleHealth(env: Env): Promise<Response> {
@@ -64,15 +65,17 @@ export async function handleHealth(env: Env): Promise<Response> {
          (SELECT COUNT(*) FROM devices)       AS devices,
          (SELECT COUNT(*) FROM messages)      AS messages,
          (SELECT COUNT(*) FROM rules)         AS rules,
-         (SELECT COUNT(*) FROM pairing_codes) AS pairing_codes,
+         (SELECT COUNT(*) FROM pairing_codes WHERE expires_at > ?) AS pairing_codes,
+         (SELECT COUNT(*) FROM alerts WHERE acknowledged_at IS NULL) AS open_alerts,
          (SELECT MAX(received_at) FROM messages) AS last_message_at`
-    ).first()) as Record<string, unknown> | null;
+    ).bind(Date.now()).first()) as Record<string, unknown> | null;
 
     counts = {
       devices: Number(row?.devices ?? 0),
       messages: Number(row?.messages ?? 0),
       rules: Number(row?.rules ?? 0),
       pairing_codes: Number(row?.pairing_codes ?? 0),
+      open_alerts: Number(row?.open_alerts ?? 0),
     };
     const last = Number(row?.last_message_at ?? 0);
     lastMessageAt = Number.isFinite(last) && last > 0 ? last : null;
@@ -94,6 +97,9 @@ export async function handleHealth(env: Env): Promise<Response> {
       missing_bindings: missing,
       retention_days: timingConfig(env as unknown as Record<string, unknown>).retentionDays,
       counts,
+      // Also surfaced at the top level: the open-alert banner should not have to
+      // dig through `counts` to answer "is the fleet reachable?".
+      open_alerts: counts?.open_alerts ?? 0,
       last_message_at: lastMessageAt,
       db_error: dbError,
       checked_at: Date.now(),

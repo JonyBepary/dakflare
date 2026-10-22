@@ -5,6 +5,7 @@ export interface HealthCounts {
 	messages: number;
 	rules: number;
 	pairing_codes: number;
+	open_alerts: number;
 }
 
 export interface Health {
@@ -16,6 +17,7 @@ export interface Health {
 	missing_bindings: string[];
 	retention_days?: number;
 	counts: HealthCounts | null;
+	open_alerts: number;
 	last_message_at: number | null;
 	db_error?: string | null;
 	checked_at?: number;
@@ -30,15 +32,17 @@ export interface HealthResult {
 export interface Device {
 	device_id: string;
 	fcm_token: string | null;
+	/** Set once, when the device enrolled or its key was rotated. */
 	paired_at: number;
-	last_seen: number;
 	/**
-	 * Not part of the current `/v1/devices` payload. Kept optional so the detail
-	 * panel can show an operator label the moment the API grows one, without a
-	 * second dashboard change.
+	 * Authenticated contact time (§11.12), not pairing time. Null while no
+	 * contact has been recorded; the console reads that as `unknown`, never as
+	 * "seen just now".
 	 */
+	last_seen: number | null;
+	/** Optional; supplied by the phone at pairing when known. */
 	label?: string | null;
-	/** Also not reported by the gateway today; see `label`. */
+	/** Optional; 0–2 or null when the phone did not report a slot. */
 	sim_slot?: number | null;
 }
 
@@ -78,11 +82,39 @@ export interface Message {
 	body: string;
 	received_at: number;
 	auto_reply: number;
+	/** `'rule'` when the gateway rule engine answered this inbound message. */
+	reply_source?: 'rule' | string | null;
+	/** The rule id that answered, when `reply_source` is `'rule'`. */
+	reply_ref?: string | null;
+	/** The ordinary outbound command created for the rule reply. */
+	reply_command_id?: string | null;
 }
 
 export interface MessagesResult {
 	messages: Message[];
 	limit: number;
+}
+
+/* ------------------------------------------------------------------ alerts */
+
+export interface Alert {
+	id: string;
+	device_id: string;
+	label: string | null;
+	kind: 'device_offline' | string;
+	raised_at: number;
+	acknowledged_at: number | null;
+	detail: string | null;
+}
+
+export interface DeviceCommand {
+	command_id: string;
+	to_e164: string;
+	body: string;
+	priority: string;
+	state: CommandState | string;
+	created_at: number;
+	expires_at: number;
 }
 
 export type MatcherType = 'exact' | 'prefix' | 'suffix' | 'glob' | 'regex';
@@ -120,6 +152,29 @@ export interface RuleInput {
 	max_per_hour: number;
 	sim_slot: number;
 	allow_shortcode: boolean;
+}
+
+export type RuleTestReason =
+	| 'disabled'
+	| 'device_mismatch'
+	| 'sender_mismatch'
+	| 'body_mismatch'
+	| 'shortcode_blocked'
+	| 'cooldown'
+	| 'hourly_cap'
+	| 'matched';
+
+export interface RuleTestMatch {
+	rule_id: string;
+	name: string;
+	matched: boolean;
+	reason: RuleTestReason | string;
+	/** Present when the Worker supplies it; the console can also derive it. */
+	matched_text?: string;
+}
+
+export interface RuleTestResult {
+	matches: RuleTestMatch[];
 }
 
 /* --------------------------------------------------------------- workflows */

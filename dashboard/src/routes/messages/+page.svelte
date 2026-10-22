@@ -1,20 +1,29 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { describeError, getDevices, getDeviceStatus, getMessages } from '$lib/api';
-	import type { Device, DeviceStatus, Message } from '$lib/types';
-	import { formatAbsolute } from '$lib/format';
+	import { describeError, getDevices, getDeviceStatus, getMessages, getRules } from '$lib/api';
+	import type { Device, DeviceStatus, Message, Rule } from '$lib/types';
+	import {
+		deviceOptionLabel,
+		devicePresence,
+		devicePrimary,
+		deviceSecondary,
+		wakeMode
+	} from '$lib/presence';
+	import { formatAbsolute, formatRelative } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
-	import Badge from '$lib/components/Badge.svelte';
+	import CommandTracker from '$lib/components/CommandTracker.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import PresenceChip from '$lib/components/PresenceChip.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import SendSmsForm from '$lib/components/SendSmsForm.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	const PAGE_SIZE = 50;
+	const LIVE_POLL_MS = 5_000;
 
 	let devices = $state<Device[]>([]);
 	let selected = $state('');
@@ -30,15 +39,37 @@
 	let hasMore = $state(false);
 	let expanded = $state<Set<string>>(new Set());
 
+	let rules = $state<Rule[]>([]);
+	let newIds = $state<Set<string>>(new Set());
+	let direction = $state('all');
+	let lastUpdatedAt = $state<number | null>(null);
+	let clock = $state(Date.now());
+	let trackers = $state<Set<string>>(new Set());
+	let liveInFlight = false;
+	let lastLivePoll = 0;
+	let logVersion = 0;
+
 	let composeOpen = $state(false);
 	let composeDevice = $state('');
 	let composeButton = $state<HTMLButtonElement | null>(null);
 
 	const selectedDevice = $derived(devices.find((device) => device.device_id === selected) ?? null);
+	const selectedPresence = $derived(
+		selectedDevice
+			? devicePresence(selectedDevice, deviceStatus?.ws_connected === true)
+			: 'unknown'
+	);
 	const shortDevice = $derived.by(() => {
-		if (!selected) return '';
-		return selected.length > 26 ? `${selected.slice(0, 24)}…` : selected;
+		if (!selectedDevice) return '';
+		const name = devicePrimary(selectedDevice);
+		return name.length > 26 ? `${name.slice(0, 24)}…` : name;
 	});
+	const rulesById = $derived(new Map(rules.map((rule) => [rule.id, rule])));
+	const visibleMessages = $derived(
+		direction === 'all'
+			? messages
+			: messages.filter((message) => message.direction === direction)
+	);
 
 	async function loadDevices(): Promise<void> {
 		devicesError = null;
@@ -51,8 +82,19 @@
 		}
 	}
 
+	async function loadRuleNames(): Promise<void> {
+		try {
+			rules = await getRules();
+		} catch {
+			// Rule names are a label on the row. The reply id remains visible.
+			rules = [];
+		}
+	}
+
 	async function loadMessages(reset: boolean): Promise<void> {
 		if (!selected) return;
+		const target = selected;
+		const version = ++logVersion;
 		if (reset) {
 			loading = true;
 			messagesError = null;
@@ -63,21 +105,88 @@
 		const before = reset || messages.length === 0 ? undefined : messages[messages.length - 1].received_at + 1;
 
 		try {
-			const result = await getMessages(selected, PAGE_SIZE, before);
+			const result = await getMessages(target, PAGE_SIZE, before);
+			if (version !== logVersion || target !== selected) return;
 			if (reset) {
 				messages = result.messages;
+				newIds = new Set();
 			} else {
 				const seen = new Set(messages.map((message) => message.id));
 				messages = [...messages, ...result.messages.filter((message) => !seen.has(message.id))];
 			}
 			hasMore = result.messages.length >= result.limit;
+			lastUpdatedAt = Date.now();
+			clock = Date.now();
 		} catch (failure) {
-			messagesError = describeError(failure);
+			if (version === logVersion && target === selected) {
+				messagesError = describeError(failure);
+			}
 		} finally {
-			loading = false;
-			loadingMore = false;
+			if (version === logVersion) {
+				loading = false;
+				loadingMore = false;
+			}
 		}
 	}
+
+	/**
+	 * Fetch the newest page and merge it into whatever the operator has loaded.
+	 * `logVersion` is bumped by every manual load, so a poll that started before
+	 * a device switch or a refresh cannot overwrite the newer result.
+	 */
+	async function pollNewMessages(): Promise<void> {
+		if (
+			document.visibilityState !== 'visible' ||
+			!selected ||
+			loading ||
+			loadingMore ||
+			refreshing ||
+			liveInFlight
+		) {
+			return;
+		}
+		const target = selected;
+		const version = logVersion;
+		liveInFlight = true;
+		try {
+			const result = await getMessages(target, PAGE_SIZE);
+			if (version !== logVersion || target !== selected) return;
+			const known = new Set(messages.map((message) => message.id));
+			const fresh = result.messages.filter((message) => !known.has(message.id));
+			const updates = new Map(result.messages.map((message) => [message.id, message]));
+			const beforeHeight = document.documentElement.scrollHeight;
+			const scrollY = window.scrollY;
+
+			messages = [
+				...fresh,
+				...messages.map((message) => updates.get(message.id) ?? message)
+			];
+			newIds = new Set(fresh.map((message) => message.id));
+			lastUpdatedAt = Date.now();
+			clock = Date.now();
+
+			// Prepending shifts the document. If the operator is reading further
+			// down, give the page back the height it just gained instead of moving
+			// their place on the screen.
+			if (fresh.length > 0 && scrollY > 8) {
+				await tick();
+				const gained = document.documentElement.scrollHeight - beforeHeight;
+				if (gained !== 0) window.scrollTo(0, scrollY + gained);
+			}
+		} catch {
+			// Keep the readable log; the next visible poll retries.
+		} finally {
+			liveInFlight = false;
+		}
+	}
+
+	function toggleTracker(messageId: string): void {
+		const next = new Set(trackers);
+		if (next.has(messageId)) next.delete(messageId);
+		else next.add(messageId);
+		trackers = next;
+	}
+
 
 	async function loadStatus(): Promise<void> {
 		if (!selected) {
@@ -103,6 +212,9 @@
 		selected = deviceId;
 		messages = [];
 		expanded = new Set();
+		trackers = new Set();
+		newIds = new Set();
+		lastUpdatedAt = null;
 		hasMore = false;
 		syncUrl();
 		deviceStatus = null;
@@ -153,6 +265,9 @@
 	}
 
 	onMount(() => {
+		void loadRuleNames();
+		let interval: ReturnType<typeof setInterval> | undefined;
+
 		void (async () => {
 			await loadDevices();
 			if (devicesError || devices.length === 0) return;
@@ -166,7 +281,29 @@
 			if (page.url.searchParams.get('compose') === '1') composeOpen = true;
 			await loadMessages(true);
 			void loadStatus();
+			lastLivePoll = Date.now();
+
+			interval = setInterval(() => {
+				if (document.visibilityState !== 'visible') return;
+				clock = Date.now();
+				if (Date.now() - lastLivePoll < LIVE_POLL_MS) return;
+				lastLivePoll = Date.now();
+				void pollNewMessages();
+			}, 1_000);
 		})();
+
+		const onVisible = () => {
+			if (document.visibilityState !== 'visible') return;
+			clock = Date.now();
+			lastLivePoll = 0;
+			void pollNewMessages();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+
+		return () => {
+			if (interval) clearInterval(interval);
+			document.removeEventListener('visibilitychange', onVisible);
+		};
 	});
 </script>
 
@@ -246,7 +383,7 @@
 						<Icon name="send" size={14} /> Compose message
 					</h2>
 					<span class="spacer"></span>
-					<span class="panel-meta">outbound · queued on the device</span>
+					<span class="panel-meta">outbound · queued for the device</span>
 					<button
 						type="button"
 						class="btn btn-ghost btn-icon btn-sm"
@@ -279,28 +416,54 @@
 						onchange={(event) => void chooseDevice(event.currentTarget.value)}
 					>
 						{#each devices as device (device.device_id)}
-							<option value={device.device_id}>{device.device_id}</option>
+							<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 						{/each}
 					</select>
 				</div>
 
 				<div class="toolbar-meta">
-					{#if deviceStatus}
-						<span class="link-state" title="WebSocket link from the device">
-							<span
-								class="dot {deviceStatus.ws_connected ? 'dot-ok dot-pulse' : ''}"
-								aria-hidden="true"
-							></span>
-							{deviceStatus.ws_connected ? 'live' : 'idle'}
-							<span class="queue mono">q{deviceStatus.queue_depth}</span>
+					<div class="seg dir-filter" role="group" aria-label="Filter by direction">
+						<label class="seg-item">
+							<input type="radio" name="direction" value="all" bind:group={direction} />
+							<span>All</span>
+						</label>
+						<label class="seg-item">
+							<input type="radio" name="direction" value="in" bind:group={direction} />
+							<span>In</span>
+						</label>
+						<label class="seg-item">
+							<input type="radio" name="direction" value="out" bind:group={direction} />
+							<span>Out</span>
+						</label>
+					</div>
+					<span class="toolbar-sep" aria-hidden="true"></span>
+					{#if selectedDevice}
+						<span class="link-state" title="Socket plus authenticated contact">
+							<PresenceChip
+								presence={selectedPresence}
+								wake={wakeMode(selectedDevice)}
+								showWake
+								queue={deviceStatus?.queue_depth ?? null}
+							/>
 						</span>
 					{:else}
 						<span class="mono muted">link unknown</span>
 					{/if}
 					<span class="toolbar-sep" aria-hidden="true"></span>
 					<span class="mono shown">
-						{#if loading}<Spinner />{:else}{messages.length}{/if}
-						{messages.length === 1 ? 'message' : 'messages'}
+						{#if loading}<Spinner />{:else}{visibleMessages.length}{/if}
+						{visibleMessages.length === 1 ? 'message' : 'messages'}
+					</span>
+					<span class="toolbar-sep" aria-hidden="true"></span>
+					<span
+						class="updated mono"
+						title="The log checks for new messages every 5 seconds while this tab is visible."
+					>
+						{#if lastUpdatedAt}
+							updated {formatRelative(lastUpdatedAt, clock)}
+						{:else}
+							checking…
+						{/if}
 					</span>
 				</div>
 			</div>
@@ -328,13 +491,24 @@
 						title="No messages for this device"
 						description="Inbound SMS appears here after the phone syncs. Outbound sends are recorded when the gateway enqueues them."
 					/>
+				{:else if visibleMessages.length === 0}
+					<EmptyState
+						icon="filter"
+						title="No {direction === 'in' ? 'inbound' : 'outbound'} messages in this window"
+						description="The loaded window has messages in the other direction. Switch to All, or load older messages."
+					/>
 				{:else}
 					<ul class="log">
-						{#each messages as message (message.id)}
+						{#each visibleMessages as message (message.id)}
 							{@const outbound = message.direction === 'out'}
 							{@const isLong = message.body.length > 200}
 							{@const isExpanded = expanded.has(message.id)}
-							<li class="log-row" class:outbound>
+							{@const isNew = newIds.has(message.id)}
+							{@const ruleName =
+								message.reply_source === 'rule'
+									? (message.reply_ref ? rulesById.get(message.reply_ref)?.name ?? message.reply_ref : 'rule')
+									: null}
+							<li class="log-row" class:outbound class:is-new={isNew}>
 								<div class="dir">
 									<span class="dir-icon">
 										<Icon
@@ -346,9 +520,17 @@
 								</div>
 								<div class="msg-main">
 									<div class="msg-head">
+										{#if isNew}
+											<span class="new-chip" title="Arrived since the last check">new</span>
+										{/if}
 										<span class="peer mono">{message.peer}</span>
-										{#if message.auto_reply && !outbound}
-											<Badge tone="accent">auto-reply</Badge>
+										{#if ruleName && !outbound}
+											<span
+												class="rule-chip"
+												title={message.reply_ref ? `Answered by rule ${message.reply_ref}` : 'Answered by a gateway rule'}
+											>
+												rule · {ruleName}
+											</span>
 										{/if}
 										<span class="spacer"></span>
 										<span class="msg-time">
@@ -368,13 +550,36 @@
 											{isExpanded ? 'Show less' : 'Show full message'}
 										</button>
 									{/if}
+									{#if message.reply_command_id && !outbound}
+										<div class="reply-track">
+											<button
+												type="button"
+												class="link-btn track-btn"
+												onclick={() => toggleTracker(message.id)}
+												aria-expanded={trackers.has(message.id)}
+											>
+												<Icon name="activity" size={11} />
+												{trackers.has(message.id) ? 'Hide reply tracking' : 'Track reply'}
+											</button>
+											{#if trackers.has(message.id)}
+												<div class="reply-tracker">
+													<CommandTracker
+														deviceId={message.device_id}
+														commandId={message.reply_command_id}
+													/>
+												</div>
+											{/if}
+										</div>
+									{/if}
 								</div>
 							</li>
 						{/each}
 					</ul>
 
 					<div class="log-foot">
-						<span class="mono muted">{messages.length} loaded</span>
+						<span class="mono muted">
+							{messages.length} loaded{#if direction !== 'all'} · {visibleMessages.length} shown{/if}
+						</span>
 						<span class="spacer"></span>
 						{#if hasMore}
 							<button
@@ -396,9 +601,12 @@
 		</section>
 
 		{#if selectedDevice}
-			<p class="device-foot mono" title={selectedDevice.device_id}>
-				{selectedDevice.device_id} · last seen{' '}
-				<RelativeTime value={selectedDevice.last_seen} /> · paired{' '}
+			<p class="device-foot" title={selectedDevice.device_id}>
+				<span class="device-foot-name">{devicePrimary(selectedDevice)}</span>
+				{#if deviceSecondary(selectedDevice)}
+					<span class="mono"> · {deviceSecondary(selectedDevice)}</span>
+				{/if}
+				· last seen <RelativeTime value={selectedDevice.last_seen} fallback="never" /> · paired{' '}
 				{formatAbsolute(selectedDevice.paired_at)}
 			</p>
 		{/if}
@@ -485,10 +693,74 @@
 		font-size: 10px;
 	}
 
-	.queue {
-		margin-left: 6px;
+	.dir-filter {
+		flex: none;
+	}
+
+	.dir-filter .seg-item span {
+		height: 24px;
+		padding: 0 8px;
+		font-size: 9.5px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.updated {
 		font-size: 10px;
+		letter-spacing: 0;
+		text-transform: none;
 		color: var(--ink-3);
+	}
+
+	.new-chip {
+		flex: none;
+		padding: 1px 5px;
+		border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+		border-radius: 3px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		font-family: var(--font-mono);
+		font-size: 8.5px;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		line-height: 1.5;
+	}
+
+	.rule-chip {
+		min-width: 0;
+		max-width: 30ch;
+		padding: 2px 6px;
+		border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+		border-radius: 3px;
+		background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+		color: var(--accent);
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
+
+	.reply-track {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+		margin-top: 5px;
+	}
+
+	.track-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 10.5px;
+	}
+
+	.reply-tracker {
+		width: 100%;
+	}
+
+	.log-row.is-new {
+		background: color-mix(in srgb, var(--accent) 4%, transparent);
 	}
 
 	.link-state {
@@ -635,6 +907,11 @@
 		overflow-wrap: anywhere;
 	}
 
+	.device-foot-name {
+		font-weight: 500;
+		color: var(--ink-2);
+	}
+
 	@media (max-width: 620px) {
 		.device-picker {
 			width: 100%;
@@ -648,7 +925,16 @@
 
 		.toolbar-meta {
 			width: 100%;
-			justify-content: space-between;
+			justify-content: flex-start;
+			gap: 8px 10px;
+		}
+
+		.toolbar-sep {
+			display: none;
+		}
+
+		.updated {
+			margin-left: auto;
 		}
 
 		.log-row {

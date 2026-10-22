@@ -108,7 +108,7 @@
 			<span>
 				<strong>Enabled</strong>
 				<span class="hint" style="display: block">
-					Paused flows are kept but should not be matched.
+					Paused flows are kept but are not delivered on the next sync.
 				</span>
 			</span>
 		</label>
@@ -146,8 +146,9 @@
 	</div>
 
 	<p class="settings-note">
-		Saving validates and stores the graph. There is no run engine yet, so a saved flow does not
-		process messages — use Simulate to preview it.
+		Saved workflows are delivered to the phone. The phone runs the flow when a message arrives;
+		if it did not report a run, the Worker runs the flow instead. Simulate previews a path without
+		sending anything.
 	</p>
 </section>
 

@@ -54,7 +54,7 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
-import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, clampTtlMs } from "../lib/config";
+import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, MAX_LABEL_CHARS, clampTtlMs } from "../lib/config";
 
 /**
  * How long a claim blocks other redeemers before it is treated as abandoned.
@@ -152,6 +152,33 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
   const fcmToken = typeof body.fcm_token === "string" && body.fcm_token !== ""
     ? body.fcm_token.slice(0, MAX_FCM_TOKEN_CHARS)
     : null;
+
+  // Optional identity metadata. `undefined`/`null` means "not reported" and stays
+  // NULL in D1, which the console renders as unknown rather than inventing a value.
+  let label: string | null = null;
+  if (body.label !== undefined && body.label !== null) {
+    if (typeof body.label !== "string") return err("bad_request", 400);
+    // Control characters have no place in an operator label and would corrupt a
+    // console table/terminal. Checked before trimming so a trailing newline is
+    // rejected rather than silently normalised away.
+    if (/[\u0000-\u001f\u007f]/.test(body.label)) return err("bad_request", 400);
+    const trimmed = body.label.trim();
+    if (trimmed.length > MAX_LABEL_CHARS) return err("bad_request", 400);
+    label = trimmed === "" ? null : trimmed;
+  }
+
+  let simSlot: number | null = null;
+  if (body.sim_slot !== undefined && body.sim_slot !== null) {
+    if (
+      typeof body.sim_slot !== "number" ||
+      !Number.isInteger(body.sim_slot) ||
+      body.sim_slot < 0 ||
+      body.sim_slot > 2
+    ) {
+      return err("bad_request", 400);
+    }
+    simSlot = body.sim_slot;
+  }
 
   if (typeof pairingCode !== "string" || pairingCode === "") return err("bad_request", 400);
   if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
@@ -266,14 +293,16 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
   }
 
   await env.DB.prepare(
-    `INSERT INTO devices (device_id, public_key, fcm_token, paired_at, last_seen)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO devices (device_id, public_key, fcm_token, paired_at, last_seen, label, sim_slot)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(device_id) DO UPDATE SET
        public_key = excluded.public_key,
        fcm_token  = excluded.fcm_token,
-       last_seen  = excluded.last_seen`
+       last_seen  = excluded.last_seen,
+       label      = excluded.label,
+       sim_slot   = excluded.sim_slot`
   )
-    .bind(deviceId, publicKeySpki, fcmToken, now, now)
+    .bind(deviceId, publicKeySpki, fcmToken, now, now, label, simSlot)
     .run();
 
   return Response.json({ ok: true });
@@ -282,7 +311,9 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
 /** `GET /v1/devices` — admin fleet visibility. */
 export async function handleDevicesList(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
-    `SELECT device_id, fcm_token, paired_at, last_seen FROM devices ORDER BY last_seen DESC`
+    `SELECT device_id, fcm_token, label, sim_slot, paired_at, last_seen
+       FROM devices
+      ORDER BY last_seen DESC`
   ).all();
   return Response.json({ devices: rows.results ?? [] });
 }
