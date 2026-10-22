@@ -435,8 +435,47 @@ async function runRetention(env: Env): Promise<void> {
     .bind(Date.now())
     .run();
 
+  // `rule_hits` is what enforces each rule's cooldown and hourly cap. It grows one
+  // row per automated reply, so it needs the same retention as the log — but the
+  // horizon must never be shorter than a cooldown that is still configured, or a
+  // prune would silently re-enable a reply the operator asked to suppress.
+  const cooldownRow = await env.DB.prepare(
+    `SELECT MAX(cooldown_s) AS max_cooldown_s FROM rules`
+  ).first<{ max_cooldown_s: number | null }>();
+  const maxCooldownS = cooldownRow?.max_cooldown_s;
+  const hitCutoff =
+    maxCooldownS === null || maxCooldownS === undefined
+      ? // No rules configured: keep a day of history so re-creating a rule shortly
+        // afterwards still respects the most recent reply.
+        Date.now() - 24 * 3_600_000
+      : Date.now() - Math.max(3_600_000, Math.max(0, maxCooldownS) * 1_000 + 3_600_000);
+  let hitsDeleted = 0;
+  for (let i = 0; i < 10; i++) {
+    const result = await env.DB.prepare(
+      `DELETE FROM rule_hits WHERE rowid IN (
+         SELECT rowid FROM rule_hits WHERE replied_at < ? LIMIT 1000
+       )`
+    )
+      .bind(hitCutoff)
+      .run();
+    const changes = Number(result.meta?.changes ?? 0);
+    hitsDeleted += changes;
+    if (changes === 0) break;
+  }
+
+  // Alerts are operator history, not device state. Acknowledged ones are safe to
+  // age out with the message log; an OPEN alert is the current outage signal and
+  // is never deleted here.
+  const alerts = await env.DB.prepare(
+    `DELETE FROM alerts WHERE acknowledged_at IS NOT NULL AND acknowledged_at < ?`
+  )
+    .bind(cutoff)
+    .run();
+
   console.log(
-    `[retention] days=${days} messages=${deleted} pairing_codes=${Number(codes.meta?.changes ?? 0)}`
+    `[retention] days=${days} messages=${deleted} pairing_codes=${Number(
+      codes.meta?.changes ?? 0
+    )} rule_hits=${hitsDeleted} alerts=${Number(alerts.meta?.changes ?? 0)}`
   );
 }
 

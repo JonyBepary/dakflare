@@ -848,6 +848,253 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── console surface (§11.11–§11.12) ───────────────────────────────────── */
+  console.log('-- console surface (§11.11–§11.12) --');
+  {
+    const rep = new Report('console surface');
+    const consoleDevice = newIdentity();
+    const consoleKey = {
+      ...consoleDevice,
+      privateKey: crypto.createPrivateKey(consoleDevice.privateKeyPem),
+    };
+
+    // Counts the section must restore. Everything below is scoped to this fresh
+    // device, so a leak is visible as a non-zero delta rather than hidden in a
+    // global total that other sections also move.
+    const rulesBefore = ((await admin('GET', '/v1/admin/rules')).data?.rules ?? []).length;
+    const devicesBefore = ((await admin('GET', '/v1/devices')).data?.devices ?? []).length;
+    const messagesBefore =
+      ((await admin('GET', `/v1/messages?device_id=${consoleDevice.deviceId}&limit=200`)).data
+        ?.messages ?? []).length;
+
+    const pairWith = async (pairingCode, extra) => {
+      const res = await fetch(`${WORKER_URL}/v1/device/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pairing_code: pairingCode,
+          device_id: consoleDevice.deviceId,
+          public_key_spki: consoleDevice.publicKeySpki,
+          ...extra,
+        }),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+    const mintPair = async (extra = {}) =>
+      (await admin('POST', '/v1/admin/pairing-code', { ttl_ms: 60_000, ...extra })).data
+        ?.pairing_code || null;
+
+    /* 1. pairing metadata (§11.12) ---------------------------------------- */
+    const enrollCode = await mintPair();
+    rep.check('control-character label -> 400',
+      (await pairWith(enrollCode, { label: 'bad\u0007label' })).status, 400);
+    rep.check('sim_slot 3 -> 400',
+      (await pairWith(enrollCode, { label: 'ok', sim_slot: 3 })).status, 400);
+
+    const label = '  Console Suite Phone  ';
+    const paired = await pairWith(enrollCode, { label, sim_slot: 1 });
+    rep.check('pair with label + sim_slot:1 -> 200', paired.status, 200);
+
+    const fleet = async () =>
+      (await admin('GET', '/v1/devices')).data?.devices ?? [];
+    const deviceRow = async () =>
+      (await fleet()).find((d) => d.device_id === consoleDevice.deviceId);
+    const row1 = await deviceRow();
+    rep.check('fleet returns the new device', Boolean(row1), true);
+    rep.check('label persisted trimmed', row1?.label, label.trim());
+    rep.check('sim_slot persisted', row1?.sim_slot, 1);
+    rep.check('paired_at is exposed as a number', typeof row1?.paired_at, 'number');
+    rep.check('last_seen is exposed as a number', typeof row1?.last_seen, 'number');
+
+    /* 2. re-pair without metadata preserves it (COALESCE) ------------------ */
+    const rotateCode = await mintPair({
+      device_id: consoleDevice.deviceId,
+      purpose: 'rotate',
+    });
+    const repaired = await pairWith(rotateCode, {});
+    rep.check('re-pair omitting label/sim_slot -> 200', repaired.status, 200);
+    const row2 = await deviceRow();
+    rep.check('re-pair preserved the label', row2?.label, label.trim());
+    rep.check('re-pair preserved sim_slot', row2?.sim_slot, 1);
+
+    /* 3. rule reply (§11.11) ----------------------------------------------- */
+    const ruleId = `console_${crypto.randomBytes(6).toString('hex')}`;
+    const sender = '+8801712345678';
+    const ruleBody = 'please keyword now';
+    const replyTemplate = 'RULEACK {sender} | {body} | {matched}';
+    const created = await admin('POST', '/v1/rules', {
+      id: ruleId,
+      device_id: consoleDevice.deviceId,
+      name: 'console suite probe',
+      matcher: { type: 'exact', value: sender },
+      body_matcher: { type: 'keyword', value: 'keyword' },
+      reply_template: replyTemplate,
+      // Highest precedence, so a pre-existing global rule in a dirty local
+      // database cannot answer first and make this section's reply ambiguous.
+      priority: 1_000_000,
+      cooldown_seconds: 3600,
+      max_per_hour: 100,
+    });
+    rep.check('create a device-scoped rule -> 200', created.status, 200);
+
+    const firstLocalId = `console_${crypto.randomBytes(6).toString('hex')}`;
+    const firstBatch = await device(consoleKey, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: firstLocalId,
+        sender,
+        body: ruleBody,
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('matching inbound -> 200', firstBatch.status, 200);
+    rep.check('accepted 1', firstBatch.data?.accepted, 1);
+    const replyCmd = (firstBatch.data?.commands ?? []).find(
+      (c) => typeof c.body === 'string' && c.body.startsWith('RULEACK ')
+    );
+    rep.check('response contains a reply command', Boolean(replyCmd), true);
+    rep.check('reply template substituted {sender}/{body}/{matched}',
+      replyCmd?.body, `RULEACK ${sender} | ${ruleBody} | keyword`);
+
+    const readLog = async () =>
+      (await admin('GET', `/v1/messages?device_id=${consoleDevice.deviceId}&limit=200`))
+        .data?.messages ?? [];
+    const log1 = await readLog();
+    const inbound1 = log1.find((m) => m.local_id === firstLocalId);
+    rep.check('inbound row records reply_source=rule', inbound1?.reply_source, 'rule');
+    rep.check('inbound row records reply_ref=rule id', inbound1?.reply_ref, ruleId);
+    rep.check('inbound row records reply_command_id',
+      inbound1?.reply_command_id, replyCmd?.command_id);
+    const outbound1 = log1.find(
+      (m) => m.direction === 'out' && m.local_id === replyCmd?.command_id
+    );
+    rep.check('outbound mirror row exists', Boolean(outbound1), true);
+    rep.check('outbound id === local_id === reply_command_id',
+      [outbound1?.id, outbound1?.local_id, replyCmd?.command_id],
+      [replyCmd?.command_id, replyCmd?.command_id, replyCmd?.command_id]);
+
+    /* 4. cooldown suppresses the second reply ------------------------------ */
+    const secondLocalId = `console_${crypto.randomBytes(6).toString('hex')}`;
+    const secondBatch = await device(consoleKey, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: secondLocalId,
+        sender,
+        body: 'second keyword message',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('second matching inbound inside cooldown -> 200', secondBatch.status, 200);
+    rep.check('accepted 1', secondBatch.data?.accepted, 1);
+    rep.check('cooldown suppressed the reply command',
+      (secondBatch.data?.commands ?? []).some(
+        (c) => typeof c.body === 'string' && c.body.startsWith('RULEACK ')
+      ), false);
+    const inbound2 = (await readLog()).find((m) => m.local_id === secondLocalId);
+    rep.check('cooldown-suppressed row has reply_source null', inbound2?.reply_source, null);
+
+    /* 5. non-matching sender gets no rule reply ---------------------------- */
+    const thirdLocalId = `console_${crypto.randomBytes(6).toString('hex')}`;
+    const thirdBatch = await device(consoleKey, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: thirdLocalId,
+        sender: '+8801999999999',
+        body: 'nothing to see here',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('non-matching inbound -> 200', thirdBatch.status, 200);
+    rep.check('accepted 1', thirdBatch.data?.accepted, 1);
+    const inbound3 = (await readLog()).find((m) => m.local_id === thirdLocalId);
+    rep.check('non-matching row was not answered by a rule',
+      inbound3?.reply_source === 'rule', false);
+
+    /* 6. dry-run test endpoint explains each non-match --------------------- */
+    const testRule = async (peer, body) => {
+      const res = await admin('POST', '/v1/admin/rules/test', {
+        device_id: consoleDevice.deviceId,
+        peer,
+        body,
+      });
+      return (res.data?.matches ?? []).find((m) => m.rule_id === ruleId);
+    };
+    const beforeTest = (await readLog()).length;
+    const testMatch = await testRule(sender, 'suite keyword sample');
+    rep.check('rules/test matching sample -> matched', testMatch?.reason, 'matched');
+    rep.check('rules/test matched flag is true', testMatch?.matched, true);
+    rep.check('rules/test sender mismatch -> sender_mismatch',
+      (await testRule('+8801999999999', 'suite keyword sample'))?.reason, 'sender_mismatch');
+    rep.check('rules/test body mismatch -> body_mismatch',
+      (await testRule(sender, 'no trigger'))?.reason, 'body_mismatch');
+    rep.check('rules/test wrote no reply', (await readLog()).length, beforeTest);
+
+    /* 7. device command history: newest-first, documented fields, clamped -- */
+    // One extra operator send makes "newest-first" falsifiable: with a single
+    // command the ordering would be true by construction.
+    const marker = `console marker ${crypto.randomBytes(4).toString('hex')}`;
+    rep.check('operator send to the console device -> 200',
+      (await admin('POST', '/v1/sms/send', {
+        device_id: consoleDevice.deviceId, to: sender, body: marker,
+      })).status, 200);
+
+    const history = await admin(
+      'GET', `/v1/admin/devices/${consoleDevice.deviceId}/commands?limit=50`
+    );
+    const commands = history.data?.commands ?? [];
+    rep.check('GET device commands -> 200', history.status, 200);
+    rep.check('history includes the rule reply and the operator send',
+      commands.some((c) => c.command_id === replyCmd?.command_id) &&
+        commands.some((c) => c.body === marker), true);
+    rep.check('command rows expose the documented fields', commands.every((c) =>
+      typeof c.command_id === 'string' && typeof c.to_e164 === 'string' &&
+      typeof c.body === 'string' && typeof c.priority === 'string' &&
+      typeof c.state === 'string' && typeof c.created_at === 'number' &&
+      typeof c.expires_at === 'number'), true);
+    rep.check('commands are newest-first', commands.every(
+      (c, i) => i === 0 || commands[i - 1].created_at >= c.created_at), true);
+
+    const one = await admin(
+      'GET', `/v1/admin/devices/${consoleDevice.deviceId}/commands?limit=1`
+    );
+    const oneCommands = one.data?.commands ?? [];
+    rep.check('limit=1 returns one command', oneCommands.length, 1);
+    rep.check('limit=1 returns the newest command',
+      oneCommands[0]?.command_id, commands[0]?.command_id);
+
+    const zero = await admin(
+      'GET', `/v1/admin/devices/${consoleDevice.deviceId}/commands?limit=0`
+    );
+    rep.check('limit=0 clamps up to 1', (zero.data?.commands ?? []).length, 1);
+    const huge = await admin(
+      'GET', `/v1/admin/devices/${consoleDevice.deviceId}/commands?limit=999`
+    );
+    rep.check('limit=999 clamps down to 50',
+      (huge.data?.commands ?? []).length, Math.min(50, commands.length));
+
+    /* 8. clean up, and prove the section left no residue ------------------- */
+    rep.check('delete the rule -> 200',
+      (await admin('DELETE', `/v1/admin/rules/${ruleId}`)).status, 200);
+    rep.check('purge the device messages -> 200',
+      (await admin('DELETE', `/v1/messages?device_id=${consoleDevice.deviceId}`)).status, 200);
+    rep.check('device has no messages after purge', (await readLog()).length, 0);
+    rep.check('revoke the device -> 200',
+      (await admin('DELETE', `/v1/admin/devices/${consoleDevice.deviceId}`)).status, 200);
+    rep.check('revoked device can no longer sign -> 401',
+      (await device(consoleKey, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] })).status,
+      401);
+
+    const rulesAfter = ((await admin('GET', '/v1/admin/rules')).data?.rules ?? []).length;
+    const devicesAfter = ((await admin('GET', '/v1/devices')).data?.devices ?? []).length;
+    const messagesAfter =
+      ((await admin('GET', `/v1/messages?device_id=${consoleDevice.deviceId}&limit=200`)).data
+        ?.messages ?? []).length;
+    rep.check('rule count returned to its pre-section value', rulesAfter, rulesBefore);
+    rep.check('device count returned to its pre-section value', devicesAfter, devicesBefore);
+    rep.check('message count returned to its pre-section value', messagesAfter, messagesBefore);
+    run(rep);
+  }
+
   /* ── incoming batch (§5.4) ─────────────────────────────────────────────── */
   console.log('-- incoming batch --');
   {
