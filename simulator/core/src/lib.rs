@@ -10,7 +10,7 @@ pub mod flowrun;
 pub mod identity;
 pub mod protocol;
 
-pub use carrier::{CarrierError, Injected, drain_outbox, inject_inbound};
+pub use carrier::{CarrierError, Injected, drain_outbox, inject_inbound, receive_offline};
 pub use db::{Device, Message, NewDevice, Store, StoreError};
 pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
 pub use identity::{

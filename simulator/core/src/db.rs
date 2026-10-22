@@ -269,6 +269,36 @@ impl Store {
         Ok(devices)
     }
 
+    /// The device that was most recently paired (or updated). There is no
+    /// explicit "default device" column, so recency is the tie-breaker when a
+    /// local store holds more than one row — for example a handset that was
+    /// paired, revoked and paired again.
+    pub async fn latest_device(&self) -> Result<Option<Device>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT device_id, public_key_spki, platform, platform_id, label,
+                        carrier, sim_slot, created_at, updated_at
+                   FROM devices ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(Device {
+                device_id: row.get(0)?,
+                public_key_spki: row.get(1)?,
+                platform: row.get(2)?,
+                platform_id: row.get(3)?,
+                label: row.get(4)?,
+                carrier: row.get(5)?,
+                sim_slot: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
     pub async fn get_device(&self, device_id: &str) -> Result<Option<Device>, StoreError> {
         let conn = self.db.connect()?;
         let mut rows = conn
@@ -374,6 +404,37 @@ impl Store {
             local_id: local_id.map(str::to_string),
             created_at: now,
         })
+    }
+
+    /// Find a row by its deterministic device-local id. This is how a
+    /// re-delivered `SMS_RECEIVED` broadcast resolves to the row the first
+    /// delivery already wrote.
+    pub async fn message_by_local_id(
+        &self,
+        device_id: &str,
+        local_id: &str,
+    ) -> Result<Option<Message>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages WHERE device_id = ? AND local_id = ?",
+                params![device_id, local_id],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            })),
+            None => Ok(None),
+        }
     }
 
     pub async fn set_message_state(&self, id: &str, state: &str) -> Result<(), StoreError> {

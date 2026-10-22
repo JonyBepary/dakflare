@@ -13,6 +13,10 @@ use dakflare_core::{
 use serde::Serialize;
 use tauri::{Manager, State};
 
+/// Direct JNI surface for the Android `SmsReceiver`. Not compiled on desktop.
+#[cfg(target_os = "android")]
+mod android;
+
 struct AppState {
     store: Arc<Store>,
 }

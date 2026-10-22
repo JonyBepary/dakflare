@@ -23,11 +23,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dakflare-core = { path = "../core" }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# The inbound SMS path is called straight from Kotlin, without a Tauri runtime.
+jni = "0.21"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# Deliberately `unwind`, not `abort`: `SmsReceiver` calls JNI in the app process,
+# and a panic there must be caught and returned as JSON rather than killing the
+# phone's gateway.
+panic = "unwind"
 strip = true

@@ -1,6 +1,9 @@
 package dev.dakflare.simulator
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -34,5 +37,16 @@ class MainActivity : TauriActivity() {
     }
     // The content view may already be attached, so ask for an explicit dispatch.
     ViewCompat.requestApplyInsets(content)
+
+    // M5.1: a bare runtime prompt so the receiver can persist real SMS. The
+    // explanatory screen (and the SEND_SMS pair) belongs to M5.4; this request
+    // is asynchronous and never blocks the webview.
+    if (checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(arrayOf(Manifest.permission.RECEIVE_SMS)) { granted ->
+        if (granted != true) {
+          Log.w("DakFlareSms", "RECEIVE_SMS not granted; inbound SMS stays disabled")
+        }
+      }
+    }
   }
 }

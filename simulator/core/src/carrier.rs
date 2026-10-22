@@ -7,9 +7,16 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use crate::db::{Message, Store, StoreError};
 use crate::flowrun::{RemoteFlow, run_flows};
 use crate::protocol::{DeviceClient, InboundMessage, OutboundReport, ProtocolError};
+
+/// The JNI surface caps these before calling in; the core repeats the check so a
+/// future caller cannot bypass them.
+const MAX_SENDER_LEN: usize = 64;
+const MAX_BODY_LEN: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CarrierError {
@@ -17,6 +24,12 @@ pub enum CarrierError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
+    /// No device exists locally, so an inbound SMS has nothing to belong to.
+    /// The app must be paired before the receiver can persist messages.
+    #[error("device is not paired")]
+    Unpaired,
+    #[error("invalid inbound message: {0}")]
+    InvalidInput(&'static str),
 }
 
 #[derive(Debug)]
@@ -34,6 +47,100 @@ pub struct Injected {
     pub device_sent: usize,
     /// Messages the WORKER fallback produced (flows the device did not run).
     pub fallback: usize,
+}
+
+/// Record an SMS that arrived on the real radio while no Tauri runtime was
+/// running (the Android `SmsReceiver` path).
+///
+/// Unlike [`inject_inbound`] this never uploads: there is no target, no signed
+/// client and no flow runner in that process yet (M5.1 is persistence only).
+/// The row is written through [`Store::record_message`], the same insert path the
+/// simulator uses.
+///
+/// `device_id` may be `Some` when a caller already knows which paired device owns
+/// the message. Otherwise the store decides: the only device, or the most
+/// recently paired one when several exist. An empty store is [`CarrierError::Unpaired`].
+///
+/// `received_at_ms` is the PDU timestamp. It is part of the deterministic
+/// `local_id`, so a broadcast Android delivers twice resolves to the row written
+/// by the first delivery instead of inserting a second copy.
+pub async fn receive_offline(
+    store: &Store,
+    device_id: Option<&str>,
+    sender: &str,
+    body: &str,
+    received_at_ms: i64,
+) -> Result<Message, CarrierError> {
+    let sender = sender.trim();
+    if sender.is_empty() || sender.len() > MAX_SENDER_LEN {
+        return Err(CarrierError::InvalidInput("sender"));
+    }
+    if body.len() > MAX_BODY_LEN {
+        return Err(CarrierError::InvalidInput("body"));
+    }
+
+    let device_id = resolve_device(store, device_id).await?;
+    let local_id = offline_local_id(sender, received_at_ms);
+
+    // The common re-delivery path: the row is already there.
+    if let Some(existing) = store.message_by_local_id(&device_id, &local_id).await? {
+        return Ok(existing);
+    }
+
+    match store
+        .record_message(&device_id, "in", sender, body, "received", Some(&local_id))
+        .await
+    {
+        Ok(message) => Ok(message),
+        // A duplicate broadcast racing this one hits `UNIQUE(device_id,
+        // local_id)`. Treat that as success and return the winner's row.
+        Err(error) => match store.message_by_local_id(&device_id, &local_id).await? {
+            Some(existing) => Ok(existing),
+            None => Err(CarrierError::Store(error)),
+        },
+    }
+}
+
+/// Pick the device an inbound message belongs to. No "default device" flag
+/// exists in the schema, so a store with more than one row uses the most
+/// recently paired/updated device.
+async fn resolve_device(store: &Store, requested: Option<&str>) -> Result<String, CarrierError> {
+    if let Some(device_id) = requested {
+        return match store.get_device(device_id).await? {
+            Some(device) => Ok(device.device_id),
+            None => Err(CarrierError::Unpaired),
+        };
+    }
+
+    let devices = store.list_devices().await?;
+    match devices.len() {
+        0 => Err(CarrierError::Unpaired),
+        1 => Ok(devices[0].device_id.clone()),
+        _ => store
+            .latest_device()
+            .await?
+            .map(|device| device.device_id)
+            .ok_or(CarrierError::Unpaired),
+    }
+}
+
+/// Deterministic id from the PDU timestamp + sender. Same delivery (even a
+/// re-delivery) hashes to the same value; a different sender at the same
+/// millisecond does not.
+fn offline_local_id(sender: &str, received_at_ms: i64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(received_at_ms.to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(sender.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut out = String::with_capacity(7 + 32);
+    out.push_str("native-");
+    for byte in &digest[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// "Receive" one SMS.
@@ -321,6 +428,120 @@ mod tests {
 
         assert_eq!(store.clear_messages(&device.device_id).await.unwrap(), 1);
         assert!(store.list_messages(&device.device_id, 50).await.unwrap().is_empty());
+    }
+
+    async fn paired_store() -> (tempfile::TempDir, Store, crate::db::Device) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("sim.db")).await.unwrap();
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "radio",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+        (dir, store, device)
+    }
+
+    #[tokio::test]
+    async fn offline_receive_is_idempotent_for_one_pdu() {
+        let (_dir, store, device) = paired_store().await;
+        let received_at = 1_776_470_400_000;
+
+        let first = receive_offline(&store, None, "+15550001111", "CODE 483920", received_at)
+            .await
+            .unwrap();
+        let second = receive_offline(&store, None, "+15550001111", "CODE 483920", received_at)
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id, "a re-delivered broadcast reuses the row");
+        assert_eq!(first.local_id, second.local_id);
+        assert!(first.local_id.as_deref().unwrap().starts_with("native-"));
+        assert_eq!(first.direction, "in");
+        assert_eq!(first.state, "received");
+        assert_eq!(first.device_id, device.device_id);
+
+        let rows = store.list_messages(&device.device_id, 50).await.unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn offline_receive_keeps_different_senders_apart() {
+        let (_dir, store, device) = paired_store().await;
+
+        receive_offline(&store, None, "+15550001111", "one", 1_776_470_400_000)
+            .await
+            .unwrap();
+        receive_offline(&store, None, "+15550002222", "two", 1_776_470_400_000)
+            .await
+            .unwrap();
+
+        let rows = store.list_messages(&device.device_id, 50).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn offline_receive_requires_a_paired_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("sim.db")).await.unwrap();
+
+        let error = receive_offline(&store, None, "+15550001111", "hi", 1).await.unwrap_err();
+        assert!(matches!(error, CarrierError::Unpaired));
+    }
+
+    #[tokio::test]
+    async fn offline_receive_prefers_the_most_recent_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("sim.db")).await.unwrap();
+        let (older, _) = store
+            .create_device(NewDevice {
+                label: "older",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (newer, _) = store
+            .create_device(NewDevice {
+                label: "newer",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let message = receive_offline(&store, None, "+15550001111", "hi", 1_776_470_400_000)
+            .await
+            .unwrap();
+
+        assert_eq!(message.device_id, newer.device_id);
+        assert_ne!(message.device_id, older.device_id);
+    }
+
+    #[tokio::test]
+    async fn offline_receive_rejects_oversized_input() {
+        let (_dir, store, _device) = paired_store().await;
+
+        let long_body = "x".repeat(MAX_BODY_LEN + 1);
+        let error = receive_offline(&store, None, "+15550001111", &long_body, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CarrierError::InvalidInput("body")));
+
+        let long_sender = "1".repeat(MAX_SENDER_LEN + 1);
+        let error = receive_offline(&store, None, &long_sender, "hi", 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CarrierError::InvalidInput("sender")));
     }
 
     #[tokio::test]

@@ -113,3 +113,9 @@ carrier mask.
 - Rules are gateway-side by decision (§11.11); the device runs flows only. A phone
   with no synced flows has nothing to execute, and the Worker fallback answers on
   the next sync.
+- **Flows are not persisted today.** `carrier::inject_inbound` receives the
+  fetched flow list from the caller and discards it after the run. The receiver
+  has no network and no webview, so M5.1b must first store the last successfully
+  fetched graphs locally (a `flows` table keyed by id+version) and have the JNI
+  path read that table. Without it, the background path can record a message but
+  never answer one.

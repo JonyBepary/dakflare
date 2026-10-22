@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Inbound SMS. The receiver is manifest-declared so it runs with no Activity. -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -23,6 +25,20 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Only the system (which holds BROADCAST_SMS) can deliver SMS_RECEIVED
+            to this receiver. It runs without the Tauri runtime; persistence goes
+            through NativeBridge into libsimulator_lib.so.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
         <provider
           android:name="androidx.core.content.FileProvider"
