@@ -48,6 +48,14 @@
 	const awaitingFleet = $derived(fleetLoading && providedDevices === undefined);
 	const recipient = $derived(to.trim());
 
+	async function resendQueued(recipientValue: string, bodyValue: string): Promise<void> {
+		if (!queued) return;
+		const target = queued.device_id;
+		const result = await sendSms({ device_id: target, to: recipientValue, body: bodyValue });
+		queued = { command_id: result.command_id, device_id: target };
+		onqueued?.(queued);
+	}
+
 	const toError = $derived(
 		recipient.length > MAX_PEER
 			? `Recipients are at most ${MAX_PEER} characters on this gateway.`
@@ -240,7 +248,11 @@
 				or carrier reports a final result.
 			</Notice>
 			<div class="queued-tracker">
-				<CommandTracker deviceId={queued.device_id} commandId={queued.command_id} />
+				<CommandTracker
+					deviceId={queued.device_id}
+					commandId={queued.command_id}
+					onResend={resendQueued}
+				/>
 			</div>
 		</div>
 	{/if}

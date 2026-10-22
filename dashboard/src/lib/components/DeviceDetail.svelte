@@ -6,7 +6,8 @@
 		getDeviceStatus,
 		getMessages,
 		purgeMessages,
-		revokeDevice
+		revokeDevice,
+		sendSms
 	} from '$lib/api';
 	import type { Device, DeviceCommand, DeviceStatus, Message } from '$lib/types';
 	import { commandStateNote, commandStateTone, isTerminalCommand } from '$lib/commands';
@@ -57,7 +58,7 @@
 	let commands = $state<DeviceCommand[]>([]);
 	let commandsError = $state<string | null>(null);
 	let commandsLoading = $state(false);
-	let trackedCommands = $state<Set<string>>(new Set());
+	let trackedCommands = $state<Record<string, string>>({});
 	let commandVersion = 0;
 	let commandInFlight = false;
 	let loading = $state(false);
@@ -113,7 +114,7 @@
 		commands = [];
 		commandsError = null;
 		commandsLoading = false;
-		trackedCommands = new Set();
+		trackedCommands = {};
 		commandVersion += 1;
 		commandInFlight = false;
 		void loadAll(deviceId, true);
@@ -188,11 +189,18 @@
 		}
 	}
 
-	function toggleCommandTracker(commandId: string): void {
-		const next = new Set(trackedCommands);
-		if (next.has(commandId)) next.delete(commandId);
-		else next.add(commandId);
+	function toggleCommandTracker(rowId: string, commandId: string): void {
+		const next = { ...trackedCommands };
+		if (rowId in next) delete next[rowId];
+		else next[rowId] = commandId;
 		trackedCommands = next;
+	}
+
+	async function resendCommand(rowId: string, recipient: string, body: string): Promise<void> {
+		if (!deviceId) return;
+		const result = await sendSms({ device_id: deviceId, to: recipient, body });
+		trackedCommands = { ...trackedCommands, [rowId]: result.command_id };
+		void loadCommands(deviceId, true);
 	}
 
 	async function confirmRevoke(): Promise<void> {
@@ -483,16 +491,21 @@
 									<button
 										type="button"
 										class="link-btn cmd-track-btn"
-										onclick={() => toggleCommandTracker(command.command_id)}
-										aria-expanded={trackedCommands.has(command.command_id)}
+										onclick={() => toggleCommandTracker(command.command_id, command.command_id)}
+										aria-expanded={command.command_id in trackedCommands}
 									>
-										{trackedCommands.has(command.command_id) ? 'Hide' : 'Track'}
+										{command.command_id in trackedCommands ? 'Hide' : 'Track'}
 									</button>
 								</div>
 								<p class="cmd-body">{command.body || '(empty message)'}</p>
-								{#if trackedCommands.has(command.command_id)}
+								{#if command.command_id in trackedCommands}
 									<div class="cmd-tracker">
-										<CommandTracker compact deviceId={deviceId} commandId={command.command_id} />
+										<CommandTracker
+											deviceId={deviceId}
+											commandId={trackedCommands[command.command_id] ?? command.command_id}
+											onResend={(to, body) =>
+												resendCommand(command.command_id, to, body)}
+										/>
 									</div>
 								{/if}
 							</li>

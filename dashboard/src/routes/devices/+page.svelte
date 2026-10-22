@@ -453,6 +453,12 @@
 									<span>Rotate key</span>
 								</label>
 							</div>
+							{#if purpose === 'rotate'}
+								<p class="rotate-note">
+									Rotation replaces the key this phone authenticates with. The old key stops working
+									immediately, and the phone must pair again with the new code.
+								</p>
+							{/if}
 						</div>
 
 						<div class="field">

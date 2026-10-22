@@ -17,8 +17,14 @@
 	let {
 		deviceId,
 		commandId,
-		compact = false
-	}: { deviceId: string; commandId: string; compact?: boolean } = $props();
+		compact = false,
+		onResend
+	}: {
+		deviceId: string;
+		commandId: string;
+		compact?: boolean;
+		onResend?: (to: string, body: string) => void | Promise<void>;
+	} = $props();
 
 	const POLL_INTERVAL_MS = 2_000;
 	const POLL_WINDOW_MS = 30_000;
@@ -29,9 +35,25 @@
 	let timedOut = $state(false);
 	let furthest = $state(0);
 	let run = $state(0);
+	let resending = $state(false);
+	let resendError = $state<string | null>(null);
 
 	const commandState = $derived(command?.state ?? null);
 	const failed = $derived(commandState === 'FAILED' || commandState === 'EXPIRED');
+	const canResend = $derived(
+		Boolean(
+			command &&
+				failed &&
+				onResend &&
+				command.to.trim() !== '' &&
+				command.body.trim() !== ''
+		)
+	);
+	const failedNote = $derived(
+		commandState === 'EXPIRED'
+			? 'The original expired before the phone collected it.'
+			: 'The phone reported a failure.'
+	);
 	const shortId = $derived(
 		commandId.length > 14 ? `${commandId.slice(0, 8)}…${commandId.slice(-4)}` : commandId
 	);
@@ -65,6 +87,8 @@
 		finished = false;
 		timedOut = false;
 		furthest = 0;
+		resending = false;
+		resendError = null;
 
 		async function poll() {
 			try {
@@ -105,6 +129,21 @@
 
 	function restart() {
 		run += 1;
+	}
+
+	async function resend(): Promise<void> {
+		if (!command || !onResend || !canResend || resending) return;
+		const recipient = command.to;
+		const message = command.body;
+		resending = true;
+		resendError = null;
+		try {
+			await onResend(recipient, message);
+		} catch (failure) {
+			resendError = describeError(failure);
+		} finally {
+			resending = false;
+		}
 	}
 </script>
 
@@ -201,7 +240,26 @@
 				</span>
 			</div>
 		{:else if command}
-			<p class="hint">{commandStateNote(command.state)}</p>
+			<div class="state-line">
+				<p class="hint">
+					{canResend ? failedNote : commandStateNote(command.state)}
+				</p>
+				{#if canResend}
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => void resend()}
+						disabled={resending}
+						aria-busy={resending}
+					>
+						{#if resending}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+						Send again
+					</button>
+				{/if}
+			</div>
+			{#if resendError}
+				<p class="field-error" role="alert">{resendError}</p>
+			{/if}
 		{:else if error}
 			<p class="field-error">{error}</p>
 		{/if}
@@ -422,6 +480,18 @@
 		align-items: center;
 		gap: var(--s-2);
 		flex-wrap: wrap;
+	}
+
+	.state-line {
+		display: flex;
+		align-items: center;
+		gap: var(--s-3);
+		flex-wrap: wrap;
+	}
+
+	.state-line .hint {
+		flex: 1;
+		min-width: 180px;
 	}
 
 	.compact {
