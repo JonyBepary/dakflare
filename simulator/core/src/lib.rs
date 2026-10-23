@@ -12,6 +12,7 @@ pub mod protocol;
 
 pub use carrier::{
     CarrierError, Injected, drain_outbox, inject_inbound, receive_and_reply, receive_offline,
+    reply_local_id,
 };
 pub use dakflare_flow::Action;
 pub use db::{Device, Message, NewDevice, Store, StoreError};

@@ -186,8 +186,9 @@ pub async fn receive_and_reply(
 }
 
 /// The deterministic outbound id for one reply. Same inbound delivery and same
-/// action index always resolve to the same row.
-fn reply_local_id(inbound_local_id: &str, action_index: usize) -> String {
+/// action index always resolve to the same row. Public so the JNI layer can name
+/// the row it just returned an action for without re-implementing the rule.
+pub fn reply_local_id(inbound_local_id: &str, action_index: usize) -> String {
     format!("{inbound_local_id}-reply-{action_index}")
 }
 

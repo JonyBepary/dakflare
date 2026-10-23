@@ -93,13 +93,15 @@ class SmsReceiver : BroadcastReceiver() {
                 Log.w(TAG, "inbound was not answered: ${outcome.error}")
                 continue
             }
-            reply(context, sender, subscriptionId, outcome.actions)
+            reply(context, appDir, outcome.deviceId, sender, subscriptionId, outcome.actions)
         }
     }
 
     /** Send the flow actions, after the filters that keep a gateway from replying badly. */
     private fun reply(
         context: Context,
+        appDir: String,
+        deviceId: String,
         sender: String,
         subscriptionId: Int,
         actions: List<Reply>,
@@ -110,10 +112,16 @@ class SmsReceiver : BroadcastReceiver() {
             PackageManager.PERMISSION_GRANTED
         ) {
             Log.w(TAG, "SEND_SMS not granted; ${actions.size} reply/replies skipped")
+            decline(appDir, deviceId, actions, "no_send_permission")
             return
         }
 
-        if (!isReplyable(sender, "sender")) return
+        val senderSkip = skipReason(sender)
+        if (senderSkip != null) {
+            Log.i(TAG, "sender=${mask(sender)} skip=$senderSkip")
+            decline(appDir, deviceId, actions, senderSkip)
+            return
+        }
 
         // Guard against a loopback / self-sent SMS. When no source yields a
         // number there is nothing to compare against, so the guard is logged as
@@ -122,13 +130,24 @@ class SmsReceiver : BroadcastReceiver() {
         if (ownNumbers.isEmpty()) {
             Log.i(TAG, "self-number guard unknown; proceeding")
         } else if (normalize(sender) in ownNumbers) {
-            Log.i(TAG, "self-number guard matched sender=${mask(sender)}; reply skipped")
+            Log.i(TAG, "sender=${mask(sender)} skip=self")
+            decline(appDir, deviceId, actions, "self")
             return
         }
 
-        val manager = smsManager(subscriptionId) ?: return
+        val manager = smsManager(subscriptionId)
+        if (manager == null) {
+            decline(appDir, deviceId, actions, "manager_unavailable")
+            return
+        }
+
         for (action in actions) {
-            if (!isReplyable(action.to, "target")) continue
+            val targetSkip = skipReason(action.to)
+            if (targetSkip != null) {
+                Log.i(TAG, "target skip=$targetSkip")
+                mark(appDir, deviceId, action.localId, "failed")
+                continue
+            }
             try {
                 val parts = manager.divideMessage(action.body)
                 if (parts.size > 1) {
@@ -136,29 +155,56 @@ class SmsReceiver : BroadcastReceiver() {
                 } else {
                     manager.sendTextMessage(action.to, null, action.body, null, null)
                 }
-                Log.i(TAG, "reply sent to=${mask(action.to)} parts=${parts.size}")
+                Log.i(TAG, "reply handled to=${mask(action.to)} parts=${parts.size}")
             } catch (error: Throwable) {
-                // A failed send must not stop the remaining actions or crash the
-                // receiver. The outbound row is already queued for the mirror.
+                // The reply never left the phone. `failed` keeps it out of the
+                // mirror; M5.5's retry queue owns what happens next.
+                mark(appDir, deviceId, action.localId, "failed")
                 Log.e(TAG, "reply failed: ${error.javaClass.simpleName}")
+                continue
             }
+            // Exactly once per action, after the whole (possibly multipart)
+            // send call returned. A mark error leaves the row queued — never
+            // claim `sent` when the store did not accept it.
+            mark(appDir, deviceId, action.localId, "sent")
+        }
+    }
+
+    /**
+     * Mark every action of a deliberately unanswered message as `failed`.
+     *
+     * Nothing left the phone, so the mirror must not upload it as history. The
+     * log carries only a word reason and a count: never the recipient or body.
+     */
+    private fun decline(
+        appDir: String,
+        deviceId: String,
+        actions: List<Reply>,
+        reason: String,
+    ) {
+        Log.i(TAG, "replies declined count=${actions.size} skip=$reason")
+        for (action in actions) {
+            mark(appDir, deviceId, action.localId, "failed")
+        }
+    }
+
+    private fun mark(appDir: String, deviceId: String, localId: String, state: String) {
+        if (!NativeBridge.markOutboundSafely(appDir, deviceId, localId, state)) {
+            // Class/name-free: markOutboundSafely already logged a class name
+            // when it threw. Staying queued is the honest outcome.
+            Log.w(TAG, "reply state not recorded; row stays queued")
         }
     }
 
     /**
      * Alphanumeric masks (`bKash`, `NAGAD`) and digits-only shortcodes are never
-     * valid reply destinations for a human conversation.
+     * valid reply destinations for a human conversation. Returns a word-only
+     * reason so the caller can decline and mark the row `failed`.
      */
-    private fun isReplyable(number: String, kind: String): Boolean {
-        if (number.any { it.isLetter() }) {
-            Log.i(TAG, "mask $kind=${mask(number)}; reply skipped")
-            return false
-        }
-        if (number.count { it.isDigit() } < MIN_DIGITS) {
-            Log.i(TAG, "shortcode $kind=${mask(number)}; reply skipped")
-            return false
-        }
-        return true
+    private fun skipReason(number: String): String? = when {
+        number.any { it.isLetter() } -> "mask"
+        number.count { it.isDigit() } < MIN_DIGITS -> "shortcode"
+        else -> null
     }
 
     /**
@@ -230,7 +276,7 @@ class SmsReceiver : BroadcastReceiver() {
     private fun parse(json: String): Outcome = try {
         val objectValue = JSONObject(json)
         if (!objectValue.optBoolean("ok")) {
-            Outcome(false, objectValue.optString("error", "unknown"), emptyList())
+            Outcome(false, objectValue.optString("error", "unknown"), "", emptyList())
         } else {
             val array: JSONArray = objectValue.optJSONArray("actions") ?: JSONArray()
             val actions = ArrayList<Reply>(array.length())
@@ -238,12 +284,20 @@ class SmsReceiver : BroadcastReceiver() {
                 val item = array.optJSONObject(index) ?: continue
                 val to = item.optString("to")
                 val body = item.optString("body")
-                if (to.isNotEmpty() && body.isNotEmpty()) actions += Reply(to, body)
+                val localId = item.optString("local_id")
+                if (to.isNotEmpty() && body.isNotEmpty()) {
+                    actions += Reply(to, body, localId)
+                }
             }
-            Outcome(true, null, actions)
+            Outcome(
+                true,
+                null,
+                objectValue.optString("device_id"),
+                actions,
+            )
         }
     } catch (_: Throwable) {
-        Outcome(false, "bad_json", emptyList())
+        Outcome(false, "bad_json", "", emptyList())
     }
 
     /** Keep at most the last four characters of a number; never log it whole. */
@@ -259,9 +313,14 @@ class SmsReceiver : BroadcastReceiver() {
         var parts = 0
     }
 
-    private class Reply(val to: String, val body: String)
+    private class Reply(val to: String, val body: String, val localId: String)
 
-    private class Outcome(val ok: Boolean, val error: String?, val actions: List<Reply>)
+    private class Outcome(
+        val ok: Boolean,
+        val error: String?,
+        val deviceId: String,
+        val actions: List<Reply>,
+    )
 
     private companion object {
         const val TAG = "DakFlareSms"

@@ -22,6 +22,8 @@ pub enum StoreError {
     InvalidDeviceId(String),
     #[error("corrupt stored data: {0}")]
     Corrupt(String),
+    #[error("invalid message state: {0}")]
+    InvalidState(String),
     #[error("time went backwards")]
     Clock,
 }
@@ -519,6 +521,10 @@ impl Store {
 
 
     /// Outbound rows the deployment has not accepted yet.
+    ///
+    /// A `failed` row is deliberately excluded: a reply that never left the
+    /// phone is not outbound history. M5.5's retry queue owns it and must flip
+    /// it back to `queued` before it becomes eligible again.
     pub async fn list_unmirrored_outbound(
         &self,
         device_id: &str,
@@ -530,6 +536,7 @@ impl Store {
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at
                    FROM messages
                   WHERE device_id = ? AND direction = 'out' AND mirrored = 0
+                    AND state <> 'failed'
                   ORDER BY created_at ASC LIMIT ?",
                 params![device_id, limit],
             )
@@ -558,6 +565,34 @@ impl Store {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Record the outcome of an outbound send by its device-local id.
+    ///
+    /// The receiver learns the id from the JNI reply and reports what actually
+    /// happened, so the mirror never uploads a reply that was never sent. Only
+    /// the reply lifecycle states are accepted; `queued` is also how M5.5 flips
+    /// a failed row back for retry. Returns `false` when no outbound row matched
+    /// (a re-delivery with no reply, or a stale id).
+    pub async fn set_message_state_by_local_id(
+        &self,
+        device_id: &str,
+        local_id: &str,
+        state: &str,
+    ) -> Result<bool, StoreError> {
+        if !matches!(state, "queued" | "sent" | "failed") {
+            return Err(StoreError::InvalidState(state.to_string()));
+        }
+
+        let conn = self.db.connect()?;
+        let affected = conn
+            .execute(
+                "UPDATE messages SET state = ?
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                params![state, device_id, local_id],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
@@ -755,6 +790,121 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(received.direction, "in");
+    }
+
+    #[tokio::test]
+    async fn message_state_updates_by_local_id() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "states",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_message(
+                &device.device_id,
+                "out",
+                "+1555",
+                "hi",
+                "queued",
+                Some("native-1-reply-0"),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "sent")
+                .await
+                .unwrap()
+        );
+        let row = store
+            .message_by_local_id(&device.device_id, "native-1-reply-0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, "sent");
+
+        // Only the reply lifecycle is allowed; a typo must not reach the table.
+        let error = store
+            .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "delivered")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidState(_)));
+
+        // A stale id is a no-op, not an error: the receiver may race a re-sync.
+        assert!(
+            !store
+                .set_message_state_by_local_id(&device.device_id, "native-missing", "sent")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_outbound_rows_are_not_mirrored() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "mirror states",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        for (local_id, state) in [
+            ("reply-0", "queued"),
+            ("reply-1", "sent"),
+            ("reply-2", "failed"),
+        ] {
+            store
+                .record_message(
+                    &device.device_id,
+                    "out",
+                    "+1555",
+                    "hi",
+                    state,
+                    Some(local_id),
+                )
+                .await
+                .unwrap();
+        }
+
+        let pending = store
+            .list_unmirrored_outbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        // Inserted in the same millisecond, so the fetch order between equal
+        // `created_at` values is not guaranteed; only the set matters here.
+        let mut states: Vec<&str> = pending.iter().map(|m| m.state.as_str()).collect();
+        states.sort_unstable();
+        assert_eq!(states, vec!["queued", "sent"]);
+
+        // M5.5's retry flips a failed row back to queued; only then does it
+        // become eligible for the mirror again.
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "reply-2", "queued")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .list_unmirrored_outbound(&device.device_id, 10)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

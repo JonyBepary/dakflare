@@ -59,6 +59,19 @@ object NativeBridge {
     ): String
 
     /**
+     * Record what happened to a queued reply row (`queued`, `sent`, `failed`).
+     *
+     * Returns `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+     */
+    @JvmStatic
+    external fun markOutbound(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+    ): String
+
+    /**
      * Safe wrapper for the receiver: never throws, including when the JNI symbol
      * is missing (which only fails on invocation, not on `loadLibrary`).
      */
@@ -117,5 +130,30 @@ object NativeBridge {
         JSONObject(json).optBoolean("ok")
     } catch (_: Throwable) {
         false
+    }
+
+    /**
+     * Best-effort state mark for a reply row. Never throws: a missing symbol or
+     * a store error returns `false` and leaves the row `queued`, which is the
+     * honest "unknown" state. Only the exception class is logged.
+     */
+    fun markOutboundSafely(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+    ): Boolean {
+        if (loadFailure != null) return false
+        if (deviceId.isEmpty() || localId.isEmpty()) return false
+
+        return try {
+            isOk(markOutbound(appDir, deviceId, localId, state))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "markOutbound symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "markOutbound failed: ${error.javaClass.simpleName}")
+            false
+        }
     }
 }
