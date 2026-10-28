@@ -8,6 +8,9 @@ worker/.wrangler/
 # Local secrets
 .dev.vars
 worker/.dev.vars
+.env
+.env.*
+!.env.example
 
 # Dependencies
 node_modules/
