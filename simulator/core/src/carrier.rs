@@ -143,6 +143,17 @@ pub async fn receive_and_reply(
     }
 
     let run = run_flows(&flows, &inbound_local_id, &message.peer, &message.body);
+
+    // Persist the run before anything else so a later flush can report it. The
+    // inbound row is already written, so a failed insert must not lose the
+    // message: the reply still goes out and the Worker simply does not learn
+    // about this run. Nothing here logs a body or a number.
+    for report in &run.reports {
+        if let Err(error) = store.record_run(&message.device_id, report).await {
+            eprintln!("[carrier] flow run not recorded: {error}");
+        }
+    }
+
     let mut actions = Vec::new();
     for (index, action) in run.actions.iter().enumerate() {
         let Action::SendSms { to, body } = action;
@@ -432,6 +443,85 @@ pub async fn drain_outbox(
 }
 
 
+/// Counts from one native flush.
+#[derive(Debug)]
+pub struct Flushed {
+    pub inbound: usize,
+    pub outbound: usize,
+}
+
+/// Upload everything the deployment has not accepted yet in one request:
+/// pending inbound rows, their stored flow runs and unmirrored outbound rows.
+///
+/// One request keeps the console consistent, so an inbound row cannot appear
+/// without its run and reply (or the other way round). A retry is free because
+/// every key is idempotent: inbound rows dedupe on `(device_id, local_id)`,
+/// runs on `(device_id, local_id, flow_id, flow_version)` and outbound rows on
+/// `(device_id, local_id)`.
+///
+/// Rows are marked as accepted only after the request succeeds. A row without a
+/// `local_id` cannot be keyed, so it is skipped in the payload and left pending.
+pub async fn flush_pending(
+    store: &Store,
+    client: &DeviceClient,
+    device_id: &str,
+) -> Result<Flushed, CarrierError> {
+    let inbound = store.list_pending_inbound(device_id, 100).await?;
+    let outbound = store.list_unmirrored_outbound(device_id, 100).await?;
+
+    if inbound.is_empty() && outbound.is_empty() {
+        return Ok(Flushed {
+            inbound: 0,
+            outbound: 0,
+        });
+    }
+
+    let local_ids: Vec<String> = inbound
+        .iter()
+        .filter_map(|message| message.local_id.clone())
+        .collect();
+    let runs = store.list_runs_for_inbound(device_id, &local_ids).await?;
+
+    let messages: Vec<InboundMessage> = inbound
+        .iter()
+        .filter_map(|message| {
+            Some(InboundMessage {
+                local_id: message.local_id.clone()?,
+                sender: message.peer.clone(),
+                body: message.body.clone(),
+                received_at: message.created_at,
+            })
+        })
+        .collect();
+
+    let reports: Vec<OutboundReport> = outbound
+        .iter()
+        .filter_map(|message| {
+            Some(OutboundReport {
+                local_id: message.local_id.clone()?,
+                to: message.peer.clone(),
+                body: message.body.clone(),
+                sent_at: message.created_at,
+            })
+        })
+        .collect();
+
+    client.upload_batch(&messages, &[], &runs, &reports).await?;
+
+    let outbound_ids: Vec<String> = outbound.iter().map(|m| m.id.clone()).collect();
+    store.mark_mirrored(&outbound_ids).await?;
+    for message in &inbound {
+        if message.local_id.is_some() {
+            store.set_message_state(&message.id, "uploaded").await?;
+        }
+    }
+
+    Ok(Flushed {
+        inbound: messages.len(),
+        outbound: reports.len(),
+    })
+}
+
 /// Upload any outbound rows the deployment has not accepted yet.
 pub async fn mirror_pending(
     store: &Store,
@@ -691,6 +781,50 @@ mod tests {
             message.local_id.as_deref().expect("inbound local id")
         );
         assert_eq!(outbound[0].local_id.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn receive_and_reply_persists_its_run_for_the_flush() {
+        let (_dir, store, device) = paired_store().await;
+        store
+            .replace_flows(&[reply_flow("wf_reply", 1, "got it")])
+            .await
+            .unwrap();
+        let received_at = 1_776_470_400_000;
+
+        let (message, _) = receive_and_reply(&store, None, "+15550001111", "ping", received_at)
+            .await
+            .unwrap();
+        let inbound_id = message.local_id.clone().expect("inbound local id");
+
+        // The row is still `received`, so a flush will pick it up.
+        let pending = store
+            .list_pending_inbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, message.id);
+        assert_eq!(pending[0].state, "received");
+
+        let runs = store
+            .list_runs_for_inbound(&device.device_id, std::slice::from_ref(&inbound_id))
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].local_id, inbound_id);
+        assert_eq!(runs[0].flow_id, "wf_reply");
+        assert_eq!(runs[0].flow_version, 1);
+
+        // A re-delivered broadcast reports the same run again; the UNIQUE key
+        // makes that insert a no-op.
+        receive_and_reply(&store, None, "+15550001111", "ping", received_at)
+            .await
+            .unwrap();
+        let again = store
+            .list_runs_for_inbound(&device.device_id, std::slice::from_ref(&inbound_id))
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1);
     }
 
     #[tokio::test]

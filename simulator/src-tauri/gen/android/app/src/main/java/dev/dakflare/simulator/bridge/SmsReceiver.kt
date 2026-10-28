@@ -168,6 +168,13 @@ class SmsReceiver : BroadcastReceiver() {
             // claim `sent` when the store did not accept it.
             mark(appDir, deviceId, action.localId, "sent")
         }
+
+        // Best effort: the inbound row, its run and the rows marked `sent`
+        // above upload together when the Worker is reachable; a failure leaves
+        // them for the next flush. Declined rows stay `failed` and are never
+        // uploaded.
+        val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
+        Log.i(TAG, "flush attempted ok=$ok")
     }
 
     /**

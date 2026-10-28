@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libsql::{Builder, Database, params};
 use serde::{Deserialize, Serialize};
 
-use crate::flowrun::RemoteFlow;
+use crate::flowrun::{FlowRunReport, RemoteFlow};
 use crate::identity::{Identity, is_valid_device_id};
 
 #[derive(Debug, thiserror::Error)]
@@ -425,6 +425,38 @@ impl Store {
         })
     }
 
+    /// Persist one flow run for an inbound message.
+    ///
+    /// `(device_id, local_id, flow_id, flow_version)` is the dedupe key shared
+    /// with the Worker fallback, so a repeated insert is a no-op rather than an
+    /// error: a re-delivered broadcast can report the same run again without
+    /// creating a second row. `sms_json` keeps its default.
+    pub async fn record_run(
+        &self,
+        device_id: &str,
+        report: &FlowRunReport,
+    ) -> Result<(), StoreError> {
+        let id = format!("run{}", random_hex(12)?);
+        let now = now_ms()?;
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO flow_runs
+                (id, device_id, local_id, flow_id, flow_version, outcome, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                device_id,
+                report.local_id.as_str(),
+                report.flow_id.as_str(),
+                report.flow_version,
+                report.outcome.as_str(),
+                now
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Find a row by its deterministic device-local id. This is how a
     /// re-delivered `SMS_RECEIVED` broadcast resolves to the row the first
     /// delivery already wrote.
@@ -553,6 +585,83 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Inbound rows a native flush has not uploaded yet.
+    ///
+    /// `received` is the marker: the carrier path flips its own rows to
+    /// `uploaded` as soon as it uploads, while a row written by the Android
+    /// receiver stays `received` until a flush is accepted for it.
+    pub async fn list_pending_inbound(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages
+                  WHERE device_id = ? AND direction = 'in' AND state = 'received'
+                  ORDER BY created_at ASC LIMIT ?",
+                params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every stored run for the given inbound message ids.
+    ///
+    /// An empty slice is answered without touching the database; otherwise this
+    /// is one `IN (…)` query whose placeholder count comes from the slice length.
+    pub async fn list_runs_for_inbound(
+        &self,
+        device_id: &str,
+        local_ids: &[String],
+    ) -> Result<Vec<FlowRunReport>, StoreError> {
+        if local_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; local_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT local_id, flow_id, flow_version, outcome
+               FROM flow_runs
+              WHERE device_id = ? AND local_id IN ({placeholders})
+              ORDER BY created_at ASC, id ASC"
+        );
+
+        let mut values: Vec<libsql::Value> = Vec::with_capacity(local_ids.len() + 1);
+        values.push(device_id.to_string().into());
+        values.extend(local_ids.iter().cloned().map(Into::into));
+
+        let conn = self.db.connect()?;
+        let mut rows = conn.query(&sql, values).await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(FlowRunReport {
+                local_id: row.get(0)?,
+                flow_id: row.get(1)?,
+                flow_version: row.get(2)?,
+                outcome: row.get(3)?,
             });
         }
         Ok(out)
@@ -790,6 +899,50 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(received.direction, "in");
+    }
+
+    #[tokio::test]
+    async fn pending_inbound_ignores_outbound_and_uploaded_rows() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "flush",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let pending = store
+            .record_message(&device.device_id, "in", "+1555", "one", "received", Some("in-1"))
+            .await
+            .unwrap();
+        store
+            .record_message(&device.device_id, "in", "+1555", "two", "uploaded", Some("in-2"))
+            .await
+            .unwrap();
+        store
+            .record_message(&device.device_id, "out", "+1555", "reply", "sent", Some("out-1"))
+            .await
+            .unwrap();
+
+        let rows = store
+            .list_pending_inbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, pending.id);
+        assert_eq!(rows[0].local_id.as_deref(), Some("in-1"));
+    }
+
+    #[tokio::test]
+    async fn runs_for_no_inbound_ids_are_empty() {
+        let (_dir, store) = open_temp().await;
+        // No device at all: an empty slice must not reach the database.
+        let runs = store.list_runs_for_inbound("dev_missing", &[]).await.unwrap();
+        assert!(runs.is_empty());
     }
 
     #[tokio::test]

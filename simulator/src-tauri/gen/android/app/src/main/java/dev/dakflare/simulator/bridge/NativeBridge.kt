@@ -72,6 +72,16 @@ object NativeBridge {
     ): String
 
     /**
+     * Upload everything the deployment has not accepted yet — pending inbound
+     * SMS, their flow runs and replies already marked `sent` — in one request.
+     *
+     * Returns `{"ok":true,"inbound":<count>,"outbound":<count>}` or
+     * `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+     */
+    @JvmStatic
+    external fun flushPending(appDir: String, deviceId: String): String
+
+    /**
      * Safe wrapper for the receiver: never throws, including when the JNI symbol
      * is missing (which only fails on invocation, not on `loadLibrary`).
      */
@@ -153,6 +163,27 @@ object NativeBridge {
             false
         } catch (error: Throwable) {
             Log.e(TAG, "markOutbound failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Best-effort flush of everything not yet accepted. Never throws: an empty
+     * argument, a missing symbol or a store/network error returns `false` and
+     * leaves the rows pending, so the next call retries them. Only the
+     * exception class is logged.
+     */
+    fun flushPendingSafely(appDir: String, deviceId: String): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || deviceId.isEmpty()) return false
+
+        return try {
+            isOk(flushPending(appDir, deviceId))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "flushPending symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
             false
         }
     }

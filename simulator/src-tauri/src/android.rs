@@ -12,7 +12,10 @@
 
 use std::path::Path;
 
-use dakflare_core::{Action, CarrierError, Store, StoreError, receive_and_reply, reply_local_id};
+use dakflare_core::{
+    Action, CarrierError, DeviceClient, Flushed, ProtocolError, Store, StoreError, Target,
+    carrier::flush_pending, receive_and_reply, reply_local_id,
+};
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
@@ -98,6 +101,54 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     state: JString,
 ) -> jstring {
     let json = mark_guarded(&mut env, &app_dir, &device_id, &local_id, &state);
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.flushPending`
+///
+/// Drains everything this deployment has not accepted yet — pending inbound
+/// rows, their stored flow runs and unmirrored outbound rows — in one atomic
+/// `upload_batch`. The receiver calls it once after its send loop. Returns
+/// `{"ok":true,"inbound":<count>,"outbound":<count>}` or
+/// `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+///
+/// Best effort: a failed call leaves the rows pending, and the next call (or
+/// the next `poll_device`) retries them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPending(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(&mut env, &app_dir, &device_id) {
+            Ok((app_dir, device_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    flush_blocking(&app_dir, &device_id)
+                })) {
+                    Ok(Ok(flushed)) => serde_json::json!({
+                        "ok": true,
+                        "inbound": flushed.inbound,
+                        "outbound": flushed.outbound,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] flushPending panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] flushPending panicked before storage");
+            error_json("storage")
+        }
+    };
     to_jstring(&mut env, json)
 }
 
@@ -273,6 +324,27 @@ fn read_mark_inputs(
     Ok((app_dir, device_id, local_id, state))
 }
 
+/// Decode and validate the flush arguments. Same rules as the state-mark path:
+/// copy the strings, bound their lengths, and never touch the database on bad
+/// input.
+fn read_flush_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    device_id: &JString,
+) -> Result<(String, String), &'static str> {
+    let app_dir = java_string(env, app_dir)?;
+    let device_id = java_string(env, device_id)?;
+
+    if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+        return Err("bad_input");
+    }
+    if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+        return Err("bad_input");
+    }
+
+    Ok((app_dir, device_id))
+}
+
 fn java_string(env: &mut JNIEnv, value: &JString) -> Result<String, &'static str> {
     env.get_string(value)
         .map(Into::into)
@@ -326,11 +398,63 @@ fn mark_blocking(
         .map_err(map_store_error)
 }
 
+/// Build the same signed client the app uses from the stored target and
+/// identity, then flush the pending inbound and outbound rows. A missing
+/// pairing or key is `unpaired`; a missing or invalid target is `storage`.
+fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+
+    tauri::async_runtime::block_on(async {
+        let base_url = store
+            .get_setting("base_url")
+            .await
+            .map_err(|_| "storage")?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("storage")?;
+        let admin_token = store
+            .get_setting("admin_token")
+            .await
+            .map_err(|_| "storage")?
+            .filter(|value| !value.trim().is_empty());
+
+        store
+            .get_device(device_id)
+            .await
+            .map_err(|_| "storage")?
+            .ok_or("unpaired")?;
+        let private_key = store
+            .private_key(device_id)
+            .await
+            .map_err(|_| "storage")?
+            .ok_or("unpaired")?;
+
+        let target = Target::new(base_url, admin_token).map_err(|_| "storage")?;
+        let client = DeviceClient::new(target, device_id, private_key);
+
+        flush_pending(&store, &client, device_id)
+            .await
+            .map_err(map_flush_error)
+    })
+}
+
 fn map_carrier_error(error: CarrierError) -> &'static str {
     match error {
         CarrierError::Unpaired => "unpaired",
         CarrierError::InvalidInput(_) => "bad_input",
         CarrierError::Store(_) | CarrierError::Protocol(_) => "storage",
+    }
+}
+
+/// The flush path can fail on the wire, which is not a store problem. Only a
+/// transport or URL failure is `network`; a signing or response-shape failure
+/// is `protocol`.
+fn map_flush_error(error: CarrierError) -> &'static str {
+    match error {
+        CarrierError::Unpaired => "unpaired",
+        CarrierError::InvalidInput(_) => "bad_input",
+        CarrierError::Store(_) => "storage",
+        CarrierError::Protocol(ProtocolError::Http(_) | ProtocolError::Url(_)) => "network",
+        CarrierError::Protocol(_) => "protocol",
     }
 }
 

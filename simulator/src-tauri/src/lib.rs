@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    Device, DeviceClient, Message, NewDevice, ProtocolError, Store, Target, drain_outbox,
-    inject_inbound, parse_pair_link,
+    Device, DeviceClient, Message, NewDevice, ProtocolError, Store, Target, carrier::flush_pending,
+    drain_outbox, inject_inbound, parse_pair_link,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -274,6 +274,9 @@ async fn poll_device(
     device_id: String,
 ) -> Result<serde_json::Value, String> {
     let (client, _device) = client_for(&state, &device_id).await?;
+    // A receiver can leave rows pending while offline; flush them before polling
+    // so opening the app clears the backlog. Best effort.
+    let _ = flush_pending(&state.store, &client, &device_id).await;
     client.poll(&[]).await.map_err(|e| e.to_string())
 }
 
