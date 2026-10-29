@@ -451,26 +451,28 @@
 <style>
 	.inspector {
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
+		overflow: hidden;
 	}
 
 	.inspector-head {
 		display: flex;
 		align-items: center;
-		gap: 9px;
-		padding: 11px 12px 9px;
-		border-bottom: 1px solid var(--line);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
 	}
 
 	.inspector-icon {
 		display: grid;
 		place-items: center;
-		width: 28px;
-		height: 28px;
+		width: 30px;
+		height: 30px;
 		flex: none;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-2);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-text-secondary);
 	}
 
 	.inspector-title {
@@ -479,7 +481,7 @@
 
 	.inspector-title h2 {
 		margin-top: 1px;
-		font-size: var(--text-md);
+		font-size: var(--df-p-text-md);
 		letter-spacing: -0.01em;
 	}
 
@@ -489,20 +491,19 @@
 	}
 
 	.inspector-help {
-		padding: 9px 12px 0;
-		font-size: 11.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-4) 0;
+		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.inspector-summary {
-		margin: 6px 12px 0;
+		margin: 6px var(--df-p-space-4) 0;
 		padding: 5px 7px;
-		border: 1px dashed var(--line);
-		border-radius: 3px;
-		background: color-mix(in srgb, var(--surface-2) 45%, transparent);
-		color: var(--ink-2);
-		font-size: 10px;
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-2xs);
 		line-height: 1.45;
 		overflow-wrap: anywhere;
 	}
@@ -510,14 +511,14 @@
 	.inspector-body {
 		display: flex;
 		flex-direction: column;
-		gap: 13px;
-		padding: 12px;
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-4);
 	}
 
 	.field-foot {
 		display: flex;
 		justify-content: space-between;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
 	.captures {
@@ -538,10 +539,10 @@
 
 	.capture-list code {
 		padding: 1px 4px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--df-border-hairline);
 		border-radius: 3px;
-		background: var(--surface-2);
-		font-family: var(--font-mono);
+		background: var(--df-surface-well);
+		font-family: var(--df-p-font-mono);
 		font-size: 9.5px;
 	}
 
@@ -550,7 +551,7 @@
 		flex-direction: column;
 		gap: 7px;
 		padding-top: 10px;
-		border-top: 1px solid var(--line);
+		border-top: 1px solid var(--df-border-hairline);
 	}
 
 	.branch-row {
@@ -565,25 +566,25 @@
 		align-items: center;
 		height: 17px;
 		padding: 0 5px;
-		border: 1px solid var(--line-strong);
+		border: 1px solid var(--df-border-control);
 		border-radius: 3px;
-		font-family: var(--font-mono);
+		font-family: var(--df-p-font-mono);
 		font-size: 9px;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
 	}
 
 	.branch-key.true {
-		color: var(--ok);
-		border-color: color-mix(in srgb, var(--ok) 36%, var(--line));
+		color: var(--df-state-ok-ink);
+		border-color: color-mix(in srgb, var(--df-state-ok-ink) 36%, var(--df-border-hairline));
 	}
 
 	.branch-key.false {
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.branch-arrow {
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.branch-target {
@@ -595,7 +596,7 @@
 
 	.branch-missing {
 		font-size: 11.5px;
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
 	}
 
 	.node-issues {
@@ -604,9 +605,9 @@
 		gap: 5px;
 		margin: 0;
 		padding: 8px;
-		border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+		border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 28%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-sm);
+		background: color-mix(in srgb, var(--df-state-danger-ink) 5%, var(--df-surface-card));
 		list-style: none;
 	}
 
@@ -616,7 +617,7 @@
 		gap: 6px;
 		font-size: 11px;
 		line-height: 1.45;
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
 	}
 
 	.node-issues :global(svg) {
@@ -628,28 +629,28 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--s-2);
-		padding: 9px 12px;
-		border-top: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 40%, var(--surface));
-		border-radius: 0 0 var(--r) var(--r);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-4);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: 0 0 var(--df-p-radius-lg) var(--df-p-radius-lg);
 	}
 
 	.node-id {
 		min-width: 0;
 		font-size: 9.5px;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	.hint.ok {
-		color: var(--ok);
+		color: var(--df-state-ok-ink);
 	}
 
 	.hint.invalid {
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
 	}
 
 	input.input-mono {

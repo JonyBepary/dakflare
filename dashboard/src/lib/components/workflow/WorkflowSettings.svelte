@@ -155,51 +155,53 @@
 <style>
 	.settings {
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
+		overflow: hidden;
 	}
 
 	.settings-head {
 		display: flex;
 		align-items: center;
-		gap: 9px;
-		padding: 11px 12px 9px;
-		border-bottom: 1px solid var(--line);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
 	}
 
 	.settings-icon {
 		display: grid;
 		place-items: center;
-		width: 28px;
-		height: 28px;
+		width: 30px;
+		height: 30px;
 		flex: none;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-2);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-text-secondary);
 	}
 
 	.settings-head h2 {
 		margin-top: 1px;
-		font-size: var(--text-md);
+		font-size: var(--df-p-text-md);
 	}
 
 	.settings-help {
-		padding: 9px 12px 0;
-		font-size: 11.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-4) 0;
+		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.settings-body {
 		display: flex;
 		flex-direction: column;
-		gap: 13px;
-		padding: 12px;
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-4);
 	}
 
 	.field-foot {
 		display: flex;
 		justify-content: space-between;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
 	.id-line {
@@ -221,44 +223,44 @@
 		gap: 6px;
 		margin: 0;
 		padding-top: 11px;
-		border-top: 1px solid var(--line);
+		border-top: 1px solid var(--df-border-hairline);
 		font-size: 11px;
 	}
 
 	.meta > div {
 		display: grid;
 		grid-template-columns: 58px minmax(0, 1fr);
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		align-items: baseline;
 	}
 
 	.meta dt {
-		font-family: var(--font-mono);
+		font-family: var(--df-p-font-mono);
 		font-size: 9px;
 		letter-spacing: 0.07em;
 		text-transform: uppercase;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.meta dd {
 		margin: 0;
 		min-width: 0;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 	}
 
 	.settings-note {
-		padding: 9px 12px;
-		border-top: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 40%, var(--surface));
-		border-radius: 0 0 var(--r) var(--r);
-		font-size: 10.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-4);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: 0 0 var(--df-p-radius-lg) var(--df-p-radius-lg);
+		font-size: var(--df-p-text-2xs);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.check strong {
-		color: var(--ink);
+		color: var(--df-text-primary);
 		font-weight: 600;
 		font-size: 12px;
 	}

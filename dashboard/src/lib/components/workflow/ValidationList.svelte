@@ -25,7 +25,8 @@
 			Checks
 		</h2>
 		<span
-			class="badge {issues.length > 0 ? 'badge-danger' : 'badge-ok'}"
+			class="chip"
+			data-tone={issues.length > 0 ? 'danger' : 'ok'}
 			role="status"
 			aria-live="polite"
 			aria-label={`${issues.length} ${issues.length === 1 ? 'problem' : 'problems'}`}
@@ -36,7 +37,7 @@
 
 	{#if issues.length === 0}
 		<div class="checks-empty">
-			<Icon name="check" size={15} />
+			<span class="ok-mark" aria-hidden="true"><Icon name="check" size={13} /></span>
 			<div>
 				<p class="checks-ok">This flow is ready to save.</p>
 				<p class="hint">The gateway runs the same checks again when you save.</p>
@@ -107,35 +108,42 @@
 <style>
 	.checks {
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
 	}
 
 	.checks-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--s-2);
-		padding: 9px 12px;
-		border-bottom: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
-		border-radius: var(--r) var(--r) 0 0;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: var(--df-p-radius-lg) var(--df-p-radius-lg) 0 0;
 	}
 
 	.checks-empty {
 		display: flex;
 		align-items: flex-start;
-		gap: 8px;
-		padding: 12px;
-		color: var(--ok);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-3);
 	}
 
-	.checks-empty :global(svg) {
-		margin-top: 1px;
+	.ok-mark {
+		display: grid;
+		place-items: center;
+		width: 20px;
+		height: 20px;
+		flex: none;
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
 	}
 
 	.checks-ok {
-		font-size: 11.5px;
-		font-weight: 500;
-		color: var(--ink);
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		color: var(--df-text-primary);
 	}
 
 	.checks-empty .hint {
@@ -145,20 +153,21 @@
 	.checks-summary {
 		display: flex;
 		gap: 5px;
-		padding: 7px 12px;
-		font-family: var(--font-mono);
-		font-size: 9.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		color: var(--ink-3);
-		border-bottom: 1px solid var(--line);
+		color: var(--df-text-meta);
+		border-bottom: 1px solid var(--df-border-hairline);
 	}
 
 	.issue-list {
 		display: flex;
 		flex-direction: column;
+		gap: 2px;
 		margin: 0;
-		padding: 4px;
+		padding: var(--df-p-space-1);
 		list-style: none;
 		max-height: 232px;
 		overflow-y: auto;
@@ -168,18 +177,24 @@
 	.issue {
 		display: flex;
 		align-items: flex-start;
-		gap: 6px;
+		gap: var(--df-p-space-2);
 		width: 100%;
 		padding: 6px;
 		border: 0;
-		border-radius: 3px;
+		border-radius: var(--df-p-radius-xs);
 		background: transparent;
 		text-align: left;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
+		transition: background-color 120ms ease;
 	}
 
 	.issue:hover:not(.is-static) {
-		background: var(--surface-2);
+		background: var(--df-surface-well);
+	}
+
+	.issue:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 1px;
 	}
 
 	.issue.is-static {
@@ -189,28 +204,25 @@
 	.issue :global(svg) {
 		margin-top: 3px;
 		flex: none;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.issue-mark {
 		margin-top: 1px;
-		padding: 0 4px;
-		border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
-		border-radius: 3px;
-		background: color-mix(in srgb, var(--danger) 6%, var(--surface));
-		color: var(--danger);
-		font-family: var(--font-mono);
-		font-size: 8px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+		padding: 0 5px;
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-state-danger-bg);
+		color: var(--df-state-danger-ink);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.04em;
 		line-height: 1.6;
 		flex: none;
 	}
 
 	.issue-mark.field {
-		color: var(--ink-3);
-		border-color: var(--line);
-		background: var(--surface-2);
+		color: var(--df-text-meta);
+		background: var(--df-surface-well);
 	}
 
 	.issue-text {
@@ -218,30 +230,36 @@
 		flex-direction: column;
 		gap: 1px;
 		min-width: 0;
-		font-size: 11px;
+		font-size: var(--df-p-text-sm);
 		line-height: 1.4;
 	}
 
 	.issue-path {
-		font-size: 9px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	.more {
-		margin: 0 12px 8px;
-		font-size: 10.5px;
+		margin: 0 var(--df-p-space-3) var(--df-p-space-2);
+		font-size: var(--df-p-text-sm);
 	}
 
 	.checks-note {
-		padding: 8px 12px;
-		border-top: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 40%, var(--surface));
-		border-radius: 0 0 var(--r) var(--r);
-		font-size: 10px;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: 0 0 var(--df-p-radius-lg) var(--df-p-radius-lg);
+		font-size: var(--df-p-text-2xs);
 		line-height: 1.5;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.issue {
+			transition: none;
+		}
 	}
 </style>

@@ -44,16 +44,16 @@
 						: `A flow can hold at most ${NODE_LIMIT} steps`
 					: `Add ${meta.title}`}
 			>
-				<span class="palette-icon"><Icon name={meta.icon} size={14} /></span>
+				<span class="palette-icon"><Icon name={meta.icon} size={15} /></span>
 				<span class="palette-text">
 					<span class="palette-name">{meta.title}</span>
 					<span class="palette-blurb">{meta.blurb}</span>
 				</span>
 				<span class="palette-mark" aria-hidden="true">
 					{#if type === 'trigger' && hasTrigger}
-						<Icon name="check" size={11} />
+						<Icon name="check" size={12} />
 					{:else}
-						<Icon name="plus" size={11} />
+						<Icon name="plus" size={12} />
 					{/if}
 				</span>
 			</button>
@@ -76,68 +76,82 @@
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
+		overflow: hidden;
 	}
 
 	.palette-head {
-		padding: 11px 12px 9px;
-		border-bottom: 1px solid var(--line);
+		padding: var(--df-p-space-3) var(--df-p-space-3) var(--df-p-space-2);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
 	}
 
 	.palette-copy {
 		margin-top: 4px;
-		font-size: 11px;
+		font-size: var(--df-p-text-xs);
 		line-height: 1.4;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.palette-list {
 		display: flex;
 		flex-direction: column;
-		padding: 5px;
+		padding: var(--df-p-space-1);
 		gap: 2px;
 	}
 
 	.palette-item {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: var(--df-p-space-2);
 		width: 100%;
 		min-width: 0;
-		padding: 7px 7px;
+		min-height: 48px;
+		padding: 7px var(--df-p-space-2);
 		border: 1px solid transparent;
-		border-radius: var(--r-sm);
+		border-radius: var(--df-p-radius-sm);
 		background: transparent;
-		color: var(--ink);
+		color: var(--df-text-primary);
 		text-align: left;
 		transition:
 			background-color 130ms ease,
-			border-color 130ms ease;
+			border-color 130ms ease,
+			transform var(--df-p-dur-press) ease-out;
 	}
 
 	.palette-item:hover:not(:disabled) {
-		background: var(--surface-2);
-		border-color: var(--line);
+		background: var(--df-surface-well);
+		border-color: var(--df-border-hairline);
 	}
 
 	.palette-item:active:not(:disabled) {
-		background: var(--surface-3);
+		transform: scale(0.97);
+	}
+
+	.palette-item:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
 	}
 
 	.palette-item.is-disabled {
 		cursor: not-allowed;
-		opacity: 0.55;
+		opacity: 0.5;
 	}
 
 	.palette-icon {
 		display: grid;
 		place-items: center;
-		width: 24px;
-		height: 24px;
+		width: 26px;
+		height: 26px;
 		flex: none;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-2);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+	}
+
+	.palette-item:hover:not(:disabled) .palette-icon {
+		background: var(--df-surface-card);
+		color: var(--df-accent-text);
 	}
 
 	.palette-text {
@@ -148,45 +162,45 @@
 	}
 
 	.palette-name {
-		font-size: 12px;
+		font-size: var(--df-p-text-base);
 		font-weight: 600;
 		line-height: 1.25;
 	}
 
 	.palette-blurb {
-		font-size: 10.5px;
+		font-size: var(--df-p-text-xs);
 		line-height: 1.35;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.palette-mark {
 		display: grid;
 		place-items: center;
 		margin-left: auto;
-		width: 16px;
-		height: 16px;
+		width: 18px;
+		height: 18px;
 		flex: none;
-		border-radius: 3px;
-		color: var(--ink-3);
+		border-radius: var(--df-p-radius-xs);
+		color: var(--df-text-meta);
 	}
 
 	.palette-item:hover:not(:disabled) .palette-mark {
-		background: var(--surface);
-		color: var(--accent);
+		color: var(--df-accent-text);
 	}
 
 	.palette-note {
 		margin-top: auto;
-		padding: 9px 12px;
-		border-top: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 40%, var(--surface));
-		border-radius: 0 0 var(--r) var(--r);
-		font-size: 10.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-2xs);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	@media (max-width: 760px) {
@@ -200,17 +214,13 @@
 		}
 	}
 
-	@media (max-width: 420px) {
+	@media (prefers-reduced-motion: reduce) {
 		.palette-item {
-			padding: 6px;
+			transition: none;
 		}
 
-		.palette-blurb {
-			white-space: normal;
-			display: -webkit-box;
-			-webkit-line-clamp: 2;
-			line-clamp: 2;
-			-webkit-box-orient: vertical;
+		.palette-item:active:not(:disabled) {
+			transform: none;
 		}
 	}
 </style>

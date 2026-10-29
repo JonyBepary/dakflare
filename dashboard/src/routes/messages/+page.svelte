@@ -10,6 +10,7 @@
 		deviceSecondary,
 		wakeMode
 	} from '$lib/presence';
+	import { answerOf, answerPhrase } from '$lib/answers';
 	import { formatAbsolute, formatRelative } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import CommandTracker from '$lib/components/CommandTracker.svelte';
@@ -86,7 +87,7 @@
 		try {
 			rules = await getRules();
 		} catch {
-			// Rule names are a label on the row. The reply id remains visible.
+			// Rule names are a label on the row. "Answered by a rule" remains true.
 			rules = [];
 		}
 	}
@@ -187,7 +188,6 @@
 		trackers = next;
 	}
 
-
 	async function loadStatus(): Promise<void> {
 		if (!selected) {
 			deviceStatus = null;
@@ -247,10 +247,8 @@
 		if (!composeDevice) composeDevice = selected;
 		composeOpen = true;
 		await tick();
-		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		document
-			.getElementById('compose-panel')
-			?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+		// An instant jump: the motion set has no scroll animation.
+		document.getElementById('compose-panel')?.scrollIntoView({ block: 'start', behavior: 'auto' });
 	}
 
 	function closeCompose(): void {
@@ -341,34 +339,32 @@
 	</PageHeader>
 
 	{#if devicesError}
-		<section class="panel">
-			<div class="panel-body stack">
-				<Notice tone="danger" title="Could not load the fleet">{devicesError}</Notice>
-				<div class="row">
-					<button
-						type="button"
-						class="btn btn-primary"
-						onclick={() => {
-							loadingDevices = true;
-							void loadDevices();
-						}}
-					>
-						<Icon name="refresh" size={14} /> Try again
-					</button>
-				</div>
+		<section class="card">
+			<Notice tone="danger" title="Could not load the fleet">{devicesError}</Notice>
+			<div class="row" style="margin-top: 16px">
+				<button
+					type="button"
+					class="btn btn-primary"
+					onclick={() => {
+						loadingDevices = true;
+						void loadDevices();
+					}}
+				>
+					<Icon name="refresh" size={14} /> Try again
+				</button>
 			</div>
 		</section>
 	{:else if loadingDevices}
-		<section class="panel" aria-busy="true" aria-live="polite">
+		<section class="card" aria-busy="true" aria-live="polite">
 			<span class="sr-only">Loading devices</span>
-			<div class="skeleton" style="height: 120px; margin: 16px"></div>
+			<div class="skeleton" style="height: 120px"></div>
 		</section>
 	{:else if devices.length === 0}
-		<section class="panel">
+		<section class="card">
 			<EmptyState
 				icon="message"
-				title="No traffic to show yet"
-				description="No devices are paired, so no messages can arrive. Mint a pairing code, open it on the phone, and this log will fill as the device syncs."
+				title="No devices paired yet"
+				description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
 			>
 				<a class="btn btn-primary" href={`${ROUTES.devices}?mint=enroll`}>
 					<Icon name="key" size={14} /> Mint a pairing code
@@ -377,13 +373,13 @@
 		</section>
 	{:else}
 		{#if composeOpen}
-			<section class="panel compose-panel" id="compose-panel" aria-labelledby="compose-heading">
-				<div class="panel-head">
-					<h2 class="panel-title" id="compose-heading">
+			<section class="card compose-panel" id="compose-panel" aria-labelledby="compose-heading">
+				<div class="card-head">
+					<h2 class="card-title" id="compose-heading">
 						<Icon name="send" size={14} /> Compose message
 					</h2>
 					<span class="spacer"></span>
-					<span class="panel-meta">outbound · queued for the device</span>
+					<span class="compose-meta">outbound · queued for the device</span>
 					<button
 						type="button"
 						class="btn btn-ghost btn-icon btn-sm"
@@ -393,18 +389,16 @@
 						<Icon name="x" size={14} />
 					</button>
 				</div>
-				<div class="panel-body">
-					<SendSmsForm
-						devices={devices}
-						bind:deviceId={composeDevice}
-						onqueued={(result) => void handleQueued(result)}
-						autofocus
-					/>
-				</div>
+				<SendSmsForm
+					devices={devices}
+					bind:deviceId={composeDevice}
+					onqueued={(result) => void handleQueued(result)}
+					autofocus
+				/>
 			</section>
 		{/if}
 
-		<section class="panel">
+		<section class="card log-card">
 			<div class="log-toolbar">
 				<div class="device-picker">
 					<label class="label" for="device-select">Device</label>
@@ -451,8 +445,14 @@
 					{/if}
 					<span class="toolbar-sep" aria-hidden="true"></span>
 					<span class="mono shown">
-						{#if loading}<Spinner />{:else}{visibleMessages.length}{/if}
-						{visibleMessages.length === 1 ? 'message' : 'messages'}
+						{#if loading}
+							<Spinner />
+						{:else if messagesError}
+							<span title="The log did not load">—</span>
+						{:else}
+							{visibleMessages.length}
+							{visibleMessages.length === 1 ? 'message' : 'messages'}
+						{/if}
 					</span>
 					<span class="toolbar-sep" aria-hidden="true"></span>
 					<span
@@ -477,9 +477,9 @@
 						{/each}
 					</div>
 				{:else if messagesError}
-					<div class="panel-body stack">
+					<div class="log-message">
 						<Notice tone="danger" title="Could not load messages">{messagesError}</Notice>
-						<div class="row">
+						<div class="row" style="margin-top: 12px">
 							<button type="button" class="btn btn-primary" onclick={() => void loadMessages(true)}>
 								<Icon name="refresh" size={14} /> Try again
 							</button>
@@ -488,8 +488,8 @@
 				{:else if messages.length === 0}
 					<EmptyState
 						icon="message"
-						title="No messages for this device"
-						description="Inbound SMS appears here after the phone syncs. Outbound sends are recorded when the gateway enqueues them."
+						title="No messages for this device yet"
+						description="Inbound SMS appears after the phone syncs. Anything you queue here appears immediately."
 					/>
 				{:else if visibleMessages.length === 0}
 					<EmptyState
@@ -505,38 +505,28 @@
 							{@const isExpanded = expanded.has(message.id)}
 							{@const isNew = newIds.has(message.id)}
 							{@const ruleName =
-								message.reply_source === 'rule'
-									? (message.reply_ref ? rulesById.get(message.reply_ref)?.name ?? message.reply_ref : 'rule')
+								message.reply_source === 'rule' && message.reply_ref
+									? (rulesById.get(message.reply_ref)?.name ?? null)
 									: null}
-							<li class="log-row" class:outbound class:is-new={isNew}>
-								<div class="dir">
-									<span class="dir-icon">
-										<Icon
-											name={outbound ? 'arrow-up-right' : 'arrow-down-left'}
-											size={14}
-										/>
-									</span>
-									<span class="dir-label">{outbound ? 'out' : 'in'}</span>
-								</div>
+							{@const answer = answerPhrase(message, ruleName)}
+							{@const answerSource = answerOf(message)}
+							<li class="log-row" data-dir={outbound ? 'out' : 'in'} class:is-new={isNew}>
+								<span class="dir" aria-hidden="true">
+									<Icon name={outbound ? 'arrow-up-right' : 'arrow-down-left'} size={14} />
+								</span>
 								<div class="msg-main">
-									<div class="msg-head">
-										{#if isNew}
-											<span class="new-chip" title="Arrived since the last check">new</span>
-										{/if}
+									<p class="msg-head">
+										<span class="dir-word">
+											<span aria-hidden="true">{outbound ? 'out' : 'in'}</span>
+											<span class="sr-only">{outbound ? 'Outbound' : 'Inbound'}</span>
+										</span>
 										<span class="peer mono">{message.peer}</span>
-										{#if ruleName && !outbound}
-											<span
-												class="rule-chip"
-												title={message.reply_ref ? `Answered by rule ${message.reply_ref}` : 'Answered by a gateway rule'}
-											>
-												rule · {ruleName}
-											</span>
-										{/if}
+										{#if isNew}<span class="new-word">new</span>{/if}
 										<span class="spacer"></span>
 										<span class="msg-time">
 											<RelativeTime value={message.received_at} />
 										</span>
-									</div>
+									</p>
 									<p class="msg-body" class:clamped={isLong && !isExpanded}>
 										{message.body || '(empty message)'}
 									</p>
@@ -550,25 +540,34 @@
 											{isExpanded ? 'Show less' : 'Show full message'}
 										</button>
 									{/if}
-									{#if message.reply_command_id && !outbound}
-										<div class="reply-track">
-											<button
-												type="button"
-												class="link-btn track-btn"
-												onclick={() => toggleTracker(message.id)}
-												aria-expanded={trackers.has(message.id)}
-											>
-												<Icon name="activity" size={11} />
-												{trackers.has(message.id) ? 'Hide reply tracking' : 'Track reply'}
-											</button>
-											{#if trackers.has(message.id)}
-												<div class="reply-tracker">
-													<CommandTracker
-														deviceId={message.device_id}
-														commandId={message.reply_command_id}
-													/>
-												</div>
+									{#if answer || (message.reply_command_id && !outbound)}
+										<div class="msg-meta">
+											{#if answer}
+												<span class="answer" data-source={answerSource}>{answer}</span>
 											{/if}
+											{#if message.reply_command_id && !outbound}
+												<span class="spacer"></span>
+												<button
+													type="button"
+													class="link-btn track-btn"
+													onclick={() => toggleTracker(message.id)}
+													aria-expanded={trackers.has(message.id)}
+													aria-controls={trackers.has(message.id)
+														? `tracker-${message.id}`
+														: undefined}
+												>
+													<Icon name="activity" size={11} />
+													{trackers.has(message.id) ? 'Hide delivery' : 'Delivery'}
+												</button>
+											{/if}
+										</div>
+									{/if}
+									{#if trackers.has(message.id) && message.reply_command_id}
+										<div class="reply-tracker" id={`tracker-${message.id}`}>
+											<CommandTracker
+												deviceId={message.device_id}
+												commandId={message.reply_command_id}
+											/>
 										</div>
 									{/if}
 								</div>
@@ -615,43 +614,39 @@
 
 <style>
 	.compose-panel {
-		margin-bottom: var(--s-4);
-		border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
-		scroll-margin-top: 16px;
+		margin-bottom: var(--df-p-space-4);
+		border-color: color-mix(in srgb, var(--df-accent-text) 24%, var(--df-border-hairline));
+		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-4));
 	}
 
-	.compose-panel .panel-head {
-		border-bottom-color: color-mix(in srgb, var(--accent) 20%, var(--line));
+	.compose-meta {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.04em;
+		color: var(--df-text-meta);
+		white-space: nowrap;
 	}
 
-	@media (max-width: 900px) {
-		.compose-panel {
-			scroll-margin-top: 128px;
-		}
-	}
-
-	@media (max-width: 520px) {
-		.compose-panel .panel-meta {
-			display: none;
-		}
+	.log-card {
+		padding: 0;
 	}
 
 	.log-toolbar {
 		display: flex;
 		align-items: flex-end;
 		justify-content: space-between;
-		gap: var(--s-4);
+		gap: var(--df-p-space-4);
 		flex-wrap: wrap;
-		padding: var(--s-3) var(--s-4);
-		border-bottom: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
-		border-radius: var(--r) var(--r) 0 0;
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: var(--df-c-card-radius) var(--df-c-card-radius) 0 0;
 	}
 
 	.device-picker {
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		min-width: 0;
 	}
 
@@ -663,34 +658,32 @@
 		width: auto;
 		min-width: 240px;
 		max-width: 440px;
-		height: 30px;
-		min-height: 30px;
-		padding-top: 4px;
-		padding-bottom: 4px;
+		height: 32px;
+		min-height: 32px;
+		padding-block: var(--df-p-space-1);
 	}
 
 	.toolbar-meta {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
-		font-size: 10.5px;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: var(--ink-3);
+		gap: var(--df-p-space-3);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.04em;
+		color: var(--df-text-meta);
 		flex-wrap: wrap;
 	}
 
 	.toolbar-sep {
 		width: 1px;
 		height: 14px;
-		background: var(--line-strong);
+		background: var(--df-border-control);
 	}
 
 	.shown {
 		display: inline-flex;
 		align-items: center;
-		gap: 5px;
-		font-size: 10px;
+		gap: var(--df-p-space-1);
+		font-size: var(--df-p-text-2xs);
 	}
 
 	.dir-filter {
@@ -699,80 +692,26 @@
 
 	.dir-filter .seg-item span {
 		height: 24px;
-		padding: 0 8px;
-		font-size: 9.5px;
-		letter-spacing: 0.06em;
+		padding: 0 var(--df-p-space-2);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.05em;
 		text-transform: uppercase;
 	}
 
 	.updated {
-		font-size: 10px;
+		font-size: var(--df-p-text-2xs);
 		letter-spacing: 0;
-		text-transform: none;
-		color: var(--ink-3);
-	}
-
-	.new-chip {
-		flex: none;
-		padding: 1px 5px;
-		border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
-		border-radius: 3px;
-		background: var(--accent-soft);
-		color: var(--accent);
-		font-family: var(--font-mono);
-		font-size: 8.5px;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		line-height: 1.5;
-	}
-
-	.rule-chip {
-		min-width: 0;
-		max-width: 30ch;
-		padding: 2px 6px;
-		border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
-		border-radius: 3px;
-		background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-		color: var(--accent);
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		line-height: 1.4;
-		overflow-wrap: anywhere;
-	}
-
-	.reply-track {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 6px;
-		margin-top: 5px;
-	}
-
-	.track-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 10.5px;
-	}
-
-	.reply-tracker {
-		width: 100%;
-	}
-
-	.log-row.is-new {
-		background: color-mix(in srgb, var(--accent) 4%, transparent);
+		color: var(--df-text-meta);
 	}
 
 	.link-state {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		font-family: var(--font-mono);
-		font-size: 10px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--ink-2);
+		gap: var(--df-p-space-1);
+		color: var(--df-text-secondary);
 	}
+
+	/* ---------- the list ---------- */
 
 	.log {
 		list-style: none;
@@ -781,12 +720,13 @@
 	}
 
 	.log-row {
+		position: relative;
 		display: grid;
-		grid-template-columns: 40px minmax(0, 1fr);
-		gap: var(--s-3);
-		padding: 13px var(--s-4);
-		border-bottom: 1px solid var(--line);
-		transition: background-color 120ms ease;
+		grid-template-columns: 28px minmax(0, 1fr);
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		transition: background-color var(--df-p-dur-lift) ease;
 	}
 
 	.log-row:last-child {
@@ -794,44 +734,35 @@
 	}
 
 	.log-row:hover {
-		background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+		background: var(--df-c-table-row-bg-hover);
+	}
+
+	/* New since the last check: a coral edge and a word, never a badge. */
+	.log-row.is-new::before {
+		content: '';
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 3px;
+		background: var(--df-accent-fill);
 	}
 
 	.dir {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 4px;
-		padding-top: 1px;
-	}
-
-	.dir-icon {
 		display: grid;
 		place-items: center;
-		width: 26px;
-		height: 26px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-2);
+		align-self: start;
+		width: 24px;
+		height: 24px;
+		margin-top: 1px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-meta);
 	}
 
-	.outbound .dir-icon {
-		color: var(--accent);
-		border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
-		background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-	}
-
-	.dir-label {
-		font-family: var(--font-mono);
-		font-size: 9px;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	.outbound .dir-label {
-		color: var(--accent);
+	.log-row[data-dir='out'] .dir {
+		color: var(--df-accent-text);
+		border-color: transparent;
+		background: var(--df-accent-soft);
 	}
 
 	.msg-main {
@@ -840,29 +771,49 @@
 
 	.msg-head {
 		display: flex;
-		align-items: center;
-		gap: var(--s-2);
+		align-items: baseline;
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
+	.dir-word {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.log-row[data-dir='out'] .dir-word {
+		color: var(--df-accent-text);
+	}
+
 	.peer {
-		font-size: var(--text-base);
-		font-weight: 500;
-		color: var(--ink);
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.new-word {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-accent-text);
 	}
 
 	.msg-time {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 		white-space: nowrap;
 	}
 
 	.msg-body {
-		margin-top: 4px;
-		color: var(--ink-2);
-		font-size: var(--text-md);
-		line-height: 1.55;
+		margin-top: 2px;
+		font-size: var(--df-p-text-md);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
@@ -876,40 +827,72 @@
 	}
 
 	.more {
-		margin-top: 5px;
-		font-size: 11.5px;
+		margin-top: var(--df-p-space-1);
+		font-size: var(--df-p-text-xs);
+	}
+
+	.msg-meta {
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		margin-top: var(--df-p-space-1);
+	}
+
+	.answer {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	.answer[data-source='none'] {
+		color: var(--df-text-meta);
+	}
+
+	.track-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--df-p-space-1);
+		font-size: var(--df-p-text-xs);
+	}
+
+	.reply-tracker {
+		margin-top: var(--df-p-space-2);
 	}
 
 	.log-foot {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
-		padding: 10px var(--s-4);
-		border-top: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 40%, var(--surface));
-		border-radius: 0 0 var(--r) var(--r);
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-2) var(--df-p-space-4);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: 0 0 var(--df-c-card-radius) var(--df-c-card-radius);
 	}
 
 	.log-body {
 		min-height: 120px;
 	}
 
+	.log-message {
+		padding: var(--df-p-space-4);
+	}
+
 	.loading-rows {
 		display: grid;
-		gap: var(--s-2);
-		padding: var(--s-4);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-4);
 	}
 
 	.device-foot {
-		margin-top: var(--s-3);
-		font-size: 10.5px;
-		color: var(--ink-3);
+		margin-top: var(--df-p-space-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
 	.device-foot-name {
 		font-weight: 500;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
 	@media (max-width: 620px) {
@@ -926,7 +909,7 @@
 		.toolbar-meta {
 			width: 100%;
 			justify-content: flex-start;
-			gap: 8px 10px;
+			gap: var(--df-p-space-2);
 		}
 
 		.toolbar-sep {
@@ -938,13 +921,19 @@
 		}
 
 		.log-row {
-			grid-template-columns: 32px minmax(0, 1fr);
-			padding: 12px;
+			grid-template-columns: 24px minmax(0, 1fr);
+			gap: var(--df-p-space-2);
+			padding: var(--df-p-space-3);
 		}
 
-		.dir-icon {
-			width: 24px;
-			height: 24px;
+		.compose-meta {
+			display: none;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.log-row {
+			transition: none;
 		}
 	}
 </style>

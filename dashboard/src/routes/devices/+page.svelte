@@ -8,7 +8,6 @@
 		deviceOptionLabel,
 		devicePresence,
 		devicePrimary,
-		deviceSecondary,
 		wakeMode
 	} from '$lib/presence';
 	import { formatAbsolute, formatClock, formatDate, formatDuration } from '$lib/format';
@@ -92,6 +91,16 @@
 		devices.find((device) => device.device_id === detailId) ?? null
 	);
 
+	// One state per row, computed once so the summary and the chips cannot disagree.
+	const fleetStates = $derived(
+		devices.map((device) =>
+			devicePresence(device, statuses[device.device_id]?.ws_connected === true)
+		)
+	);
+	const answering = $derived(
+		fleetStates.filter((state) => state === 'live' || state === 'synced').length
+	);
+
 	const scopeError = $derived.by(() => {
 		if (purpose === 'rotate' && !scope) return 'Choose the device whose key will be rotated.';
 		if (scope && !DEVICE_ID_RE.test(scope)) {
@@ -118,8 +127,6 @@
 		if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
 		return `${minutes}:${String(seconds).padStart(2, '0')}`;
 	}
-
-	const selectedScope = $derived(devices.find((device) => device.device_id === scope) ?? null);
 
 	// The rotate picker borrows the shared scope error, and gains a hint only when
 	// there is nothing to pick. Build the reference list so neither goes dangling.
@@ -193,10 +200,8 @@
 		minted = null;
 		if (scroll) {
 			await tick();
-			const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-			document
-				.getElementById('mint-panel')
-				?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+			// An instant jump: the motion set has no scroll animation.
+			document.getElementById('mint-panel')?.scrollIntoView({ block: 'start', behavior: 'auto' });
 		}
 	}
 
@@ -437,14 +442,6 @@
 		</button>
 	</PageHeader>
 
-	<p class="presence-legend">
-		<span class="legend-live">live</span> connected now · <span class="legend-ok">synced</span>
-		last contact within 15 min · <span class="legend-warn">stale</span> within 24 h ·
-		<span class="legend-danger">offline</span> over 24 h · <span class="muted">unknown</span>
-		no contact recorded. Wake is <span class="mono">push</span> with an FCM token, otherwise
-		<span class="mono">poll-only</span>.
-	</p>
-
 	{#if refreshError && lastRefreshedAt}
 		<p class="refresh-note" role="status" title={refreshError}>
 			last refreshed <RelativeTime value={lastRefreshedAt} /> · refresh failed
@@ -459,9 +456,12 @@
 		{/if}
 
 		{#if mintOpen}
-			<section class="panel mint-panel" id="mint-panel" aria-labelledby="mint-heading">
-				<div class="panel-head">
-					<h2 id="mint-heading" class="panel-title"><Icon name="key" size={14} /> Mint pairing code</h2>
+			<section class="card mint-panel" id="mint-panel" aria-labelledby="mint-heading">
+				<div class="card-head">
+					<h2 id="mint-heading" class="card-title">
+						<Icon name="key" size={14} /> Mint pairing code
+					</h2>
+					<span class="spacer"></span>
 					<button
 						type="button"
 						class="btn btn-ghost btn-icon btn-sm"
@@ -471,302 +471,300 @@
 						<Icon name="x" size={14} />
 					</button>
 				</div>
-				<div class="panel-body">
-					<form
-						class="form-grid"
-						onsubmit={(event) => {
-							event.preventDefault();
-							void mint();
-						}}
-					>
-						<div class="field span-1">
-							<span class="label" id="purpose-label">Purpose</span>
-							<div class="seg" role="group" aria-labelledby="purpose-label">
-								<label class="seg-item">
-									<input type="radio" name="purpose" value="enroll" bind:group={purpose} />
-									<span>Enroll new</span>
-								</label>
-								<label class="seg-item">
-									<input type="radio" name="purpose" value="rotate" bind:group={purpose} />
-									<span>Rotate key</span>
-								</label>
-							</div>
-							{#if purpose === 'rotate'}
-								<p class="rotate-note">
-									Rotation replaces the key this phone authenticates with. The old key stops working
-									immediately, and the phone must pair again with the new code.
-								</p>
-							{/if}
+				<form
+					class="form-grid"
+					onsubmit={(event) => {
+						event.preventDefault();
+						void mint();
+					}}
+				>
+					<div class="field span-1">
+						<span class="label" id="purpose-label">Purpose</span>
+						<div class="seg" role="group" aria-labelledby="purpose-label">
+							<label class="seg-item">
+								<input type="radio" name="purpose" value="enroll" bind:group={purpose} />
+								<span>Enroll new</span>
+							</label>
+							<label class="seg-item">
+								<input type="radio" name="purpose" value="rotate" bind:group={purpose} />
+								<span>Rotate key</span>
+							</label>
 						</div>
-
-						<div class="field">
-							<label class="label" for="ttl">Valid for</label>
-							<select id="ttl" class="input" bind:value={ttl}>
-								{#each TTL_OPTIONS as option (option.value)}
-									<option value={option.value}>{option.label}</option>
-								{/each}
-							</select>
-						</div>
-
-						<div class="field">
-							{#if purpose === 'rotate'}
-								<label class="label" for="scope-select">Device to rotate</label>
-								<select
-									id="scope-select"
-									class="input input-mono"
-									bind:value={scope}
-									aria-invalid={scopeError ? 'true' : undefined}
-									aria-describedby={scopeSelectDescribedBy}
-								>
-									<option value="">Select a device…</option>
-									{#each devices as device (device.device_id)}
-										<option value={device.device_id}>{deviceOptionLabel(device)}</option>
-									{/each}
-								</select>
-								{#if devices.length === 0}
-									<p class="hint" id="scope-select-hint">No paired devices to rotate yet.</p>
-								{/if}
-							{:else}
-								<label class="label" for="scope-input">
-									Device id <span class="optional">optional</span>
-								</label>
-								<input
-									id="scope-input"
-									class="input input-mono"
-									bind:value={scope}
-									placeholder="Any device"
-									autocomplete="off"
-									spellcheck="false"
-									aria-invalid={scope && DEVICE_ID_RE.test(scope) === false ? 'true' : undefined}
-									aria-describedby={scopeError ? 'scope-hint scope-error' : 'scope-hint'}
-								/>
-								<p class="hint" id="scope-hint">
-									Scope the code to one id, or leave blank to enroll any device.
-								</p>
-							{/if}
-						</div>
-
-						{#if scopeError}
-							<p class="field-error span-3" id="scope-error" role="alert">{scopeError}</p>
-						{/if}
-
-						{#if purpose !== 'rotate'}
-							<p class="hint span-3">
-								An enrollment code registers a device that is not yet paired. It cannot take over an
-								existing device id.
+						{#if purpose === 'rotate'}
+							<p class="rotate-note">
+								Rotation replaces the key this phone authenticates with. The old key stops
+								working immediately, and the phone must pair again with the new code.
 							</p>
 						{/if}
+					</div>
 
-						<div class="form-foot">
-							<button
-								type="submit"
-								class="btn btn-primary"
-								disabled={minting || Boolean(scopeError)}
-								aria-busy={minting}
+					<div class="field">
+						<label class="label" for="ttl">Valid for</label>
+						<select id="ttl" class="input" bind:value={ttl}>
+							{#each TTL_OPTIONS as option (option.value)}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+					</div>
+
+					<div class="field">
+						{#if purpose === 'rotate'}
+							<label class="label" for="scope-select">Device to rotate</label>
+							<select
+								id="scope-select"
+								class="input input-mono"
+								bind:value={scope}
+								aria-invalid={scopeError ? 'true' : undefined}
+								aria-describedby={scopeSelectDescribedBy}
 							>
-								{#if minting}<Spinner />{:else}<Icon name="key" size={14} />{/if}
-								{ttl === 86_400_000 ? 'Mint 24-hour code' : `Mint ${formatDuration(ttl)} code`}
-							</button>
-							<span class="spacer"></span>
-							<button type="button" class="btn btn-ghost" onclick={closeMint}>Close</button>
-						</div>
-					</form>
-
-					{#if mintError}
-						<div class="mint-feedback" aria-live="assertive">
-							<Notice tone="danger" title="Could not mint a code">{mintError}</Notice>
-						</div>
-					{/if}
-
-					{#if minted}
-						<div class="mint-feedback">
-							{#if waitState === 'paired' && paired}
-								{@const matched = paired}
-								<div class="pair-state pair-state-ok" aria-live="polite">
-									<span class="pair-state-mark"><Icon name="check" size={16} /></span>
-									<div class="pair-state-body">
-										<p class="eyebrow">
-											{minted.purpose === 'rotate' ? 'Key rotated' : 'Pairing complete'}
-										</p>
-										<h3>
-											{minted.purpose === 'rotate' ? 'Key rotated for' : 'Paired as'}
-											{deviceLabel(matched) ?? matched.device_id}
-										</h3>
-										{#if deviceLabel(matched)}
-											<p class="mono pair-id">{matched.device_id}</p>
-										{/if}
-										<p class="hint">
-											The phone is in the fleet. This code was single-use and can no longer be
-											redeemed.
-										</p>
-										<div class="row">
-											<a
-												class="btn btn-primary btn-sm"
-												href={pairedHref}
-												onclick={(event) => {
-													if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-													event.preventDefault();
-													openDetail(matched.device_id);
-												}}
-											>
-												<Icon name="smartphone" size={12} /> Open device
-											</a>
-											<button type="button" class="btn btn-sm" onclick={closeMint}>Done</button>
-										</div>
-									</div>
-								</div>
-							{:else if waitState === 'expired'}
-								<div class="pair-state pair-state-expired" aria-live="polite">
-									<span class="pair-state-mark"><Icon name="clock" size={16} /></span>
-									<div class="pair-state-body">
-										<p class="eyebrow">Pairing code</p>
-										<h3>Code expired — mint a new one</h3>
-										<p class="hint">
-											This code can no longer register a phone. A fresh code replaces it; the old
-											one is not left looking valid.
-										</p>
-										<div class="row">
-											<button
-												type="button"
-												class="btn btn-primary btn-sm"
-												onclick={() => void mint()}
-												disabled={minting}
-												aria-busy={minting}
-											>
-												{#if minting}<Spinner />{:else}<Icon name="key" size={12} />{/if}
-												Mint a new code
-											</button>
-											<button type="button" class="btn btn-sm" onclick={closeMint}>Close</button>
-										</div>
-									</div>
-								</div>
-							{:else}
-								<div class="mint-result">
-									<div class="mint-result-head">
-										<span class="eyebrow">
-											{minted.purpose === 'rotate' ? 'Rotation code' : 'Enrollment code'}
-										</span>
-										<span class="mono mint-expiry">
-											expires <RelativeTime value={minted.expires_at} className="mono" /> ·{' '}
-											{formatClock(minted.expires_at)}
-										</span>
-									</div>
-									<div class="mint-result-body">
-										<div class="mint-credential">
-											<div class="code-line">
-												<code class="pair-code">{minted.pairing_code}</code>
-												<CopyButton value={minted.pairing_code} label="Copy code" />
-											</div>
-											<div class="field deep-link">
-												<label class="label" for="deep-link">Deep link</label>
-												<div class="input-row">
-													<input
-														id="deep-link"
-														class="input input-mono"
-														readonly
-														value={deepLink}
-														aria-describedby="deep-link-hint"
-													/>
-													<CopyButton value={deepLink} label="Copy link" />
-												</div>
-											</div>
-											<p class="hint" id="deep-link-hint">
-												{minted.device_id
-													? `Bound to ${minted.device_id}. Open the link on that device.`
-													: 'Unscoped: the first device to redeem it is registered.'}
-												Single-use; it disappears after one successful pairing.
-											</p>
-										</div>
-										<div class="mint-qr">
-											<QrCode
-												value={deepLink}
-												size={184}
-												label={`Pairing QR code for ${minted.pairing_code}`}
-												caption="Scan to pair"
-											/>
-										</div>
-									</div>
-								</div>
-
-								{#if waitState === 'waiting'}
-									<div class="pair-watch">
-										<Spinner />
-										<div class="pair-watch-copy">
-											<strong>Waiting for the phone…</strong>
-											<span class="hint">
-												Checked every 2 seconds while this tab is visible.
-												<span class="mono">{waitCountdown}</span> left.
-											</span>
-										</div>
-										<span class="spacer"></span>
-										<button
-											type="button"
-											class="btn btn-sm"
-											onclick={() => void checkNow()}
-											disabled={waitBusy}
-											aria-busy={waitBusy}
-										>
-											{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
-											Check now
-										</button>
-									</div>
-								{:else if waitState === 'timed-out'}
-									<div class="pair-watch pair-watch-stopped">
-										<Icon name="clock" size={15} />
-										<div class="pair-watch-copy">
-											<strong>Still waiting for the phone</strong>
-											<span class="hint">
-												Automatic checks stopped after 10 minutes. The code is valid for another
-												<span class="mono">{waitCountdown}</span> if it was not redeemed.
-											</span>
-										</div>
-										<span class="spacer"></span>
-										<button
-											type="button"
-											class="btn btn-sm"
-											onclick={() => void checkNow()}
-											disabled={waitBusy}
-											aria-busy={waitBusy}
-										>
-											{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
-											Check now
-										</button>
-									</div>
-								{/if}
+								<option value="">Select a device…</option>
+								{#each devices as device (device.device_id)}
+									<option value={device.device_id}>{deviceOptionLabel(device)}</option>
+								{/each}
+							</select>
+							{#if devices.length === 0}
+								<p class="hint" id="scope-select-hint">No paired devices to rotate yet.</p>
 							{/if}
-						</div>
+						{:else}
+							<label class="label" for="scope-input">
+								Device id <span class="optional">optional</span>
+							</label>
+							<input
+								id="scope-input"
+								class="input input-mono"
+								bind:value={scope}
+								placeholder="Any device"
+								autocomplete="off"
+								spellcheck="false"
+								aria-invalid={scope && DEVICE_ID_RE.test(scope) === false ? 'true' : undefined}
+								aria-describedby={scopeError ? 'scope-hint scope-error' : 'scope-hint'}
+							/>
+							<p class="hint" id="scope-hint">
+								Scope the code to one id, or leave blank to enroll any device.
+							</p>
+						{/if}
+					</div>
+
+					{#if scopeError}
+						<p class="field-error span-3" id="scope-error" role="alert">{scopeError}</p>
 					{/if}
-				</div>
+
+					{#if purpose !== 'rotate'}
+						<p class="hint span-3">
+							An enrollment code registers a device that is not yet paired. It cannot take over
+							an existing device id.
+						</p>
+					{/if}
+
+					<div class="form-foot">
+						<button
+							type="submit"
+							class="btn btn-primary"
+							disabled={minting || Boolean(scopeError)}
+							aria-busy={minting}
+						>
+							{#if minting}<Spinner />{:else}<Icon name="key" size={14} />{/if}
+							{ttl === 86_400_000 ? 'Mint 24-hour code' : `Mint ${formatDuration(ttl)} code`}
+						</button>
+						<span class="spacer"></span>
+						<button type="button" class="btn btn-ghost" onclick={closeMint}>Close</button>
+					</div>
+				</form>
+
+				{#if mintError}
+					<div class="mint-feedback" aria-live="assertive">
+						<Notice tone="danger" title="Could not mint a code">{mintError}</Notice>
+					</div>
+				{/if}
+
+				{#if minted}
+					<div class="mint-feedback">
+						{#if waitState === 'paired' && paired}
+							{@const matched = paired}
+							<div class="pair-state pair-state-ok" aria-live="polite">
+								<span class="pair-state-mark"><Icon name="check" size={16} /></span>
+								<div class="pair-state-body">
+									<p class="eyebrow">
+										{minted.purpose === 'rotate' ? 'Key rotated' : 'Pairing complete'}
+									</p>
+									<h3>
+										{minted.purpose === 'rotate' ? 'Key rotated for' : 'Paired as'}
+										{deviceLabel(matched) ?? matched.device_id}
+									</h3>
+									{#if deviceLabel(matched)}
+										<p class="mono pair-id">{matched.device_id}</p>
+									{/if}
+									<p class="hint">
+										The phone is in the fleet. This code was single-use and can no longer be
+										redeemed.
+									</p>
+									<div class="row">
+										<a
+											class="btn btn-primary btn-sm"
+											href={pairedHref}
+											onclick={(event) => {
+												if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+												event.preventDefault();
+												openDetail(matched.device_id);
+											}}
+										>
+											<Icon name="smartphone" size={12} /> Open device
+										</a>
+										<button type="button" class="btn btn-sm" onclick={closeMint}>Done</button>
+									</div>
+								</div>
+							</div>
+						{:else if waitState === 'expired'}
+							<div class="pair-state pair-state-expired" aria-live="polite">
+								<span class="pair-state-mark"><Icon name="clock" size={16} /></span>
+								<div class="pair-state-body">
+									<p class="eyebrow">Pairing code</p>
+									<h3>Code expired — mint a new one</h3>
+									<p class="hint">
+										This code can no longer register a phone. A fresh code replaces it; the old
+										one is not left looking valid.
+									</p>
+									<div class="row">
+										<button
+											type="button"
+											class="btn btn-primary btn-sm"
+											onclick={() => void mint()}
+											disabled={minting}
+											aria-busy={minting}
+										>
+											{#if minting}<Spinner />{:else}<Icon name="key" size={12} />{/if}
+											Mint a new code
+										</button>
+										<button type="button" class="btn btn-sm" onclick={closeMint}>Close</button>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<div class="mint-result">
+								<div class="mint-result-head">
+									<span class="eyebrow">
+										{minted.purpose === 'rotate' ? 'Rotation code' : 'Enrollment code'}
+									</span>
+									<span class="mono mint-expiry">
+										expires <RelativeTime value={minted.expires_at} className="mono" /> ·{' '}
+										{formatClock(minted.expires_at)}
+									</span>
+								</div>
+								<div class="mint-result-body">
+									<div class="mint-credential">
+										<div class="code-line">
+											<code class="pair-code">{minted.pairing_code}</code>
+											<CopyButton value={minted.pairing_code} label="Copy code" />
+										</div>
+										<div class="field deep-link">
+											<label class="label" for="deep-link">Deep link</label>
+											<div class="input-row">
+												<input
+													id="deep-link"
+													class="input input-mono"
+													readonly
+													value={deepLink}
+													aria-describedby="deep-link-hint"
+												/>
+												<CopyButton value={deepLink} label="Copy link" />
+											</div>
+										</div>
+										<p class="hint" id="deep-link-hint">
+											{minted.device_id
+												? `Bound to ${minted.device_id}. Open the link on that device.`
+												: 'Unscoped: the first device to redeem it is registered.'}
+											Single-use; it disappears after one successful pairing.
+										</p>
+									</div>
+									<div class="mint-qr">
+										<QrCode
+											value={deepLink}
+											size={184}
+											label={`Pairing QR code for ${minted.pairing_code}`}
+											caption="Scan to pair"
+										/>
+									</div>
+								</div>
+							</div>
+
+							{#if waitState === 'waiting'}
+								<div class="pair-watch">
+									<Spinner />
+									<div class="pair-watch-copy">
+										<strong>Waiting for the phone…</strong>
+										<span class="hint">
+											Checked every 2 seconds while this tab is visible.
+											<span class="mono">{waitCountdown}</span> left.
+										</span>
+									</div>
+									<span class="spacer"></span>
+									<button
+										type="button"
+										class="btn btn-sm"
+										onclick={() => void checkNow()}
+										disabled={waitBusy}
+										aria-busy={waitBusy}
+									>
+										{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+										Check now
+									</button>
+								</div>
+							{:else if waitState === 'timed-out'}
+								<div class="pair-watch pair-watch-stopped">
+									<Icon name="clock" size={15} />
+									<div class="pair-watch-copy">
+										<strong>Still waiting for the phone</strong>
+										<span class="hint">
+											Automatic checks stopped after 10 minutes. The code is valid for another
+											<span class="mono">{waitCountdown}</span> if it was not redeemed.
+										</span>
+									</div>
+									<span class="spacer"></span>
+									<button
+										type="button"
+										class="btn btn-sm"
+										onclick={() => void checkNow()}
+										disabled={waitBusy}
+										aria-busy={waitBusy}
+									>
+										{#if waitBusy}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+										Check now
+									</button>
+								</div>
+							{/if}
+						{/if}
+					</div>
+				{/if}
 			</section>
 		{/if}
 
 		{#if error}
-			<section class="panel">
-				<div class="panel-body stack">
-					<Notice tone="danger" title="Could not load devices">{error}</Notice>
-					<div class="row">
-						<button type="button" class="btn btn-primary" onclick={() => void load()}>
-							<Icon name="refresh" size={14} /> Try again
-						</button>
-					</div>
+			<section class="card">
+				<Notice tone="danger" title="Could not load devices">{error}</Notice>
+				<div class="row" style="margin-top: 16px">
+					<button type="button" class="btn btn-primary" onclick={() => void load()}>
+						<Icon name="refresh" size={14} /> Try again
+					</button>
 				</div>
 			</section>
 		{:else if loading}
-			<section class="panel" aria-busy="true" aria-live="polite">
+			<section class="card fleet-card" aria-busy="true" aria-live="polite">
 				<span class="sr-only">Loading devices</span>
-				<div class="panel-head"><h2 class="panel-title">Fleet</h2></div>
-				<div class="loading-rows">
+				<div class="fleet-card-head">
+					<h2 class="card-title">Fleet</h2>
+				</div>
+				<div class="fleet-skeletons">
 					{#each ['a', 'b', 'c'] as key (key)}
 						<div class="skeleton" style="height: 46px"></div>
 					{/each}
 				</div>
 			</section>
 		{:else if devices.length === 0}
-			<section class="panel">
+			<section class="card">
 				<EmptyState
 					icon="smartphone"
 					title="No devices paired yet"
-					description="Mint a single-use pairing code and open it on the phone. The first device that redeems it joins the fleet."
+					description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
 				>
 					<button type="button" class="btn btn-primary" onclick={() => void openMint('enroll')}>
 						<Icon name="key" size={14} /> Mint a pairing code
@@ -774,177 +772,113 @@
 				</EmptyState>
 			</section>
 		{:else}
-			<section class="panel">
-				<div class="panel-head">
-					<h2 class="panel-title"><Icon name="smartphone" size={14} /> Fleet</h2>
-					<span class="panel-meta">
-						{devices.length} device{devices.length === 1 ? '' : 's'}
-						{#if statusesLoading}<span class="status-loading"> · checking links</span>{/if}
+			<section class="card fleet-card" aria-labelledby="fleet-heading">
+				<div class="fleet-card-head">
+					<h2 id="fleet-heading" class="card-title">Fleet</h2>
+					<span class="fleet-count mono">
+						{devices.length} paired · {answering} answering
 					</span>
-				</div>
-				<div class="table-scroll desktop-only">
-					<table class="table fleet-table">
-						<caption class="sr-only">Paired devices, their reachability and wake capability</caption>
-						<thead>
-							<tr>
-								<th scope="col">Device</th>
-								<th scope="col">State</th>
-								<th scope="col">Last seen</th>
-								<th scope="col">Paired</th>
-								<th scope="col">Wake</th>
-								<th scope="col"><span class="sr-only">Actions</span></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each devices as device (device.device_id)}
-								{@const status = statuses[device.device_id]}
-								{@const presence = devicePresence(device, status?.ws_connected === true)}
-								<tr>
-									<td>
-										<div class="device-cell">
-											<button
-												type="button"
-												class="device-open"
-												onclick={() => openDetail(device.device_id)}
-												aria-label={`Open details for ${devicePrimary(device)}`}
-												title="Open device details"
-											>
-												<span class="device-label">
-													{#if deviceLabel(device)}
-														<span class="device-name">{deviceLabel(device)}</span>
-													{/if}
-													<span class="mono device-id">{device.device_id}</span>
-												</span>
-											</button>
-											<CopyButton value={device.device_id} label="Copy device id" iconOnly />
-										</div>
-									</td>
-									<td>
-										<PresenceChip {presence} queue={status?.queue_depth ?? null} />
-										{#if status === null && !statusesLoading}
-											<span class="cell-sub">socket state unavailable</span>
-										{/if}
-									</td>
-									<td>
-										<span class="cell-main">
-											<RelativeTime value={device.last_seen} fallback="never" />
-										</span>
-										<span class="cell-sub">{formatAbsolute(device.last_seen)}</span>
-									</td>
-									<td>
-										<span class="cell-main">{formatDate(device.paired_at)}</span>
-										<span class="cell-sub">{formatClock(device.paired_at)}</span>
-									</td>
-									<td>
-										<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
-									</td>
-									<td>
-										<div class="cell-actions">
-											<button
-												type="button"
-												class="btn btn-ghost btn-sm"
-												onclick={() => void startRotate(device)}
-												aria-label={`Rotate key for ${devicePrimary(device)}`}
-											>
-												<Icon name="key" size={12} /> Rotate
-											</button>
-											<button
-												type="button"
-												class="btn btn-danger btn-sm"
-												onclick={() => {
-													revokeError = null;
-													revokeTarget = device;
-												}}
-												aria-label={`Revoke ${devicePrimary(device)}`}
-											>
-												<Icon name="trash" size={12} /> Revoke
-											</button>
-										</div>
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
+					{#if statusesLoading}
+						<span class="fleet-checking"><Spinner /> checking links</span>
+					{/if}
 				</div>
 
-				<ul class="device-cards">
-					{#each devices as device (device.device_id)}
-						{@const status = statuses[device.device_id]}
-						{@const presence = devicePresence(device, status?.ws_connected === true)}
-						<li class="device-card">
-							<div class="card-head">
-								<button
-									type="button"
-									class="device-open"
-									onclick={() => openDetail(device.device_id)}
-									aria-label={`Open details for ${devicePrimary(device)}`}
-									title="Open device details"
-								>
-									<span class="device-label">
-										{#if deviceLabel(device)}
-											<span class="device-name">{deviceLabel(device)}</span>
-										{/if}
-										<span class="mono device-id">{device.device_id}</span>
-									</span>
-								</button>
-								<CopyButton value={device.device_id} label="Copy device id" iconOnly />
-							</div>
-							<div class="card-status">
-								<PresenceChip {presence} queue={status?.queue_depth ?? null} />
-								{#if status === null && !statusesLoading}
-									<span class="mono muted">socket state unavailable</span>
-								{/if}
-								<span class="spacer"></span>
-								<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
-							</div>
-							<dl class="card-kv">
-								<div>
-									<dt>Last seen</dt>
-									<dd>
+				<!-- One list, two layouts: a dense table-like grid above 860px, a stacked
+				     row below it. The fleet is never rendered twice. -->
+				<div class="fleet">
+					<div class="fleet-head" aria-hidden="true">
+						<span>Device</span>
+						<span>State</span>
+						<span>Last seen</span>
+						<span>Paired</span>
+						<span>Wake</span>
+						<span></span>
+					</div>
+					<ul class="fleet-rows">
+						{#each devices as device, index (device.device_id)}
+							{@const status = statuses[device.device_id]}
+							{@const presence = fleetStates[index]}
+							<li class="fleet-row">
+								<div class="cell-device">
+									<span class="sr-only">Device</span>
+									<button
+										type="button"
+										class="device-open"
+										onclick={() => openDetail(device.device_id)}
+										aria-label={`Open details for ${devicePrimary(device)}`}
+										title="Open device details"
+									>
+										<span class="device-label">
+											{#if deviceLabel(device)}
+												<span class="device-name">{deviceLabel(device)}</span>
+											{/if}
+											<span class="mono device-id">
+												{device.device_id}<span class="device-go" aria-hidden="true">›</span>
+											</span>
+										</span>
+									</button>
+									<CopyButton value={device.device_id} label="Copy device id" iconOnly />
+								</div>
+
+								<div class="cell-state">
+									<span class="sr-only">State </span>
+									<PresenceChip {presence} queue={status?.queue_depth ?? null} />
+									{#if status === null && !statusesLoading}
+										<span class="cell-note">socket state unavailable</span>
+									{/if}
+								</div>
+
+								<div class="cell-seen">
+									<span class="cell-key">last seen</span>
+									<span class="cell-main mono">
 										<RelativeTime value={device.last_seen} fallback="never" />
-										<span class="muted"> · {formatAbsolute(device.last_seen)}</span>
-									</dd>
+									</span>
+									<span class="cell-sub">{formatAbsolute(device.last_seen)}</span>
 								</div>
-								<div>
-									<dt>Paired</dt>
-									<dd>{formatDate(device.paired_at)} · {formatClock(device.paired_at)}</dd>
+
+								<div class="cell-paired">
+									<span class="cell-key">paired</span>
+									<span class="cell-main">{formatDate(device.paired_at)}</span>
+									<span class="cell-sub">{formatClock(device.paired_at)}</span>
 								</div>
-							</dl>
-							<div class="card-actions">
-								<button
-									type="button"
-									class="btn btn-sm"
-									onclick={() => openDetail(device.device_id)}
-									aria-label={`Open details for ${devicePrimary(device)}`}
-								>
-									<Icon name="info" size={12} /> Details
-								</button>
-								<button
-									type="button"
-									class="btn btn-sm"
-									onclick={() => void startRotate(device)}
-									aria-label={`Rotate key for ${devicePrimary(device)}`}
-								>
-									<Icon name="key" size={12} /> Rotate key
-								</button>
-								<button
-									type="button"
-									class="btn btn-danger btn-sm"
-									onclick={() => {
-										revokeError = null;
-										revokeTarget = device;
-									}}
-									aria-label={`Revoke ${devicePrimary(device)}`}
-								>
-									<Icon name="trash" size={12} /> Revoke
-								</button>
-							</div>
-						</li>
-					{/each}
-				</ul>
-				<p class="panel-note">
-					Select a device to open its detail panel. Revocation destroys the device's stored public
-					key in its Durable Object and removes it from D1; a revoked device must be enrolled again.
+
+								<div class="cell-wake">
+									<span class="sr-only">Wake </span>
+									<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
+								</div>
+
+								<div class="cell-actions">
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => void startRotate(device)}
+										aria-label={`Rotate key for ${devicePrimary(device)}`}
+									>
+										<Icon name="key" size={12} /> Rotate
+									</button>
+									<button
+										type="button"
+										class="btn btn-danger btn-sm"
+										onclick={() => {
+											revokeError = null;
+											revokeTarget = device;
+										}}
+										aria-label={`Revoke ${devicePrimary(device)}`}
+									>
+										<Icon name="trash" size={12} /> Revoke
+									</button>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				</div>
+
+				<p class="fleet-note">
+					<strong>live</strong> — connected now · <strong>synced</strong> — in contact within 15
+					minutes · <strong>stale</strong> — within 24 hours · <strong>offline</strong> — over 24
+					hours · <strong>unknown</strong> — no contact recorded. Wake is
+					<span class="mono">push</span> when the phone holds a push token, otherwise
+					<span class="mono">poll-only</span>.
 				</p>
 			</section>
 		{/if}
@@ -970,11 +904,11 @@
 		<p>
 			<strong>{devicePrimary(revokeTarget)}</strong>
 			{#if deviceLabel(revokeTarget)}(<span class="mono">{revokeTarget.device_id}</span>){/if}
-			will stop authenticating immediately. Its public key is destroyed in both stores and any
-			queued command is abandoned.
+			stops authenticating now. Its key is destroyed on the gateway and any queued message is
+			dropped.
 		</p>
 		<p class="hint" style="margin-top: 10px">
-			To restore it, enroll the phone again with a new pairing code.
+			Pair it again with a new code to bring it back.
 		</p>
 	{/if}
 </ConfirmDialog>
@@ -989,80 +923,53 @@
 />
 
 <style>
-	.presence-legend {
-		margin: -4px 0 var(--s-4);
-		font-size: 11.5px;
-		line-height: 1.6;
-		color: var(--ink-3);
-	}
-
 	.refresh-note {
-		margin: -8px 0 var(--s-4);
-		font-family: var(--font-mono);
-		font-size: 10.5px;
+		margin: calc(-1 * var(--df-p-space-2)) 0 var(--df-p-space-4);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xs);
 		line-height: 1.45;
-		color: var(--ink-3);
-	}
-
-	.legend-live,
-	.legend-ok {
-		font-family: var(--font-mono);
-		color: var(--ok);
-	}
-
-	.legend-warn {
-		font-family: var(--font-mono);
-		color: var(--warn);
-	}
-
-	.legend-danger {
-		font-family: var(--font-mono);
-		color: var(--danger);
+		color: var(--df-text-meta);
 	}
 
 	.mint-panel {
-		border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-		scroll-margin-top: 16px;
+		border-color: color-mix(in srgb, var(--df-accent-text) 26%, var(--df-border-hairline));
+		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-4));
+	}
+
+	.mint-panel .card-head {
+		margin-bottom: var(--df-p-space-4);
 	}
 
 	.rotate-note {
-		margin-top: 7px;
-		padding: 7px 8px;
-		border: 1px solid color-mix(in srgb, var(--warn) 28%, var(--line));
-		border-left-width: 2px;
-		border-left-color: var(--warn);
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
-		color: var(--ink-2);
-		font-size: 11px;
+		margin-top: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-left: 2px solid var(--df-state-warn-ink);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-state-warn-bg);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
 		line-height: 1.45;
 	}
 
-	@media (max-width: 900px) {
-		.mint-panel {
-			scroll-margin-top: 128px;
-		}
-	}
-
 	.mint-feedback {
-		margin-top: var(--s-4);
+		margin-top: var(--df-p-space-4);
 	}
 
 	.pair-watch {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
-		margin-top: var(--s-3);
-		padding: 10px var(--s-3);
-		border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+		margin-top: var(--df-p-space-3);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 24%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-accent-soft);
 	}
 
 	.pair-watch-stopped {
-		border-color: color-mix(in srgb, var(--warn) 28%, var(--line));
-		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
+		border-color: var(--df-state-warn-ink);
+		background: var(--df-state-warn-bg);
 	}
 
 	.pair-watch-copy {
@@ -1073,28 +980,27 @@
 	}
 
 	.pair-watch-copy strong {
-		font-size: var(--text-base);
+		font-size: var(--df-p-text-base);
 		font-weight: 600;
 	}
 
 	.pair-state {
 		display: flex;
 		align-items: flex-start;
-		gap: var(--s-3);
-		padding: var(--s-4);
-		border: 1px solid var(--line);
-		border-left-width: 2px;
-		border-radius: var(--r-sm);
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-4);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
 	}
 
 	.pair-state-ok {
-		border-left-color: var(--ok);
-		background: color-mix(in srgb, var(--ok) 6%, var(--surface));
+		border-color: transparent;
+		background: var(--df-state-ok-bg);
 	}
 
 	.pair-state-expired {
-		border-left-color: var(--warn);
-		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
+		border-color: transparent;
+		background: var(--df-state-warn-bg);
 	}
 
 	.pair-state-mark {
@@ -1103,76 +1009,70 @@
 		width: 30px;
 		height: 30px;
 		flex: none;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface);
-		color: var(--ok);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-state-ok-ink);
 	}
 
 	.pair-state-expired .pair-state-mark {
-		color: var(--warn);
+		color: var(--df-state-warn-ink);
 	}
 
 	.pair-state-body {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		min-width: 0;
 	}
 
 	.pair-state-body h3 {
-		font-size: var(--text-md);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
 		overflow-wrap: anywhere;
 	}
 
 	.pair-id {
-		font-size: 10.5px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
 	.mint-result {
-		margin-top: var(--s-4);
-		padding: var(--s-4);
-		border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+		margin-top: var(--df-p-space-4);
+		padding: var(--df-p-space-4);
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 30%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
 	}
 
 	.mint-result-head {
 		display: flex;
 		justify-content: space-between;
 		align-items: baseline;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
 	}
 
 	.mint-expiry {
-		font-size: 10.5px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.mint-result-body {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
-		gap: var(--s-5);
+		gap: var(--df-p-space-5);
 		align-items: start;
-		margin-top: var(--s-3);
+		margin-top: var(--df-p-space-3);
 	}
 
 	.mint-credential {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		min-width: 0;
-	}
-
-	.mint-credential .code-line {
-		margin-top: 0;
-	}
-
-	.mint-credential .deep-link {
-		margin-bottom: 0;
 	}
 
 	.mint-qr {
@@ -1180,35 +1080,22 @@
 		justify-content: center;
 	}
 
-	@media (max-width: 760px) {
-		.mint-result-body {
-			grid-template-columns: minmax(0, 1fr);
-			gap: var(--s-4);
-		}
-
-		.mint-qr {
-			justify-content: flex-start;
-			padding-top: 2px;
-		}
-	}
-
 	.code-line {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
-		margin: var(--s-3) 0;
 	}
 
 	.pair-code {
 		flex: 1;
 		min-width: 0;
-		padding: 8px 12px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface);
-		font-family: var(--font-mono);
-		font-size: 1.5rem;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xl);
 		font-weight: 500;
 		letter-spacing: 0.16em;
 		line-height: 1.3;
@@ -1217,50 +1104,122 @@
 	}
 
 	.deep-link {
-		margin-bottom: var(--s-3);
+		margin-bottom: var(--df-p-space-3);
 	}
 
-	.device-cell {
+	/* ---------- fleet ---------- */
+
+	.fleet-card {
+		padding: 0;
+	}
+
+	.fleet-card-head {
 		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-4) var(--df-p-space-5);
+	}
+
+	.fleet-count {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.fleet-checking {
+		display: inline-flex;
 		align-items: center;
-		gap: 4px;
+		gap: var(--df-p-space-1);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.fleet {
+		--fleet-cols:
+			minmax(0, 2.2fr) minmax(118px, 0.9fr) minmax(116px, 1fr) minmax(104px, 0.8fr)
+			84px minmax(150px, auto);
+	}
+
+	.fleet-head,
+	.fleet-row {
+		display: grid;
+		grid-template-columns: var(--fleet-cols);
+		gap: var(--df-p-space-3);
+		align-items: center;
+	}
+
+	/* Sticky below the shell header: two sticky siblings at top: 0 would overlap. */
+	.fleet-head {
+		position: sticky;
+		top: var(--df-c-shell-header);
+		z-index: 2;
+		padding: var(--df-p-space-2) var(--df-p-space-5);
+		background: var(--df-surface-well);
+		border-top: 1px solid var(--df-border-hairline);
+		border-bottom: 1px solid var(--df-border-hairline);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		font-weight: 500;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.fleet-rows {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.fleet-row {
+		padding: var(--df-p-space-3) var(--df-p-space-5);
+		border-bottom: 1px solid var(--df-border-hairline);
+		transition: background-color var(--df-p-dur-lift) ease;
+	}
+
+	.fleet-rows .fleet-row:last-child {
+		border-bottom: 0;
+	}
+
+	.fleet-row:hover {
+		background: var(--df-c-table-row-bg-hover);
+	}
+
+	.cell-device {
+		display: flex;
+		align-items: flex-end;
+		gap: var(--df-p-space-1);
+		min-width: 0;
 	}
 
 	.device-open {
 		display: inline-flex;
-		flex: 1;
+		flex: 0 1 auto;
 		align-items: center;
-		gap: 5px;
+		gap: var(--df-p-space-1);
 		min-width: 0;
+		max-width: 100%;
 		padding: 0;
 		border: 0;
+		border-radius: var(--df-p-radius-xs);
 		background: none;
-		color: var(--ink);
+		color: var(--df-text-primary);
 		text-align: left;
-		border-radius: 2px;
 	}
 
-	.device-open::after {
-		content: '›';
-		font-family: var(--font-mono);
-		font-size: 13px;
-		line-height: 1;
-		color: var(--ink-3);
-		opacity: 0.55;
-		transition:
-			color 140ms ease,
-			transform 140ms ease,
-			opacity 140ms ease;
+	.device-go {
+		margin-left: 3px;
+		font-family: var(--df-p-font-mono);
+		color: var(--df-text-meta);
+		transition: transform var(--df-p-dur-lift) ease;
 	}
 
-	.device-open:hover::after {
-		color: var(--accent);
-		opacity: 1;
+	.device-open:hover .device-go {
 		transform: translateX(1px);
 	}
 
 	.device-open:hover .device-id {
-		color: var(--accent);
+		color: var(--df-accent-text);
 		text-decoration: underline;
 		text-underline-offset: 3px;
 	}
@@ -1273,132 +1232,226 @@
 	}
 
 	.device-name {
-		font-size: var(--text-base);
-		font-weight: 500;
-		line-height: 1.35;
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		line-height: 1.3;
 		overflow-wrap: anywhere;
 	}
 
 	.device-id {
-		font-size: var(--text-sm);
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
-	.status-loading {
-		color: var(--ink-3);
+	.cell-state {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
 	}
 
-	.loading-rows {
-		display: grid;
-		gap: var(--s-2);
-		padding: var(--s-4);
+	.cell-note {
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-state-warn-ink);
 	}
 
-	.fleet-table {
-		min-width: 860px;
-		table-layout: fixed;
+	.cell-seen,
+	.cell-paired {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
 	}
 
-	.fleet-table th:nth-child(1) {
-		width: 27%;
+	.cell-main {
+		font-size: var(--df-p-text-base);
+		font-weight: 500;
+		color: var(--df-text-primary);
+		white-space: nowrap;
 	}
 
-	.fleet-table th:nth-child(2) {
-		width: 10%;
+	.cell-sub {
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+		white-space: nowrap;
 	}
 
-	.fleet-table th:nth-child(3) {
-		width: 20%;
-	}
-
-	.fleet-table th:nth-child(4) {
-		width: 16%;
-	}
-
-	.fleet-table th:nth-child(5) {
-		width: 9%;
-	}
-
-	.fleet-table th:nth-child(6) {
-		width: 18%;
-	}
-
-	.device-cards {
-		display: none;
-		list-style: none;
-		margin: 0;
+	/* The column head is the label on a wide screen, but it is aria-hidden so a
+	   row still reads on its own. The same key is clipped here and shown below
+	   860px, where the head is gone. */
+	.cell-key {
+		position: absolute;
+		width: 1px;
+		height: 1px;
 		padding: 0;
-	}
-
-	.device-card {
-		padding: var(--s-4);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.device-card:last-child {
-		border-bottom: 0;
-	}
-
-	.card-head {
-		display: flex;
-		align-items: flex-start;
-		gap: 4px;
-	}
-
-	.card-status {
-		display: flex;
-		align-items: center;
-		gap: var(--s-3);
-		flex-wrap: wrap;
-		margin-top: var(--s-2);
-	}
-
-	.card-kv {
-		display: grid;
-		gap: 3px;
-		margin: var(--s-3) 0 0;
-		font-size: 11.5px;
-	}
-
-	.card-kv > div {
-		display: grid;
-		grid-template-columns: 66px minmax(0, 1fr);
-		gap: var(--s-2);
-	}
-
-	.card-kv dt {
-		font-family: var(--font-mono);
-		font-size: 9.5px;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--ink-3);
-		padding-top: 2px;
+		color: var(--df-text-meta);
 	}
 
-	.card-kv dd {
-		margin: 0;
-		color: var(--ink-2);
-	}
-
-	.card-actions {
+	.cell-wake {
 		display: flex;
-		gap: var(--s-2);
-		margin-top: var(--s-3);
+		align-items: center;
+		min-width: 0;
+	}
+
+	.cell-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-1);
+		justify-content: flex-end;
 		flex-wrap: wrap;
 	}
 
-	@media (max-width: 820px) {
-		.desktop-only {
+	.fleet-note {
+		padding: var(--df-p-space-3) var(--df-p-space-5);
+		border-top: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: 0 0 var(--df-c-card-radius) var(--df-c-card-radius);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.6;
+		color: var(--df-text-meta);
+	}
+
+	.fleet-note strong {
+		font-weight: 600;
+		color: var(--df-text-secondary);
+	}
+
+	.fleet-skeletons {
+		display: grid;
+		gap: var(--df-p-space-2);
+		padding: 0 var(--df-p-space-5) var(--df-p-space-5);
+	}
+
+	@media (max-width: 1100px) {
+		.fleet-card-head,
+		.fleet-head,
+		.fleet-row,
+		.fleet-note,
+		.fleet-skeletons {
+			padding-inline: var(--df-p-space-4);
+		}
+	}
+
+	@media (max-width: 860px) {
+		.fleet-head {
 			display: none;
 		}
 
-		.device-cards {
-			display: block;
+		.fleet-row {
+			grid-template-columns: minmax(0, 1fr) auto;
+			grid-template-areas:
+				'device device'
+				'state wake'
+				'seen seen'
+				'paired paired'
+				'actions actions';
+			row-gap: var(--df-p-space-2);
+			padding-block: var(--df-p-space-3);
+		}
+
+		.cell-device {
+			grid-area: device;
+		}
+
+		/* The row opens the detail; the name is the target, so it meets the
+		   44px touch floor rather than being a 15px line. */
+		.device-open {
+			min-height: 44px;
+			align-items: center;
+		}
+
+		.cell-state {
+			grid-area: state;
+			align-items: flex-start;
+		}
+
+		.cell-seen {
+			grid-area: seen;
+		}
+
+		.cell-paired {
+			grid-area: paired;
+		}
+
+		.cell-wake {
+			grid-area: wake;
+			justify-content: flex-end;
+			align-self: start;
+		}
+
+		.cell-actions {
+			grid-area: actions;
+			justify-content: flex-start;
+			padding-top: var(--df-p-space-1);
+		}
+
+		.cell-key {
+			position: static;
+			width: auto;
+			height: auto;
+			padding: 0;
+			margin: 0;
+			overflow: visible;
+			clip: auto;
+			min-width: 68px;
+		}
+
+		/* The head is gone, so the two dated cells become labelled lines rather
+		   than three-line stacks. */
+		.cell-seen,
+		.cell-paired {
+			flex-direction: row;
+			align-items: baseline;
+			gap: var(--df-p-space-1);
+			flex-wrap: wrap;
+		}
+
+		.cell-seen .cell-main,
+		.cell-paired .cell-main {
+			font-size: var(--df-p-text-sm);
+		}
+	}
+
+	@media (max-width: 720px) {
+		.fleet-card-head {
+			padding-block: var(--df-p-space-3);
+		}
+	}
+
+	@media (max-width: 760px) {
+		.mint-result-body {
+			grid-template-columns: minmax(0, 1fr);
+			gap: var(--df-p-space-4);
+		}
+
+		.mint-qr {
+			justify-content: flex-start;
+			padding-top: 2px;
 		}
 	}
 
 	.span-1 {
 		min-width: 0;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.fleet-row,
+		.device-go {
+			transition: none;
+		}
+
+		.device-open:hover .device-go {
+			transform: none;
+		}
 	}
 </style>

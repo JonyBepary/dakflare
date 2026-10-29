@@ -37,8 +37,8 @@
 	const active = $derived(ui.activeEdgeIds.has(id));
 
 	const style = $derived.by(() => {
-		if (active) return 'stroke: var(--ok); stroke-width: 2;';
-		if (selected || incident) return 'stroke: var(--accent); stroke-width: 2;';
+		if (active) return 'stroke: var(--df-state-ok-ink); stroke-width: 2;';
+		if (selected || incident) return 'stroke: var(--df-accent-text); stroke-width: 2;';
 		return 'stroke-width: 1.5;';
 	});
 </script>

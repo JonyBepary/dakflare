@@ -10,8 +10,20 @@
 		sendSms
 	} from '$lib/api';
 	import type { Device, DeviceCommand, DeviceStatus, Message } from '$lib/types';
-	import { commandStateNote, commandStateTone, isTerminalCommand } from '$lib/commands';
-	import { deviceLabel, devicePresence, devicePrimary, wakeMode } from '$lib/presence';
+	import {
+		commandStateLabel,
+		commandStateNote,
+		commandStateTone,
+		isTerminalCommand
+	} from '$lib/commands';
+	import { answerOf, answerPhrase } from '$lib/answers';
+	import {
+		PRESENCE_META,
+		deviceLabel,
+		devicePresence,
+		devicePrimary,
+		wakeMode
+	} from '$lib/presence';
 	import { formatAbsolute, formatClock, formatDate } from '$lib/format';
 	import Badge from './Badge.svelte';
 	import CommandTracker from './CommandTracker.svelte';
@@ -20,7 +32,6 @@
 	import EmptyState from './EmptyState.svelte';
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
-	import PresenceChip from './PresenceChip.svelte';
 	import RelativeTime from './RelativeTime.svelte';
 	import SendSmsForm from './SendSmsForm.svelte';
 	import Spinner from './Spinner.svelte';
@@ -79,10 +90,16 @@
 	const presence = $derived(
 		device ? devicePresence(device, status?.ws_connected === true) : 'unknown'
 	);
+	const stateSentence = $derived.by(() => {
+		const meaning = PRESENCE_META[presence].meaning;
+		return `${meaning.charAt(0).toUpperCase()}${meaning.slice(1)}.`;
+	});
 	const wake = $derived(device ? wakeMode(device) : null);
 	const simSlot = $derived.by(() => {
 		const slot = device?.sim_slot;
-		return typeof slot === 'number' && slot >= 0 && slot <= 2 ? `SIM ${slot + 1}` : null;
+		// The phone stores the 1-based tray number (`simSlotIndex + 1`); a stored 0
+		// is a pre-fix record and is honestly "not reported".
+		return typeof slot === 'number' && slot >= 1 && slot <= 2 ? `SIM ${slot}` : null;
 	});
 
 	$effect(() => {
@@ -228,7 +245,7 @@
 			purging = false;
 			purgeOpen = false;
 			messages = [];
-			purgedNotice = `${result.deleted} message${result.deleted === 1 ? '' : 's'} and ${result.flow_runs_deleted} flow run${result.flow_runs_deleted === 1 ? '' : 's'} removed for this device.`;
+			purgedNotice = `${result.deleted} ${result.deleted === 1 ? 'message' : 'messages'} and ${result.flow_runs_deleted} ${result.flow_runs_deleted === 1 ? 'flow run' : 'flow runs'} removed for this device.`;
 		} catch (failure) {
 			purgeError = describeError(failure);
 			purging = false;
@@ -280,6 +297,107 @@
 		</header>
 
 		<div class="drawer-body">
+			<!-- The one tinted container: the state the operator opened this for. -->
+			<section
+				class="state-block"
+				data-presence={presence}
+				aria-labelledby={`state-${uid}`}
+			>
+				<div class="state-lead">
+					<p class="state-word" id={`state-${uid}`}>
+						<span class="state-glyph" data-presence={presence} aria-hidden="true"></span>
+						{presence}
+					</p>
+					<p class="state-sentence">
+						{stateSentence}
+						{#if device?.last_seen}
+							Last contact <RelativeTime value={device.last_seen} fallback="never" />.
+						{:else}
+							No authenticated contact has been recorded.
+						{/if}
+					</p>
+				</div>
+				<div class="state-queue">
+					<span class="fact-k">Queue</span>
+					<span class="fact-v mono">{status ? status.queue_depth : '—'}</span>
+				</div>
+			</section>
+
+			{#if statusError}
+				<Notice tone="warn" title="Live status unavailable">{statusError}</Notice>
+			{/if}
+
+			<section class="section" aria-labelledby={`facts-${uid}`}>
+				<div class="section-head">
+					<h3 class="section-title" id={`facts-${uid}`}>Identity</h3>
+					<span class="spacer"></span>
+					<button
+						type="button"
+						class="btn btn-ghost btn-sm"
+						onclick={() => void loadAll()}
+						disabled={loading}
+						aria-busy={loading}
+					>
+						{#if loading}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+						Refresh
+					</button>
+				</div>
+
+				<dl class="facts">
+					<div class="fact-row">
+						<dt>Label</dt>
+						<dd>
+							{#if device?.label?.trim()}
+								{device.label.trim()}
+							{:else}
+								<span class="muted">Not reported for this device</span>
+							{/if}
+						</dd>
+					</div>
+
+					<div class="fact-row">
+						<dt>Paired</dt>
+						<dd>
+							{#if device}
+								<span title={formatAbsolute(device.paired_at)}>
+									{formatDate(device.paired_at)} · {formatClock(device.paired_at)}
+								</span>
+							{:else}
+								<span class="muted">—</span>
+							{/if}
+						</dd>
+					</div>
+
+					<div class="fact-row">
+						<dt>SIM slot</dt>
+						<dd>
+							{#if simSlot}
+								<span class="mono">{simSlot}</span>
+							{:else}
+								<span class="muted">Not reported</span>
+							{/if}
+						</dd>
+					</div>
+
+					<div class="fact-row">
+						<dt>Wake</dt>
+						<dd>
+							{#if wake}
+								<span class="mono">{wake}</span>
+								<span class="muted">
+									·
+									{wake === 'push'
+										? 'the gateway can wake the phone.'
+										: 'the phone is reached on its next check-in.'}
+								</span>
+							{:else}
+								<span class="muted">—</span>
+							{/if}
+						</dd>
+					</div>
+				</dl>
+			</section>
+
 			<div class="action-row">
 				<button
 					type="button"
@@ -313,135 +431,17 @@
 				</button>
 			</div>
 
-			<div class="status-strip" aria-busy={loading && !statusError}>
-				<div class="status-cell">
-					<span class="status-k">Link</span>
-					<span class="status-v">
-						{#if device}
-							<PresenceChip {presence} />
-						{:else if statusError}
-							<span class="muted">unavailable</span>
-						{:else}
-							<span class="muted">checking…</span>
-						{/if}
-					</span>
-				</div>
-				<div class="status-cell">
-					<span class="status-k">Queue</span>
-					<span class="status-v mono">{status ? status.queue_depth : '—'}</span>
-				</div>
-				<div class="status-cell">
-					<span class="status-k">Last contact</span>
-					<span class="status-v">
-						{#if device}
-							<RelativeTime value={device.last_seen} fallback="never" />
-						{:else}
-							<span class="muted">—</span>
-						{/if}
-					</span>
-				</div>
-				<div class="status-cell">
-					<span class="status-k">Wake</span>
-					<span class="status-v">
-						{#if wake}
-							<Badge tone={wake === 'push' ? 'accent' : 'muted'}>{wake}</Badge>
-						{:else}
-							<span class="muted">—</span>
-						{/if}
-					</span>
-				</div>
-			</div>
-
-			{#if statusError}
-				<Notice tone="warn" title="Live status unavailable">{statusError}</Notice>
-			{/if}
-
-			<section class="section" aria-labelledby={`facts-${uid}`}>
-				<div class="section-head">
-					<h3 class="section-title" id={`facts-${uid}`}>Identity</h3>
-					<span class="spacer"></span>
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm"
-						onclick={() => void loadAll()}
-						disabled={loading}
-						aria-busy={loading}
-					>
-						{#if loading}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
-						Refresh
-					</button>
-				</div>
-
-				<dl class="kv facts">
-					<dt>Label</dt>
-					<dd>
-						{#if device?.label?.trim()}
-							{device.label.trim()}
-						{:else}
-							<span class="muted">Unlabeled</span>
-							<span class="hint"> · not reported for this device</span>
-						{/if}
-					</dd>
-
-					<dt>Paired</dt>
-					<dd>
-						{#if device}
-							{formatDate(device.paired_at)} · {formatClock(device.paired_at)}
-							<span class="hint"> · {formatAbsolute(device.paired_at)}</span>
-						{:else}
-							<span class="muted">—</span>
-						{/if}
-					</dd>
-
-					<dt>Last contact</dt>
-					<dd>
-						{#if device}
-							<RelativeTime value={device.last_seen} fallback="never" />
-							<span class="hint"> · {formatAbsolute(device.last_seen)}</span>
-							<span class="hint"> · authenticated contact, not pairing time</span>
-						{:else}
-							<span class="muted">—</span>
-						{/if}
-					</dd>
-
-					<dt>Wake</dt>
-					<dd>
-						{#if wake}
-							<Badge tone={wake === 'push' ? 'accent' : 'muted'}>{wake}</Badge>
-							<span class="hint">
-								·
-								{wake === 'push'
-									? 'FCM token present; the gateway can wake the phone.'
-									: 'no push token; the phone is reached on its next poll.'}
-							</span>
-						{:else}
-							<span class="muted">—</span>
-						{/if}
-					</dd>
-
-					<dt>SIM slot</dt>
-					<dd>
-						{#if simSlot}
-							<span class="mono">{simSlot}</span>
-						{:else}
-							<span class="muted">Not reported</span>
-							<span class="hint"> · the device record carries no slot</span>
-						{/if}
-					</dd>
-				</dl>
-
-				<p class="hint">
-					Queued commands are drained over the device's WebSocket, or on its next poll if the
-					device is not connected.
-				</p>
-			</section>
-
 			{#if sendOpen}
 				<section class="section send-section" id={`send-panel-${uid}`} aria-labelledby={`send-${uid}`}>
 					<div class="section-head">
 						<h3 class="section-title" id={`send-${uid}`}>Send SMS from this device</h3>
 					</div>
-					<SendSmsForm devices={device ? [device] : []} deviceId={deviceId} onqueued={onQueued} autofocus />
+					<SendSmsForm
+						devices={device ? [device] : []}
+						deviceId={deviceId}
+						onqueued={onQueued}
+						autofocus
+					/>
 				</section>
 			{/if}
 
@@ -453,53 +453,54 @@
 
 			<section class="section" aria-labelledby={`commands-${uid}`}>
 				<div class="section-head">
-					<h3 class="section-title" id={`commands-${uid}`}>Commands</h3>
-					<span class="panel-meta">
-						{#if commandsLoading && commands.length === 0}<Spinner />{:else}newest · last {COMMAND_LIMIT}{/if}
+					<h3 class="section-title" id={`commands-${uid}`}>Outbound</h3>
+					<span class="section-meta">
+						{#if commandsLoading && commands.length === 0}<Spinner />{:else}newest {COMMAND_LIMIT}{/if}
 					</span>
 				</div>
 				{#if commandsError}
-					<p class="field-error">
-						Could not refresh commands. {commandsError}
-					</p>
+					<p class="field-error">Could not refresh this list. {commandsError}</p>
 				{/if}
 				{#if commandsLoading && commands.length === 0}
-					<div class="cmd-skeletons" aria-busy="true" aria-live="polite">
-						<span class="sr-only">Loading commands</span>
+					<div class="row-skeletons" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Loading outbound messages</span>
 						{#each ['a', 'b'] as key (key)}
 							<div class="skeleton" style="height: 46px"></div>
 						{/each}
 					</div>
 				{:else if commands.length === 0}
-					<p class="hint">No commands recorded for this device.</p>
+					<p class="section-note">Nothing has been queued for this device.</p>
 				{:else}
 					<ul class="cmd-list">
 						{#each commands as command (command.command_id)}
 							<li class="cmd-row">
 								<div class="cmd-head">
 									<span class="mono cmd-peer">{command.to_e164 || '(no recipient)'}</span>
-									<span title={commandStateNote(command.state)}>
-										<Badge
-											tone={commandStateTone(command.state)}
-											dot={!isTerminalCommand(command.state)}
-										>
-											{command.state}
+									<span title={command.state}>
+										<Badge tone={commandStateTone(command.state)}>
+											{commandStateLabel(command.state)}
 										</Badge>
 									</span>
-									<span class="hint">· <RelativeTime value={command.created_at} /></span>
+									<span class="cmd-time mono">
+										<RelativeTime value={command.created_at} />
+									</span>
 									<span class="spacer"></span>
 									<button
 										type="button"
 										class="link-btn cmd-track-btn"
 										onclick={() => toggleCommandTracker(command.command_id, command.command_id)}
 										aria-expanded={command.command_id in trackedCommands}
+										aria-controls={command.command_id in trackedCommands
+											? `cmd-tracker-${command.command_id}`
+											: undefined}
+										title={commandStateNote(command.state)}
 									>
 										{command.command_id in trackedCommands ? 'Hide' : 'Track'}
 									</button>
 								</div>
 								<p class="cmd-body">{command.body || '(empty message)'}</p>
 								{#if command.command_id in trackedCommands}
-									<div class="cmd-tracker">
+									<div class="cmd-tracker" id={`cmd-tracker-${command.command_id}`}>
 										<CommandTracker
 											deviceId={deviceId}
 											commandId={trackedCommands[command.command_id] ?? command.command_id}
@@ -517,8 +518,8 @@
 			<section class="section" aria-labelledby={`messages-${uid}`}>
 				<div class="section-head">
 					<h3 class="section-title" id={`messages-${uid}`}>Messages</h3>
-					<span class="panel-meta">
-						{#if loading}<Spinner />{:else}last {MESSAGE_LIMIT}{/if}
+					<span class="section-meta">
+						{#if loading}<Spinner />{:else}newest {MESSAGE_LIMIT}{/if}
 					</span>
 					<span class="spacer"></span>
 					{#if messages.length > 0}
@@ -541,7 +542,7 @@
 						<Icon name="refresh" size={12} /> Try again
 					</button>
 				{:else if loading && messages.length === 0}
-					<div class="dlog-skeletons" aria-busy="true" aria-live="polite">
+					<div class="row-skeletons" aria-busy="true" aria-live="polite">
 						<span class="sr-only">Loading messages</span>
 						{#each ['a', 'b', 'c'] as key (key)}
 							<div class="skeleton" style="height: 52px"></div>
@@ -550,34 +551,38 @@
 				{:else if messages.length === 0}
 					<EmptyState
 						icon="message"
-						title="No messages yet"
-						description="Inbound SMS appears after the phone syncs. Messages queued here appear immediately."
+						title="No messages for this device yet"
+						description="Inbound SMS appears after the phone syncs. Anything you queue here appears immediately."
 					/>
 				{:else}
 					<ul class="dlog">
 						{#each messages as message (message.id)}
 							{@const outbound = message.direction === 'out'}
-							<li class="dlog-row" class:outbound>
+							{@const answer = answerPhrase(message)}
+							{@const answerSource = answerOf(message)}
+							<li class="dlog-row" data-dir={outbound ? 'out' : 'in'}>
 								<span class="dlog-icon" aria-hidden="true">
 									<Icon name={outbound ? 'arrow-up-right' : 'arrow-down-left'} size={13} />
 								</span>
 								<div class="dlog-main">
 									<div class="dlog-head">
+										<span class="sr-only">{outbound ? 'Outbound' : 'Inbound'} message</span>
 										<span class="mono dlog-peer">{message.peer}</span>
-										{#if message.auto_reply && !outbound}
-											<Badge tone="accent">auto-reply</Badge>
-										{/if}
 										<span class="spacer"></span>
 										<span class="dlog-time">
 											<RelativeTime value={message.received_at} />
 										</span>
 									</div>
 									<p class="dlog-body">{message.body || '(empty message)'}</p>
+									{#if answer}
+										<p class="dlog-answer" data-source={answerSource}>
+											{answer}
+										</p>
+									{/if}
 								</div>
 							</li>
 						{/each}
 					</ul>
-					<p class="hint">Newest {messages.length} messages, both directions.</p>
 				{/if}
 			</section>
 		</div>
@@ -602,18 +607,18 @@
 	<p>
 		<strong>{device ? devicePrimary(device) : deviceId}</strong>
 		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if}
-		will stop authenticating immediately. Its public key is destroyed in both stores and any
-		queued command is abandoned.
+		stops authenticating now. Its key is destroyed on the gateway and any queued message is
+		dropped.
 	</p>
 	<p class="hint" style="margin-top: 10px">
-		To restore it, enroll the phone again with a new pairing code.
+		Pair it again with a new code to bring it back.
 	</p>
 </ConfirmDialog>
 
 <ConfirmDialog
 	open={purgeOpen}
-	title="Purge the message log?"
-	confirmLabel="Purge messages"
+	title="Delete this device's messages?"
+	confirmLabel="Delete messages"
 	tone="danger"
 	pending={purging}
 	error={purgeError}
@@ -626,13 +631,10 @@
 	}}
 >
 	<p>
-		Every stored message and flow run for
+		Every message and flow run stored for
 		<strong>{device ? devicePrimary(device) : deviceId}</strong>
-		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if} is deleted. This
-		cannot be undone.
-	</p>
-	<p class="hint" style="margin-top: 10px">
-		The device stays paired; only the log is erased. New messages will arrive normally.
+		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if} is deleted. The
+		device stays paired and new messages keep arriving. This cannot be undone.
 	</p>
 </ConfirmDialog>
 
@@ -647,43 +649,31 @@
 		height: 100dvh;
 		max-height: 100dvh;
 		border: 0;
-		border-left: 1px solid var(--line-strong);
-		background: var(--surface);
-		color: var(--ink);
-		box-shadow: var(--shadow-dialog);
+		border-left: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-xl) 0 0 var(--df-p-radius-xl);
+		background: var(--df-surface-card);
+		color: var(--df-text-primary);
+		box-shadow: var(--df-shadow-dialog);
 		overflow: hidden;
 	}
 
+	/* `settle` is the only entrance in the system: 220ms, 6px, no slide. */
 	.drawer[open] {
-		animation: drawer-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+		animation: settle var(--df-p-dur-settle) var(--df-p-ease-standard) both;
 	}
 
 	.drawer::backdrop {
-		background: rgba(10, 12, 10, 0.42);
-		backdrop-filter: blur(2px);
+		background: var(--df-c-dialog-scrim);
 	}
 
-	.drawer[open]::backdrop {
-		animation: backdrop-in 200ms ease both;
-	}
-
-	@keyframes drawer-in {
-		from {
-			transform: translateX(22px);
-			opacity: 0.55;
-		}
-		to {
-			transform: none;
-			opacity: 1;
-		}
-	}
-
-	@keyframes backdrop-in {
+	@keyframes settle {
 		from {
 			opacity: 0;
+			transform: translateY(6px);
 		}
 		to {
 			opacity: 1;
+			transform: none;
 		}
 	}
 
@@ -697,11 +687,11 @@
 	.drawer-head {
 		display: flex;
 		align-items: flex-start;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex: none;
-		padding: var(--s-4) var(--s-5);
-		border-bottom: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+		padding: var(--df-p-space-4) var(--df-p-space-5);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-card);
 	}
 
 	.drawer-title {
@@ -710,8 +700,9 @@
 	}
 
 	.drawer-title h2 {
-		margin-top: 3px;
-		font-size: var(--text-xl);
+		margin-top: 2px;
+		font-size: var(--df-p-text-xl);
+		font-weight: 700;
 		letter-spacing: -0.02em;
 		overflow-wrap: anywhere;
 	}
@@ -719,11 +710,11 @@
 	.id-line {
 		display: flex;
 		align-items: center;
-		gap: 3px;
-		margin-top: 5px;
+		gap: var(--df-p-space-1);
+		margin-top: var(--df-p-space-1);
 		min-width: 0;
-		font-size: 10.5px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.id-line .mono {
@@ -737,119 +728,218 @@
 		overscroll-behavior: contain;
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-5);
-		padding: var(--s-5);
+		gap: var(--df-p-space-5);
+		padding: var(--df-p-space-5);
 	}
 
 	/* The body scrolls; its children must keep their natural height instead of
-	   being squeezed by the flex column (the status strip would clip to 2px). */
+	   being squeezed by the flex column. */
 	.drawer-body > * {
 		flex: none;
 	}
 
-	.action-row {
+	/* ---------- state block ---------- */
+
+	.state-block {
 		display: flex;
-		align-items: center;
-		gap: var(--s-2);
-		flex-wrap: wrap;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-4);
+		padding: var(--df-p-space-4);
+		border-radius: var(--df-p-radius-lg);
+		background: var(--df-state-neutral-bg);
 	}
 
-	.status-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--surface-2) 45%, var(--surface));
-		overflow: hidden;
+	.state-block[data-presence='live'],
+	.state-block[data-presence='synced'] {
+		background: var(--df-state-ok-bg);
 	}
 
-	.status-cell {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-		padding: 10px 12px;
-		border-right: 1px solid var(--line);
+	.state-block[data-presence='stale'] {
+		background: var(--df-state-warn-bg);
+	}
+
+	.state-block[data-presence='offline'] {
+		background: var(--df-state-danger-bg);
+	}
+
+	.state-lead {
 		min-width: 0;
 	}
 
-	.status-cell:last-child {
-		border-right: 0;
-	}
-
-	.status-k {
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	.status-v {
-		display: inline-flex;
+	.state-word {
+		display: flex;
 		align-items: center;
-		gap: 6px;
-		font-family: var(--font-mono);
-		font-size: 11px;
-		letter-spacing: 0.04em;
-		color: var(--ink-2);
+		gap: var(--df-p-space-2);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-xl);
+		font-weight: 700;
+		line-height: 1.1;
+		letter-spacing: -0.02em;
+		color: var(--df-text-primary);
 	}
+
+	/* Same five shapes as PresenceChip, so the drawer and the row agree. */
+	.state-glyph {
+		width: 9px;
+		height: 9px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--df-text-primary);
+	}
+
+	.state-glyph[data-presence='synced'] {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--df-text-primary);
+	}
+
+	.state-glyph[data-presence='stale'] {
+		background: transparent;
+		border-radius: 1px;
+		box-shadow: inset 0 0 0 1.5px var(--df-text-primary);
+	}
+
+	.state-glyph[data-presence='offline'] {
+		border-radius: 1px;
+	}
+
+	.state-glyph[data-presence='unknown'] {
+		width: 10px;
+		height: 2px;
+		border-radius: 1px;
+	}
+
+	.state-sentence {
+		margin-top: var(--df-p-space-1);
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.state-queue {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		flex: none;
+		text-align: right;
+	}
+
+	.fact-k {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.fact-v {
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	/* ---------- sections ---------- */
 
 	.section {
 		display: grid;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		min-width: 0;
 	}
 
 	.section-head {
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
-		padding-bottom: 8px;
-		border-bottom: 1px solid var(--line);
+		gap: var(--df-p-space-2);
+		padding-bottom: var(--df-p-space-2);
+		border-bottom: 1px solid var(--df-border-hairline);
 	}
 
 	.section-title {
-		font-family: var(--font-mono);
-		font-size: 10px;
-		font-weight: 500;
-		letter-spacing: 0.11em;
-		text-transform: uppercase;
-		color: var(--ink-3);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		color: var(--df-text-primary);
+	}
+
+	.section-meta {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.04em;
+		color: var(--df-text-meta);
+	}
+
+	.section-note {
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 	}
 
 	.facts {
-		grid-template-columns: 78px minmax(0, 1fr);
-		gap: 8px var(--s-3);
+		margin: 0;
 	}
 
-	.facts dd {
-		color: var(--ink-2);
+	.fact-row {
+		display: grid;
+		grid-template-columns: 92px minmax(0, 1fr);
+		gap: var(--df-p-space-2) var(--df-p-space-3);
+		padding: var(--df-p-space-2) 0;
+		border-bottom: 1px solid var(--df-border-hairline);
+		align-items: baseline;
+	}
+
+	.fact-row:last-child {
+		border-bottom: 0;
+	}
+
+	.fact-row dt {
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-2xs);
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.fact-row dd {
+		margin: 0;
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.action-row {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
 	}
 
 	.send-section {
-		padding: var(--s-4);
-		border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+		padding: var(--df-p-space-4);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
 	}
 
 	.send-section .section-head {
-		border-bottom-color: color-mix(in srgb, var(--accent) 20%, var(--line));
+		border-bottom-color: var(--df-border-hairline);
 	}
+
+	/* ---------- outbound ---------- */
 
 	.cmd-list {
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
 		overflow: hidden;
 	}
 
 	.cmd-row {
-		padding: 9px 12px;
-		border-bottom: 1px solid var(--line);
-		background: color-mix(in srgb, var(--surface-2) 30%, var(--surface));
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-card);
 	}
 
 	.cmd-row:last-child {
@@ -859,67 +949,65 @@
 	.cmd-head {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.cmd-peer {
-		font-size: 11.5px;
+		font-size: var(--df-p-text-sm);
 		font-weight: 500;
-		color: var(--ink);
+		color: var(--df-text-primary);
+	}
+
+	.cmd-time {
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 	}
 
 	.cmd-body {
-		margin-top: 3px;
-		font-size: 11.5px;
+		margin-top: var(--df-p-space-1);
+		font-size: var(--df-p-text-sm);
 		line-height: 1.5;
-		color: var(--ink-3);
+		color: var(--df-text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
 	.cmd-track-btn {
-		font-size: 10.5px;
+		font-size: var(--df-p-text-xs);
 	}
 
 	.cmd-tracker {
-		margin-top: 6px;
+		margin-top: var(--df-p-space-2);
 	}
 
-	.cmd-skeletons {
+	.row-skeletons {
 		display: grid;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
-	.dlog-skeletons {
-		display: grid;
-		gap: var(--s-2);
-	}
+	/* ---------- message log ---------- */
 
 	.dlog {
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
 		overflow: hidden;
 	}
 
 	.dlog-row {
 		display: grid;
 		grid-template-columns: 24px minmax(0, 1fr);
-		gap: 9px;
-		padding: 10px 12px;
-		border-bottom: 1px solid var(--line);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
 	}
 
 	.dlog-row:last-child {
 		border-bottom: 0;
-	}
-
-	.dlog-row.outbound {
-		background: color-mix(in srgb, var(--accent) 4%, var(--surface));
 	}
 
 	.dlog-icon {
@@ -927,16 +1015,16 @@
 		place-items: center;
 		width: 22px;
 		height: 22px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-meta);
 	}
 
-	.outbound .dlog-icon {
-		color: var(--accent);
-		border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-		background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+	.dlog-row[data-dir='out'] .dlog-icon {
+		color: var(--df-accent-text);
+		border-color: var(--df-accent-soft);
+		background: var(--df-accent-soft);
 	}
 
 	.dlog-main {
@@ -946,28 +1034,28 @@
 	.dlog-head {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.dlog-peer {
-		font-size: 11.5px;
+		font-size: var(--df-p-text-sm);
 		font-weight: 500;
-		color: var(--ink);
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
 	}
 
 	.dlog-time {
-		font-family: var(--font-mono);
-		font-size: 10px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 		white-space: nowrap;
 	}
 
 	.dlog-body {
 		margin-top: 2px;
-		font-size: 11.5px;
+		font-size: var(--df-p-text-sm);
 		line-height: 1.5;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
@@ -976,35 +1064,48 @@
 		overflow: hidden;
 	}
 
+	.dlog-answer {
+		margin-top: 2px;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+	}
+
+	.dlog-answer[data-source='none'] {
+		color: var(--df-state-warn-ink);
+	}
+
 	@media (max-width: 620px) {
+		.drawer {
+			border-radius: 0;
+			border-left: 0;
+		}
+
 		.drawer-head {
-			padding: var(--s-4);
+			padding: var(--df-p-space-4);
 		}
 
 		.drawer-body {
-			padding: var(--s-4);
-			gap: var(--s-4);
+			padding: var(--df-p-space-4);
+			gap: var(--df-p-space-4);
 		}
 
-		.status-strip {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+		.state-block {
+			flex-direction: column;
+			gap: var(--df-p-space-2);
 		}
 
-		.status-cell {
-			padding: 9px 10px;
+		.state-queue {
+			text-align: left;
 		}
 
-		.status-cell:nth-child(2) {
-			border-right: 0;
+		.fact-row {
+			grid-template-columns: 80px minmax(0, 1fr);
 		}
+	}
 
-		.status-cell:nth-child(3),
-		.status-cell:nth-child(4) {
-			border-top: 1px solid var(--line);
-		}
-
-		.status-v {
-			font-size: 10.5px;
+	@media (prefers-reduced-motion: reduce) {
+		.drawer[open] {
+			animation: none;
 		}
 	}
 </style>

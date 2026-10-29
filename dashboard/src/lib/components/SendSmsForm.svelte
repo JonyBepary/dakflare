@@ -3,6 +3,7 @@
 	import { describeError, getDevices, sendSms } from '$lib/api';
 	import type { Device } from '$lib/types';
 	import { deviceOptionLabel } from '$lib/presence';
+	import { encodingHint, encodingLabel, measureSms, smsCapacity } from '$lib/sms';
 	import CommandTracker from './CommandTracker.svelte';
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
@@ -27,6 +28,7 @@
 	const bodyFieldId = `send-body-${uid}`;
 	const toErrorId = `send-to-error-${uid}`;
 	const countId = `send-count-${uid}`;
+	const encodingId = `send-encoding-${uid}`;
 
 	const MAX_PEER = 32;
 	const MAX_BODY = 4096;
@@ -47,6 +49,9 @@
 	const options = $derived(providedDevices ?? fleet);
 	const awaitingFleet = $derived(fleetLoading && providedDevices === undefined);
 	const recipient = $derived(to.trim());
+	// Measured the way the carrier measures it: a Bangla body is 70 per message,
+	// not 160. The denominator moves to 67 per part once the text splits.
+	const measure = $derived(measureSms(body));
 
 	async function resendQueued(recipientValue: string, bodyValue: string): Promise<void> {
 		if (!queued) return;
@@ -150,8 +155,8 @@
 			<div class="skeleton" style="height: 96px"></div>
 		</div>
 	{:else if options.length === 0}
-		<Notice tone="warn" title="No paired devices">
-			Pair a phone before sending. Mint a pairing code on the Devices page, then come back.
+		<Notice tone="warn" title="No device paired yet">
+			Pair a phone before sending. Mint a code on Devices, then come back.
 		</Notice>
 	{:else}
 		<form
@@ -202,19 +207,28 @@
 					<label class="label" for={bodyFieldId}>Message</label>
 					<textarea
 						id={bodyFieldId}
-						class="input"
+						class="input body-field"
 						bind:value={body}
 						rows="3"
 						maxlength={MAX_BODY}
 						placeholder="Type the message the phone should send…"
-						aria-describedby={countId}
+						aria-describedby={`${countId} ${encodingId}`}
 						aria-invalid={bodyError ? 'true' : undefined}
 						disabled={sending}
 					></textarea>
 					<div class="body-meta">
-						<span class="hint">Plain text. The phone sends it from its default SIM.</span>
-						<span class="count mono" id={countId}>{body.length} / {MAX_BODY}</span>
+						<span class="hint" id={encodingId}>{encodingHint(measure)}</span>
+						<span class="count" id={countId}>
+							<span class="count-encoding">{encodingLabel(measure)}</span>
+							<span class="mono">{measure.units}/{smsCapacity(measure)}</span>
+							{#if measure.segments > 0}
+								<span class="count-parts mono">{measure.segments} SMS</span>
+							{/if}
+						</span>
 					</div>
+					{#if bodyError}
+						<p class="field-error">{bodyError}</p>
+					{/if}
 				</div>
 
 				<div class="send-foot span-2">
@@ -227,8 +241,6 @@
 						{#if sending}<Spinner />{:else}<Icon name="send" size={14} />{/if}
 						Send SMS
 					</button>
-					<span class="spacer"></span>
-					<span class="hint">Queued as a command for the device.</span>
 				</div>
 			</div>
 		</form>
@@ -243,9 +255,8 @@
 	{#if queued}
 		<div class="send-feedback" aria-live="polite">
 			<Notice tone="ok" title="Message queued">
-				Command <span class="mono">{queued.command_id.slice(0, 8)}…</span> accepted for{' '}
-				<span class="mono">{queued.device_id}</span>. The state below follows it until the device
-				or carrier reports a final result.
+				The phone collects it when it next checks in. Its state below follows it until the
+				phone reports a result.
 			</Notice>
 			<div class="queued-tracker">
 				<CommandTracker
@@ -261,46 +272,73 @@
 <style>
 	.send {
 		display: grid;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 	}
 
 	.fleet-error {
 		display: grid;
 		justify-items: start;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
 	.send-grid {
 		display: grid;
 		grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-		gap: var(--s-3) var(--s-4);
+		gap: var(--df-p-space-3) var(--df-p-space-4);
+	}
+
+	.send-grid > .span-2 {
+		grid-column: 1 / -1;
+	}
+
+	/* A message body is prose, not a payload: mono would make a Bangla sentence
+	   render in a fallback face at the wrong size. */
+	.body-field {
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-md);
+		line-height: 1.5;
 	}
 
 	.body-meta {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
 	}
 
 	.count {
-		font-size: 10.5px;
-		color: var(--ink-3);
+		display: inline-flex;
+		align-items: baseline;
+		gap: var(--df-p-space-2);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 		white-space: nowrap;
+	}
+
+	.count-encoding {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.count-parts {
+		color: var(--df-text-secondary);
 	}
 
 	.send-foot {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
-		padding-top: var(--s-3);
-		border-top: 1px solid var(--line);
+		padding-top: var(--df-p-space-3);
+		border-top: 1px solid var(--df-border-hairline);
 	}
 
 	.send-feedback {
 		display: grid;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 	}
 
 	.queued-tracker {

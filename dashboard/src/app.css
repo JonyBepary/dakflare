@@ -808,10 +808,6 @@ time {
 	padding: var(--df-p-space-4);
 }
 
-.panel-body.flush {
-	padding: 0;
-}
-
 .panel-note {
 	padding: 10px var(--df-p-space-4);
 	border-top: 1px solid var(--df-border-hairline);
@@ -961,14 +957,12 @@ time {
 /* --------------------------------------------------------------------------
    chips, dots, callouts
    --------------------------------------------------------------------------
-   `.chip` is the state word: pill, sentence case, explicit pastel pair.
-   `.badge*` survives for the command vocabulary (uppercase mono log tags) so
-   phase 1 does not have to touch other routes' markup. Both share one colour
-   block — the six pastel pairs — so the old color-mix derivations are gone.
+   `.chip` is the state word: pill, sentence case, explicit pastel pair. The
+   old `.badge*` log-tag vocabulary is retired — its last caller moved to
+   `.chip` + `data-tone`, and 02 §4.4 asked for exactly this.
    -------------------------------------------------------------------------- */
 
-.chip,
-.badge {
+.chip {
 	display: inline-flex;
 	align-items: center;
 	gap: var(--df-c-chip-gap);
@@ -986,59 +980,37 @@ time {
 	white-space: nowrap;
 }
 
-.badge {
-	height: 20px;
-	border-radius: var(--df-p-radius-xs);
-	font-family: var(--df-p-font-mono);
-	font-size: var(--df-p-text-2xs);
-	font-weight: 500;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-}
-
-.chip[data-tone='ok'],
-.chip-ok,
-.badge-ok {
+.chip[data-tone='ok'] {
 	background: var(--df-c-chip-live-bg);
 	color: var(--df-c-chip-live-ink);
 }
 
-.chip[data-tone='info'],
-.chip-info {
+.chip[data-tone='info'] {
 	background: var(--df-c-chip-synced-bg);
 	color: var(--df-c-chip-synced-ink);
 }
 
-.chip[data-tone='warn'],
-.chip-warn,
-.badge-warn {
+.chip[data-tone='warn'] {
 	background: var(--df-c-chip-stale-bg);
 	color: var(--df-c-chip-stale-ink);
 }
 
-.chip[data-tone='danger'],
-.chip-danger,
-.badge-danger {
+.chip[data-tone='danger'] {
 	background: var(--df-c-chip-offline-bg);
 	color: var(--df-c-chip-offline-ink);
 }
 
-.chip[data-tone='accent'],
-.chip-accent,
-.badge-accent {
+.chip[data-tone='accent'] {
 	background: var(--df-accent-soft);
 	color: var(--df-accent-text);
 }
 
-.chip[data-tone='muted'],
-.chip-muted,
-.badge-muted {
+.chip[data-tone='muted'] {
 	background: var(--df-state-neutral-bg);
 	color: var(--df-state-neutral-ink);
 }
 
-.chip-dot,
-.badge-dot {
+.chip-dot {
 	width: var(--df-c-chip-dot-size);
 	height: var(--df-c-chip-dot-size);
 	border-radius: 50%;
@@ -1098,18 +1070,15 @@ time {
 	color: var(--df-text-secondary);
 }
 
-.callout[data-tone='info'],
-.notice-info {
+.callout[data-tone='info'] {
 	background: var(--df-state-info-bg);
 }
 
-.callout[data-tone='ok'],
-.notice-ok {
+.callout[data-tone='ok'] {
 	background: var(--df-state-ok-bg);
 }
 
-.callout[data-tone='warn'],
-.notice-warn {
+.callout[data-tone='warn'] {
 	background: var(--df-state-warn-bg);
 }
 
@@ -1122,13 +1091,11 @@ time {
 	color: var(--df-state-info-ink);
 }
 
-.callout[data-tone='ok'] svg,
-.notice-ok svg {
+.callout[data-tone='ok'] svg {
 	color: var(--df-state-ok-ink);
 }
 
-.callout[data-tone='warn'] svg,
-.notice-warn svg {
+.callout[data-tone='warn'] svg {
 	color: var(--df-state-warn-ink);
 }
 
@@ -1190,9 +1157,9 @@ time {
 }
 
 .input:focus-visible {
-	outline: none;
-	border-color: var(--df-accent-text);
-	box-shadow: 0 0 0 3px color-mix(in srgb, var(--df-accent-text) 20%, transparent);
+	outline: 2px solid var(--df-accent-text);
+	outline-offset: 2px;
+	border-color: var(--df-border-focus);
 }
 
 .input[aria-invalid='true'] {
@@ -1316,7 +1283,7 @@ select.input {
 
 .seg-item:has(input:focus-visible) span {
 	outline: 2px solid var(--df-accent-text);
-	outline-offset: 1px;
+	outline-offset: 2px;
 }
 
 .form-grid {
@@ -1331,20 +1298,6 @@ select.input {
 
 .form-grid > .span-3 {
 	grid-column: 1 / -1;
-}
-
-.form-section {
-	grid-column: 1 / -1;
-	display: flex;
-	align-items: center;
-	gap: var(--df-p-space-3);
-	padding-top: var(--df-p-space-2);
-	margin-top: var(--df-p-space-1);
-}
-
-.form-section:not(:first-child) {
-	border-top: 1px solid var(--df-border-hairline);
-	padding-top: var(--df-p-space-4);
 }
 
 .form-foot {
@@ -1378,25 +1331,26 @@ select.input {
 
 .table th {
 	position: sticky;
-	top: 0;
+	top: var(--df-c-shell-header);
 	z-index: 1;
-	padding: 9px 12px;
+	padding: var(--df-c-table-cell-padding-block) var(--df-c-table-cell-padding-inline);
 	text-align: left;
 	font-family: var(--df-p-font-mono);
-	font-size: 10px;
+	font-size: var(--df-c-table-head-size);
 	font-weight: 500;
-	letter-spacing: 0.1em;
+	letter-spacing: var(--df-c-table-head-tracking);
 	text-transform: uppercase;
-	color: var(--df-text-meta);
-	background: var(--df-surface-well);
-	border-bottom: 1px solid var(--df-border-hairline);
+	color: var(--df-c-table-head-ink);
+	background: var(--df-c-table-head-bg);
+	border-bottom: 1px solid var(--df-c-table-row-border);
 	white-space: nowrap;
 }
 
 .table td {
-	padding: 11px 12px;
-	border-bottom: 1px solid var(--df-border-hairline);
+	padding: var(--df-c-table-cell-padding-block) var(--df-c-table-cell-padding-inline);
+	border-bottom: 1px solid var(--df-c-table-row-border);
 	vertical-align: top;
+	color: var(--df-c-table-cell-ink);
 }
 
 .table tr:last-child td {
@@ -1408,7 +1362,7 @@ select.input {
 }
 
 .table tbody tr:hover {
-	background: color-mix(in srgb, var(--df-surface-well) 55%, transparent);
+	background: var(--df-c-table-row-bg-hover);
 }
 
 .table th:first-child,
@@ -1672,6 +1626,12 @@ select.input {
 		grid-template-columns: minmax(0, 1fr);
 	}
 
+	/* The mobile section tabs are sticky under the header too, so a table head
+	   has to clear both. */
+	.table th {
+		top: calc(var(--df-c-shell-header) + var(--df-c-shell-tabs));
+	}
+
 	.rail {
 		display: none;
 	}
@@ -1817,7 +1777,8 @@ select.input {
 	.btn,
 	.nav-link,
 	.chip,
-	.devrow {
+	.devrow,
+	.table tbody tr {
 		transition: none;
 	}
 

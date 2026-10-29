@@ -60,7 +60,7 @@
 		<div class="sim-title">
 			<Icon name="activity" size={14} />
 			<h2 id="simulation-title">Preview run</h2>
-			<span class="badge badge-accent">Nothing is sent</span>
+			<span class="chip" data-tone="info">Nothing is sent</span>
 		</div>
 		<button type="button" class="btn btn-ghost btn-icon btn-sm" onclick={onclose} aria-label="Close preview">
 			<Icon name="x" size={14} />
@@ -129,7 +129,8 @@
 					<div>
 						<strong>{result.summary}</strong>
 						<span>
-							{result.visitedNodes.length} steps visited · {result.sms.length}
+							{result.visitedNodes.length}
+							{result.visitedNodes.length === 1 ? 'step' : 'steps'} visited · {result.sms.length}
 							{result.sms.length === 1 ? 'message' : 'messages'} prepared
 						</span>
 					</div>
@@ -142,10 +143,10 @@
 							{#each result.sms as message, index (message.nodeId + index)}
 								<li class="sms-card">
 									<div class="sms-meta">
-										<span class="mono">to {message.to || '(no recipient)'}</span>
+										<span class="mono">to {message.to || 'no recipient'}</span>
 										<span class="mono muted">{message.body.length} chars</span>
 									</div>
-									<p class="sms-body">{message.body || '(empty message)'}</p>
+									<p class="sms-body">{message.body || 'empty message'}</p>
 								</li>
 							{/each}
 						</ul>
@@ -159,7 +160,7 @@
 							{#each captured as [name, value] (name)}
 								<div>
 									<dt class="mono">{name}</dt>
-									<dd class="mono">{value === '' ? '(empty)' : value}</dd>
+									<dd class="mono">{value === '' ? 'empty' : value}</dd>
 								</div>
 							{/each}
 						</dl>
@@ -200,19 +201,20 @@
 
 <style>
 	.simulation {
-		border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
+		overflow: hidden;
 	}
 
 	.sim-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--s-2);
-		padding: 9px 12px;
-		border-bottom: 1px solid var(--line);
-		background: color-mix(in srgb, var(--accent) 4%, var(--surface));
-		border-radius: var(--r) var(--r) 0 0;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: var(--df-p-radius-lg) var(--df-p-radius-lg) 0 0;
 	}
 
 	.sim-title {
@@ -220,31 +222,31 @@
 		align-items: center;
 		gap: 7px;
 		min-width: 0;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
 	.sim-title h2 {
-		font-size: var(--text-base);
-		color: var(--ink);
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-primary);
 		white-space: nowrap;
 	}
 
-	.sim-title .badge {
+	.sim-title .chip {
 		margin-left: 2px;
 	}
 
 	.sim-help {
-		padding: 9px 12px 0;
-		font-size: 11.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-3) 0;
+		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.sim-form {
 		display: grid;
 		grid-template-columns: minmax(0, 190px) minmax(0, 1fr);
-		gap: 10px;
-		padding: 12px;
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-3);
 	}
 
 	.sim-form .field:nth-child(2) {
@@ -255,66 +257,55 @@
 		grid-column: 1 / -1;
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.sim-output {
-		border-top: 1px solid var(--line);
+		border-top: 1px solid var(--df-border-hairline);
 	}
 
 	.sim-idle {
 		display: flex;
 		align-items: center;
 		gap: 7px;
-		padding: 12px;
-		font-size: 11.5px;
-		color: var(--ink-3);
+		padding: var(--df-p-space-3);
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 	}
 
 	.sim-result {
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
-		padding: 12px;
-		animation: sim-in 220ms ease both;
-	}
-
-	@keyframes sim-in {
-		from {
-			opacity: 0;
-			transform: translateY(-3px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-3);
+		/* The motion set, not a local keyframe: settle, final state under reduced motion. */
+		animation: settle var(--df-p-dur-settle) var(--df-p-ease-standard) both;
 	}
 
 	.sim-verdict {
 		display: flex;
 		align-items: flex-start;
 		gap: 8px;
-		padding: 9px 10px;
-		border: 1px solid var(--line);
-		border-left-width: 2px;
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		box-shadow: inset 3px 0 0 var(--df-text-meta);
 	}
 
 	.sim-verdict.ok {
-		border-left-color: var(--ok);
-		background: color-mix(in srgb, var(--ok) 6%, var(--surface));
+		background: var(--df-state-ok-bg);
+		box-shadow: inset 3px 0 0 var(--df-state-ok-ink);
 	}
 
 	.sim-verdict.warn {
-		border-left-color: var(--warn);
-		background: color-mix(in srgb, var(--warn) 7%, var(--surface));
+		background: var(--df-state-warn-bg);
+		box-shadow: inset 3px 0 0 var(--df-state-warn-ink);
 	}
 
 	.sim-verdict.danger {
-		border-left-color: var(--danger);
-		background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+		background: var(--df-state-danger-bg);
+		box-shadow: inset 3px 0 0 var(--df-state-danger-ink);
 	}
 
 	.verdict-dot {
@@ -322,20 +313,20 @@
 		height: 6px;
 		margin-top: 5px;
 		border-radius: 50%;
-		background: var(--ink-3);
+		background: var(--df-text-meta);
 		flex: none;
 	}
 
 	.sim-verdict.ok .verdict-dot {
-		background: var(--ok);
+		background: var(--df-state-ok-ink);
 	}
 
 	.sim-verdict.warn .verdict-dot {
-		background: var(--warn);
+		background: var(--df-state-warn-ink);
 	}
 
 	.sim-verdict.danger .verdict-dot {
-		background: var(--danger);
+		background: var(--df-state-danger-ink);
 	}
 
 	.sim-verdict strong {
@@ -343,15 +334,15 @@
 		font-size: 11.5px;
 		font-weight: 600;
 		line-height: 1.4;
-		color: var(--ink);
+		color: var(--df-text-primary);
 	}
 
 	.sim-verdict span {
 		display: block;
 		margin-top: 2px;
-		font-family: var(--font-mono);
+		font-family: var(--df-p-font-mono);
 		font-size: 9.5px;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.sim-block {
@@ -370,18 +361,17 @@
 	}
 
 	.sms-card {
-		padding: 8px 9px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
 	}
 
 	.sms-meta {
 		display: flex;
 		justify-content: space-between;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		font-size: 10px;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
 	.sms-meta .mono {
@@ -392,7 +382,7 @@
 		margin-top: 4px;
 		font-size: 11.5px;
 		line-height: 1.5;
-		color: var(--ink);
+		color: var(--df-text-primary);
 		overflow-wrap: anywhere;
 	}
 
@@ -405,9 +395,9 @@
 	.var-table > div {
 		display: grid;
 		grid-template-columns: minmax(70px, auto) minmax(0, 1fr);
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		padding: 3px 0;
-		border-bottom: 1px dotted var(--line);
+		border-bottom: 1px dotted var(--df-border-hairline);
 	}
 
 	.var-table > div:last-child {
@@ -416,14 +406,14 @@
 
 	.var-table dt {
 		font-size: 10px;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
 	.var-table dd {
 		margin: 0;
 		font-size: 10.5px;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 	}
 
@@ -453,44 +443,43 @@
 		height: 16px;
 		flex: none;
 		margin-top: 1px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--df-border-hairline);
 		border-radius: 3px;
 		font-size: 8.5px;
-		color: var(--ink-3);
-		background: var(--surface-2);
+		color: var(--df-text-meta);
+		background: var(--df-surface-well);
 	}
 
 	.trace li.ok .trace-index {
-		border-color: color-mix(in srgb, var(--ok) 32%, var(--line));
-		color: var(--ok);
+		border-color: color-mix(in srgb, var(--df-state-ok-ink) 32%, var(--df-border-hairline));
+		color: var(--df-state-ok-ink);
 	}
 
 	.trace li.danger .trace-index {
-		border-color: color-mix(in srgb, var(--danger) 32%, var(--line));
-		color: var(--danger);
+		border-color: color-mix(in srgb, var(--df-state-danger-ink) 32%, var(--df-border-hairline));
+		color: var(--df-state-danger-ink);
 	}
 
 	.trace-node {
 		display: block;
-		font-family: var(--font-mono);
+		font-family: var(--df-p-font-mono);
 		font-size: 8.5px;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.trace-text {
 		display: block;
 		font-size: 11px;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 	}
 
 	.sim-warnings {
-		padding: 8px 9px;
-		border: 1px dashed color-mix(in srgb, var(--warn) 40%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--warn) 5%, var(--surface));
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-warn-bg);
 	}
 
 	.sim-warnings ul {
@@ -498,7 +487,7 @@
 		padding-left: 16px;
 		font-size: 11px;
 		line-height: 1.45;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
 	@media (max-width: 620px) {
@@ -508,6 +497,12 @@
 
 		.sim-title {
 			flex-wrap: wrap;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sim-result {
+			animation: none;
 		}
 	}
 </style>

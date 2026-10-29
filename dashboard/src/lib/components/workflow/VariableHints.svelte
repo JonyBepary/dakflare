@@ -27,7 +27,7 @@
 
 	.vars-label {
 		font-size: 10.5px;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 		line-height: 1.4;
 	}
 
@@ -43,11 +43,11 @@
 	code {
 		display: inline-block;
 		padding: 1px 4px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--df-border-hairline);
 		border-radius: 3px;
-		background: var(--surface-2);
-		color: var(--ink-2);
-		font-family: var(--font-mono);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-family: var(--df-p-font-mono);
 		font-size: 9.5px;
 		line-height: 1.5;
 		white-space: nowrap;

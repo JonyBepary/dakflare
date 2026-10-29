@@ -2,9 +2,11 @@
 	import { describeError, getCommand } from '$lib/api';
 	import {
 		COMMAND_STEPS,
+		commandStateLabel,
 		commandStateNote,
 		commandStateTone,
 		commandStepIndex,
+		commandStepLabel,
 		isTerminalCommand
 	} from '$lib/commands';
 	import type { CommandInfo } from '$lib/types';
@@ -49,21 +51,16 @@
 				command.body.trim() !== ''
 		)
 	);
-	const failedNote = $derived(
-		commandState === 'EXPIRED'
-			? 'The original expired before the phone collected it.'
-			: 'The phone reported a failure.'
-	);
 	const shortId = $derived(
 		commandId.length > 14 ? `${commandId.slice(0, 8)}…${commandId.slice(-4)}` : commandId
 	);
 
 	const announcement = $derived.by(() => {
-		if (command === undefined && !error) return 'Checking command status.';
-		if (error && command === undefined) return `Command status unavailable. ${error}`;
-		if (command === null) return 'The gateway does not know this command id.';
+		if (command === undefined && !error) return 'Checking the message state.';
+		if (error && command === undefined) return `Message state unavailable. ${error}`;
+		if (command === null) return 'The gateway has no record of this message.';
 		if (!command) return '';
-		return `Command state ${command.state}. ${commandStateNote(command.state)}`;
+		return `Message state: ${commandStateLabel(command.state)}. ${commandStateNote(command.state)}`;
 	});
 
 	/**
@@ -151,17 +148,21 @@
 	<span
 		class="compact"
 		title={command === null
-			? 'The gateway has no record of this command id.'
+			? 'The gateway has no record of this message.'
 			: (error ?? undefined)}
 	>
 		{#if command === undefined && !error}
 			<span class="checking mono"><Spinner /> checking</span>
 		{:else if command === null}
-			<Badge tone="muted">untracked</Badge>
+			<Badge tone="muted">No record</Badge>
 		{:else if !command}
-			<Badge tone="warn">unreachable</Badge>
+			<Badge tone="warn">Unreachable</Badge>
 		{:else}
-			<Badge tone={commandStateTone(command.state)} dot={!finished}>{command.state}</Badge>
+			<span title={command.state}>
+				<Badge tone={commandStateTone(command.state)}>
+					{commandStateLabel(command.state)}
+				</Badge>
+			</span>
 			<span class="mini" aria-hidden="true">
 				{#each COMMAND_STEPS as step, index (step)}
 					<span
@@ -175,21 +176,25 @@
 		<span class="sr-only" aria-live="polite">{announcement}</span>
 	</span>
 {:else}
-	<div class="tracker">
+	<div class="tracker" data-state={commandState ?? 'checking'}>
 		<div class="tracker-head">
 			<span class="eyebrow">Delivery</span>
 			{#if command === undefined && !error}
 				<span class="checking mono"><Spinner /> checking</span>
 			{:else if command === null}
-				<Badge tone="muted">unknown</Badge>
+				<Badge tone="muted">No record</Badge>
 			{:else if !command}
-				<Badge tone="warn">unreachable</Badge>
+				<Badge tone="warn">Unreachable</Badge>
 			{:else}
-				<Badge tone={commandStateTone(command.state)} dot={!finished}>{command.state}</Badge>
+				<span title={command.state}>
+					<Badge tone={commandStateTone(command.state)}>
+						{commandStateLabel(command.state)}
+					</Badge>
+				</span>
 			{/if}
 			<span class="spacer"></span>
 			<span class="cmd-id mono" title={commandId}>{shortId}</span>
-			<CopyButton value={commandId} label="Copy command id" iconOnly />
+			<CopyButton value={commandId} label="Copy message id" iconOnly />
 		</div>
 
 		{#if command}
@@ -213,17 +218,17 @@
 			</dl>
 		{/if}
 
-		<ol class="timeline" class:failed aria-label="Command state timeline">
+		<ol class="timeline" class:failed aria-label="Message state">
 			{#each COMMAND_STEPS as step, index (step)}
 				{@const reached = command !== undefined && command !== null && index <= furthest}
 				{@const current = command !== undefined && command !== null && index === furthest}
 				<li class:reached class:current class:bad={failed && index === furthest}>
 					<span class="step-mark" aria-hidden="true">
 						{#if index < furthest || (current && finished && !failed)}
-							<Icon name="check" size={10} />
+							<Icon name="check" size={9} />
 						{/if}
 					</span>
-					<span class="step-name">{step}</span>
+					<span class="step-name">{commandStepLabel(step)}</span>
 					{#if current && !failed && !finished}
 						<span class="step-live" aria-hidden="true"></span>
 					{/if}
@@ -235,15 +240,13 @@
 			<div class="tracker-note">
 				<Icon name="info" size={13} />
 				<span>
-					The gateway returned <code>command: null</code> for this id. It may have expired out
-					of the device's store, or the id was never a command.
+					No record of this message. It either expired before the phone collected it, or it
+					was never a message.
 				</span>
 			</div>
 		{:else if command}
 			<div class="state-line">
-				<p class="hint">
-					{canResend ? failedNote : commandStateNote(command.state)}
-				</p>
+				<p class="note">{commandStateNote(command.state)}</p>
 				{#if canResend}
 					<button
 						type="button"
@@ -266,23 +269,19 @@
 
 		{#if timedOut}
 			<div class="tracker-foot">
-				<span class="hint">Stopped checking after 30 seconds.</span>
+				<span class="hint">No change after 30 seconds. The phone has not reported back.</span>
 				<span class="spacer"></span>
 				<button type="button" class="btn btn-sm" onclick={restart}>
 					<Icon name="refresh" size={12} /> Check again
 				</button>
 			</div>
-		{:else if finished && command === null}
-			<p class="hint">Polling stopped — nothing to track.</p>
-		{:else if finished && !failed}
-			<p class="hint">Polling stopped — this is a final state.</p>
 		{:else if !finished && command !== undefined && !error}
-			<span class="tracker-foot hint mono">live · every 2s</span>
+			<span class="tracker-foot hint">Waiting for the phone…</span>
 		{/if}
 
 		{#if error && command !== undefined}
 			<p class="field-error">
-				Last check failed: {error}.{finished ? ' Polling stopped.' : ' Retrying…'}
+				Last check failed: {error}.{finished ? ' Checks stopped.' : ' Retrying…'}
 			</p>
 		{/if}
 
@@ -293,33 +292,63 @@
 <style>
 	.tracker {
 		display: grid;
-		gap: var(--s-3);
-		padding: var(--s-3) var(--s-4);
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--surface-2) 38%, var(--surface));
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
 	}
 
 	.tracker-head {
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.cmd-id {
-		font-size: 10.5px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.checking {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		font-size: 10px;
-		letter-spacing: 0.05em;
+		gap: var(--df-p-space-1);
+		font-size: var(--df-p-text-xs);
+		letter-spacing: 0.04em;
+		color: var(--df-text-meta);
+	}
+
+	.tracker-meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1) var(--df-p-space-5);
+		margin: 0;
+		padding-bottom: var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
+	}
+
+	.tracker-meta > div {
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-1);
+		min-width: 0;
+	}
+
+	.tracker-meta dt {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
+	}
+
+	.tracker-meta dd {
+		margin: 0;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
 	}
 
 	.timeline {
@@ -331,62 +360,30 @@
 		padding: 0;
 	}
 
-	.tracker-meta {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 3px var(--s-5);
-		margin: 0;
-		padding: 0 0 var(--s-3);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.tracker-meta > div {
-		display: flex;
-		align-items: baseline;
-		gap: 6px;
-		min-width: 0;
-	}
-
-	.tracker-meta dt {
-		font-family: var(--font-mono);
-		font-size: 9px;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	.tracker-meta dd {
-		margin: 0;
-		font-size: 10.5px;
-		color: var(--ink-2);
-		overflow-wrap: anywhere;
-	}
-
 	.timeline li {
 		position: relative;
 		display: flex;
 		align-items: center;
-		gap: 9px;
-		min-height: 26px;
-		padding-left: 1px;
+		gap: var(--df-p-space-2);
+		min-height: 24px;
 	}
 
 	.timeline li:not(:last-child)::before {
 		content: '';
 		position: absolute;
-		left: 7px;
-		top: 19px;
-		bottom: -7px;
+		left: 6px;
+		top: 17px;
+		bottom: -5px;
 		width: 1px;
-		background: var(--line-strong);
+		background: var(--df-border-control);
 	}
 
 	.timeline li.reached:not(:last-child)::before {
-		background: color-mix(in srgb, var(--accent) 55%, var(--line));
+		background: var(--df-accent-fill);
 	}
 
 	.timeline.failed li.bad:not(:last-child)::before {
-		background: color-mix(in srgb, var(--danger) 55%, var(--line));
+		background: var(--df-state-danger-fill);
 	}
 
 	.step-mark {
@@ -394,56 +391,55 @@
 		z-index: 1;
 		display: grid;
 		place-items: center;
-		width: 15px;
-		height: 15px;
+		width: 13px;
+		height: 13px;
 		flex: none;
-		border: 1px solid var(--line-strong);
+		border: 1px solid var(--df-border-control);
 		border-radius: 50%;
-		background: var(--surface);
-		color: var(--accent-ink);
+		background: var(--df-surface-card);
+		color: var(--df-text-on-accent);
 	}
 
 	.reached .step-mark {
-		border-color: var(--accent);
-		background: var(--accent);
+		border-color: var(--df-accent-fill);
+		background: var(--df-accent-fill);
 	}
 
 	.current .step-mark {
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--df-accent-fill) 18%, transparent);
 	}
 
 	.bad .step-mark {
-		border-color: var(--danger);
-		background: var(--danger);
-		color: var(--danger-ink);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 15%, transparent);
+		border-color: var(--df-state-danger-fill);
+		background: var(--df-state-danger-fill);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--df-state-danger-fill) 16%, transparent);
 	}
 
 	.step-name {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
-		letter-spacing: 0.06em;
-		color: var(--ink-3);
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 	}
 
 	.reached .step-name {
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
 	.current .step-name {
-		color: var(--ink);
+		color: var(--df-text-primary);
 		font-weight: 600;
 	}
 
 	.bad .step-name {
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
+		font-weight: 600;
 	}
 
 	.step-live {
 		width: 4px;
 		height: 4px;
 		border-radius: 50%;
-		background: var(--accent);
+		background: var(--df-accent-fill);
 		animation: live-pulse 1.8s ease-in-out infinite;
 	}
 
@@ -460,44 +456,42 @@
 	.tracker-note {
 		display: flex;
 		align-items: flex-start;
-		gap: 7px;
-		padding: 8px 10px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface);
-		color: var(--ink-3);
-		font-size: 11.5px;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-sm);
 		line-height: 1.5;
-	}
-
-	.tracker-note code {
-		font-family: var(--font-mono);
-		font-size: 10.5px;
 	}
 
 	.tracker-foot {
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.state-line {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
 	}
 
-	.state-line .hint {
+	.state-line .note {
 		flex: 1;
 		min-width: 180px;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
 	}
 
 	.compact {
 		display: inline-flex;
 		align-items: center;
-		gap: 7px;
+		gap: var(--df-p-space-1);
 		white-space: nowrap;
 	}
 
@@ -510,14 +504,21 @@
 		width: 7px;
 		height: 3px;
 		border-radius: 1px;
-		background: var(--line-strong);
+		background: var(--df-border-control);
 	}
 
 	.mini-seg.on {
-		background: var(--accent);
+		background: var(--df-accent-fill);
 	}
 
 	.mini-seg.bad {
-		background: var(--danger);
+		background: var(--df-state-danger-fill);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.step-live {
+			animation: none;
+			opacity: 1;
+		}
 	}
 </style>
