@@ -161,3 +161,16 @@ All secrets are Worker Encrypted Secrets (`wrangler secret put`), read from `env
 `X-Dakflare-Client: cli`, compared with `timingSafeEqual`, and written to `audit_log` as
 `actor_label = "admin-token"` on every call. `dakflare init --local` writes fresh random
 values to `.dev.vars` so local runs exercise the same paths.
+
+## 9. Decided 2026-10-30
+
+- **Cutover by flag.** `AUTH_MODE` stays `legacy` until the owner has enrolled a passkey,
+  a second account has signed in, TOTP has been proven, and the audit page shows both.
+  Only then does it flip to `new`. A bad session bug can therefore never lock the console.
+- **Magic link sender: Resend sandbox** until a domain exists. It delivers only to the
+  account's own address, which is exactly one operator. The feature is wired behind a
+  sender interface and stays disabled until a key is present; invites are CLI-printed
+  links, so onboarding never depends on email.
+- **Deploy-to-Cloudflare button after phase 2**, not before: the button deploys Worker +
+  D1 + DO, the deploy script applies migrations first, and `dakflare init --from-deploy`
+  sets secrets and creates the owner. A button over a Worker with no auth tables is a trap.
