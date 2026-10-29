@@ -11,6 +11,15 @@ export interface HealthCounts {
 /** Which gate answers the admin routes. `AUTH_MODE` in the Worker. */
 export type AuthMode = 'legacy' | 'new';
 
+/**
+ * Which side runs the password KDF — `AUTH_PASSWORD_MODE` in the Worker.
+ *
+ * `off` is the default and means the factor does not exist on this deployment.
+ * The mode is the deployment's capability; it is NOT a row's provenance, which
+ * every stored row carries as `m=c|s`.
+ */
+export type PasswordMode = 'off' | 'client-derived' | 'server-kdf';
+
 export interface Health {
 	ok: boolean;
 	version: string;
@@ -26,6 +35,10 @@ export interface Health {
 	checked_at?: number;
 	auth_mode?: AuthMode;
 	auth_configured?: boolean;
+	/** `off` when the field is absent: a Worker without phase 4 has no password factor. */
+	password_mode?: PasswordMode;
+	/** Whether `AUTH_PEPPER` is set. Without it no password row can be written or read. */
+	password_configured?: boolean;
 }
 
 export interface HealthResult {

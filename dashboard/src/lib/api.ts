@@ -47,6 +47,12 @@ export class ApiError extends Error {
 	readonly retryAfter: number | null;
 	/** The endpoint's own sentence, kept when our copy is the one shown. */
 	readonly serverMessage: string | null;
+	/**
+	 * The whole decoded body, when it was JSON. Some refusals carry the fact that
+	 * explains them — a `password_mode_mismatch` names the mode the deployment
+	 * moved to — and a sentence written without that value would be a guess.
+	 */
+	readonly payload: unknown;
 
 	constructor(
 		message: string,
@@ -54,7 +60,8 @@ export class ApiError extends Error {
 		code: string | null = null,
 		details: unknown = null,
 		retryAfter: number | null = null,
-		serverMessage: string | null = null
+		serverMessage: string | null = null,
+		payload: unknown = null
 	) {
 		super(message);
 		this.name = 'ApiError';
@@ -63,6 +70,7 @@ export class ApiError extends Error {
 		this.details = details;
 		this.retryAfter = retryAfter;
 		this.serverMessage = serverMessage;
+		this.payload = payload;
 	}
 }
 
@@ -169,7 +177,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 			payload && typeof payload === 'object'
 				? ((payload as Record<string, unknown>).details ?? null)
 				: null;
-		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details);
+		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details, null, null, payload);
 	}
 
 	return { data: payload as T, status: response.status };
@@ -285,7 +293,8 @@ export async function authRequest<T>(
 			code,
 			null,
 			retryAfter,
-			extractField(payload, 'message')
+			extractField(payload, 'message'),
+			payload
 		);
 	}
 

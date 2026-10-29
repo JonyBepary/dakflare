@@ -1,8 +1,22 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { describeError } from '$lib/api';
+	import { describeError, getHealth } from '$lib/api';
 	import { formatDate } from '$lib/format';
 	import { listPasskeys } from '$lib/passkey';
+	import {
+		checkPasswordLength,
+		MAX_PASSWORD_LENGTH,
+		MIN_PASSWORD_LENGTH,
+		modeLabel,
+		passwordIsSet,
+		passwordStrength,
+		readMode,
+		removePassword,
+		setPassword,
+		toPasswordFailure,
+		type PasswordFailure,
+		type PasswordMode
+	} from '$lib/password';
 	import { ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import {
@@ -32,6 +46,10 @@
 	 * is the first factor and is read-only here; the authenticator is factor 3,
 	 * optional, and the recovery codes are what makes it useful when the device
 	 * holding the passkey is gone.
+	 *
+	 * Factor 4 is the password, and it is a deployment capability first: under
+	 * `off` the card does not exist at all, because a factor that is switched off
+	 * is not a disabled control — it is nothing to do here.
 	 *
 	 * Nothing on this page is assumed. `probeTotp()` asks the mount whether the
 	 * two-factor routes exist at all, so an older Worker gets a sentence instead
@@ -70,6 +88,50 @@
 	let codeField = $state<HTMLInputElement | null>(null);
 	let disableField = $state<HTMLInputElement | null>(null);
 
+	/*
+	 * Factor 4 — the password.
+	 *
+	 * `passwordMode` is the deployment's capability, read from health; `null` is
+	 * "not answered yet" and is never rendered as `off`. `passwordSet` is this
+	 * account's row, read from the linked-accounts list; `null` is "could not be
+	 * read", shown as unknown rather than guessed.
+	 */
+	let passwordMode = $state<PasswordMode | null>(null);
+	let pepperReady = $state<boolean | null>(null);
+	let passwordSet = $state<boolean | null>(null);
+	let passwordLoading = $state(true);
+	let passwordReadError = $state<string | null>(null);
+
+	/** The set/replace form. */
+	let pwOpen = $state(false);
+	let pwValue = $state('');
+	let pwShow = $state(false);
+	let pwSaving = $state(false);
+	let pwError = $state<string | null>(null);
+	let pwField = $state<HTMLInputElement | null>(null);
+
+	/** Removal, which has to prove the factor it is removing. */
+	let pwRemoveOpen = $state(false);
+	let pwRemoveValue = $state('');
+	let pwRemoveCode = $state('');
+	let pwRemoveBusy = $state(false);
+	let pwRemoveError = $state<string | null>(null);
+	let pwProofField = $state<HTMLInputElement | null>(null);
+
+	let pwNotice = $state<string | null>(null);
+
+	const pwStrength = $derived(passwordStrength(pwValue));
+	const pwLengthError = $derived(pwValue === '' ? null : checkPasswordLength(pwValue));
+	/** Under `off` the section is absent, not disabled. An unknown mode shows. */
+	const pwVisible = $derived(passwordLoading || passwordMode !== 'off');
+	/** A TOTP account proves removal with a code, not with the password. */
+	const pwNeedsCode = $derived(probe?.kind === 'on');
+	/**
+	 * A UI rule, not a gateway one (`handlePasswordRemove` cannot see passkeys):
+	 * removing the last way in would be an account without a first factor.
+	 */
+	const pwOnlyFactor = $derived(passkeys !== null && passkeys.length === 0);
+
 	const unsupported: Record<
 		'missing' | 'no-secret' | 'disabled' | 'password',
 		{ title: string; body: string; fix: string | null }
@@ -90,9 +152,9 @@
 			fix: null
 		},
 		password: {
-			title: 'The gateway asked for a password this account does not have',
-			body: 'Enrolling an authenticator needs the Worker to allow passwordless two-factor. It refused because the deployment expects a password step, and accounts here are passkey-only.',
-			fix: null
+			title: 'The gateway asked for the account password',
+			body: 'Changing the authenticator needs the account’s password, and one is set on this account. The authenticator controls on this page do not collect it yet, so they are refused.',
+			fix: 'Remove the password in factor 04, change the authenticator, then set the password again.'
 		}
 	};
 
@@ -109,12 +171,17 @@
 	async function load(): Promise<void> {
 		if (!allowed) {
 			checking = false;
+			passwordLoading = false;
 			return;
 		}
 		checking = true;
 		failure = null;
+		ended = null;
+		pwNotice = null;
+		resetPasswordForms();
 		probe = await probeTotp();
 		if (probe.kind === 'error') failure = probe.message;
+		await loadPassword();
 		checking = false;
 		try {
 			passkeys = await listPasskeys();
@@ -123,6 +190,183 @@
 			// leaves the counts unknown rather than blocking the factor controls.
 			passkeys = null;
 		}
+	}
+
+	/**
+	 * Read the deployment's password mode and this account's row.
+	 *
+	 * Two questions, two sources, because they are different things: health knows
+	 * whether the deployment has passwords at all, and the linked-accounts list
+	 * knows whether this account holds one. Neither is inferred from the other.
+	 */
+	async function loadPassword(): Promise<void> {
+		passwordLoading = true;
+		passwordReadError = null;
+		passwordSet = null;
+		try {
+			const { health } = await getHealth(true);
+			passwordMode = readMode(health.password_mode);
+			pepperReady = health.password_configured === true;
+		} catch (error) {
+			// The module answered for itself even if health did not: one of the
+			// two unanswered means the card says so rather than inventing a mode.
+			passwordMode = null;
+			pepperReady = null;
+			passwordReadError = describeError(error);
+		}
+		if (passwordMode !== null && passwordMode !== 'off') {
+			passwordSet = await passwordIsSet();
+		}
+		passwordLoading = false;
+	}
+
+	function resetPasswordForms(): void {
+		pwOpen = false;
+		pwValue = '';
+		pwShow = false;
+		pwError = null;
+		pwRemoveOpen = false;
+		pwRemoveValue = '';
+		pwRemoveCode = '';
+		pwRemoveError = null;
+	}
+
+	async function openPasswordForm(): Promise<void> {
+		pwOpen = true;
+		pwError = null;
+		pwNotice = null;
+		pwValue = '';
+		pwShow = false;
+		await tick();
+		pwField?.focus();
+	}
+
+	/**
+	 * A refusal the operator has to read: bring the notice into view, keeping the
+	 * caret where they were, the same way the authenticator forms do.
+	 */
+	async function applyPasswordFailure(error: unknown, where: 'set' | 'remove'): Promise<void> {
+		const failure: PasswordFailure = toPasswordFailure(error, where === 'set' ? 'set' : 'remove');
+		const message = failure.message;
+		if (failure.kind === 'mode-changed' && failure.mode !== null) {
+			// The deployment moved; the page's copy of the mode was stale. Trust the
+			// refusal over the load, so the next attempt uses the right shape.
+			passwordMode = failure.mode;
+			if (failure.mode === 'off') passwordSet = null;
+		}
+		if (where === 'set') {
+			pwError = message;
+			if (failure.kind !== 'mode-changed') {
+				pwValue = '';
+				pwShow = false;
+			}
+			await revealError('pw-error', pwField);
+			return;
+		}
+		pwRemoveError = message;
+		pwRemoveValue = '';
+		pwRemoveCode = '';
+		await revealError('pw-remove-error', pwProofField);
+	}
+
+	async function savePassword(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (pwSaving || passwordMode === null || passwordMode === 'off') return;
+		const email = session.email;
+		if (email === null) {
+			pwError = 'The signed-in account has no email on this session. Sign in again.';
+			return;
+		}
+		const lengthProblem = checkPasswordLength(pwValue);
+		if (lengthProblem !== null) {
+			pwError = lengthProblem;
+			pwField?.focus();
+			return;
+		}
+		pwSaving = true;
+		pwError = null;
+		pwNotice = null;
+		try {
+			await setPassword({ mode: passwordMode, email, password: pwValue });
+			passwordSet = true;
+			pwOpen = false;
+			pwValue = '';
+			pwShow = false;
+			pwNotice =
+				passwordMode === 'client-derived'
+					? 'The password is set. The key was derived in this browser; the password itself was never sent.'
+					: 'The password is set. The gateway derived the key from it.';
+		} catch (error) {
+			await applyPasswordFailure(error, 'set');
+		} finally {
+			pwSaving = false;
+		}
+	}
+
+	async function openRemoval(): Promise<void> {
+		if (pwOnlyFactor) return;
+		pwRemoveOpen = true;
+		pwRemoveError = null;
+		pwNotice = null;
+		pwRemoveValue = '';
+		pwRemoveCode = '';
+		await tick();
+		pwProofField?.focus();
+	}
+
+	async function removeThePassword(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (pwRemoveBusy || passwordMode === null || passwordMode === 'off') return;
+		const email = session.email;
+		if (email === null) {
+			pwRemoveError = 'The signed-in account has no email on this session. Sign in again.';
+			return;
+		}
+
+		if (pwNeedsCode) {
+			const code = cleanCode(pwRemoveCode);
+			if (!isWellFormedCode(code, false)) {
+				pwRemoveError = 'Enter the six digits the authenticator is showing right now.';
+				pwProofField?.focus();
+				return;
+			}
+			pwRemoveBusy = true;
+			pwRemoveError = null;
+			try {
+				await removePassword({ mode: passwordMode, email, code });
+				finishRemoval();
+			} catch (error) {
+				await applyPasswordFailure(error, 'remove');
+			} finally {
+				pwRemoveBusy = false;
+			}
+			return;
+		}
+
+		if (pwRemoveValue === '') {
+			pwRemoveError = 'Enter the password this account uses now.';
+			pwProofField?.focus();
+			return;
+		}
+		pwRemoveBusy = true;
+		pwRemoveError = null;
+		try {
+			await removePassword({ mode: passwordMode, email, password: pwRemoveValue });
+			finishRemoval();
+		} catch (error) {
+			await applyPasswordFailure(error, 'remove');
+		} finally {
+			pwRemoveBusy = false;
+		}
+	}
+
+	function finishRemoval(): void {
+		passwordSet = false;
+		pwRemoveOpen = false;
+		pwRemoveValue = '';
+		pwRemoveCode = '';
+		pwNotice =
+			'The password was removed. The passkey is the way in; the authenticator, if it is on, still asks for its code.';
 	}
 
 	async function startEnrolment(): Promise<void> {
@@ -652,6 +896,313 @@
 				</div>
 			</section>
 		{/if}
+
+		{#if pwVisible}
+			<section class="card factor-card" id="password-card" aria-labelledby="password-title">
+				<header class="factor-head">
+					<div class="factor-title">
+						<span class="step-mark mono" aria-hidden="true">04</span>
+						<div>
+							<h2 id="password-title">Password</h2>
+							<p class="factor-lede">
+								A way in that needs no passkey: a fallback for a device where the key is gone,
+								or a browser that cannot use one.
+							</p>
+						</div>
+					</div>
+					{#if passwordLoading}
+						<span class="chip" data-tone="muted"><Spinner /> checking</span>
+					{:else if passwordMode === null}
+						<span class="chip" data-tone="muted">unknown</span>
+					{:else if pepperReady === false}
+						<span class="chip" data-tone="warn">no pepper</span>
+					{:else if passwordSet === null}
+						<span class="chip" data-tone="muted">unknown</span>
+					{:else if passwordSet}
+						<span class="chip" data-tone="ok">set</span>
+					{:else}
+						<span class="chip" data-tone="muted">not set</span>
+					{/if}
+				</header>
+
+				{#if passwordLoading}
+					<div class="factor-body" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Reading this deployment's password mode</span>
+						<div class="skeleton" style="height: 14px; width: 56%"></div>
+						<div class="skeleton" style="height: 14px; width: 38%; margin-top: 10px"></div>
+					</div>
+				{:else if passwordMode === null}
+					<div class="factor-body">
+						<Notice tone="warn" title="The password mode could not be read">
+							{passwordReadError ?? 'The gateway did not say which side runs the password key derivation, so nothing here is offered.'}
+						</Notice>
+						<button
+							type="button"
+							class="btn btn-sm"
+							style="margin-top: 12px"
+							onclick={() => void loadPassword()}
+						>
+							<Icon name="refresh" size={13} /> Read it again
+						</button>
+					</div>
+				{:else if pepperReady === false}
+					<div class="factor-body">
+						<Notice tone="warn" title="The password pepper is not set">
+							A password row is sealed with <code>AUTH_PEPPER</code>, and this deployment has none,
+							so a password can be neither stored nor checked. The mode is on; the secret is missing.
+						</Notice>
+						<div class="command">
+							<code>wrangler secret put AUTH_PEPPER</code>
+							<CopyButton value="wrangler secret put AUTH_PEPPER" iconOnly label="Copy command" />
+						</div>
+					</div>
+				{:else}
+					<div class="factor-body">
+						<p class="pw-mode">
+							<span class="mode-tag mono">{passwordMode}</span>
+							<span class="hint">
+								{#if passwordMode === 'client-derived'}
+									Passwords are {modeLabel(passwordMode)}: this browser runs PBKDF2 with the count
+									the gateway reports, and only the derived key is sent. The free plan has the CPU
+									for this and not for the alternative.
+								{:else}
+									Passwords are {modeLabel(passwordMode)}: each attempt costs the gateway a KDF, which
+									is why this mode exists on paid plans. The password crosses the connection; the
+									key derivation happens at the other end.
+								{/if}
+							</span>
+						</p>
+
+						{#if pwNotice}
+							<div class="field-error-note pw-notice"><Notice tone="ok">{pwNotice}</Notice></div>
+						{/if}
+
+						<p class="state-line pw-state">
+							{#if passwordSet === true}
+								Set. This account can sign in with it where there is no passkey; the passkey stays
+								the first choice and is asked for first.
+							{:else if passwordSet === false}
+								Not set. Signing in uses the passkey, and an authenticator code after it when that
+								factor is on.
+							{:else}
+								This console could not read whether a password is set. Saving one sets it if it is
+								missing and replaces it if it is not.
+							{/if}
+						</p>
+
+						{#if !pwOpen && !pwRemoveOpen}
+							<div class="factor-actions">
+								<button
+									type="button"
+									class="btn btn-primary btn-sm"
+									onclick={() => void openPasswordForm()}
+									disabled={pwSaving || pwRemoveBusy}
+								>
+									<Icon name="key" size={14} />
+									{passwordSet === true ? 'Replace the password' : 'Set a password'}
+								</button>
+								{#if passwordSet === true}
+									<button
+										type="button"
+										class="btn btn-danger btn-sm"
+										onclick={() => void openRemoval()}
+										disabled={pwOnlyFactor || pwSaving || pwRemoveBusy}
+										aria-expanded={pwRemoveOpen}
+										aria-controls="pw-remove-form"
+									>
+										<Icon name="trash" size={13} /> Remove
+									</button>
+								{/if}
+							</div>
+							{#if passwordSet === true && pwOnlyFactor}
+								<p class="hint pw-note pw-blocked">
+									This account has no passkey listed, so the password is the only way in. Removing
+									it would leave an account nobody can reach; add a passkey first.
+								</p>
+							{:else if passwordSet === true}
+								<p class="hint pw-note">
+									Replacing the password keeps the passkey and the authenticator as they are.
+								</p>
+							{/if}
+						{/if}
+
+						{#if pwOpen}
+							<form class="pw-form" onsubmit={savePassword} novalidate>
+								<div class="field">
+									<label class="label" for="pw-new">New password</label>
+									<div class="input-row">
+										<input
+											bind:this={pwField}
+											bind:value={pwValue}
+											id="pw-new"
+											name="new-password"
+											class="input"
+											type={pwShow ? 'text' : 'password'}
+											autocomplete="new-password"
+											autocapitalize="off"
+											autocorrect="off"
+											spellcheck="false"
+											minlength={MIN_PASSWORD_LENGTH}
+											maxlength={MAX_PASSWORD_LENGTH}
+											placeholder={`${MIN_PASSWORD_LENGTH} characters or more`}
+											disabled={pwSaving}
+											aria-invalid={pwError ? 'true' : undefined}
+											aria-describedby="pw-new-hint"
+										/>
+										<button
+											type="button"
+											class="btn btn-sm pw-show"
+											onclick={() => (pwShow = !pwShow)}
+											aria-pressed={pwShow}
+											aria-label={pwShow ? 'Hide the password' : 'Show the password'}
+										>
+											{pwShow ? 'Hide' : 'Show'}
+										</button>
+									</div>
+
+									<div class="pw-strength" data-tone={pwStrength.tone} aria-hidden="true">
+										{#each [1, 2, 3, 4] as segment (segment)}
+											<span class="pw-seg" class:is-lit={pwStrength.score >= segment}></span>
+										{/each}
+									</div>
+									<p id="pw-new-hint" class="hint pw-hint" aria-live="polite">
+										<strong>{pwStrength.label}.</strong>
+										{pwStrength.hint}
+									</p>
+									<p class="hint">
+										Length is judged here, nothing else: a symbol makes a short password look better
+										without making it harder to guess. Paste from a password manager as usual.
+									</p>
+								</div>
+
+								{#if pwError}
+									<div class="field-error-note" id="pw-error">
+										<Notice tone="danger">{pwError}</Notice>
+									</div>
+								{/if}
+
+								<div class="pw-actions">
+									<button
+										type="submit"
+										class="btn btn-primary btn-sm"
+										disabled={pwSaving || pwLengthError !== null || pwValue.length < MIN_PASSWORD_LENGTH}
+										aria-busy={pwSaving}
+									>
+										{#if pwSaving}<Spinner />{:else}<Icon name="check" size={13} />{/if}
+										{pwSaving
+											? 'Deriving'
+											: passwordSet === true
+												? 'Replace it'
+												: 'Save the password'}
+									</button>
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => {
+											pwOpen = false;
+											pwError = null;
+											pwValue = '';
+											pwShow = false;
+										}}
+										disabled={pwSaving}
+									>
+										Cancel
+									</button>
+								</div>
+							</form>
+						{/if}
+
+						{#if pwRemoveOpen}
+							<form id="pw-remove-form" class="disable-form" onsubmit={removeThePassword} novalidate>
+								{#if pwNeedsCode}
+									<div class="field">
+										<label class="label" for="pw-remove-code">Confirm with a current code</label>
+										<input
+											bind:this={pwProofField}
+											bind:value={pwRemoveCode}
+											id="pw-remove-code"
+											class="input input-mono code-input"
+											inputmode="numeric"
+											autocomplete="one-time-code"
+											pattern="[0-9]*"
+											maxlength="6"
+											placeholder="000000"
+											spellcheck="false"
+											disabled={pwRemoveBusy}
+											aria-invalid={pwRemoveError ? 'true' : undefined}
+											aria-describedby="pw-remove-hint"
+											oninput={(event) => {
+												pwRemoveCode = event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6);
+											}}
+										/>
+									</div>
+								{:else}
+									<div class="field">
+										<label class="label" for="pw-remove-value">Confirm with the password</label>
+										<input
+											bind:this={pwProofField}
+											bind:value={pwRemoveValue}
+											id="pw-remove-value"
+											name="current-password"
+											class="input"
+											type="password"
+											autocomplete="current-password"
+											spellcheck="false"
+											disabled={pwRemoveBusy}
+											aria-invalid={pwRemoveError ? 'true' : undefined}
+											aria-describedby="pw-remove-hint"
+										/>
+									</div>
+								{/if}
+
+								<p id="pw-remove-hint" class="hint">
+									Removing the password stops password sign-in on every device at once. The passkey
+									and the authenticator are left untouched.
+									{#if pwNeedsCode}
+										A current authenticator code proves this is you; the password is not asked for
+										while the authenticator is on.
+									{:else}
+										The password itself proves this is you.
+									{/if}
+								</p>
+
+								{#if pwRemoveError}
+									<div class="field-error-note" id="pw-remove-error">
+										<Notice tone="danger">{pwRemoveError}</Notice>
+									</div>
+								{/if}
+
+								<div class="disable-actions">
+									<button
+										type="submit"
+										class="btn btn-danger-solid btn-sm"
+										disabled={pwRemoveBusy ||
+											(pwNeedsCode ? pwRemoveCode.length !== 6 : pwRemoveValue === '')}
+										aria-busy={pwRemoveBusy}
+									>
+										{#if pwRemoveBusy}<Spinner />{:else}<Icon name="trash" size={13} />{/if}
+										{pwRemoveBusy ? 'Removing' : 'Remove the password'}
+									</button>
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => {
+											pwRemoveOpen = false;
+											pwRemoveError = null;
+											pwRemoveValue = '';
+											pwRemoveCode = '';
+										}}
+										disabled={pwRemoveBusy}
+									>
+										Keep it
+									</button>
+								</div>
+							</form>
+						{/if}
+					</div>
+				{/if}
+			</section>
+		{/if}
 	{/if}
 </div>
 
@@ -905,6 +1456,111 @@
 		margin-top: var(--s-3);
 	}
 
+	/* --------------------------------------------------------------- password */
+
+	/* The mode on its own line, then one sentence about what it means. Side by
+	   side, the tag starved the sentence into a narrow column. */
+	.pw-mode {
+		max-width: 84ch;
+		margin-bottom: var(--s-3);
+	}
+
+	/* The raw `AUTH_PASSWORD_MODE` value, so what the page says and what the
+	   deployment is set to are the same string. */
+	.mode-tag {
+		flex: none;
+		padding: 2px 7px;
+		border: 1px solid var(--line);
+		border-radius: var(--r-sm);
+		background: var(--df-surface-well);
+		color: var(--ink-2);
+		font-size: 10.5px;
+		letter-spacing: 0.04em;
+	}
+
+	.pw-mode .hint {
+		display: block;
+		margin-top: 6px;
+	}
+
+	.pw-state {
+		max-width: 68ch;
+	}
+
+	.pw-notice {
+		margin-bottom: var(--s-3);
+	}
+
+	.pw-blocked {
+		max-width: 74ch;
+	}
+
+	/* A sentence under a button row, not glued to it. */
+	.pw-note {
+		margin-top: var(--s-2);
+	}
+
+	.pw-form {
+		margin-top: var(--s-3);
+		padding-top: var(--s-3);
+		border-top: 1px solid var(--line);
+		max-width: 460px;
+	}
+
+	.pw-show {
+		flex: none;
+		min-width: 58px;
+		height: auto;
+		align-self: stretch;
+	}
+
+	.pw-actions {
+		display: flex;
+		gap: var(--s-2);
+		flex-wrap: wrap;
+		margin-top: var(--s-3);
+	}
+
+	/* Four segments, lit by length alone. The colour is the only judgement made
+	   here, and it is about length, not about what is in the password. */
+	.pw-strength {
+		display: flex;
+		gap: 4px;
+		margin-top: 8px;
+	}
+
+	.pw-seg {
+		flex: 1;
+		height: 3px;
+		border-radius: 2px;
+		background: color-mix(in srgb, var(--ink-3) 26%, transparent);
+		transition: background-color 160ms ease;
+	}
+
+	.pw-strength[data-tone='short'] .pw-seg.is-lit,
+	.pw-strength[data-tone='weak'] .pw-seg.is-lit {
+		background: var(--danger);
+	}
+
+	.pw-strength[data-tone='fair'] .pw-seg.is-lit {
+		background: var(--warn);
+	}
+
+	.pw-strength[data-tone='good'] .pw-seg.is-lit,
+	.pw-strength[data-tone='long'] .pw-seg.is-lit {
+		background: var(--ok);
+	}
+
+	.pw-hint strong {
+		color: var(--ink-2);
+		font-weight: 600;
+	}
+
+	.pw-hint + .hint {
+		margin-top: 6px;
+		max-width: 62ch;
+	}
+
 	@media (max-width: 720px) {
 		.factor-card {
 			padding: var(--s-4);
@@ -946,13 +1602,29 @@
 		}
 
 		.factor-actions .btn,
-		.disable-actions .btn {
+		.disable-actions .btn,
+		.pw-actions .btn {
 			min-height: 48px;
+		}
+
+		/* The password field is typed into with a thumb, and the Show button sits
+		   on the same row: both take the 48dp target. */
+		.pw-form .input,
+		.pw-show {
+			min-height: 48px;
+		}
+
+		.pw-form {
+			max-width: none;
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.factor-card {
+			transition: none;
+		}
+
+		.pw-seg {
 			transition: none;
 		}
 	}

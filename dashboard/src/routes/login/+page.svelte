@@ -13,6 +13,13 @@
 		signOutAccount
 	} from '$lib/api';
 	import { passkeySupport, signInWithPasskey, verifyAuthenticatorCode, verifyRecoveryCode } from '$lib/passkey';
+	import {
+		PasswordFailure,
+		probePasswordSignIn,
+		readMode,
+		signInWithPassword,
+		type PasswordMode
+	} from '$lib/password';
 	import { isWellFormedCode } from '$lib/totp';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
@@ -50,17 +57,40 @@
 	let gate = $state<Gate>({ kind: 'checking' });
 
 	/** Passkey path: which step of it is on screen. */
-	let step = $state<'passkey' | 'second-factor'>('passkey');
+	let step = $state<'passkey' | 'password' | 'second-factor'>('passkey');
 	let useRecovery = $state(false);
 	let codeInput = $state<HTMLInputElement | null>(null);
 	let passkeyBusy = $state(false);
 	let passkeyError = $state<string | null>(null);
+	/** Which first factor this sign-in came through, so the code step names it. */
+	let firstFactor = $state<'passkey' | 'password'>('passkey');
 	/**
 	 * True once the server has burned the challenge: too many wrong codes, or the
-	 * ten-minute window closed. The only way forward is a new passkey assertion,
-	 * so the form stops offering a retry that cannot work.
+	 * ten-minute window closed. The only way forward is a new first factor, so
+	 * the form stops offering a retry that cannot work.
 	 */
 	let challengeSpent = $state(false);
+
+	/**
+	 * The password door.
+	 *
+	 * `password_mode` lives on `/v1/admin/health`, which is admin-gated: before
+	 * sign-in it usually answers 401, so the mode is often `unknown` here. The
+	 * door is then offered, and opening it asks the sign-in route itself whether
+	 * passwords are on — that route is the authority, and it answers
+	 * `password_disabled` (403) when the mode is `off`. A deployment known to be
+	 * off never offers the door, and no password field is ever shown for one.
+	 */
+	let passwordAvailable = $state<'on' | 'off' | 'unknown'>('unknown');
+	let passwordCheck = $state<'idle' | 'checking'>('idle');
+	let passwordRefused = $state<string | null>(null);
+	let pwEmail = $state('');
+	let pwPassword = $state('');
+	let pwShow = $state(false);
+	let pwBusy = $state(false);
+	let pwError = $state<string | null>(null);
+	let pwEmailField = $state<HTMLInputElement | null>(null);
+	let pwPasswordField = $state<HTMLInputElement | null>(null);
 
 	const nextTarget = $derived.by(() => {
 		const requested = page.url.searchParams.get('next');
@@ -114,6 +144,7 @@
 				raw.auth_configured === true
 					? { kind: 'new' }
 					: { kind: 'new-unconfigured' };
+			readPasswordAvailability(raw);
 		} else if (raw.auth_mode === 'legacy') {
 			gate = { kind: 'legacy' };
 		} else if (String(raw.error ?? '') === 'auth_unavailable') {
@@ -135,6 +166,135 @@
 		if (gate.kind === 'new-unconfigured' || gate.kind === 'unreachable' || gate.kind === 'failed')
 			return;
 		input?.focus();
+	}
+
+	/**
+	 * The one pre-sign-in read of the password mode, when health answers at all.
+	 * `password_configured: false` means `AUTH_PEPPER` is missing: a password
+	 * could be stored in neither mode, so the door stays shut.
+	 */
+	function readPasswordAvailability(health: Record<string, unknown>): void {
+		const mode: PasswordMode = readMode(health.password_mode);
+		const configured = health.password_configured === true;
+		passwordAvailable = mode !== 'off' && configured ? 'on' : 'off';
+	}
+
+	/**
+	 * Open the password door.
+	 *
+	 * When the mode was readable this is immediate. When it was not — the usual
+	 * case, because health is admin-gated — the sign-in route is asked once,
+	 * with a reserved `.example` address and all-zero material, so the check can
+	 * never touch a real account. A deployment that says `password_disabled`
+	 * gets a sentence instead of a form, which is the rule: no password field is
+	 * ever shown for a deployment whose mode is off.
+	 */
+	async function openPasswordDoor(): Promise<void> {
+		if (passwordCheck === 'checking' || passkeyBusy) return;
+		passwordRefused = null;
+		passkeyError = null;
+		if (passwordAvailable === 'on') {
+			await showPasswordStep();
+			return;
+		}
+		passwordCheck = 'checking';
+		try {
+			const answer = await probePasswordSignIn();
+			if (answer === 'off') {
+				passwordAvailable = 'off';
+				passwordRefused =
+					'Passwords are switched off on this deployment. Sign in with the passkey.';
+				await tick();
+				document.getElementById('passkey-start')?.focus();
+				return;
+			}
+			passwordAvailable = answer;
+			await showPasswordStep();
+		} finally {
+			passwordCheck = 'idle';
+		}
+	}
+
+	async function showPasswordStep(): Promise<void> {
+		step = 'password';
+		pwError = null;
+		pwPassword = '';
+		pwShow = false;
+		if (pwEmail === '') pwEmail = session.email ?? '';
+		await tick();
+		if (pwEmail.trim() === '') pwEmailField?.focus();
+		else pwPasswordField?.focus();
+	}
+
+	async function backToPasskey(): Promise<void> {
+		step = 'passkey';
+		pwError = null;
+		pwPassword = '';
+		pwShow = false;
+		await tick();
+		document.getElementById('passkey-start')?.focus();
+	}
+
+	/** A shape check, not a policy: the gateway is the one that decides. */
+	function looksLikeEmail(value: string): boolean {
+		return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+	}
+
+	async function passwordSignIn(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (pwBusy) return;
+		const email = pwEmail.trim();
+		if (!looksLikeEmail(email)) {
+			pwError = 'Enter the email address this account uses.';
+			pwEmailField?.focus();
+			return;
+		}
+		if (pwPassword === '') {
+			pwError = 'Enter the password for this account.';
+			pwPasswordField?.focus();
+			return;
+		}
+
+		pwBusy = true;
+		pwError = null;
+		try {
+			const result = await signInWithPassword({ email, password: pwPassword });
+			// The password has been used; keep no copy of it in state or in the DOM.
+			pwPassword = '';
+			pwShow = false;
+			firstFactor = 'password';
+			if (result.twoFactorRedirect) {
+				await beginSecondFactorStep();
+				return;
+			}
+			const current = await getAuthSession();
+			if (current === null) {
+				// A TOTP account: this Worker withheld the session. An older one that
+				// did not is caught here rather than opening the console unasked.
+				await beginSecondFactorStep();
+				return;
+			}
+			await landAccountSession();
+		} catch (error) {
+			if (error instanceof PasswordFailure) {
+				if (error.kind === 'disabled') {
+					passwordAvailable = 'off';
+					passwordRefused = error.message;
+					step = 'passkey';
+					await tick();
+					document.getElementById('passkey-start')?.focus();
+					return;
+				}
+				pwError = error.message;
+			} else {
+				pwError = errorCopy(error);
+			}
+			pwPassword = '';
+			await tick();
+			pwPasswordField?.focus();
+		} finally {
+			pwBusy = false;
+		}
 	}
 
 	onMount(() => {
@@ -207,8 +367,9 @@
 			if (failure instanceof ApiError && (failure.status === 401 || failure.status === 403)) {
 				await signOutAccount();
 				gate = { kind: 'legacy' };
-				error =
-					'This deployment still signs in with the admin token. The passkey worked, but the console does not accept it yet; use the token below.';
+				error = `This deployment still signs in with the admin token. The ${
+					firstFactor === 'password' ? 'password' : 'passkey'
+				} worked, but the console does not accept it yet; use the token below.`;
 				await focusArrival();
 				return false;
 			}
@@ -255,12 +416,16 @@
 		codeInput?.focus();
 	}
 
-	/** Back to the passkey step: a spent challenge cannot be revived. */
+	/** Back to the first factor that was used: a spent challenge cannot be revived. */
 	async function startOver(): Promise<void> {
-		step = 'passkey';
 		useRecovery = false;
 		challengeSpent = false;
 		passkeyError = null;
+		if (firstFactor === 'password') {
+			await showPasswordStep();
+			return;
+		}
+		step = 'passkey';
 		await tick();
 		document.getElementById('passkey-start')?.focus();
 	}
@@ -416,19 +581,20 @@
 						<h1>Enter your {useRecovery ? 'recovery code' : 'authenticator code'}</h1>
 						<p class="login-lede">
 							{#if challengeSpent}
-								This sign-in challenge was used up. Start again with the passkey to get a fresh one.
+								This sign-in challenge was used up. Start again with
+								{firstFactor === 'password' ? 'the password' : 'the passkey'} to get a fresh one.
 							{:else if useRecovery}
 								One of the single-use codes saved when the authenticator was set up. Each one works
 								once and cannot be reused.
 							{:else}
-								The passkey was accepted. One code from the authenticator app on this account
-								finishes the sign-in.
+								{firstFactor === 'password' ? 'The password was accepted.' : 'The passkey was accepted.'}
+								One code from the authenticator app on this account finishes the sign-in.
 							{/if}
 						</p>
 
 						<p class="step-done">
 							<span class="step-tick" aria-hidden="true"><Icon name="check" size={12} /></span>
-							Passkey accepted
+							{firstFactor === 'password' ? 'Password accepted' : 'Passkey accepted'}
 						</p>
 
 						{#if challengeSpent}
@@ -440,7 +606,11 @@
 								class="btn btn-primary btn-wide login-submit"
 								onclick={() => void startOver()}
 							>
-								<Icon name="fingerprint" size={15} /> Start again with the passkey
+								{#if firstFactor === 'password'}
+									<Icon name="key" size={15} /> Start again with the password
+								{:else}
+									<Icon name="fingerprint" size={15} /> Start again with the passkey
+								{/if}
 							</button>
 						{:else}
 							<form onsubmit={submitCode} novalidate>
@@ -506,16 +676,108 @@
 								<span>
 									{useRecovery
 										? 'Codes are replaced, not topped up: when the set runs low, make a new one from Sign-in security.'
-										: 'Five wrong codes end this sign-in; the passkey starts a fresh one.'}
+										: 'Five wrong codes end this sign-in; the first step starts a fresh one.'}
 								</span>
 							</p>
 						{/if}
+					{:else if step === 'password'}
+						<p class="eyebrow">Operator access</p>
+						<h1>Sign in with a password</h1>
+						<p class="login-lede">
+							The address and password on this account. This browser runs the key derivation
+							first; the password itself is not sent.
+						</p>
+
+						<form onsubmit={passwordSignIn} novalidate>
+							<div class="field">
+								<label class="label" for="pw-email">Email</label>
+								<input
+									bind:this={pwEmailField}
+									bind:value={pwEmail}
+									id="pw-email"
+									name="username"
+									class="input"
+									type="email"
+									autocomplete="username"
+									autocapitalize="none"
+									autocorrect="off"
+									spellcheck="false"
+									placeholder="you@example.com"
+									disabled={pwBusy}
+									aria-describedby="pw-email-hint"
+								/>
+								<p id="pw-email-hint" class="hint">The address this account was invited with.</p>
+							</div>
+
+							<div class="field">
+								<label class="label" for="pw-secret">Password</label>
+								<div class="input-row">
+									<input
+										bind:this={pwPasswordField}
+										bind:value={pwPassword}
+										id="pw-secret"
+										name="current-password"
+										class="input"
+										type={pwShow ? 'text' : 'password'}
+										autocomplete="current-password"
+										autocapitalize="off"
+										autocorrect="off"
+										spellcheck="false"
+										disabled={pwBusy}
+										aria-invalid={pwError ? 'true' : undefined}
+										aria-describedby="pw-secret-hint"
+									/>
+									<button
+										type="button"
+										class="btn btn-sm show-btn"
+										onclick={() => (pwShow = !pwShow)}
+										aria-pressed={pwShow}
+										aria-label={pwShow ? 'Hide the password' : 'Show the password'}
+									>
+										{pwShow ? 'Hide' : 'Show'}
+									</button>
+								</div>
+								<p id="pw-secret-hint" class="hint">
+									8 to 128 characters. Paste from a password manager as usual.
+								</p>
+							</div>
+
+							{#if pwError}
+								<div class="login-error"><Notice tone="danger">{pwError}</Notice></div>
+							{/if}
+
+							<button
+								type="submit"
+								class="btn btn-primary btn-wide login-submit"
+								disabled={pwBusy}
+								aria-busy={pwBusy}
+							>
+								{#if pwBusy}<Spinner />{:else}<Icon name="key" size={15} />{/if}
+								{pwBusy ? 'Deriving and checking' : 'Sign in'}
+							</button>
+
+							<button
+								type="button"
+								class="link-btn login-alternate"
+								onclick={() => void backToPasskey()}
+								disabled={pwBusy}
+							>
+								Use a passkey instead
+							</button>
+						</form>
+
+						<p class="login-note">
+							<span class="note-icon"><Icon name="shield" size={13} /></span>
+							<span>
+								A wrong password and an address with no account get the same answer, on purpose.
+								Only an HttpOnly, SameSite=Strict session cookie is kept.
+							</span>
+						</p>
 					{:else}
 						<p class="eyebrow">Operator access</p>
 						<h1>Sign in to the console</h1>
 						<p class="login-lede">
-							This deployment signs in with a passkey. The key stays on this device; there is no
-							password.
+							This deployment signs in with a passkey. The key stays on this device.
 						</p>
 
 						{#if supportNote}
@@ -541,6 +803,38 @@
 							<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
 						{/if}
 
+						<!--
+							The password factor, offered under the passkey rather than beside it:
+							the passkey is the first factor, and this is the fallback for an
+							account that has one. A deployment whose mode is `off` (or whose
+							pepper is missing) never renders this.
+						-->
+						{#if passwordAvailable !== 'off'}
+							<div class="login-alt">
+								<span class="login-alt-rule" aria-hidden="true"></span>
+								<button
+									type="button"
+									class="btn btn-wide"
+									onclick={() => void openPasswordDoor()}
+									disabled={passwordCheck === 'checking' || passkeyBusy}
+									aria-busy={passwordCheck === 'checking'}
+								>
+									{#if passwordCheck === 'checking'}
+										<Spinner />
+									{:else}
+										<Icon name="key" size={15} />
+									{/if}
+									{passwordCheck === 'checking'
+										? 'Checking this deployment'
+										: 'Use a password instead'}
+								</button>
+							</div>
+						{/if}
+
+						{#if passwordRefused}
+							<div class="login-error"><Notice tone="info">{passwordRefused}</Notice></div>
+						{/if}
+
 						<p class="login-note">
 							<span class="note-icon"><Icon name="shield" size={13} /></span>
 							<span>
@@ -553,11 +847,16 @@
 							<summary>Trouble signing in?</summary>
 							<div class="login-more-body">
 								<p>
-									A passkey is the only way into an account on this deployment. If the device
-									holding it is gone, an owner has to help: there is no password to reset.
+									{#if passwordAvailable === 'off'}
+										A passkey is the only way into an account on this deployment. If the device
+										holding it is gone, an owner has to help: there is no password to reset.
+									{:else}
+										A passkey is the first way in. If the device holding it is gone, an account with
+										a password can use that instead; one without it needs an owner to help.
+									{/if}
 								</p>
 								<p>
-									Two-factor on the account? After the passkey the console asks for an
+									Two-factor on the account? After the first step the console asks for an
 									authenticator code, and a saved recovery code is accepted there instead.
 								</p>
 								<p>
@@ -657,6 +956,24 @@
 								>
 									<Icon name="fingerprint" size={15} /> Sign in with a passkey
 								</button>
+								<!--
+									The same door as on the passkey screen. This is the screen a real
+									deployment lands on — health is admin-gated, so the mode is usually
+									unreadable before sign-in — and an account whose only way in is a
+									password must not have to press "passkey" to find it.
+								-->
+								{#if passwordAvailable !== 'off'}
+									<button
+										type="button"
+										class="btn btn-wide"
+										onclick={() => {
+											gate = { kind: 'new' };
+											void tick().then(() => openPasswordDoor());
+										}}
+									>
+										<Icon name="key" size={15} /> Use a password instead
+									</button>
+								{/if}
 								<p class="hint">
 									Use this after the deployment has switched to account sign-in.
 								</p>
@@ -843,6 +1160,12 @@
 		border: 1px solid var(--line);
 	}
 
+	/* Two stacked fields need air between them: the first one's hint otherwise
+	   sits on top of the second one's label. */
+	form .field + .field {
+		margin-top: var(--s-4);
+	}
+
 	.login-submit + .login-error {
 		margin-top: var(--s-3);
 	}
@@ -885,9 +1208,13 @@
 
 	@media (max-width: 720px) {
 		/* A code is typed with a thumb and the submit finishes the whole
-		   sign-in: both get the 48dp target on a phone. */
+		   sign-in: both get the 48dp target on a phone. The password fields and
+		   the two door buttons are the same kind of control. */
 		.code-field,
-		.login-submit {
+		.login-submit,
+		.login-body form .input,
+		.login-alt .btn,
+		.login-alternate {
 			min-height: 48px;
 		}
 	}
