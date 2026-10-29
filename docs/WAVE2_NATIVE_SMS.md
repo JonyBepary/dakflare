@@ -124,8 +124,12 @@ subscription instead.
 
 ## 7. What this does not fix
 
-- Keystore migration (the key is still PKCS#8 in libSQL) — do it in M5.3 while the
-  service work touches identity boot.
+- ~~Keystore migration (the key is still PKCS#8 in libSQL)~~ — done in M5.3. The
+  column holds `keystore:v1:<iv>:<ciphertext||tag>`, wrapped by an AndroidKeyStore
+  AES-256-GCM key (StrongBox where present); the P-256 identity and pairing are
+  unchanged, and the migration proves the round-trip against the stored SPKI before
+  it commits. Desktop keeps the plaintext column: it has no Keystore and is not a
+  gateway.
 - FCM wake and the WebSocket client — M5.3/M5.6; polling still works without them.
 - Rules are gateway-side by decision (§11.11); the device runs flows only. A phone
   with no synced flows has nothing to execute, and the Worker fallback answers on
