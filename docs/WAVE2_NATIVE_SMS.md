@@ -269,3 +269,22 @@ composer uses the same receipt.
 Still open, and not a software question: whether this SIM may send at all (carrier barring,
 plan, or the LineageOS 23 modem/IMS stack on `laurel_sprout`). Test order: the same SIM in
 another handset, then another SIM in this handset.
+
+### M5.2 closed, 2026-10-29 15:43
+
+With credit on the SIM the radio accepts sends, so the receipt path finally reports
+success instead of a refusal:
+
+```
+DakFlareSms: inbound sender=***6080 parts=1 stored=true actions=1
+DakFlareSms: reply handed to radio to=***6080 parts=1
+DakFlareSms: send status id=native-8010…-reply-0 result=-1 state=sent stored=true
+```
+
+Device rows: `in uploaded` and `out sent` for the same exchange. The composer path
+behaves the same (`compose-…` → `sent`, `sent provider wrote` into
+`content://sms/sent` with `address/body/date` intact).
+
+The earlier `failed` rows were the truth about an unfunded SIM, not a bug: no credit
+made every mobile-originated SMS fail with `result=16`, from every app on the phone.
+`sent` now means the radio accepted the message; delivery is still M5.5.
