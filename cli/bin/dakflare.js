@@ -95,6 +95,9 @@ const VALUE_FLAGS = new Set([
   'actor',
   'limit',
   'ttl',
+  'email',
+  'role',
+  'expires-in',
   'max-age',
   'serial',
   'keystore',
@@ -1308,6 +1311,111 @@ async function commandSend(argv) {
 
 /* ───────────────────────────── audit ───────────────────────────── */
 
+async function commandAuth(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('auth');
+  if (sub === 'bootstrap') return commandAuthBootstrap(rest);
+  if (sub === 'invite') return commandAuthInvite(rest);
+  if (sub === 'invites') return commandAuthInvites(rest);
+  err(`dakflare: unknown auth subcommand "${sub}"`);
+  err('try `dakflare auth --help`');
+  return 2;
+}
+
+/**
+ * Create the first owner. The account has no credential by design: the owner
+ * enrols a passkey from the console afterwards. Refused once an owner exists.
+ */
+async function commandAuthBootstrap(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['email', 'json']);
+  const json = Boolean(flags.json);
+  const email = stringFlag(flags, 'email');
+  if (!email || !email.includes('@')) throw usage('--email is required');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email, role: 'owner' });
+  if (result.status === 409) {
+    const message = 'an owner already exists on this deployment';
+    if (json) out(JSON.stringify({ ok: false, error: 'owner_exists' }, null, 2));
+    else out(message);
+    return 1;
+  }
+  if (result.status !== 200) throw requestFailure('bootstrap', result);
+
+  if (json) out(JSON.stringify({ ok: true, email, role: 'owner' }, null, 2));
+  else {
+    out(`Owner created: ${email}`);
+    out('  next: open the console and enrol a passkey, or `dakflare auth invite` another operator.');
+  }
+  return 0;
+}
+
+/** Mint an invite. The link is printed once; only its hash is stored. */
+async function commandAuthInvite(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['email', 'role', 'ttl', 'json']);
+  const json = Boolean(flags.json);
+  const email = stringFlag(flags, 'email');
+  if (!email || !email.includes('@')) throw usage('--email is required');
+  const role = stringFlag(flags, 'role') ?? 'member';
+  if (!['owner', 'admin', 'member'].includes(role)) {
+    throw usage('--role must be owner, admin or member');
+  }
+  const ttlFlag = stringFlag(flags, 'ttl');
+  const ttlSeconds = ttlFlag === undefined ? 86400 : Number(ttlFlag);
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 604800) {
+    throw usage('--ttl must be between 60 and 604800 seconds');
+  }
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'POST', '/v1/admin/invites', {
+    email,
+    role,
+    expires_in_s: Math.round(ttlSeconds),
+  });
+  if (result.status !== 200) throw requestFailure('invite', result);
+
+  const token = result.data?.invite?.token ?? result.data?.token ?? null;
+  const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
+  if (json) {
+    out(JSON.stringify({ ok: true, email, role, link, expires_in: ttlSeconds }, null, 2));
+  } else {
+    out(`Invite for ${email} (${role})`);
+    if (link) out(`  link           ${link}`);
+    else out('  link           not returned by this deployment; use `dakflare auth invites`');
+    out(`  expires        in ${ttlSeconds} seconds`);
+  }
+  return 0;
+}
+
+async function commandAuthInvites(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['json']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+  const result = await api(cfg, 'GET', '/v1/admin/invites');
+  if (result.status !== 200) throw requestFailure('invites', result);
+  const invites = result.data?.invites ?? [];
+  if (json) {
+    out(JSON.stringify({ ok: true, invites }, null, 2));
+    return 0;
+  }
+  if (invites.length === 0) {
+    out('no invites');
+    return 0;
+  }
+  out(`Invites (${invites.length})`);
+  for (const invite of invites) {
+    const used = invite.used_at ? 'used' : 'open';
+    out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
+  }
+  return 0;
+}
+
 async function commandAudit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('audit');
@@ -1575,6 +1683,14 @@ Queues one outbound SMS and prints the command id and its current state.
 
   For a body that begins with "-", use --body="…".`,
 
+  auth: `Usage: dakflare auth <bootstrap|invite|invites> [options]
+
+  bootstrap --email <address>            create the first owner (no credential; enrol a passkey next)
+  invite --email <address> [--role r] [--ttl seconds]
+                                         mint a single-use invite; prints the dakflare://invite link
+  invites                                list invites and whether they were used
+
+Roles: owner, admin, member. The invite link is shown once; only its hash is stored.`,
   audit: `Usage: dakflare audit --tail [n] [--actor <label>] [--limit <n>] [--json]
 
 Reads /v1/admin/audit. When the deployment has no audit endpoint (the phase 2
@@ -1611,6 +1727,7 @@ const COMMANDS = {
   revoke: commandRevoke,
   send: commandSend,
   audit: commandAudit,
+  auth: commandAuth,
   key: commandKey,
 };
 
