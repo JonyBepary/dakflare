@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="32" height="32" role="img" aria-labelledby="dakflare-title">
+	<title id="dakflare-title">DakFlare</title>
+	<!--
+		The app icon, not a second mark. Same coordinates as
+		simulator/.../res/drawable/ic_launcher_foreground.xml, shown through the
+		adaptive icon's 72dp window (viewBox 18 18 72 72) so the browser tab, the
+		console's brand plate and the launcher all draw one drawing.
+
+		Ink field because browser chrome is light: a cream field on cream chrome is
+		a shape with no edge. Coin (cream slab) and arc (coral) keep the launcher's
+		relationship: field #241F1A, slab #FBF6EE, arc #D9502C.
+	-->
+	<rect x="18" y="18" width="72" height="72" rx="16" fill="#241F1A" />
+	<rect x="41" y="40" width="26" height="42" rx="9" fill="#FBF6EE" />
+	<path d="M46.5 34a7.5 7.5 0 0 1 15 0" fill="none" stroke="#D9502C" stroke-width="5.5" stroke-linecap="round" />
+</svg>

@@ -18,6 +18,7 @@
 	import DeviceDetail from '$lib/components/DeviceDetail.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import Mascot from '$lib/components/Mascot.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import PresenceChip from '$lib/components/PresenceChip.svelte';
@@ -582,7 +583,7 @@
 						{#if waitState === 'paired' && paired}
 							{@const matched = paired}
 							<div class="pair-state pair-state-ok" aria-live="polite">
-								<span class="pair-state-mark"><Icon name="check" size={16} /></span>
+								<span class="pair-state-mascot"><Mascot size={64} /></span>
 								<div class="pair-state-body">
 									<p class="eyebrow">
 										{minted.purpose === 'rotate' ? 'Key rotated' : 'Pairing complete'}
@@ -1013,6 +1014,12 @@
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-surface-card);
 		color: var(--df-state-ok-ink);
+	}
+
+	.pair-state-mascot {
+		flex: none;
+		align-self: center;
+		margin: calc(var(--df-p-space-1) * -1) 0;
 	}
 
 	.pair-state-expired .pair-state-mark {

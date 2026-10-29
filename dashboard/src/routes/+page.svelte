@@ -16,6 +16,7 @@
 	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import Mascot from '$lib/components/Mascot.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import PresenceChip from '$lib/components/PresenceChip.svelte';
@@ -574,51 +575,7 @@
 					{:else}
 						<h2 id="alerts-heading" class="card-title">The console is quiet</h2>
 						<div class="quiet">
-							<svg
-								class="daki"
-								width="72"
-								height="58"
-								viewBox="0 0 120 96"
-								fill="none"
-								aria-hidden="true"
-							>
-								<rect
-									x="34"
-									y="10"
-									width="52"
-									height="76"
-									rx="14"
-									stroke="currentColor"
-									stroke-width="2.2"
-								/>
-								<rect
-									x="26"
-									y="34"
-									width="26"
-									height="34"
-									rx="8"
-									fill="var(--df-state-ok-bg)"
-									stroke="currentColor"
-									stroke-width="2.2"
-								/>
-								<path
-									d="M32 50l4 4 8-9"
-									stroke="var(--df-state-ok-ink)"
-									stroke-width="2.6"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								/>
-								<circle cx="52" cy="34" r="2.6" fill="currentColor" />
-								<circle cx="68" cy="34" r="2.6" fill="currentColor" />
-								<path
-									d="M52 44c3.4 4 12.6 4 16 0"
-									stroke="currentColor"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								/>
-								<path d="M86 26c6 0 10 4 10 10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
-								<path d="M96 44c3 0 5 2 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
-							</svg>
+							<Mascot size={72} idle />
 							<p class="quiet-title">No open alerts</p>
 							<p class="card-note">
 								Last checked <RelativeTime value={checkedAt} />. Alerts land here, not in your
@@ -945,10 +902,6 @@
 		text-align: center;
 		gap: var(--df-p-space-1);
 		padding: var(--df-p-space-3) 0 0;
-	}
-
-	.daki {
-		color: var(--df-text-primary);
 	}
 
 	.quiet-title {
