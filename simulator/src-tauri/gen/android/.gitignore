@@ -15,6 +15,9 @@ build
 local.properties
 key.properties
 keystore.properties
+# Signing material must live outside the repository (~/.config/dakflare).
+*.jks
+*.keystore
 
 /.tauri
 /tauri.settings.gradle
