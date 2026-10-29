@@ -15,7 +15,7 @@ use std::path::Path;
 use dakflare_core::{
     Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
     StoreError, Target, carrier::flush_pending, is_device_fact_key, receive_and_reply,
-    reply_local_id,
+    reply_local_id, sync_flows,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -297,6 +297,53 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] flushPending panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.syncFlows`
+///
+/// Replaces the cached flow set with this deployment's current set. The gateway
+/// service calls it in the same tick as its flush, so a Worker-side edit reaches
+/// a phone the operator never touches. Returns
+/// `{"ok":true,"flows":<count>}` or
+/// `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+///
+/// Best effort: on failure the previous cache stays in place and the next tick
+/// retries. An empty list is success and clears the cache.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_syncFlows(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(&mut env, &app_dir, &device_id) {
+            Ok((app_dir, device_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sync_flows_blocking(&app_dir, &device_id)
+                })) {
+                    Ok(Ok(count)) => serde_json::json!({
+                        "ok": true,
+                        "flows": count,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] syncFlows panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] syncFlows panicked before storage");
             error_json("storage")
         }
     };
@@ -760,11 +807,10 @@ fn queue_blocking(
 }
 
 /// Build the same signed client the app uses from the stored target and
-/// identity, then flush the pending inbound and outbound rows. A missing
-/// pairing or key is `unpaired`; a missing or invalid target is `storage`.
-fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static str> {
-    let store = open_store_blocking(app_dir)?;
-
+/// identity. A missing pairing or key is `unpaired`; a missing or invalid
+/// target is `storage`. Shared by the flush and flow-sync entries so both
+/// always talk to the same deployment as the same identity.
+fn signed_client_blocking(store: &Store, device_id: &str) -> Result<DeviceClient, &'static str> {
     tauri::async_runtime::block_on(async {
         let base_url = store
             .get_setting("base_url")
@@ -790,12 +836,25 @@ fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static st
             .ok_or("unpaired")?;
 
         let target = Target::new(base_url, admin_token).map_err(|_| "storage")?;
-        let client = DeviceClient::new(target, device_id, private_key);
-
-        flush_pending(&store, &client, device_id)
-            .await
-            .map_err(map_flush_error)
+        Ok(DeviceClient::new(target, device_id, private_key))
     })
+}
+
+/// Flush everything the deployment has not accepted yet.
+fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+
+    tauri::async_runtime::block_on(flush_pending(&store, &client, device_id))
+        .map_err(map_network_error)
+}
+
+/// Replace the cached flow set with this deployment's current set.
+fn sync_flows_blocking(app_dir: &str, device_id: &str) -> Result<usize, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+
+    tauri::async_runtime::block_on(sync_flows(&store, &client)).map_err(map_network_error)
 }
 
 fn map_carrier_error(error: CarrierError) -> &'static str {
@@ -806,10 +865,10 @@ fn map_carrier_error(error: CarrierError) -> &'static str {
     }
 }
 
-/// The flush path can fail on the wire, which is not a store problem. Only a
-/// transport or URL failure is `network`; a signing or response-shape failure
-/// is `protocol`.
-fn map_flush_error(error: CarrierError) -> &'static str {
+/// The network paths (flush and flow sync) can fail on the wire, which is not a
+/// store problem. Only a transport or URL failure is `network`; a signing or
+/// response-shape failure is `protocol`.
+fn map_network_error(error: CarrierError) -> &'static str {
     match error {
         CarrierError::Unpaired => "unpaired",
         CarrierError::InvalidInput(_) => "bad_input",

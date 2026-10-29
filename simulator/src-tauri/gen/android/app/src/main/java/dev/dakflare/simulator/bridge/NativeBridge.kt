@@ -82,6 +82,17 @@ object NativeBridge {
     external fun flushPending(appDir: String, deviceId: String): String
 
     /**
+     * Replace the cached flow set with this deployment's current set.
+     *
+     * Returns `{"ok":true,"flows":<count>}` or
+     * `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+     * An empty list is success and clears the cache; on failure the previous
+     * cache stays in place.
+     */
+    @JvmStatic
+    external fun syncFlows(appDir: String, deviceId: String): String
+
+    /**
      * The paired identity in this store, if there is one.
      *
      * Returns `{"ok":true,"device_id":"…"}` or
@@ -336,6 +347,27 @@ object NativeBridge {
             false
         } catch (error: Throwable) {
             Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Best-effort flow sync for the gateway tick. Never throws: an empty
+     * argument, a missing symbol or a store/network error returns `false` and
+     * leaves the previous cache, so the receiver keeps answering with the last
+     * good set. Only the exception class is logged.
+     */
+    fun syncFlowsSafely(appDir: String, deviceId: String): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || deviceId.isEmpty()) return false
+
+        return try {
+            isOk(syncFlows(appDir, deviceId))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "syncFlows symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "syncFlows failed: ${error.javaClass.simpleName}")
             false
         }
     }

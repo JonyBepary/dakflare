@@ -32,6 +32,12 @@ export type Message = {
 /** One keyset page from `list_messages_page`; newest first. */
 export type MessagePage = { messages: Message[]; has_more: boolean };
 
+/** `poll_device` also reports the best-effort flow sync it ran. */
+export type PollResult = {
+	commands?: unknown[];
+	flows?: { ok: boolean; count?: number; error?: string | null };
+};
+
 /** A flow graph cached on this phone. A corrupt graph keeps its row and `node_count: null`. */
 export type CachedFlow = {
 	id: string;
@@ -503,8 +509,19 @@ class AppStore {
 		this.busy.poll = true;
 		this.clearNotice(`device:${deviceId}`);
 		try {
-			const commands = await this.call<unknown[]>('poll_device', { deviceId });
+			const result = await this.call<PollResult>('poll_device', { deviceId });
+			// Older shells answered with the bare command array; accept both.
+			const commands = Array.isArray(result) ? result : (result.commands ?? []);
+			const flows = Array.isArray(result) ? null : (result.flows ?? null);
 			this.contactAt[deviceId] = Date.now();
+			// The poll also synced the flow cache. Re-read it first, then keep the
+			// failure visible so the Flows frame does not pass off stale graphs.
+			if (this.flowsLoaded) await this.loadFlows(deviceId);
+			if (flows && !flows.ok) {
+				this.flowsError = `Flow sync failed: ${flows.error ?? 'unknown error'}. Showing the last cache.`;
+			} else if (flows?.ok) {
+				this.flowsError = null;
+			}
 			// A poll also backfills the pairing time for identities created before
 			// it was recorded, so re-read it rather than showing a stale "unknown".
 			const paired = await this.call<number | null>('get_device_pairing', { deviceId });
@@ -512,10 +529,10 @@ class AppStore {
 			this.notify(
 				`device:${deviceId}`,
 				`Signed poll OK · ${count(
-					Array.isArray(commands) ? commands.length : 0,
+					commands.length,
 					'command',
 					'commands'
-				)}.`,
+				)}${flows?.ok ? ` · ${count(flows.count ?? 0, 'flow', 'flows')} cached` : ''}.`,
 				'ok'
 			);
 		} catch (error) {
@@ -622,10 +639,12 @@ class AppStore {
 	}
 
 	/**
-	 * "Sync now" on Flows. The command surface has no `fetch_flows` and no
-	 * `list_flows`, so the only reachable Worker call is the carrier panel's
-	 * outbox poll. It is labelled as such; the flow cache itself is refreshed
-	 * by the inbound inject path in `carrier_inject`.
+	 * "Sync now" on Flows: refresh the cached flow set from the deployment, then
+	 * check for queued replies.
+	 *
+	 * A failed fetch leaves the cached rows runnable and records `flowsError`,
+	 * which the Flows frame shows next to the graphs it still holds. A silent
+	 * failure here is what once left a paired phone deaf to automation.
 	 */
 	async syncFlows() {
 		if (!this.selectedId) {
@@ -633,12 +652,47 @@ class AppStore {
 			return;
 		}
 		if (this.offline) {
-			this.notify('flows', 'Carrier is offline. Turn it back on to poll the Worker.', 'error');
+			this.notify('flows', 'Carrier is offline. Turn it back on to sync the Worker.', 'error');
 			return;
 		}
 		this.busy.sync = true;
-		await this.drain('flows');
-		this.busy.sync = false;
+		this.clearNotice('flows');
+
+		let flows: number;
+		try {
+			flows = await this.call<number>('sync_flows', { deviceId: this.selectedId });
+			this.flowsError = null;
+			await this.loadFlows(this.selectedId);
+		} catch (error) {
+			// Keep the last good cache: say the refresh failed rather than
+			// presenting stale rows as current.
+			await this.loadFlows(this.selectedId);
+			this.flowsError = `Flow sync failed: ${String(error)}. Showing the last cache.`;
+			this.fail('flows', error);
+			this.busy.sync = false;
+			return;
+		}
+
+		try {
+			const captured = await this.call<Message[]>('carrier_drain', {
+				deviceId: this.selectedId
+			});
+			this.contactAt[this.selectedId] = Date.now();
+			this.notify(
+				'flows',
+				`Flows synced · ${count(flows, 'flow', 'flows')} cached · ${
+					captured.length === 0
+						? 'no queued commands'
+						: `captured ${count(captured.length, 'outbound message', 'outbound messages')}`
+				}.`,
+				'ok'
+			);
+			await this.refreshSelected();
+		} catch (error) {
+			this.fail('flows', error);
+		} finally {
+			this.busy.sync = false;
+		}
 	}
 
 	async clearThread() {

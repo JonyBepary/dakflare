@@ -9,6 +9,7 @@ use std::sync::Arc;
 use dakflare_core::{
     CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, Message, NewDevice, ProtocolError,
     Store, Target, carrier::flush_pending, drain_outbox, inject_inbound, parse_pair_link,
+    sync_flows as sync_flows_core,
 };
 use serde::Serialize;
 #[cfg(target_os = "android")]
@@ -207,7 +208,24 @@ async fn pair_device(
         .await
         .map_err(|e| e.to_string())?;
     record_pairing(&state, &device.device_id).await;
-    Ok(format!("Paired as {}", device.device_id))
+    Ok(pairing_message(&state, &client, &device.device_id).await)
+}
+
+/// Pairing has already succeeded by the time this runs: the returned sentence
+/// carries the flow-sync outcome, but a failure there never fails the pairing.
+/// The first real contact (`poll_device`, the gateway tick) retries the sync.
+async fn pairing_message(
+    state: &State<'_, AppState>,
+    client: &DeviceClient,
+    device_id: &str,
+) -> String {
+    match sync_flows_core(&state.store, client).await {
+        Ok(count) => format!("Paired as {device_id}. Cached {count} flow(s)."),
+        Err(error) => {
+            eprintln!("[pair] flow sync failed: {error}");
+            format!("Paired as {device_id}. Flows will sync on the next contact.")
+        }
+    }
 }
 
 /// Redeem an operator-minted pairing code. No admin token is read or required.
@@ -247,7 +265,7 @@ async fn pair_with_code(
         .await
         .map_err(pair_failure)?;
     record_pairing(&state, &device.device_id).await;
-    Ok(format!("Paired as {}", device.device_id))
+    Ok(pairing_message(&state, &client, &device.device_id).await)
 }
 
 /// Translate the protocol error into something a person can act on.
@@ -287,6 +305,16 @@ async fn poll_device(
     // A receiver can leave rows pending while offline; flush them before polling
     // so opening the app clears the backlog. Best effort.
     let _ = flush_pending(&state.store, &client, &device_id).await;
+    // Opening the app is also a flow-sync trigger: a Worker-side edit must reach
+    // the phone without an operator opening the carrier panel. Best effort, and
+    // reported in the reply so the Flows frame can say a refresh failed.
+    let flows = match sync_flows_core(&state.store, &client).await {
+        Ok(count) => serde_json::json!({ "ok": true, "count": count }),
+        Err(error) => {
+            eprintln!("[poll] flow sync failed: {error}");
+            serde_json::json!({ "ok": false, "error": error.to_string() })
+        }
+    };
     let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
     // Both calls above are signed and were answered, so this is a real contact.
     let _ = state.store.touch_device(&device_id).await;
@@ -297,7 +325,20 @@ async fn poll_device(
     if matches!(state.store.get_setting(&key).await, Ok(None)) {
         record_pairing(&state, &device_id).await;
     }
-    Ok(commands)
+    Ok(serde_json::json!({ "commands": commands, "flows": flows }))
+}
+
+/// Pull the deployment's flow set for this device into the local cache.
+///
+/// The explicit "Sync now" trigger in the Flows frame. Returns the number of
+/// cached flows; an error leaves the previous cache in place so the frame keeps
+/// listing graphs this phone can still run.
+#[tauri::command]
+async fn sync_flows(state: State<'_, AppState>, device_id: String) -> Result<usize, String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    sync_flows_core(&state.store, &client)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Test-cleanup: erase this device's message log on the deployment.
@@ -793,6 +834,7 @@ pub fn run() {
             pair_device,
             pair_with_code,
             poll_device,
+            sync_flows,
             purge_messages,
             revoke_device,
             carrier_inject,

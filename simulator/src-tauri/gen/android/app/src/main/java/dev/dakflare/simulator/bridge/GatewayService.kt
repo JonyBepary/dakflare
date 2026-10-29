@@ -22,12 +22,13 @@ import java.util.Date
  * The long-lived half of the gateway: one `remoteMessaging` foreground service
  * that drains what the deployment has not accepted yet.
  *
- * It owns exactly one job. Every [INTERVAL_MS] while this process lives it calls
+ * It owns one job. Every [INTERVAL_MS] while this process lives it calls
  * [NativeBridge.flushPendingSafely] so inbound rows stored while offline, their
- * flow runs and replies already marked `sent` reach the deployment. It does not
- * execute queued commands, does not send SMS and does not poll the network
- * beyond that flush — the receive path stays in [SmsReceiver] and needs no
- * service.
+ * flow runs and replies already marked `sent` reach the deployment, then
+ * [NativeBridge.syncFlowsSafely] so a Worker-side flow edit reaches a phone the
+ * operator never opens. It does not execute queued commands, does not send SMS
+ * and makes no other network calls — the receive path stays in [SmsReceiver]
+ * and needs no service.
  *
  * Started from [MainActivity] when the app opens with a paired identity, from
  * [SmsReceiver] after a successful inbound store, and from [BootReceiver] after
@@ -70,8 +71,11 @@ class GatewayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A restart after the system killed the process arrives with a null
-        // intent; onCreate already owns the loop, so there is nothing to do.
+        // Reopening the app calls `start` while the loop may already be
+        // waiting out its interval. Wake it so the flush and flow sync run now
+        // instead of up to a quarter of an hour later. A create-only start is
+        // unaffected: its first tick already runs immediately.
+        synchronized(sleeper) { sleeper.notifyAll() }
         return START_STICKY
     }
 
@@ -113,10 +117,14 @@ class GatewayService : Service() {
 
                     val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
                     if (ok) saveLastContact(System.currentTimeMillis())
+                    // Flows ride the same tick: at most one fetch per interval,
+                    // never more often than the flush. A failed sync keeps the
+                    // cached set, so the receive path is unaffected.
+                    val flowsOk = NativeBridge.syncFlowsSafely(appDir, deviceId)
                     // Counts are deliberately absent: the notification shows a
                     // timestamp, which cannot drift from the store.
                     updateNotification(deviceId, lastContact())
-                    Log.i(TAG, "gateway flush ok=$ok")
+                    Log.i(TAG, "gateway flush ok=$ok flows ok=$flowsOk")
 
                     synchronized(sleeper) {
                         if (!running) return@Thread

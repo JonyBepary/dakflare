@@ -443,6 +443,21 @@ pub async fn drain_outbox(
 }
 
 
+/// Pull this deployment's flow set for this device into the local cache.
+///
+/// The fetched list is authoritative: [`Store::replace_flows`] replaces every
+/// cached row, so a flow deleted on the Worker stops running here and an empty
+/// answer clears the cache. Returns how many flows are now cached.
+///
+/// A failed fetch returns the protocol error and leaves the previous cache
+/// untouched, which is what lets the background receiver keep answering with
+/// the last good set.
+pub async fn sync_flows(store: &Store, client: &DeviceClient) -> Result<usize, CarrierError> {
+    let flows = client.fetch_flows().await?;
+    store.replace_flows(&flows).await?;
+    Ok(flows.len())
+}
+
 /// Counts from one native flush.
 #[derive(Debug)]
 pub struct Flushed {
@@ -575,6 +590,7 @@ fn random_hex(bytes: usize) -> Result<String, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Target;
     use crate::db::NewDevice;
 
     #[tokio::test]
@@ -905,6 +921,71 @@ mod tests {
             .await
             .unwrap();
         assert!(actions.is_empty());
+    }
+
+    /// A one-shot HTTP endpoint that answers `GET /v1/flows` with `flows` as
+    /// the `flows` array. The signed headers are ignored: this test exercises
+    /// the cache replacement, not the protocol.
+    fn serve_flows(flows: String) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = format!("{{\"flows\":{flows}}}");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn sync_flows_replaces_the_cache_and_clears_it_when_empty() {
+        let (_dir, store, device) = paired_store().await;
+        store
+            .replace_flows(&[reply_flow("wf_old", 1, "old")])
+            .await
+            .unwrap();
+        let identity = crate::generate_identity().unwrap();
+
+        // One served flow replaces whatever was cached.
+        let fetched = serde_json::json!([{
+            "id": "wf_new",
+            "version": 2,
+            "graph": reply_flow("wf_new", 2, "new").graph,
+        }]);
+        let (base_url, server) = serve_flows(fetched.to_string());
+        let client = DeviceClient::new(
+            Target::new(base_url, None).unwrap(),
+            device.device_id.clone(),
+            identity.private_key_pkcs8_pem.clone(),
+        );
+        assert_eq!(sync_flows(&store, &client).await.unwrap(), 1);
+        server.join().unwrap();
+
+        let cached = store.list_cached_flows().await.unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "wf_new");
+        assert_eq!(cached[0].version, 2);
+
+        // An empty answer is a valid answer: the deleted flow must stop running.
+        let (base_url, server) = serve_flows("[]".to_string());
+        let client = DeviceClient::new(
+            Target::new(base_url, None).unwrap(),
+            device.device_id.clone(),
+            identity.private_key_pkcs8_pem.clone(),
+        );
+        assert_eq!(sync_flows(&store, &client).await.unwrap(), 0);
+        server.join().unwrap();
+
+        assert!(store.list_cached_flows().await.unwrap().is_empty());
+        assert!(store.load_flows().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -103,6 +103,9 @@
 					Flows arrive with an inbound message that syncs with the gateway. This phone runs
 					only the ones it has cached.
 				</p>
+				{#if app.flowsError}
+					<p class="note">{app.flowsError}</p>
+				{/if}
 				<p class="mono note">flows · cache empty</p>
 			</div>
 		{:else}
@@ -159,10 +162,7 @@
 		>
 			{app.busy.sync || app.busy.drain ? 'Syncing…' : 'Sync now'}
 		</button>
-		<p class="note">
-			Sync now checks for queued replies. It cannot fetch flow metadata; an inbound message
-			that syncs with the gateway refreshes the cache.
-		</p>
+		<p class="note">Sync now refreshes the cached flows and checks for queued replies.</p>
 	</section>
 
 	<Notice scope="flows" />

@@ -12,7 +12,7 @@ pub mod protocol;
 
 pub use carrier::{
     CarrierError, Flushed, Injected, drain_outbox, flush_pending, inject_inbound,
-    receive_and_reply, receive_offline, reply_local_id,
+    receive_and_reply, receive_offline, reply_local_id, sync_flows,
 };
 pub use dakflare_flow::Action;
 pub use db::{
