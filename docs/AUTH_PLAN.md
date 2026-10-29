@@ -174,3 +174,18 @@ values to `.dev.vars` so local runs exercise the same paths.
 - **Deploy-to-Cloudflare button after phase 2**, not before: the button deploys Worker +
   D1 + DO, the deploy script applies migrations first, and `dakflare init --from-deploy`
   sets secrets and creates the owner. A button over a Worker with no auth tables is a trap.
+
+## 10. Decided 2026-10-30 (second pass)
+
+- **TOTP is optional for every role.** Anyone may enrol it; nobody is forced. The
+  account that can revoke phones can therefore stay single-factor if the operator never
+  enrols — accepted deliberately, because with one person and passkeys the marginal
+  protection of a forced TOTP is smaller than the lockout risk of enforcing a factor
+  before its recovery path is proven.
+- **Sessions: seven days, sliding**, unchanged: five-minute cookie cache, and
+  `requireRole({ fresh: true })` on destructive actions.
+- **Next after TOTP: password mode (phase 4)** — client-derived PBKDF2 on free, server KDF
+  on paid, the pepper keyring and its rotation, and the mode switch `doctor` reports.
+
+The cutover rule from §9 stands unchanged: `AUTH_MODE` flips only after a real passkey
+sign-in reaches Overview and the audit page records it.
