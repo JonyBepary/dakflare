@@ -11,6 +11,12 @@
         it every source is empty and the guard reports itself as unknown.
     -->
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <!--
+        The subscription list (SIM slot and carrier) is gated on READ_PHONE_STATE,
+        not on READ_PHONE_NUMBERS. It is a normal permission, granted at install,
+        so the Device frame can stop saying "not reported".
+    -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

@@ -4,9 +4,11 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { deleteSession, setUnauthorizedHandler } from '$lib/api';
-	import { formatAbsolute } from '$lib/format';
+	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
+	import { formatAbsolute, formatCount } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
+	import { consoleCounts } from '$lib/console-counts.svelte';
 	import Brand from '$lib/components/Brand.svelte';
 	import AlertBanner from '$lib/components/AlertBanner.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
@@ -17,26 +19,38 @@
 
 	let { children } = $props();
 
-	type NavItem = { href: string; label: string; icon: IconName; match?: string[] };
+	type CountKey = 'devices' | 'messages' | 'rules';
+	type NavItem = {
+		href: string;
+		label: string;
+		icon: IconName;
+		match?: string[];
+		count?: CountKey;
+		countWord?: string;
+	};
 
 	// Rules and workflows are two authored forms of one automation pipeline. The
 	// segmented control on those pages switches between them, so the rail carries
 	// a single entry instead of implying two unrelated features.
 	const nav: NavItem[] = [
 		{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
-		{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone' },
-		{ href: ROUTES.messages, label: 'Messages', icon: 'message' },
+		{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone', count: 'devices', countWord: 'paired' },
+		{ href: ROUTES.messages, label: 'Messages', icon: 'message', count: 'messages', countWord: 'kept' },
 		{
 			href: ROUTES.rules,
 			label: 'Automation',
 			icon: 'workflow',
-			match: [ROUTES.rules, ROUTES.workflows]
+			match: [ROUTES.rules, ROUTES.workflows],
+			count: 'rules',
+			countWord: 'authored'
 		}
 	];
 
+	const COUNT_REFRESH_MS = 60_000;
+
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');
 	let loggingOut = $state(false);
-	let mobileNav = $state<HTMLElement | null>(null);
+	let topbarNav = $state<HTMLElement | null>(null);
 
 	const isLogin = $derived(
 		page.url.pathname === ROUTES.login || page.url.pathname === `${ROUTES.login}/`
@@ -54,6 +68,21 @@
 			(prefix) =>
 				page.url.pathname === prefix || page.url.pathname.startsWith(`${prefix}/`)
 		);
+	}
+
+	const activeLabel = $derived(nav.find(isActive)?.label ?? 'Console');
+
+	function pillCount(item: NavItem): number | null {
+		if (!item.count) return null;
+		const value = consoleCounts[item.count];
+		// A zero pill is noise; the rail's job is to show what exists.
+		return value !== null && value > 0 ? value : null;
+	}
+
+	function linkLabel(item: NavItem): string | undefined {
+		const count = pillCount(item);
+		if (count === null || item.countWord === undefined) return undefined;
+		return `${item.label}, ${count} ${item.countWord}`;
 	}
 
 	function loginUrl(next?: string): string {
@@ -101,7 +130,32 @@
 	onMount(() => {
 		setUnauthorizedHandler(handleUnauthorized);
 		void bootSession();
-		return () => setUnauthorizedHandler(null);
+
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible' && !isLogin) void consoleCounts.refresh();
+		}, COUNT_REFRESH_MS);
+		const onVisible = () => {
+			if (document.visibilityState === 'visible' && !isLogin) void consoleCounts.refresh();
+		};
+		const onAlertsChanged = () => {
+			if (!isLogin) void consoleCounts.refresh();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+		window.addEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+
+		return () => {
+			setUnauthorizedHandler(null);
+			clearInterval(timer);
+			document.removeEventListener('visibilitychange', onVisible);
+			window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+		};
+	});
+
+	// One health read per navigation feeds the rail's pill counts. Overview pushes
+	// its own result into the same store, so the two never disagree.
+	$effect(() => {
+		void page.url.pathname;
+		if (boot === 'ready' && !isLogin) void consoleCounts.refresh();
 	});
 
 	// Keep the current section in view inside the horizontally scrolling mobile
@@ -109,7 +163,7 @@
 	// edge with the next one fading in, instead of a row that starts at Overview.
 	$effect(() => {
 		void page.url.pathname;
-		const navEl = mobileNav;
+		const navEl = topbarNav;
 		if (!navEl) return;
 		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
 		if (!active) return;
@@ -153,72 +207,94 @@
 		<aside class="rail">
 			<Brand />
 			<nav class="nav" aria-label="Main">
-				<p class="eyebrow nav-label">Console</p>
+				<p class="nav-label">Console</p>
 				{#each nav as item (item.href)}
-					<a class="nav-link" href={item.href} aria-current={isActive(item) ? 'page' : undefined}>
-						<Icon name={item.icon} size={15} />
+					{@const count = pillCount(item)}
+					<a
+						class="nav-link"
+						href={item.href}
+						aria-current={isActive(item) ? 'page' : undefined}
+						aria-label={linkLabel(item)}
+					>
+						<Icon name={item.icon} size={20} />
 						{item.label}
+						{#if count !== null}
+							<span class="nav-pill" aria-hidden="true">{formatCount(count)}</span>
+						{/if}
 					</a>
 				{/each}
 			</nav>
 
 			<div class="rail-foot">
-				<p class="session-line" title={session.expiresAt ? formatAbsolute(session.expiresAt) : undefined}>
-					<span class="session-dot"></span>
-					{#if session.expiresAt}
-						<span>session · <RelativeTime value={session.expiresAt} /></span>
-					{:else}
-						<span>session active</span>
-					{/if}
-				</p>
-				<div class="rail-actions">
-					<button
-						type="button"
-						class="btn btn-sm"
-						onclick={() => void logout()}
-						disabled={loggingOut}
-						aria-busy={loggingOut}
-					>
-						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={13} />{/if}
-						Sign out
-					</button>
-					<ThemeToggle />
+				<p class="nav-label">Operator</p>
+				<div class="operator">
+					<div class="operator-id">
+						<span class="operator-avatar" aria-hidden="true">OP</span>
+						<span class="operator-copy">
+							<span class="operator-name">Operator</span>
+							<span
+								class="operator-meta"
+								title={session.expiresAt ? formatAbsolute(session.expiresAt) : undefined}
+							>
+								{#if session.expiresAt}
+									expires <RelativeTime value={session.expiresAt} />
+								{:else}
+									session active
+								{/if}
+							</span>
+						</span>
+					</div>
 				</div>
 			</div>
 		</aside>
 
 		<div class="main-wrap">
-			<header class="mobile-bar">
-				<Brand />
-				<nav class="mobile-nav" aria-label="Main" bind:this={mobileNav}>
-					{#each nav as item (item.href)}
-						<a
-							class="nav-link"
-							href={item.href}
-							aria-current={isActive(item) ? 'page' : undefined}
-						>
-							<Icon name={item.icon} size={14} />
-							{item.label}
-						</a>
-					{/each}
-				</nav>
-				<div class="row" style="gap: 4px">
+			<header class="topbar">
+				<a class="topbar-brand" href={ROUTES.overview} aria-label="DakFlare overview">
+					<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+						<rect x="2.5" y="9.5" width="2.6" height="4" rx="0.6" fill="currentColor" />
+						<rect x="6.7" y="6.5" width="2.6" height="7" rx="0.6" fill="currentColor" />
+						<rect x="10.9" y="2.5" width="2.6" height="11" rx="0.6" fill="currentColor" />
+					</svg>
+				</a>
+				<span class="topbar-brand-name">DakFlare</span>
+
+				<div class="topbar-context">
+					<span class="eyebrow">Console</span>
+					<span class="topbar-section">{activeLabel}</span>
+				</div>
+
+				<div class="topbar-actions">
 					<ThemeToggle />
 					<button
 						type="button"
-						class="btn btn-ghost btn-icon btn-sm"
+						class="btn btn-icon btn-sm"
 						onclick={() => void logout()}
 						disabled={loggingOut}
 						aria-label="Sign out"
 						title="Sign out"
 					>
-						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={14} />{/if}
+						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={16} />{/if}
 					</button>
 				</div>
 			</header>
 
+			<nav class="shell-tabs" aria-label="Main" bind:this={topbarNav}>
+				{#each nav as item (item.href)}
+					<a
+						class="nav-link"
+						href={item.href}
+						aria-current={isActive(item) ? 'page' : undefined}
+					>
+						<Icon name={item.icon} size={16} />
+						{item.label}
+					</a>
+				{/each}
+			</nav>
+
+			<AlertBanner />
+
 			<main class="main">
-				<AlertBanner />
 				{@render children()}
 			</main>
 		</div>

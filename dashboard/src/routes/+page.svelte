@@ -1,38 +1,30 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import {
-		describeError,
-		getDeviceStatus,
-		getDevices,
-		getHealth
-	} from '$lib/api';
+	import { describeError, getDeviceStatus, getDevices, getHealth } from '$lib/api';
 	import type { Device, DeviceStatus, Health } from '$lib/types';
-	import { devicePresence, presenceCounts, type DevicePresence } from '$lib/presence';
+	import {
+		devicePresence,
+		devicePrimary,
+		deviceSecondary,
+		presenceCounts,
+		type DevicePresence
+	} from '$lib/presence';
 	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
-	import { formatAbsolute, formatClock, formatCount } from '$lib/format';
+	import { consoleCounts } from '$lib/console-counts.svelte';
+	import { formatAbsolute, formatCount, plural } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import PresenceChip from '$lib/components/PresenceChip.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
-	const BINDING_LABELS: Record<string, string> = {
-		DB: 'D1 database',
-		KV: 'KV namespace',
-		DEVICE: 'Durable Objects',
-		PAIR_LIMITER: 'Pairing limiter · per IP',
-		PAIR_GLOBAL_LIMITER: 'Pairing limiter · global',
-		ADMIN_LIMITER: 'Admin limiter',
-		DEVICE_LIMITER: 'Device limiter',
-		AUTH_FAIL_LIMITER: 'Auth-failure limiter',
-		FCM_SERVICE_ACCOUNT: 'FCM service account'
-	};
-
 	/** FCM is absent in a perfectly healthy local or polling-only deployment. */
 	const OPTIONAL_BINDINGS = new Set(['FCM_SERVICE_ACCOUNT']);
+	const DEVICE_ROWS = 4;
 
 	let health = $state<Health | null>(null);
 	let loading = $state(true);
@@ -69,13 +61,6 @@
 		return 'ok';
 	});
 
-	const fleetSummary = $derived.by(() => {
-		if (fleetLoading) return 'Checking fleet reachability…';
-		if (fleetError) return 'Fleet state unavailable';
-		if (devices.length === 0) return 'No devices paired yet';
-		return `${answering} of ${devices.length} ${devices.length === 1 ? 'device' : 'devices'} answering`;
-	});
-
 	const fleetBreakdown = $derived.by(() => {
 		if (fleetError || fleetLoading || devices.length === 0) return '';
 		const order: DevicePresence[] = ['live', 'synced', 'stale', 'offline', 'unknown'];
@@ -85,7 +70,13 @@
 			.join(' · ');
 	});
 
+	const visibleDevices = $derived(devices.slice(0, DEVICE_ROWS));
+	const remainingDevices = $derived(Math.max(0, devices.length - visibleDevices.length));
+
 	const openAlerts = $derived(health?.open_alerts ?? health?.counts?.open_alerts ?? 0);
+	// `open_alerts` collapses to 0 when the count query failed. Do not print that
+	// zero as "quiet": an unreadable database is an unknown, not an empty list.
+	const alertsKnown = $derived(health !== null && !health.db_error && health.counts !== null);
 
 	const refreshNote = $derived.by(() => {
 		if (healthRefreshError && fleetRefreshError) return 'health and fleet refresh failed';
@@ -98,13 +89,16 @@
 		(health?.missing_bindings ?? []).filter((key) => !OPTIONAL_BINDINGS.has(key))
 	);
 
-	const statusTone = $derived.by(() => {
-		if (!health) return 'warn' as const;
-		if (health.db_error || ['DB', 'KV', 'DEVICE'].some((k) => health?.missing_bindings.includes(k))) {
-			return 'danger' as const;
+	const statusTone = $derived.by<'ok' | 'warn' | 'danger'>(() => {
+		if (!health) return 'warn';
+		if (
+			health.db_error ||
+			['DB', 'KV', 'DEVICE'].some((key) => health?.missing_bindings.includes(key))
+		) {
+			return 'danger';
 		}
-		if (missingCapabilities.length > 0) return 'warn' as const;
-		return health.ok ? ('ok' as const) : ('warn' as const);
+		if (missingCapabilities.length > 0) return 'warn';
+		return health.ok ? 'ok' : 'warn';
 	});
 
 	const headline = $derived.by(() => {
@@ -112,47 +106,33 @@
 		if (health.db_error) return 'Database unreachable';
 		if (!health.schema_ready) return 'Schema not ready';
 		if (missingCapabilities.length > 0) return 'Reduced configuration';
-		return health.ok ? 'Deployment nominal' : 'Degraded';
+		return health.ok ? 'Gateway running' : 'Gateway degraded';
 	});
 
 	const subline = $derived.by(() => {
 		if (!health) return '';
-		if (health.db_error) return 'Counts and schema state could not be read from D1.';
-		if (!health.schema_ready) return 'No migrations are recorded — apply the schema before pairing devices.';
-		if (missingCapabilities.length > 0) {
-			return `${missingCapabilities.length} ${missingCapabilities.length === 1 ? 'capability is' : 'capabilities are'} not attached. Core routing still works; the affected safeguards are skipped.`;
+		if (health.db_error) {
+			return 'The database did not answer, so counts and schema state are unknown.';
 		}
-		if (!health.ok) return 'The gateway answered, but its own readiness check did not pass.';
+		if (!health.schema_ready) {
+			return 'No migrations are recorded. Apply the schema before pairing a device.';
+		}
+		if (missingCapabilities.length > 0) {
+			return `${missingCapabilities.length} ${
+				missingCapabilities.length === 1 ? 'binding is' : 'bindings are'
+			} not attached. The gateway keeps serving; the safeguards that depend on them are skipped.`;
+		}
+		if (!health.ok) return 'The gateway answered, but its readiness check did not pass.';
 		const count = health.counts?.devices ?? 0;
 		return count === 0
-			? 'The gateway, schema and bindings are healthy; no device is paired yet.'
-			: 'The gateway, schema and bindings are healthy. Fleet reachability is reported separately below.';
+			? 'The gateway, schema and bindings are healthy. No device is paired yet.'
+			: 'The gateway, schema and bindings are healthy. Fleet reachability is below.';
 	});
 
-	type BindingRow = {
-		key: string;
-		label: string;
-		present: boolean;
-		optional: boolean;
-		order: number;
-	};
-
-	const bindingRows: BindingRow[] = $derived.by(() => {
-		const entries = Object.entries(health?.bindings ?? {});
-		return entries
-			.map(([key, present], order) => ({
-				key,
-				label: BINDING_LABELS[key] ?? key,
-				present,
-				optional: OPTIONAL_BINDINGS.has(key),
-				order
-			}))
-			.sort((a, b) => {
-				const rank = (row: BindingRow) =>
-					!row.present && !row.optional ? 0 : !row.present ? 1 : 2;
-				return rank(a) - rank(b) || a.order - b.order;
-			});
-	});
+	const bindingTotal = $derived(Object.keys(health?.bindings ?? {}).length);
+	const attachedBindings = $derived(
+		Object.values(health?.bindings ?? {}).filter((present) => present).length
+	);
 
 	async function loadHealth(): Promise<void> {
 		if (healthInFlight) return;
@@ -165,9 +145,11 @@
 			checkedAt = result.health.checked_at ?? Date.now();
 			error = null;
 			healthRefreshError = null;
+			// The rail's pill counts come from the same read.
+			consoleCounts.note(result.health);
 		} catch (failure) {
 			// A refresh must never blank a page that already has values; the
-			// initial failure still gets the full diagnostic panel.
+			// initial failure still gets the full error panel.
 			if (hadHealth) healthRefreshError = describeError(failure);
 			else error = describeError(failure);
 		} finally {
@@ -255,9 +237,9 @@
 
 <div class="page">
 	<PageHeader
-		eyebrow="Overview"
+		eyebrow="Deployment"
 		title="Gateway status"
-		description="Live health, schema and capability state for this deployment."
+		description="Deployment health, fleet reachability and what answers a stranger."
 	>
 		{#if checkedAt}
 			<span
@@ -282,297 +264,446 @@
 	</PageHeader>
 
 	{#if error}
-		<div class="panel">
-			<div class="panel-body stack">
-				<Notice tone="danger" title="Health check failed">{error}</Notice>
-				<div class="row">
-					<button type="button" class="btn btn-primary" onclick={() => void refreshAll()}>
-						<Icon name="refresh" size={14} /> Try again
-					</button>
-				</div>
+		<div class="card">
+			<Notice tone="danger" title="The gateway is not answering">{error}</Notice>
+			<p class="card-note" style="margin-top: 12px">
+				The console could not read deployment health. It tries again on the next refresh.
+			</p>
+			<div class="row" style="margin-top: 16px">
+				<button type="button" class="btn btn-primary" onclick={() => void refreshAll()}>
+					<Icon name="refresh" size={14} /> Try again
+				</button>
 			</div>
 		</div>
 	{:else if loading}
-		<div class="stack" aria-busy="true" aria-live="polite">
-			<span class="sr-only">Loading gateway health</span>
-			<div class="skeleton" style="height: 104px"></div>
-			<div class="stat-grid">
-				{#each ['a', 'b', 'c', 'd'] as key (key)}
-					<div class="stat">
-						<div class="skeleton" style="height: 10px; width: 60%"></div>
-						<div class="skeleton" style="height: 28px; width: 40%; margin-top: 14px"></div>
+		<div class="grid-stack" aria-busy="true" aria-live="polite">
+			<span class="sr-only">Checking the gateway and the fleet</span>
+			<p class="loading-line"><Spinner /> Checking the gateway and the fleet</p>
+
+			<div class="bento">
+				<div class="card span-12">
+					<div class="skeleton" style="height: 12px; width: 90px"></div>
+					<div class="skeleton" style="height: 26px; width: 280px; margin-top: 12px"></div>
+					<div class="skeleton" style="height: 12px; width: 60%; margin-top: 12px"></div>
+				</div>
+			</div>
+
+			<div class="bento">
+				<div class="card span-6">
+					<div class="skeleton" style="height: 10px; width: 90px"></div>
+					<div class="skeleton" style="height: 34px; width: 120px; margin-top: 18px"></div>
+					<div class="skeleton" style="height: 10px; width: 70%; margin-top: 18px"></div>
+				</div>
+				{#each ['messages', 'rules'] as key (key)}
+					<div class="card span-3">
+						<div class="skeleton" style="height: 10px; width: 70px"></div>
+						<div class="skeleton" style="height: 26px; width: 60px; margin-top: 18px"></div>
+						<div class="skeleton" style="height: 10px; width: 80%; margin-top: 18px"></div>
 					</div>
 				{/each}
 			</div>
-			<div class="cols">
-				<div class="skeleton" style="height: 260px"></div>
-				<div class="skeleton" style="height: 260px"></div>
+
+			<div class="bento">
+				<div class="card span-8">
+					<div class="skeleton" style="height: 14px; width: 120px"></div>
+					{#each ['a', 'b', 'c'] as key (key)}
+						<div class="skeleton" style="height: 48px; margin-top: 12px"></div>
+					{/each}
+				</div>
+				<div class="card span-4">
+					<div class="skeleton" style="height: 14px; width: 100px"></div>
+					<div class="skeleton" style="height: 96px; margin-top: 16px"></div>
+					<div class="skeleton" style="height: 10px; width: 80%; margin-top: 16px"></div>
+				</div>
+			</div>
+
+			<div class="bento">
+				<div class="card span-12">
+					<div class="skeleton" style="height: 14px; width: 140px"></div>
+					<div class="skeleton" style="height: 56px; margin-top: 16px"></div>
+					<div class="skeleton" style="height: 96px; margin-top: 12px"></div>
+				</div>
 			</div>
 		</div>
 	{:else if health}
-		<div class="stack">
-			<section class="panel status-panel" aria-labelledby="status-heading">
-				<div class="status-main">
-					<span class="beacon beacon-{statusTone}" aria-hidden="true"></span>
-					<div>
+		<div class="grid-stack">
+			<!-- 12 — deployment status. The one band that can carry a state fill. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 0">
+				<section
+					class="card span-12 status"
+					data-tone={statusTone}
+					aria-labelledby="status-heading"
+				>
+					<span class="beacon" data-tone={statusTone} aria-hidden="true"></span>
+					<div class="status-main">
 						<p class="eyebrow">Deployment</p>
 						<h2 id="status-heading">{headline}</h2>
 						<p class="status-sub">{subline}</p>
 					</div>
-				</div>
-				<div class="status-side">
-					<div class="status-metric">
-						<span class="eyebrow">Version</span>
-						<span class="mono">{health.version}</span>
-					</div>
-					<div class="status-metric">
-						<span class="eyebrow">Schema</span>
-						{#if health.schema_ready}
-							<span class="badge badge-ok">ready</span>
-						{:else}
-							<span class="badge badge-warn">not ready</span>
-						{/if}
-					</div>
-					<div class="status-metric">
-						<span class="eyebrow">Open alerts</span>
-						{#if openAlerts > 0}
-							<span class="badge badge-danger">{openAlerts} open</span>
-						{:else}
-							<span class="mono">0</span>
-						{/if}
-					</div>
-				</div>
-				<div class="fleet-line fleet-{fleetTone}">
-					<span
-						class="dot"
-						class:dot-ok={fleetTone === 'ok'}
-						class:dot-warn={fleetTone === 'warn'}
-						class:dot-danger={fleetTone === 'danger'}
-						aria-hidden="true"
-					></span>
-					<span class="eyebrow">Fleet</span>
-					<span class="fleet-summary">{fleetSummary}</span>
-					{#if fleetBreakdown}
-						<span class="fleet-breakdown mono">{fleetBreakdown}</span>
-					{/if}
-					<span class="spacer"></span>
-					<a class="fleet-link" href={ROUTES.devices}>View devices</a>
-				</div>
-			</section>
+					<dl class="status-facts">
+						<div class="fact">
+							<dt>Version</dt>
+							<dd class="mono">{health.version}</dd>
+						</div>
+						<div class="fact">
+							<dt>Schema</dt>
+							<dd>
+								{#if health.db_error}
+									<span class="muted">unknown</span>
+								{:else if health.schema_ready}
+									<Badge tone="ok" dot>ready</Badge>
+								{:else}
+									<Badge tone="warn" dot>not ready</Badge>
+								{/if}
+							</dd>
+						</div>
+						<div class="fact">
+							<dt>Bindings</dt>
+							<dd class="mono">{attachedBindings}/{bindingTotal}</dd>
+						</div>
+						<div class="fact">
+							<dt>Open alerts</dt>
+							<dd>
+								{#if openAlerts > 0}
+									<Badge tone="danger" dot>{openAlerts} open</Badge>
+								{:else if alertsKnown}
+									<span class="mono">0</span>
+								{:else}
+									<span class="muted" title="Not reported">—</span>
+								{/if}
+							</dd>
+						</div>
+					</dl>
+				</section>
+			</div>
 
 			{#if health.db_error}
-				<Notice tone="danger" title="D1 error">
+				<Notice tone="danger" title="The database did not answer">
 					<span class="mono break">{health.db_error}</span>
 				</Notice>
 			{/if}
 
 			{#if !health.schema_ready && !health.db_error}
 				<Notice tone="warn" title="Schema not ready">
-					No migrations are recorded. Run the migration before pairing a device — pairing writes to
-					tables that may not exist yet.
+					No migrations are recorded. Run the migration before pairing a device: pairing
+					writes to tables that may not exist yet.
 				</Notice>
 			{/if}
 
 			{#if missingCapabilities.length > 0}
-				<Notice tone="warn" title="Missing bindings">
+				<Notice tone="warn" title="Bindings not attached">
 					The gateway keeps serving, but the calls that depend on these bindings are skipped:
-					<span class="mono">{missingCapabilities.join(', ')}</span>
+					<span class="mono">{missingCapabilities.join(', ')}</span>.
 				</Notice>
 			{/if}
 
-			<div class="stat-grid">
-				<div class="stat">
-					<div class="stat-label">
-						<span>Devices</span>
-						<Icon name="smartphone" size={14} />
-					</div>
-					<div class="stat-value" class:empty={!health.counts}>
-						{formatCount(health.counts?.devices)}
-					</div>
-					<p class="stat-foot">paired fleet</p>
-				</div>
-				<div class="stat">
-					<div class="stat-label">
-						<span>Messages</span>
-						<Icon name="message" size={14} />
-					</div>
-					<div class="stat-value" class:empty={!health.counts}>
-						{formatCount(health.counts?.messages)}
-					</div>
-					<p class="stat-foot">
-						{#if health.last_message_at}
-							last <RelativeTime value={health.last_message_at} /> ·{' '}
-							{health.retention_days ?? 90}d retention
+			<!-- 6 + 3 + 3 — one hero figure, two supporting counts. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 1">
+				<section
+					class="card span-6 metric"
+					class:tint-mint={fleetTone === 'ok'}
+					class:tint-butter={fleetTone === 'warn'}
+					class:tint-peach={fleetTone === 'danger'}
+					class:lift={!fleetError}
+					aria-label="Phones answering"
+				>
+					<p class="eyebrow">Phones answering</p>
+					<p class="metric-figure hero">
+						{#if fleetLoading}
+							<span class="metric-quiet">…</span>
+						{:else if fleetError}
+							<span class="metric-quiet">—</span>
+						{:else if devices.length > 0}
+							{formatCount(answering)}<span class="metric-total"
+								>/ {formatCount(devices.length)}</span
+							>
 						{:else}
-							no traffic yet
+							{formatCount(answering)}
 						{/if}
 					</p>
-				</div>
-				<div class="stat">
-					<div class="stat-label">
-						<span>Rules</span>
-						<Icon name="filter" size={14} />
-					</div>
-					<div class="stat-value" class:empty={!health.counts}>
+					<p class="metric-note">
+						{#if fleetLoading}
+							Checking reachability…
+						{:else if fleetError}
+							Fleet state not reported.
+							<button type="button" class="link-btn" onclick={() => void loadFleet()}>
+								Try again
+							</button>
+						{:else if devices.length === 0}
+							No device is paired yet.
+						{:else}
+							{fleetBreakdown}
+						{/if}
+					</p>
+				</section>
+
+				<section class="card span-3 metric lift" aria-label="Messages">
+					<p class="eyebrow">Messages</p>
+					<p class="metric-figure" class:empty={!health.counts}>
+						{formatCount(health.counts?.messages)}
+					</p>
+					<p class="metric-note">
+						{#if !health.counts}
+							Not reported.
+						{:else if health.last_message_at}
+							Last <RelativeTime value={health.last_message_at} /> · kept
+							{health.retention_days ?? 90} days
+						{:else}
+							No traffic yet.
+						{/if}
+					</p>
+				</section>
+
+				<section class="card span-3 metric lift" aria-label="Rules">
+					<p class="eyebrow">Rules</p>
+					<p class="metric-figure" class:empty={!health.counts}>
 						{formatCount(health.counts?.rules)}
-					</div>
-					<p class="stat-foot">global and per-device</p>
-				</div>
-				<div class="stat">
-					<div class="stat-label">
-						<span>Pairing codes</span>
-						<Icon name="key" size={14} />
-					</div>
-					<div class="stat-value" class:empty={!health.counts}>
-						{formatCount(health.counts?.pairing_codes)}
-					</div>
-					<p class="stat-foot">single-use, unexpired</p>
-				</div>
+					</p>
+					<p class="metric-note">
+						{#if !health.counts}
+							Not reported.
+						{:else if health.counts.rules > 0}
+							Matched in priority order, on the gateway.
+						{:else}
+							Nothing answers automatically yet.
+						{/if}
+					</p>
+				</section>
 			</div>
 
-			<div class="cols">
-				<div class="stack">
-					<section class="panel">
-						<div class="panel-head">
-							<h2 class="panel-title"><Icon name="shield" size={14} /> Schema</h2>
-							<span class="panel-meta"
-								>{health.migrations.length} migration{health.migrations.length === 1 ? '' : 's'}</span
-							>
-						</div>
-						{#if health.migrations.length > 0}
-							<ul class="mig-list">
-								{#each health.migrations as migration, index (migration)}
-									<li>
-										<span class="mig-index mono">{String(index + 1).padStart(2, '0')}</span>
-										<span class="mono mig-name">{migration}</span>
-									</li>
-								{/each}
-							</ul>
-						{:else}
-							<EmptyState
-								icon="alert"
-								title="No migrations recorded"
-								description="The migration table is empty or missing. Apply the schema before pairing."
-							/>
+			<!-- 8 + 4 — the fleet, and the quiet (or alert) state beside it. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 2">
+				<section class="card span-8" aria-labelledby="devices-heading">
+					<div class="card-head">
+						<h2 id="devices-heading" class="card-title">Devices</h2>
+						{#if !fleetLoading && !fleetError && devices.length > 0}
+							<Badge tone="muted">{formatCount(devices.length)} paired</Badge>
 						{/if}
-					</section>
+						<a class="card-link" href={ROUTES.devices}>All devices</a>
+					</div>
 
-					<section class="panel">
-						<div class="panel-head">
-							<h2 class="panel-title"><Icon name="activity" size={14} /> Bindings</h2>
-							<span class="panel-meta">
-								{bindingRows.filter((row) => row.present).length}/{bindingRows.length} attached
-							</span>
+					{#if fleetLoading}
+						<div aria-busy="true">
+							<span class="sr-only">Loading devices</span>
+							{#each ['a', 'b', 'c'] as key (key)}
+								<div class="skeleton" style="height: 48px; margin-top: 12px"></div>
+							{/each}
 						</div>
-						<ul class="bind-list">
-							{#each bindingRows as row (row.key)}
-								<li class="bind-row" class:is-missing={!row.present && !row.optional}>
-									<span class="bind-mark" aria-hidden="true">
-										{#if row.present}
-											<Icon name="check" size={13} />
-										{:else}
-											<span class="bind-dash"></span>
-										{/if}
-									</span>
-									<span class="bind-text">
-										<span class="bind-label">{row.label}</span>
-										<span class="mono bind-key">{row.key}</span>
-									</span>
-									<span class="bind-state">
-										{#if row.present}
-											<span class="mono bound">bound</span>
-										{:else if row.optional}
-											<Badge tone="muted">optional</Badge>
-										{:else}
-											<Badge tone="danger">missing</Badge>
-										{/if}
-									</span>
+					{:else if fleetError}
+						<Notice tone="danger" title="Fleet state not reported">{fleetError}</Notice>
+						<div class="row" style="margin-top: 12px">
+							<button type="button" class="btn btn-sm" onclick={() => void loadFleet()}>
+								<Icon name="refresh" size={13} /> Try again
+							</button>
+						</div>
+					{:else if devices.length === 0}
+						<EmptyState
+							icon="smartphone"
+							title="No devices paired yet"
+							description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
+						>
+							<a class="btn btn-primary" href={`${ROUTES.devices}?mint=enroll`}>
+								<Icon name="key" size={14} /> Mint a pairing code
+							</a>
+						</EmptyState>
+					{:else}
+						<ul class="dev-rows">
+							{#each visibleDevices as device, index (device.device_id)}
+								{@const state = fleetStates[index]}
+								{@const secondary = deviceSecondary(device)}
+								<li>
+									<a
+										class="devrow"
+										href={`${ROUTES.devices}?device=${encodeURIComponent(device.device_id)}`}
+									>
+										<span class="dev-glyph" aria-hidden="true">
+											<Icon name="smartphone" size={18} />
+										</span>
+										<span class="dev-copy">
+											<span class="dev-name" class:mono={!secondary}>{devicePrimary(device)}</span>
+											<span class="dev-meta mono">
+												{#if secondary}{secondary} · {/if}
+												{#if device.sim_slot !== null && device.sim_slot !== undefined}
+													sim {device.sim_slot} ·
+												{/if}
+												{#if device.last_seen}
+													seen <RelativeTime value={device.last_seen} />
+												{:else}
+													never synced
+												{/if}
+											</span>
+										</span>
+										<PresenceChip presence={state} />
+									</a>
 								</li>
 							{/each}
 						</ul>
-						<p class="panel-note">
-							FCM is expected to be absent in local and polling-only deployments. Without it the
-							gateway cannot send wake-up pushes; the phone still reaches the gateway on its next
-							poll or socket connection.
+						{#if remainingDevices > 0}
+							<a class="dev-more" href={ROUTES.devices}>
+								and {formatCount(remainingDevices)}
+								{remainingDevices === 1 ? 'more device' : 'more devices'}
+							</a>
+						{/if}
+					{/if}
+				</section>
+
+				<section
+					class="card span-4 quiet-card"
+					aria-labelledby="alerts-heading"
+				>
+					{#if openAlerts > 0}
+						<div class="card-head">
+							<h2 id="alerts-heading" class="card-title">Open alerts</h2>
+							<Badge tone="danger" dot>{formatCount(openAlerts)}</Badge>
+						</div>
+						<p class="card-note">
+							{formatCount(openAlerts)}
+							{plural(openAlerts, 'device')}
+							{openAlerts === 1 ? 'has' : 'have'} not been heard from.
+							{openAlerts === 1
+								? 'It stays open until you acknowledge it in the banner above.'
+								: 'Acknowledge them in the banner above; they leave the open list.'}
 						</p>
-					</section>
-				</div>
+						<a class="card-link alerts-link" href={ROUTES.devices}>Open devices</a>
+					{:else if !alertsKnown}
+						<h2 id="alerts-heading" class="card-title">Alert state not reported</h2>
+						<p class="card-note">
+							The database did not answer, so open alerts cannot be counted. The status above
+							says which check failed.
+						</p>
+					{:else}
+						<h2 id="alerts-heading" class="card-title">The console is quiet</h2>
+						<div class="quiet">
+							<svg
+								class="daki"
+								width="72"
+								height="58"
+								viewBox="0 0 120 96"
+								fill="none"
+								aria-hidden="true"
+							>
+								<rect
+									x="34"
+									y="10"
+									width="52"
+									height="76"
+									rx="14"
+									stroke="currentColor"
+									stroke-width="2.2"
+								/>
+								<rect
+									x="26"
+									y="34"
+									width="26"
+									height="34"
+									rx="8"
+									fill="var(--df-state-ok-bg)"
+									stroke="currentColor"
+									stroke-width="2.2"
+								/>
+								<path
+									d="M32 50l4 4 8-9"
+									stroke="var(--df-state-ok-ink)"
+									stroke-width="2.6"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								/>
+								<circle cx="52" cy="34" r="2.6" fill="currentColor" />
+								<circle cx="68" cy="34" r="2.6" fill="currentColor" />
+								<path
+									d="M52 44c3.4 4 12.6 4 16 0"
+									stroke="currentColor"
+									stroke-width="2.4"
+									stroke-linecap="round"
+								/>
+								<path d="M86 26c6 0 10 4 10 10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+								<path d="M96 44c3 0 5 2 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+							</svg>
+							<p class="quiet-title">No open alerts</p>
+							<p class="card-note">
+								Last checked <RelativeTime value={checkedAt} />. Alerts land here, not in your
+								sleep.
+							</p>
+						</div>
+					{/if}
+				</section>
+			</div>
 
-				<div class="stack">
-					<section class="panel">
-						<div class="panel-head">
-							<h2 class="panel-title"><Icon name="key" size={14} /> Quick actions</h2>
-						</div>
-						<div class="panel-body flush">
-							<a class="quick" href={`${ROUTES.devices}?mint=enroll`}>
-								<span class="quick-icon"><Icon name="key" size={15} /></span>
-								<span class="quick-text">
-									<strong>Mint a pairing code</strong>
-									<small>Enroll a phone or rotate a device key</small>
-								</span>
-								<span class="quick-arrow"><Icon name="arrow-up-right" size={14} /></span>
-							</a>
-							<a class="quick" href={ROUTES.messages}>
-								<span class="quick-icon"><Icon name="message" size={15} /></span>
-								<span class="quick-text">
-									<strong>Open the message log</strong>
-									<small>Inspect inbound and outbound traffic</small>
-								</span>
-								<span class="quick-arrow"><Icon name="arrow-up-right" size={14} /></span>
-							</a>
-							<a class="quick" href={ROUTES.rules}>
-								<span class="quick-icon"><Icon name="filter" size={15} /></span>
-								<span class="quick-text">
-									<strong>Review auto-reply rules</strong>
-									<small>Matchers, reply templates and limits</small>
-								</span>
-								<span class="quick-arrow"><Icon name="arrow-up-right" size={14} /></span>
-							</a>
-						</div>
-					</section>
+			<!-- 12 — what answers a stranger. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 3">
+				<section class="card span-12" aria-labelledby="automation-heading">
+					<div class="card-head">
+						<h2 id="automation-heading" class="card-title">Automation</h2>
+						{#if health.counts}
+							<Badge tone="accent">
+								{formatCount(health.counts.rules)}
+								{plural(health.counts.rules, 'rule')}
+							</Badge>
+						{/if}
+						<a class="card-link" href={ROUTES.rules}>Review automation</a>
+					</div>
 
-					<section class="panel">
-						<div class="panel-head">
-							<h2 class="panel-title"><Icon name="info" size={14} /> Deployment</h2>
+					<p class="pipeline">
+						<span>
+							Rules answer first on the gateway. When no rule matches, the phone runs its own
+							flows. One reply per message, whichever answered.
+						</span>
+					</p>
+
+					<div class="board">
+						<div class="lane">
+							<div class="lane-head">
+								<span>Rules</span>
+								{#if health.counts}
+									<span class="lane-count mono">{formatCount(health.counts.rules)}</span>
+								{/if}
+							</div>
+							{#if !health.counts}
+								<p class="lane-note">Count not reported.</p>
+							{:else if health.counts.rules === 0}
+								<p class="lane-title">No rules yet</p>
+								<p class="lane-note">Nothing answers automatically until a rule matches.</p>
+								<a class="lane-link" href={ROUTES.rules}>Create a rule</a>
+							{:else}
+								<p class="lane-title">Authored on the gateway</p>
+								<p class="lane-note">Rules run before flows, in priority order.</p>
+								<a class="lane-link" href={ROUTES.rules}>Review rules</a>
+							{/if}
 						</div>
-						<div class="panel-body">
-							<dl class="kv">
-								<dt>Version</dt>
-								<dd class="mono">{health.version}</dd>
-								<dt>Retention</dt>
-								<dd>{health.retention_days ?? 90} days</dd>
-								<dt>Last inbound</dt>
-								<dd>
-									{#if health.last_message_at}
-										<RelativeTime value={health.last_message_at} />
-									{:else}
-										<span class="muted">none</span>
-									{/if}
-								</dd>
-								<dt>Open alerts</dt>
-								<dd>
-									{#if openAlerts > 0}
-										<Badge tone="danger">{openAlerts} open</Badge>
-									{:else}
-										<span class="muted">none</span>
-									{/if}
-								</dd>
-								<dt>Auto-replies</dt>
-								<dd><a href={ROUTES.messages}>See rule replies in the message log</a></dd>
-								<dt>Checked</dt>
-								<dd>{formatClock(checkedAt)}</dd>
-								<dt>Database</dt>
-								<dd>
-									{#if health.db_error}
-										<Badge tone="danger">error</Badge>
-									{:else}
-										<Badge tone="ok">reachable</Badge>
-									{/if}
-								</dd>
-							</dl>
+
+						<div class="lane">
+							<div class="lane-head">
+								<span>Flows</span>
+							</div>
+							<p class="lane-title">Run on the phone</p>
+							<p class="lane-note">Synced graphs answer when no rule matched.</p>
+							<a class="lane-link" href={ROUTES.workflows}>Open workflows</a>
 						</div>
-					</section>
-				</div>
+
+						<div class="lane">
+							<div class="lane-head">
+								<span>Reach</span>
+							</div>
+							{#if fleetLoading}
+								<p class="lane-title">Checking…</p>
+								<p class="lane-note">Waiting for device reachability.</p>
+							{:else if fleetError}
+								<p class="lane-title">Not reported</p>
+								<p class="lane-note">A phone in contact is the only one that can run its flows.</p>
+							{:else if devices.length === 0}
+								<p class="lane-title">No phone paired</p>
+								<p class="lane-note">A phone in contact is the only one that can run its flows.</p>
+							{:else}
+								<p class="lane-title">
+									<span class="mono">{formatCount(answering)}</span>
+									{answering === 1 ? 'phone answering' : 'phones answering'}
+								</p>
+								<p class="lane-note">A phone in contact is the only one that can run its flows.</p>
+							{/if}
+							<a class="lane-link" href={ROUTES.devices}>Open devices</a>
+						</div>
+					</div>
+				</section>
 			</div>
 		</div>
 	{/if}
@@ -580,351 +711,366 @@
 
 <style>
 	.checked {
-		font-size: var(--text-xs);
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 		letter-spacing: 0.03em;
 	}
 
-	.status-panel {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--s-5);
-		flex-wrap: wrap;
-		padding: var(--s-5);
-		background:
-			linear-gradient(120deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 55%),
-			var(--surface);
-	}
-
-	.status-main {
-		display: flex;
-		align-items: flex-start;
-		gap: var(--s-4);
-		min-width: 0;
-	}
-
-	.beacon {
-		position: relative;
-		width: 9px;
-		height: 9px;
-		margin-top: 6px;
-		border-radius: 50%;
-		flex: none;
-	}
-
-	.beacon-ok {
-		background: var(--ok);
-		box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 15%, transparent);
-	}
-
-	.beacon-ok::after {
-		content: '';
-		position: absolute;
-		inset: -4px;
-		border-radius: 50%;
-		border: 1px solid var(--ok);
-		opacity: 0;
-		animation: beacon 3s ease-out infinite;
-	}
-
-	@keyframes beacon {
-		0% {
-			opacity: 0.5;
-			transform: scale(0.8);
-		}
-		70%,
-		100% {
-			opacity: 0;
-			transform: scale(1.6);
-		}
-	}
-
-	.beacon-warn {
-		background: var(--warn);
-		box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 15%, transparent);
-	}
-
-	.beacon-danger {
-		background: var(--danger);
-		box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 15%, transparent);
-	}
-
-	.status-panel h2 {
-		margin-top: 5px;
-		font-size: var(--text-xl);
-		letter-spacing: -0.02em;
-	}
-
-	.status-sub {
-		margin-top: 5px;
-		max-width: 58ch;
-		color: var(--ink-3);
-		font-size: var(--text-base);
-	}
-
-	.status-side {
-		display: flex;
-		gap: var(--s-6);
-		padding-left: var(--s-5);
-		border-left: 1px solid var(--line);
-	}
-
-	.status-metric {
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-	}
-
-	.status-metric > .mono {
-		font-size: var(--text-sm);
-	}
-
-	.fleet-line {
-		display: flex;
-		align-items: center;
-		gap: var(--s-2);
-		flex-basis: 100%;
-		flex-wrap: wrap;
-		margin-top: var(--s-4);
-		padding-top: var(--s-3);
-		border-top: 1px solid var(--line);
-		font-size: var(--text-base);
-	}
-
-	.fleet-summary {
-		font-weight: 600;
-		color: var(--ink);
-	}
-
-	.fleet-ok .fleet-summary {
-		color: var(--ok);
-	}
-
-	.fleet-warn .fleet-summary {
-		color: var(--warn);
-	}
-
-	.fleet-danger .fleet-summary {
-		color: var(--danger);
-	}
-
-	.fleet-muted .fleet-summary {
-		color: var(--ink-3);
-		font-weight: 500;
-	}
-
-	.fleet-breakdown {
-		font-size: 10px;
-		color: var(--ink-3);
-	}
-
-	.fleet-link {
-		font-size: var(--text-sm);
-		white-space: nowrap;
-	}
-
-	.cols {
-		display: grid;
-		grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
-		gap: var(--s-4);
-		align-items: start;
-	}
-
-	/* schema */
-	.mig-list {
-		margin: 0;
-		padding: 0;
-		list-style: none;
-		max-height: 232px;
-		overflow-y: auto;
-	}
-
-	.mig-list li {
-		display: flex;
-		align-items: baseline;
-		gap: var(--s-3);
-		padding: 7px var(--s-4);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.mig-list li:last-child {
-		border-bottom: 0;
-	}
-
-	.mig-index {
-		font-size: 10px;
-		color: var(--ink-3);
-		width: 18px;
-		flex: none;
-	}
-
-	.mig-name {
-		font-size: var(--text-sm);
-		overflow-wrap: anywhere;
-	}
-
-	/* bindings */
-	.bind-list {
-		margin: 0;
-		padding: 0;
-		list-style: none;
-	}
-
-	.bind-row {
-		display: grid;
-		grid-template-columns: 18px minmax(0, 1fr) auto;
-		align-items: center;
-		gap: var(--s-3);
-		padding: 8px var(--s-4);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.bind-row:last-child {
-		border-bottom: 0;
-	}
-
-	.bind-row.is-missing {
-		background: color-mix(in srgb, var(--danger) 4%, transparent);
-	}
-
-	.bind-mark {
-		display: grid;
-		place-items: center;
-		width: 18px;
-		height: 18px;
-		border-radius: 3px;
-		color: var(--ok);
-	}
-
-	.bind-row.is-missing .bind-mark {
-		color: var(--ink-3);
-	}
-
-	.bind-dash {
-		width: 7px;
-		height: 1px;
-		background: var(--ink-3);
-	}
-
-	.bind-text {
-		min-width: 0;
-	}
-
-	.bind-label {
-		display: block;
-		font-size: var(--text-base);
-	}
-
-	.bind-key {
-		display: block;
-		font-size: 9.5px;
-		color: var(--ink-3);
-		letter-spacing: 0.04em;
-		margin-top: 1px;
-	}
-
-	.bound {
-		font-size: 9.5px;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	/* quick actions */
-	.quick {
-		display: flex;
-		align-items: center;
-		gap: var(--s-3);
-		padding: 12px var(--s-4);
-		border-bottom: 1px solid var(--line);
-		color: var(--ink);
-		text-decoration: none;
-		transition: background-color 120ms ease;
-	}
-
-	.quick:last-child {
-		border-bottom: 0;
-	}
-
-	.quick:hover {
-		background: var(--surface-2);
-		text-decoration: none;
-	}
-
-	.quick-arrow {
-		display: inline-flex;
-		color: var(--ink-3);
-		opacity: 0;
-		transform: translateX(-3px);
-		transition:
-			opacity 140ms ease,
-			transform 140ms ease;
-	}
-
-	.quick:hover .quick-arrow {
-		opacity: 1;
-		transform: none;
-	}
-
-	.quick-icon {
-		display: grid;
-		place-items: center;
-		width: 28px;
-		height: 28px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--ink-2);
-		flex: none;
-	}
-
-	.quick:first-child .quick-icon {
-		color: var(--accent);
-		border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-		background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-	}
-
-	.quick-text {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.quick-text strong {
-		display: block;
-		font-size: var(--text-base);
-		font-weight: 500;
-	}
-
-	.quick-text small {
-		display: block;
-		margin-top: 1px;
-		font-size: 11px;
-		color: var(--ink-3);
+	.checked.has-error {
+		color: var(--df-state-danger-ink);
 	}
 
 	.break {
 		overflow-wrap: anywhere;
 	}
 
-	@media (max-width: 980px) {
-		.cols {
-			grid-template-columns: minmax(0, 1fr);
+	.loading-line {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-base);
+	}
+
+	/* ---------- status banner ---------- */
+
+	.status {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: start;
+		gap: var(--df-p-space-4);
+	}
+
+	.status[data-tone='warn'] {
+		background: var(--df-state-warn-bg);
+		border-color: transparent;
+	}
+
+	.status[data-tone='danger'] {
+		background: var(--df-state-danger-bg);
+		border-color: transparent;
+	}
+
+	.beacon {
+		width: 10px;
+		height: 10px;
+		margin-top: 5px;
+		border-radius: 50%;
+		background: var(--df-text-meta);
+		flex: none;
+	}
+
+	.beacon[data-tone='ok'] {
+		background: var(--df-state-ok-ink);
+		box-shadow: 0 0 0 4px color-mix(in srgb, var(--df-state-ok-ink) 16%, transparent);
+		/* DESIGN_2026 §2: pulse is allowed on the deployment beacon, never on a row. */
+		animation: pulse 2.4s ease-in-out infinite;
+	}
+
+	.beacon[data-tone='warn'] {
+		background: var(--df-state-warn-ink);
+		box-shadow: 0 0 0 4px color-mix(in srgb, var(--df-state-warn-ink) 16%, transparent);
+	}
+
+	.beacon[data-tone='danger'] {
+		background: var(--df-state-danger-ink);
+		box-shadow: 0 0 0 4px color-mix(in srgb, var(--df-state-danger-ink) 16%, transparent);
+	}
+
+	.status-main {
+		min-width: 0;
+	}
+
+	.status h2 {
+		margin-top: 4px;
+		font-size: var(--df-p-text-xl);
+		letter-spacing: -0.02em;
+	}
+
+	.status-sub {
+		margin-top: 4px;
+		max-width: 62ch;
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+	}
+
+	.status-facts {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-5);
+		margin: 0;
+		padding-left: var(--df-p-space-5);
+		border-left: 1px solid var(--df-border-hairline);
+	}
+
+	.fact dt {
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.fact dd {
+		margin: 4px 0 0;
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-primary);
+		white-space: nowrap;
+	}
+
+	/* ---------- metric cards ---------- */
+
+	.metric {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-2);
+	}
+
+	.metric-figure {
+		margin-top: 2px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xl);
+		font-weight: 600;
+		line-height: 0.95;
+		letter-spacing: -0.03em;
+		font-variant-numeric: tabular-nums;
+		color: var(--df-text-primary);
+	}
+
+	.metric-figure.hero {
+		font-size: var(--df-p-text-3xl);
+	}
+
+	.metric-figure.empty,
+	.metric-quiet {
+		color: var(--df-text-meta);
+	}
+
+	.metric-total {
+		margin-left: 6px;
+		font-size: var(--df-p-text-xl);
+		font-weight: 500;
+		color: var(--df-text-meta);
+	}
+
+	.metric-note {
+		margin-top: auto;
+		font-size: var(--df-p-text-base);
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+	}
+
+	.metric .link-btn {
+		font-size: inherit;
+	}
+
+	/* ---------- device rows ---------- */
+
+	.dev-rows {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.devrow {
+		display: grid;
+		grid-template-columns: 22px minmax(0, 1fr) auto;
+		align-items: center;
+		gap: var(--df-p-space-3);
+		padding: 11px var(--df-p-space-2);
+		border-top: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		color: var(--df-text-primary);
+		text-decoration: none;
+		transition: background-color 140ms ease;
+	}
+
+	.dev-rows li:first-child .devrow {
+		border-top: 0;
+	}
+
+	.devrow:hover {
+		background: var(--df-surface-well);
+		text-decoration: none;
+	}
+
+	.dev-glyph {
+		display: grid;
+		place-items: center;
+		color: var(--df-text-meta);
+	}
+
+	.dev-copy {
+		min-width: 0;
+	}
+
+	.dev-name {
+		display: block;
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		line-height: 1.3;
+		overflow-wrap: anywhere;
+	}
+
+	.dev-meta {
+		display: block;
+		margin-top: 2px;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+		overflow-wrap: anywhere;
+	}
+
+	.dev-more {
+		display: inline-block;
+		margin-top: var(--df-p-space-3);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+	}
+
+	/* ---------- quiet / alerts ---------- */
+
+	.quiet-card {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-2);
+	}
+
+	.quiet {
+		flex: 1;
+		display: grid;
+		place-items: center;
+		align-content: center;
+		text-align: center;
+		gap: var(--df-p-space-1);
+		padding: var(--df-p-space-3) 0 0;
+	}
+
+	.daki {
+		color: var(--df-text-primary);
+	}
+
+	.quiet-title {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		color: var(--df-text-primary);
+	}
+
+	.alerts-link {
+		margin-left: 0;
+		margin-top: var(--df-p-space-2);
+		align-self: flex-start;
+	}
+
+	/* ---------- automation board ---------- */
+
+	.pipeline {
+		margin-bottom: var(--df-p-space-3);
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+	}
+
+	.pipeline span {
+		display: block;
+		max-width: 78ch;
+	}
+
+	.board {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: var(--df-p-space-3);
+	}
+
+	.lane {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-1);
+		padding: var(--df-p-space-3);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
+		min-width: 0;
+	}
+
+	.lane-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-2);
+		padding-bottom: var(--df-p-space-1);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.lane-count {
+		font-size: var(--df-p-text-xs);
+		letter-spacing: 0;
+		color: var(--df-text-secondary);
+	}
+
+	.lane-title {
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.lane-note {
+		font-size: var(--df-p-text-sm);
+		line-height: 1.45;
+		color: var(--df-text-meta);
+	}
+
+	.lane-link {
+		margin-top: auto;
+		padding-top: var(--df-p-space-2);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+	}
+
+	@media (max-width: 1100px) {
+		.status {
+			grid-template-columns: auto minmax(0, 1fr);
+		}
+
+		.status-facts {
+			grid-column: 1 / -1;
+			padding-left: 0;
+			padding-top: var(--df-p-space-3);
+			border-left: 0;
+			border-top: 1px solid var(--df-border-hairline);
 		}
 	}
 
-	@media (max-width: 620px) {
-		.status-panel {
-			padding: var(--s-4);
+	@media (max-width: 720px) {
+		.status {
+			grid-template-columns: auto minmax(0, 1fr);
+			gap: var(--df-p-space-3);
 		}
 
-		.status-side {
-			width: 100%;
-			padding-left: 0;
-			padding-top: var(--s-3);
-			border-left: 0;
-			border-top: 1px solid var(--line);
-			gap: var(--s-5);
+		.status-facts {
+			flex-wrap: wrap;
+			gap: var(--df-p-space-4);
+		}
+
+		.board {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.devrow {
+			grid-template-columns: 20px minmax(0, 1fr);
+			row-gap: 6px;
+		}
+
+		.devrow :global(.presence) {
+			grid-column: 2;
 		}
 	}
 </style>

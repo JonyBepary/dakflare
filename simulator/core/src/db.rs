@@ -24,8 +24,29 @@ pub enum StoreError {
     Corrupt(String),
     #[error("invalid message state: {0}")]
     InvalidState(String),
+    #[error("invalid device fact: {0}")]
+    InvalidFact(String),
     #[error("time went backwards")]
     Clock,
+}
+
+/// Facts the native shell may report. Anything else is refused, so a caller
+/// cannot use the fact setter to overwrite a credential or the target URL.
+pub const DEVICE_FACT_KEYS: [&str; 6] = [
+    "self_number",
+    "sim_slot",
+    "sim_carrier",
+    "permissions",
+    "battery_optimized",
+    "default_sms_app",
+];
+
+/// One fact value is a phone number, a slot, a small JSON object or a package
+/// name; 256 bytes is comfortably more than any of those needs.
+pub const MAX_DEVICE_FACT_LEN: usize = 256;
+
+pub fn is_device_fact_key(key: &str) -> bool {
+    DEVICE_FACT_KEYS.contains(&key)
 }
 
 /// One statement per entry, applied in order and recorded in `schema_migrations`.
@@ -154,6 +175,40 @@ pub struct Message {
     pub state: String,
     pub local_id: Option<String>,
     pub created_at: i64,
+}
+
+/// One row of the cached flow set. `node_count` is parsed from the stored graph
+/// and is `None` when that graph is not valid JSON; the metadata stays readable
+/// either way. The `flows` table has no `enabled` column, so this does not
+/// invent one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedFlow {
+    pub id: String,
+    pub version: i64,
+    pub fetched_at: i64,
+    pub node_count: Option<u64>,
+}
+
+/// One recorded flow run, in the shape the Flows frame reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowRunRow {
+    pub local_id: String,
+    pub flow_id: String,
+    pub flow_version: i64,
+    pub outcome: String,
+    pub created_at: i64,
+}
+
+/// Handset facts the native shell reports once the permission flow settles.
+/// A missing or unparseable setting is `None`, never a fabricated default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceFacts {
+    pub self_number: Option<String>,
+    pub sim_slot: Option<i64>,
+    pub sim_carrier: Option<String>,
+    pub permissions: Option<serde_json::Value>,
+    pub battery_optimized: Option<bool>,
+    pub default_sms_app: Option<String>,
 }
 
 pub struct Store {
@@ -383,6 +438,50 @@ impl Store {
         }
     }
 
+    /// Persist one whitelisted handset fact.
+    ///
+    /// The key is checked here, in the core, so both the Tauri command surface
+    /// and the JNI setter share one rule. A rejected key is never written, which
+    /// also keeps the fact path from overwriting `base_url` or `admin_token`.
+    pub async fn set_device_fact(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        if !is_device_fact_key(key) {
+            return Err(StoreError::InvalidFact(key.to_string()));
+        }
+        if value.len() > MAX_DEVICE_FACT_LEN {
+            return Err(StoreError::InvalidFact(format!("value too long for {key}")));
+        }
+        self.set_setting(key, value).await
+    }
+
+    /// The last handset facts the native shell wrote. Each missing or malformed
+    /// value stays `None`, so the UI shows "not reported" instead of a guess.
+    pub async fn get_device_facts(&self) -> Result<DeviceFacts, StoreError> {
+        let self_number = self.get_setting("self_number").await?;
+        let sim_slot = self
+            .get_setting("sim_slot")
+            .await?
+            .and_then(|value| value.parse::<i64>().ok());
+        let sim_carrier = self.get_setting("sim_carrier").await?;
+        let permissions = self
+            .get_setting("permissions")
+            .await?
+            .and_then(|value| serde_json::from_str(&value).ok());
+        let battery_optimized = self
+            .get_setting("battery_optimized")
+            .await?
+            .and_then(|value| value.parse::<bool>().ok());
+        let default_sms_app = self.get_setting("default_sms_app").await?;
+
+        Ok(DeviceFacts {
+            self_number,
+            sim_slot,
+            sim_carrier,
+            permissions,
+            battery_optimized,
+            default_sms_app,
+        })
+    }
+
     /// Append a message to this device's local thread.
     pub async fn record_message(
         &self,
@@ -457,6 +556,37 @@ impl Store {
         Ok(())
     }
 
+    /// This device's recorded runs, newest first. Clamped so a bad caller cannot
+    /// ask the phone to materialise its entire history.
+    pub async fn list_flow_runs(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<FlowRunRow>, StoreError> {
+        let limit = limit.clamp(1, 100);
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT local_id, flow_id, flow_version, outcome, created_at
+                   FROM flow_runs WHERE device_id = ?
+                  ORDER BY created_at DESC, id DESC LIMIT ?",
+                params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(FlowRunRow {
+                local_id: row.get(0)?,
+                flow_id: row.get(1)?,
+                flow_version: row.get(2)?,
+                outcome: row.get(3)?,
+                created_at: row.get(4)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// Find a row by its deterministic device-local id. This is how a
     /// re-delivered `SMS_RECEIVED` broadcast resolves to the row the first
     /// delivery already wrote.
@@ -510,6 +640,53 @@ impl Store {
                    FROM messages WHERE device_id = ?
                   ORDER BY created_at DESC, id DESC LIMIT ?",
                 params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// One keyset page strictly older than `(before_created_at, before_id)`.
+    ///
+    /// The tie-breaker is `id`, matching the `ORDER BY created_at DESC, id DESC`
+    /// of [`Store::list_messages`]. Comparing the tuple rather than just the
+    /// timestamp is what keeps rows that share a millisecond from repeating or
+    /// vanishing between pages.
+    pub async fn list_messages_before(
+        &self,
+        device_id: &str,
+        before_created_at: i64,
+        before_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages
+                  WHERE device_id = ?
+                    AND (created_at < ? OR (created_at = ? AND id < ?))
+                  ORDER BY created_at DESC, id DESC LIMIT ?",
+                params![
+                    device_id,
+                    before_created_at,
+                    before_created_at,
+                    before_id,
+                    limit
+                ],
             )
             .await?;
 
@@ -763,6 +940,41 @@ impl Store {
                 id: row.get(0)?,
                 version: row.get(1)?,
                 graph,
+            });
+        }
+        Ok(flows)
+    }
+
+    /// Read the cached flow set as metadata for the Flows frame.
+    ///
+    /// Unlike [`Store::load_flows`] this tolerates a corrupt graph: the row is
+    /// still reported, with `node_count` set to `None`, because hiding a cached
+    /// flow would be a lie about what this phone holds.
+    pub async fn list_cached_flows(&self) -> Result<Vec<CachedFlow>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, version, graph, fetched_at FROM flows ORDER BY id, version",
+                (),
+            )
+            .await?;
+
+        let mut flows = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let graph: String = row.get(2)?;
+            let node_count = serde_json::from_str::<serde_json::Value>(&graph)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("nodes")
+                        .and_then(|nodes| nodes.as_array())
+                        .and_then(|nodes| u64::try_from(nodes.len()).ok())
+                });
+            flows.push(CachedFlow {
+                id: row.get(0)?,
+                version: row.get(1)?,
+                fetched_at: row.get(3)?,
+                node_count,
             });
         }
         Ok(flows)
@@ -1145,5 +1357,223 @@ mod tests {
         // An empty fetched set clears the cache rather than reviving old rows.
         store.replace_flows(&[]).await.unwrap();
         assert!(store.load_flows().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_paging_uses_the_created_at_and_id_cursor() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "paging",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let mut expected = Vec::new();
+        for index in 0..4 {
+            let message = store
+                .record_message(
+                    &device.device_id,
+                    "in",
+                    "+1555",
+                    &format!("body {index}"),
+                    "received",
+                    Some(&format!("in-{index}")),
+                )
+                .await
+                .unwrap();
+            expected.push(message.id);
+        }
+
+        // Put all four rows in one millisecond. Only the id tie-breaker keeps
+        // the pages stable, so this is the case the cursor exists for.
+        {
+            let conn = store.db.connect().unwrap();
+            conn.execute(
+                "UPDATE messages SET created_at = 1000 WHERE device_id = ?",
+                params![device.device_id.as_str()],
+            )
+            .await
+            .unwrap();
+        }
+
+        let first = store.list_messages(&device.device_id, 2).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].created_at, first[1].created_at);
+        assert!(first[0].id > first[1].id, "newest first within a tie");
+
+        let cursor = &first[1];
+        let second = store
+            .list_messages_before(&device.device_id, cursor.created_at, &cursor.id, 2)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].created_at, second[1].created_at);
+        assert!(second[0].id > second[1].id);
+        assert!(second[0].id < cursor.id, "strictly older than the cursor");
+
+        let first_ids: Vec<&str> = first.iter().map(|m| m.id.as_str()).collect();
+        let second_ids: Vec<&str> = second.iter().map(|m| m.id.as_str()).collect();
+        assert!(second_ids.iter().all(|id| !first_ids.contains(id)));
+
+        let mut seen = first_ids.clone();
+        seen.extend(second_ids);
+        seen.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(seen, expected);
+
+        // The final page is empty: the cursor has walked off the end once.
+        let last = &second[1];
+        assert!(
+            store
+                .list_messages_before(&device.device_id, last.created_at, &last.id, 2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_flows_report_metadata_and_count_nodes() {
+        let (_dir, store) = open_temp().await;
+        assert!(store.list_cached_flows().await.unwrap().is_empty());
+
+        store
+            .replace_flows(&[flow("wf_a", 2, "x"), flow("wf_b", 1, "y")])
+            .await
+            .unwrap();
+
+        let cached = store.list_cached_flows().await.unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].id, "wf_a");
+        assert_eq!(cached[0].version, 2);
+        assert_eq!(cached[0].node_count, Some(3));
+        assert!(cached[0].fetched_at > 0);
+        assert_eq!(cached[1].id, "wf_b");
+
+        // A corrupt graph must not hide the row or panic the reader.
+        {
+            let conn = store.db.connect().unwrap();
+            conn.execute("UPDATE flows SET graph = 'not json'", ())
+                .await
+                .unwrap();
+        }
+        let cached = store.list_cached_flows().await.unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].node_count, None);
+        assert_eq!(cached[1].node_count, None);
+    }
+
+    #[tokio::test]
+    async fn flow_runs_list_newest_first_and_are_scoped_to_the_device() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "runs",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        for (index, outcome) in ["delivered", "masked", "error"].iter().enumerate() {
+            store
+                .record_run(
+                    &device.device_id,
+                    &FlowRunReport {
+                        local_id: format!("in-{index}"),
+                        flow_id: "wf_gate".into(),
+                        flow_version: 2,
+                        outcome: (*outcome).into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        // record_run stamps every row with the same millisecond, so give them
+        // distinct times to prove the ORDER BY rather than insertion order.
+        {
+            let conn = store.db.connect().unwrap();
+            for index in 0..3i64 {
+                conn.execute(
+                    "UPDATE flow_runs SET created_at = ? WHERE local_id = ?",
+                    params![1000 + index, format!("in-{index}")],
+                )
+                .await
+                .unwrap();
+            }
+        }
+
+        let runs = store.list_flow_runs(&device.device_id, 2).await.unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].local_id, "in-2");
+        assert_eq!(runs[0].created_at, 1002);
+        assert_eq!(runs[0].flow_id, "wf_gate");
+        assert_eq!(runs[0].flow_version, 2);
+        assert_eq!(runs[0].outcome, "error");
+        assert_eq!(runs[1].local_id, "in-1");
+        assert_eq!(runs[1].outcome, "masked");
+
+        assert!(
+            store
+                .list_flow_runs("dev_missing", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn device_facts_reject_unknown_keys_and_long_values() {
+        let (_dir, store) = open_temp().await;
+
+        assert_eq!(store.get_device_facts().await.unwrap().self_number, None);
+        store
+            .set_device_fact("self_number", "+15550001111")
+            .await
+            .unwrap();
+        store.set_device_fact("sim_slot", "1").await.unwrap();
+        store
+            .set_device_fact(
+                "permissions",
+                r#"{"sms":true,"send":true,"phone_numbers":false}"#,
+            )
+            .await
+            .unwrap();
+
+        let facts = store.get_device_facts().await.unwrap();
+        assert_eq!(facts.self_number.as_deref(), Some("+15550001111"));
+        assert_eq!(facts.sim_slot, Some(1));
+        assert_eq!(
+            facts
+                .permissions
+                .as_ref()
+                .and_then(|p| p["phone_numbers"].as_bool()),
+            Some(false)
+        );
+
+        // A key outside the whitelist must not touch the settings table: this is
+        // the same row the target URL lives in.
+        let error = store
+            .set_device_fact("base_url", "https://example.invalid")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidFact(_)));
+        assert_eq!(store.get_setting("base_url").await.unwrap(), None);
+
+        let long = "x".repeat(MAX_DEVICE_FACT_LEN + 1);
+        let error = store
+            .set_device_fact("sim_carrier", &long)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidFact(_)));
+        assert_eq!(store.get_setting("sim_carrier").await.unwrap(), None);
     }
 }

@@ -18,7 +18,7 @@
 	};
 </script>
 
-<div class="notice notice-{tone}" role={tone === 'danger' ? 'alert' : 'status'}>
+<div class="callout" data-tone={tone} role={tone === 'danger' ? 'alert' : 'status'}>
 	<Icon name={icons[tone]} size={15} />
 	<div>
 		{#if title}<strong>{title}</strong>{/if}

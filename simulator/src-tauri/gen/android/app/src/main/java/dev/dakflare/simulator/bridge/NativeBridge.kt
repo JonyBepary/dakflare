@@ -82,6 +82,16 @@ object NativeBridge {
     external fun flushPending(appDir: String, deviceId: String): String
 
     /**
+     * Persist one whitelisted handset fact (`self_number`, `sim_slot`,
+     * `sim_carrier`, `permissions`, `battery_optimized`, `default_sms_app`).
+     *
+     * Returns `{"ok":true}` or `{"ok":false,"error":"bad_input"|"storage"}`.
+     * The key and value are never logged.
+     */
+    @JvmStatic
+    external fun setDeviceFact(appDir: String, key: String, value: String): String
+
+    /**
      * Safe wrapper for the receiver: never throws, including when the JNI symbol
      * is missing (which only fails on invocation, not on `loadLibrary`).
      */
@@ -184,6 +194,26 @@ object NativeBridge {
             false
         } catch (error: Throwable) {
             Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Best-effort write of one handset fact. Never throws: a missing symbol, a
+     * rejected key or a store error returns `false`. Neither the key nor the
+     * value is logged; only the exception class.
+     */
+    fun setDeviceFactSafely(appDir: String, key: String, value: String): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || key.isEmpty()) return false
+
+        return try {
+            isOk(setDeviceFact(appDir, key, value))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "setDeviceFact symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "setDeviceFact failed: ${error.javaClass.simpleName}")
             false
         }
     }

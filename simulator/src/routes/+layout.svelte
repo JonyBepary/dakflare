@@ -1,33 +1,50 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { page } from '$app/state';
+	import ConversationFooter from '$lib/components/ConversationFooter.svelte';
+	import Dock from '$lib/components/Dock.svelte';
+	import Notice from '$lib/components/Notice.svelte';
+	import { app } from '$lib/stores/app.svelte';
 
 	let { children } = $props();
-	let schemaVersion = $state<number | null>(null);
 
-	onMount(async () => {
-		try {
-			schemaVersion = await invoke<number>('schema_version');
-		} catch {
-			// Running in a plain browser (`vite dev` without Tauri): no backend.
-			schemaVersion = null;
-		}
+	// A conversation is a push below Threads, so it swaps the dock for the plain
+	// read-only footer; Android back pops the push and restores the dock.
+	const conversation = $derived(/^\/messages\/[^/]+\/?$/.test(page.url.pathname));
+
+	const status = $derived(
+		app.loading.boot
+			? 'opening local db'
+			: !app.backendAvailable
+				? 'browser preview'
+				: app.schemaVersion === null
+					? 'backend ready'
+					: `schema v${app.schemaVersion}`
+	);
+
+	onMount(() => {
+		void app.boot();
 	});
 </script>
 
-<div class="shell">
+<div class="app">
 	<header class="topbar">
-		<div class="brand">
-			<strong>DAKFLARE</strong>
-			<span>device app</span>
-		</div>
-		<div class="meta">
-			{schemaVersion === null ? 'backend unavailable' : `local schema v${schemaVersion}`}
-		</div>
+		<span class="wordmark">DAKFLARE</span>
+		<span class="topbar-meta" data-offline={!app.backendAvailable && !app.loading.boot}>
+			{status}
+		</span>
 	</header>
 
-	<main>
+	<main class="app-main">
+		<Notice scope="boot" />
+		<Notice scope="data" />
 		{@render children()}
 	</main>
+
+	{#if conversation}
+		<ConversationFooter />
+	{:else}
+		<Dock />
+	{/if}
 </div>

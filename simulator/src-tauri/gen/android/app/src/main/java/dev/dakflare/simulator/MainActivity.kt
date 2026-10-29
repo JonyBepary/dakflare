@@ -2,12 +2,19 @@ package dev.dakflare.simulator
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Telephony
+import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.View
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import dev.dakflare.simulator.bridge.NativeBridge
+import org.json.JSONObject
 
 /**
  * Edge-to-edge is compulsory from Android 15 for apps targeting SDK 35+, and
@@ -51,11 +58,103 @@ class MainActivity : TauriActivity() {
       checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
     }
     if (missing.isNotEmpty()) {
-      requestPermissions(missing.toTypedArray()) { granted ->
-        if (granted != true) {
+      requestPermissions(missing.toTypedArray()) { allGranted ->
+        if (allGranted != true) {
           Log.w("DakFlareSms", "SMS permissions not granted; gateway stays disabled")
         }
+        // The callback is the point where the permission flow has settled, so
+        // the phone reports its facts exactly once.
+        writeDeviceFacts()
       }
+    } else {
+      writeDeviceFacts()
     }
   }
+
+  /**
+   * Report the handset facts the Device frame cannot get from the webview.
+   *
+   * Writes go straight to the same local store through [NativeBridge]; the
+   * Tauri command `get_device_facts` reads them back. Every permission-gated
+   * read is wrapped: a `SecurityException` leaves the fact unwritten, which the
+   * UI renders as "not reported" rather than a guessed value. No number, key or
+   * value is logged, only how many writes the store accepted.
+   */
+  private fun writeDeviceFacts() {
+    val appDir = applicationInfo.dataDir
+    val subscriptions = getSystemService(SubscriptionManager::class.java)
+    val telephony = getSystemService(TelephonyManager::class.java)
+    val defaultSubId = SubscriptionManager.getDefaultSubscriptionId()
+    var written = 0
+
+    fun write(key: String, value: String?) {
+      if (value.isNullOrEmpty()) return
+      if (NativeBridge.setDeviceFactSafely(appDir, key, value)) written += 1
+    }
+
+    // SubscriptionManager on API 33+, then the framework line as the fallback.
+    var selfNumber: String? = null
+    if (Build.VERSION.SDK_INT >= 33 &&
+      subscriptions != null &&
+      defaultSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID
+    ) {
+      try {
+        selfNumber = subscriptions.getPhoneNumber(defaultSubId)
+      } catch (_: SecurityException) {
+        // No phone-number permission: fall through to line1Number.
+      }
+    }
+    if (selfNumber.isNullOrEmpty()) {
+      try {
+        selfNumber = telephony?.line1Number
+      } catch (_: SecurityException) {
+      }
+    }
+    write("self_number", selfNumber)
+
+    if (subscriptions != null) {
+      try {
+        val infos = subscriptions.activeSubscriptionInfoList ?: emptyList()
+        val info = infos.firstOrNull { it.subscriptionId == defaultSubId }
+          ?: infos.firstOrNull()
+        if (info != null) {
+          write("sim_slot", info.simSlotIndex.toString())
+          write("sim_carrier", info.carrierName?.toString())
+        }
+      } catch (_: SecurityException) {
+        // Reading the list needs a phone permission; write nothing instead of
+        // reporting a slot the phone did not confirm.
+      }
+    }
+
+    val permissions = JSONObject()
+      .put("sms", isGranted(Manifest.permission.RECEIVE_SMS))
+      .put("send", isGranted(Manifest.permission.SEND_SMS))
+      .put("phone_numbers", isGranted(Manifest.permission.READ_PHONE_NUMBERS))
+    write("permissions", permissions.toString())
+
+    try {
+      val power = getSystemService(PowerManager::class.java)
+      if (power != null) {
+        write(
+          "battery_optimized",
+          power.isIgnoringBatteryOptimizations(packageName).toString(),
+        )
+      }
+    } catch (_: SecurityException) {
+    }
+
+    try {
+      // `null` is a real answer here — no app holds the default-SMS role on this
+      // handset — so it is recorded rather than skipped, and the Device frame can
+      // say "none" instead of "not reported".
+      write("default_sms_app", Telephony.Sms.getDefaultSmsPackage(this) ?: "none")
+    } catch (_: SecurityException) {
+    }
+
+    Log.i("DakFlareSms", "device facts written=$written")
+  }
+
+  private fun isGranted(permission: String): Boolean =
+    checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 }

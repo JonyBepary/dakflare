@@ -13,8 +13,9 @@
 use std::path::Path;
 
 use dakflare_core::{
-    Action, CarrierError, DeviceClient, Flushed, ProtocolError, Store, StoreError, Target,
-    carrier::flush_pending, receive_and_reply, reply_local_id,
+    Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
+    StoreError, Target, carrier::flush_pending, is_device_fact_key, receive_and_reply,
+    reply_local_id,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -101,6 +102,24 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     state: JString,
 ) -> jstring {
     let json = mark_guarded(&mut env, &app_dir, &device_id, &local_id, &state);
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.setDeviceFact`
+///
+/// Persists one whitelisted handset fact (`self_number`, `sim_slot`,
+/// `sim_carrier`, `permissions`, `battery_optimized`, `default_sms_app`):
+/// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"storage"}`. Neither the
+/// key nor the value is ever logged.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_setDeviceFact(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    key: JString,
+    value: JString,
+) -> jstring {
+    let json = fact_guarded(&mut env, &app_dir, &key, &value);
     to_jstring(&mut env, json)
 }
 
@@ -254,6 +273,35 @@ fn mark_guarded(
     }
 }
 
+/// The fact setter follows the same two-guard shape as the message paths: no
+/// panic crosses JNI and every result is JSON. A rejected key/value is
+/// `bad_input` and never reaches the settings table.
+fn fact_guarded(env: &mut JNIEnv, app_dir: &JString, key: &JString, value: &JString) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_fact_inputs(env, app_dir, key, value) {
+            Ok((app_dir, key, value)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    fact_blocking(&app_dir, &key, &value)
+                })) {
+                    Ok(Ok(())) => serde_json::json!({ "ok": true }).to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] setDeviceFact panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] setDeviceFact panicked before storage");
+            error_json("storage")
+        }
+    }
+}
+
 fn to_jstring(env: &mut JNIEnv, json: String) -> jstring {
     match env.new_string(json) {
         Ok(value) => value.into_raw(),
@@ -345,6 +393,28 @@ fn read_flush_inputs(
     Ok((app_dir, device_id))
 }
 
+/// Decode and validate one device fact. The key whitelist and the length cap
+/// live in the core, so this path and any future caller share one rule.
+fn read_fact_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    key: &JString,
+    value: &JString,
+) -> Result<(String, String, String), &'static str> {
+    let app_dir = java_string(env, app_dir)?;
+    let key = java_string(env, key)?;
+    let value = java_string(env, value)?;
+
+    if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+        return Err("bad_input");
+    }
+    if !is_device_fact_key(&key) || value.len() > MAX_DEVICE_FACT_LEN {
+        return Err("bad_input");
+    }
+
+    Ok((app_dir, key, value))
+}
+
 fn java_string(env: &mut JNIEnv, value: &JString) -> Result<String, &'static str> {
     env.get_string(value)
         .map(Into::into)
@@ -396,6 +466,11 @@ fn mark_blocking(
     let store = open_store_blocking(app_dir)?;
     tauri::async_runtime::block_on(store.set_message_state_by_local_id(device_id, local_id, state))
         .map_err(map_store_error)
+}
+
+fn fact_blocking(app_dir: &str, key: &str, value: &str) -> Result<(), &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(store.set_device_fact(key, value)).map_err(map_store_error)
 }
 
 /// Build the same signed client the app uses from the stored target and
@@ -462,6 +537,7 @@ fn map_store_error(error: StoreError) -> &'static str {
     match error {
         StoreError::InvalidState(_) => "bad_input",
         StoreError::InvalidDeviceId(_) => "bad_input",
+        StoreError::InvalidFact(_) => "bad_input",
         StoreError::Database(_) | StoreError::Corrupt(_) | StoreError::Clock => "storage",
     }
 }

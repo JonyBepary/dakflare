@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    Device, DeviceClient, Message, NewDevice, ProtocolError, Store, Target, carrier::flush_pending,
-    drain_outbox, inject_inbound, parse_pair_link,
+    CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, Message, NewDevice, ProtocolError,
+    Store, Target, carrier::flush_pending, drain_outbox, inject_inbound, parse_pair_link,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -25,6 +25,12 @@ struct AppState {
 struct TargetView {
     base_url: Option<String>,
     has_admin_token: bool,
+}
+
+#[derive(Serialize)]
+struct MessagePage {
+    messages: Vec<Message>,
+    has_more: bool,
 }
 
 async fn load_target(state: &AppState) -> Result<Target, String> {
@@ -395,6 +401,75 @@ async fn list_messages(
         .map_err(|e| e.to_string())
 }
 
+/// One keyset page for the Threads frame.
+///
+/// No cursor means the first page and delegates to [`list_messages`], so the
+/// two commands cannot disagree about what "newest" is. A cursor is the
+/// `(created_at, id)` pair of the last row the client already has; `has_more`
+/// comes from fetching one extra row rather than a second `COUNT`.
+#[tauri::command]
+async fn list_messages_page(
+    state: State<'_, AppState>,
+    device_id: String,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<MessagePage, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 100);
+    let mut messages = match (before_created_at, before_id) {
+        (None, None) => state.store.list_messages(&device_id, limit + 1).await,
+        (Some(created_at), Some(id)) => {
+            state
+                .store
+                .list_messages_before(&device_id, created_at, &id, limit + 1)
+                .await
+        }
+        _ => {
+            return Err("before_created_at and before_id must be provided together".into());
+        }
+    }
+    .map_err(|e| e.to_string())?;
+
+    let has_more = messages.len() as i64 > limit;
+    messages.truncate(limit as usize);
+    Ok(MessagePage { messages, has_more })
+}
+
+/// The cached flow set, readable by the Flows frame. A corrupt graph keeps its
+/// row and reports `node_count: null`; it does not hide the cache.
+#[tauri::command]
+async fn list_cached_flows(state: State<'_, AppState>) -> Result<Vec<CachedFlow>, String> {
+    state
+        .store
+        .list_cached_flows()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_flow_runs(
+    state: State<'_, AppState>,
+    device_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<FlowRunRow>, String> {
+    state
+        .store
+        .list_flow_runs(&device_id, limit.unwrap_or(50).clamp(1, 100))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Handset facts written by the Android shell. A desktop build has none, so
+/// every field is `null` rather than a fabricated value.
+#[tauri::command]
+async fn get_device_facts(state: State<'_, AppState>) -> Result<DeviceFacts, String> {
+    state
+        .store
+        .get_device_facts()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn clear_messages(state: State<'_, AppState>, device_id: String) -> Result<u64, String> {
     state
@@ -471,6 +546,10 @@ pub fn run() {
             carrier_inject,
             carrier_drain,
             list_messages,
+            list_messages_page,
+            list_cached_flows,
+            list_flow_runs,
+            get_device_facts,
             clear_messages,
             set_offline,
             get_offline,

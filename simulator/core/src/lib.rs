@@ -15,7 +15,10 @@ pub use carrier::{
     receive_and_reply, receive_offline, reply_local_id,
 };
 pub use dakflare_flow::Action;
-pub use db::{Device, Message, NewDevice, Store, StoreError};
+pub use db::{
+    CachedFlow, DEVICE_FACT_KEYS, Device, DeviceFacts, FlowRunRow, MAX_DEVICE_FACT_LEN, Message,
+    NewDevice, Store, StoreError, is_device_fact_key,
+};
 pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
 pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
