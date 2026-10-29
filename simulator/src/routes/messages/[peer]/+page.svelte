@@ -4,8 +4,10 @@
 	import { page } from '$app/state';
 	import Icon from '$lib/components/Icon.svelte';
 	import { app, type Message } from '$lib/stores/app.svelte';
+	import { composer } from '$lib/stores/composer.svelte';
 	import { formatClock, formatDay } from '$lib/device-state';
 	import { sendStateTone, sendStateWord } from '$lib/message-state';
+	import { decodePeer } from '$lib/reply-target';
 
 	const rawPeer = $derived(page.params.peer ?? '');
 	const peer = $derived(decodePeer(rawPeer));
@@ -20,13 +22,43 @@
 	let started = $state(false);
 	let error = $state<string | null>(null);
 	let scroller: HTMLElement | null = null;
+	let pinned = true;
 
-	type Row = { kind: 'day'; key: string; label: string } | { kind: 'message'; message: Message };
+	/** A real row, or one the composer wrote and the database has not returned yet. */
+	type Bubble = Message & { pending?: boolean };
+	type Row = { kind: 'day'; key: string; label: string } | { kind: 'message'; message: Bubble };
+
+	// Optimistic rows for this peer. One is dropped as soon as the thread holds
+	// the same body from an outbound row, so a re-read never paints a duplicate.
+	const optimistic = $derived.by<Bubble[]>(() => {
+		return composer
+			.pendingFor(peer)
+			.filter(
+				(row) =>
+					!messages.some(
+						(message) =>
+							message.direction === 'out' &&
+							message.body === row.body &&
+							message.created_at >= row.created_at - 60_000
+					)
+			)
+			.map((row) => ({
+				id: row.key,
+				device_id: app.selectedId,
+				direction: 'out' as const,
+				peer: row.peer,
+				body: row.body,
+				state: 'queued',
+				local_id: null,
+				created_at: row.created_at,
+				pending: true
+			}));
+	});
 
 	const rows = $derived.by(() => {
 		const out: Row[] = [];
 		let lastDay = '';
-		for (const message of messages.slice().reverse()) {
+		for (const message of [...messages.slice().reverse(), ...optimistic]) {
 			const date = new Date(message.created_at);
 			const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 			if (key !== lastDay) {
@@ -43,14 +75,6 @@
 	// before one of its messages appears. The cap keeps one tap bounded; the
 	// button stays available when the cap was the reason we stopped.
 	const MAX_PAGES = 40;
-
-	function decodePeer(value: string): string {
-		try {
-			return decodeURIComponent(value);
-		} catch {
-			return value;
-		}
-	}
 
 	async function fetchPeerPages(start: Message | null, stopAtFirst: boolean) {
 		const collected: Message[] = [];
@@ -83,6 +107,16 @@
 		if (!scroller) return;
 		scroller.scrollTop = scroller.scrollHeight;
 		ready = true;
+		// Rows carry `content-visibility: auto`, so a row's real height lands on
+		// the first paint rather than at scroll time. One more frame puts the
+		// newest row flush against the composer instead of 24px short.
+		requestAnimationFrame(() => {
+			const node = scroller;
+			if (!node) return;
+			if (node.scrollHeight - node.scrollTop - node.clientHeight < 160) {
+				node.scrollTop = node.scrollHeight;
+			}
+		});
 	}
 
 	async function loadInitial() {
@@ -99,6 +133,26 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	/**
+	 * Re-read the newest page without blanking the thread: rows we already have
+	 * are replaced in place (a queued row becomes sent, a failed one fails), and
+	 * rows we do not have are prepended. This is what turns the composer's
+	 * optimistic row into the database's real one.
+	 */
+	async function refreshNewest() {
+		const atBottom = scroller
+			? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48
+			: true;
+		const result = await fetchPeerPages(null, true);
+		const known = new Set(messages.map((message) => message.id));
+		const incoming = new Map(result.collected.map((message) => [message.id, message]));
+		const updated = messages.map((message) => incoming.get(message.id) ?? message);
+		const fresh = result.collected.filter((message) => !known.has(message.id));
+		messages = [...fresh, ...updated];
+		await tick();
+		if (atBottom) await scrollToNewest();
 	}
 
 	async function loadOlder() {
@@ -121,6 +175,11 @@
 	}
 
 	function onScroll() {
+		if (scroller) {
+			// Stay pinned to the newest message while the bar or the keyboard
+			// changes the height of the thread, until the user scrolls away.
+			pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+		}
 		if (!ready || loading || loadingOlder || !hasMore || !scroller) return;
 		if (scroller.scrollTop > 8) return;
 		// A conversation shorter than the viewport has no scroll gesture; the
@@ -142,10 +201,44 @@
 		void loadInitial();
 	});
 
+	// The composer lives in the shell; the route lends it the thread it writes to.
+	$effect(() => composer.bind(refreshNewest));
+
+	$effect(() => {
+		composer.repliesOpen = loading || rows.length > 0;
+	});
+
+	// A row the user just wrote must be visible, even when the thread was longer
+	// than the viewport before the tap.
+	let pendingSeen = 0;
+	$effect(() => {
+		const count = composer.pendingFor(peer).length;
+		if (count === pendingSeen) return;
+		pendingSeen = count;
+		if (count === 0) return;
+		void (async () => {
+			await tick();
+			await scrollToNewest();
+		})();
+	});
+
 	onMount(() => {
 		scroller = document.querySelector<HTMLElement>('.app-main');
 		scroller?.addEventListener('scroll', onScroll, { passive: true });
-		return () => scroller?.removeEventListener('scroll', onScroll);
+		// A taller composer or an open keyboard shrinks the thread; a reader
+		// sitting at the newest message should keep seeing it. The content is
+		// watched separately because rows carry `content-visibility`, so their
+		// real heights arrive after the scroll, not during it.
+		const observer = new ResizeObserver(() => {
+			if (pinned) void scrollToNewest();
+		});
+		if (scroller) observer.observe(scroller);
+		const content = scroller?.querySelector('.screen');
+		if (content) observer.observe(content);
+		return () => {
+			observer.disconnect();
+			scroller?.removeEventListener('scroll', onScroll);
+		};
 	});
 </script>
 
@@ -226,7 +319,11 @@
 					{#if row.kind === 'day'}
 						<li class="day-divider">{row.label}</li>
 					{:else}
-						<li class="bubble-row" data-dir={row.message.direction}>
+						<li
+							class="bubble-row"
+							data-dir={row.message.direction}
+							data-pending={row.message.pending ? 'true' : undefined}
+						>
 							<div class="bubble">
 								<p class="bubble-body">{row.message.body}</p>
 								<p class="bubble-meta mono">

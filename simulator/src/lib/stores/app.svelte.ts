@@ -1,4 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
+import { goto } from '$app/navigation';
+
+/** This app's applicationId; the default-SMS fact reports a package name. */
+export const DEFAULT_SMS_PACKAGE = 'dev.dakflare.simulator';
 
 export type Device = {
 	device_id: string;
@@ -258,6 +262,57 @@ class AppStore {
 			beforeId: before ? before.id : null,
 			limit
 		});
+	}
+
+	/**
+	 * Hand a reply to this phone's own radio. The command queues the row and
+	 * returns its `local_id`; a failure is the backend's plain sentence, which
+	 * the composer shows verbatim rather than swallowing.
+	 */
+	async sendSms(to: string, body: string): Promise<{ local_id: string }> {
+		if (!this.selectedId) throw new Error('No device is selected on this phone');
+		return await this.call<{ local_id: string }>('send_sms', {
+			deviceId: this.selectedId,
+			to,
+			body
+		});
+	}
+
+	/**
+	 * Ask Android for the default-SMS role. The command only opens the system
+	 * dialog; the row keeps saying "not default" until `get_device_facts` reads
+	 * the new holder back on resume.
+	 */
+	async requestDefaultSmsRole() {
+		this.busy.defaultSms = true;
+		this.clearNotice('default-sms');
+		try {
+			await this.call('request_default_sms_role');
+			this.notify(
+				'default-sms',
+				'Android is asking. The role is shown here only after Android reports it.',
+				'info'
+			);
+		} catch (error) {
+			this.fail('default-sms', error);
+		} finally {
+			this.busy.defaultSms = false;
+		}
+	}
+
+	/**
+	 * Follow the one sms:/smsto: link the Android shell handed over, if any.
+	 * Called after boot and when the app regains focus, so a link that arrives
+	 * while the app is already running still opens its thread.
+	 */
+	async followSmsIntent() {
+		if (!this.backendAvailable) return;
+		try {
+			const route = await this.call<string | null>('take_sms_route');
+			if (route) await goto(route);
+		} catch {
+			// The desktop shell and older builds have no intent mailbox.
+		}
 	}
 
 	async refreshSelected() {

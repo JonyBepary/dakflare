@@ -38,19 +38,83 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+
+            <!--
+                Default-SMS eligibility: Android only offers the SMS role to an
+                app with an Activity that handles SENDTO for these four schemes.
+                There is no compose screen; MainActivity routes a sms:/smsto:
+                number to its thread and everything else to Threads.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+            <!-- The same links may be opened as VIEW intents by other apps. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
         </activity>
 
         <!--
-            Only the system (which holds BROADCAST_SMS) can deliver SMS_RECEIVED
-            to this receiver. It runs without the Tauri runtime; persistence goes
-            through NativeBridge into libsimulator_lib.so.
+            Only the system (which holds BROADCAST_SMS) can deliver SMS_DELIVER
+            or SMS_RECEIVED to this receiver. SMS_DELIVER is the default app's
+            copy; SMS_RECEIVED stays declared so the gateway still works when
+            another app holds the role. It runs without the Tauri runtime;
+            persistence goes through NativeBridge into libsimulator_lib.so.
         -->
         <receiver
             android:name="dev.dakflare.simulator.bridge.SmsReceiver"
             android:exported="true"
             android:permission="android.permission.BROADCAST_SMS">
             <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            The SMS role on this Android build also requires a
+            RESPOND_VIA_MESSAGE service protected by SEND_RESPOND_VIA_MESSAGE
+            (the dialer's quick-reply action). Without it RoleManager rejects
+            the package as unqualified. The service is a deliberate no-op.
+        -->
+        <service
+            android:name="dev.dakflare.simulator.bridge.RespondViaMessageService"
+            android:exported="true"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
+
+        <!--
+            Required for the default-SMS role even though MMS is out of scope
+            (docs/WAVE2_NATIVE_SMS.md §5): Android will not offer the role to an
+            app without a WAP_PUSH_DELIVER receiver. MmsReceiver drops the push.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.MmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_WAP_PUSH">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
             </intent-filter>
         </receiver>
 

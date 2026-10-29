@@ -1,7 +1,10 @@
 package dev.dakflare.simulator
 
 import android.Manifest
+import android.app.role.RoleManager
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -14,6 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import dev.dakflare.simulator.bridge.NativeBridge
+import dev.dakflare.simulator.bridge.SmsRoute
 import org.json.JSONObject
 
 /**
@@ -33,6 +37,11 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // A SENDTO/VIEW intent launched this Activity (cold start). Hand the route
+    // to the webview; the layout takes it once after boot. A normal launcher
+    // intent offers nothing, so the app opens on Threads as before.
+    offerSmsRoute(intent)
 
     val content = findViewById<View>(android.R.id.content)
     ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
@@ -68,6 +77,115 @@ class MainActivity : TauriActivity() {
       }
     } else {
       writeDeviceFacts()
+    }
+  }
+
+  /**
+   * `singleTask` sends a new sms:/smsto: link to this instance instead of
+   * creating a second Activity. Tauri still sees the intent; the webview takes
+   * the route on the next focus/resume.
+   */
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    offerSmsRoute(intent)
+  }
+
+  /**
+   * Android's role dialog runs in another Activity, so returning from it is the
+   * first moment the new holder can be read. Write that fact here, before the
+   * webview reloads it: the UI never claims the role from the button tap, only
+   * from this report.
+   */
+  override fun onResume() {
+    super.onResume()
+    writeDefaultSmsFact()
+  }
+
+  /**
+   * Turn a SENDTO/VIEW intent into a webview route.
+   *
+   * Only the four SMS/MMS schemes qualify. A `sms:`/`smsto:` number opens that
+   * thread; an empty number, or an mms: link (MMS has no thread here), opens
+   * Threads. Anything else offers nothing, so a normal launch is unchanged.
+   */
+  private fun offerSmsRoute(intent: Intent?) {
+    val action = intent?.action
+    if (action != Intent.ACTION_SENDTO && action != Intent.ACTION_VIEW) return
+    val data = intent.data ?: return
+    val scheme = data.scheme?.lowercase() ?: return
+    if (scheme !in SMS_SCHEMES) return
+
+    // `sms:+8801…?body=…` puts the number in schemeSpecificPart; `sms://+8801…`
+    // adds two slashes. The query is the optional draft body, which this build
+    // does not use.
+    val peer = data.schemeSpecificPart
+      ?.substringBefore('?')
+      ?.trimStart('/')
+      ?.let(Uri::decode)
+      ?.trim()
+      .orEmpty()
+
+    // Only a real sms:/smsto: number names a thread this build can show. An
+    // mms: link (MMS is out of scope) or an empty number opens Threads.
+    val isSms = scheme == "sms" || scheme == "smsto"
+    SmsRoute.offer(
+      if (isSms && peer.isNotEmpty()) "/messages/${Uri.encode(peer)}" else "/messages",
+    )
+  }
+
+  /**
+   * Record the current default-SMS package. `none` is a real answer and is
+   * written as such, matching what [writeDeviceFacts] does on first launch.
+   */
+  private fun writeDefaultSmsFact() {
+    try {
+      val value = defaultSmsPackage() ?: "none"
+      NativeBridge.setDeviceFactSafely(applicationInfo.dataDir, "default_sms_app", value)
+    } catch (_: SecurityException) {
+      // The fact stays as the last confirmed value rather than guessing.
+    }
+  }
+
+  /**
+   * The package Android currently treats as the default SMS app.
+   *
+   * From API 29 the SMS role is authoritative, and this is not just tidiness:
+   * on the Android 16 gate handset `cmd role add-role-holder` makes this app the
+   * holder while `Settings.Secure.sms_default_application` — and therefore
+   * `Telephony.Sms.getDefaultSmsPackage` — still returns null. Reading the role
+   * first is what keeps the UI from claiming "none" while the app is default.
+   * The legacy getter remains the fallback below API 29 and for ROMs that keep
+   * the setting in step.
+   */
+  private fun defaultSmsPackage(): String? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      try {
+        val roles = getSystemService(RoleManager::class.java)
+        if (roles != null &&
+          roles.isRoleAvailable(RoleManager.ROLE_SMS) &&
+          roles.isRoleHeld(RoleManager.ROLE_SMS)
+        ) {
+          // `isRoleHeld` is the only public RoleManager query a normal app has;
+          // the holder list is a system API. This answers the one question the
+          // UI must never guess: does *this* package hold the role?
+          return packageName
+        }
+      } catch (_: SecurityException) {
+        // Fall through to the legacy source.
+      } catch (_: Throwable) {
+        // A broken role service must not take the facts screen down.
+      }
+    }
+
+    // Below API 29, and on ROMs that keep the secure setting in step, this names
+    // another holder too. On this Android 16 build it can stay null even while
+    // another app holds the role, so a false "none" is possible only for that
+    // other-app case; the role request itself still works.
+    return try {
+      Telephony.Sms.getDefaultSmsPackage(this)
+    } catch (_: SecurityException) {
+      null
     }
   }
 
@@ -146,17 +264,19 @@ class MainActivity : TauriActivity() {
     } catch (_: SecurityException) {
     }
 
-    try {
-      // `null` is a real answer here — no app holds the default-SMS role on this
-      // handset — so it is recorded rather than skipped, and the Device frame can
-      // say "none" instead of "not reported".
-      write("default_sms_app", Telephony.Sms.getDefaultSmsPackage(this) ?: "none")
-    } catch (_: SecurityException) {
-    }
+    // `null` is a real answer here — no app holds the default-SMS role — so it
+    // is recorded rather than skipped, and the UI can say "none" instead of
+    // "not reported". [defaultSmsPackage] asks RoleManager before the legacy
+    // secure setting, which this Android build leaves null.
+    write("default_sms_app", defaultSmsPackage() ?: "none")
 
     Log.i("DakFlareSms", "device facts written=$written")
   }
 
   private fun isGranted(permission: String): Boolean =
     checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+  private companion object {
+    val SMS_SCHEMES = setOf("sms", "smsto", "mms", "mmsto")
+  }
 }

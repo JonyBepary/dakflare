@@ -8,4 +8,5 @@ export type IconName =
 	| 'arrow-out'
 	| 'check'
 	| 'alert'
-	| 'chevron-left';
+	| 'chevron-left'
+	| 'send';

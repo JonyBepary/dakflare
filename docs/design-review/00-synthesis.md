@@ -145,3 +145,25 @@ second tray SIM 2.
 
 Dark mode measures clean against the tokens: body 16.07:1, the five state chips
 7.41–8.66:1, the lowest pair in the phone palette 4.61:1.
+
+## 7. Phase 5, and the thing it found
+
+The composer is built and on the handset: reply-only, segment-accurate (160/153 GSM-7,
+70/67 UCS-2, real part count), an optimistic `queued` bubble replaced by the stored row,
+and the text restored with the exact reason when a send is refused. `send_sms` reaches
+Kotlin through a Tauri mobile plugin; the row is written before the radio, and
+`SendReceipt`/`SendStatusReceiver` now decide `sent` or `failed` from the radio's answer —
+for flow replies too, which used to assume success.
+
+The first real send exposed a hardware blocker rather than a bug: this SIM cannot send
+SMS from any app (result 16 / 111; the stock messaging app says "Not sent"), so every
+bubble in the thread is honestly `failed` and the console no longer mirrors replies that
+never left. Receiving is unaffected.
+
+Two design consequences that are not settled:
+
+1. A `failed` reply is not mirrored at all (`WAVE2` §4), so the console shows an inbound
+   message with no reply and no reason. Once `failed` can mean "the radio refused", the
+   operator needs to see it; that needs a Worker-side decision, not a CSS one.
+2. The composer's send is per-thread only. Sending to a number that never wrote first is
+   still out of scope, and stays that way until the hardware can send at all.

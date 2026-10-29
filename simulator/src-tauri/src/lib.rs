@@ -472,6 +472,13 @@ struct SmsPluginReply {
     local_id: String,
 }
 
+/// The webview's one pending sms:/smsto: route, if an intent offered one.
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct SmsRouteReply {
+    route: Option<String>,
+}
+
 #[cfg(target_os = "android")]
 fn sms_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("dakflare-sms")
@@ -564,6 +571,65 @@ async fn send_sms(
     {
         let _ = (app, device);
         Err("Sending SMS is only available on the phone".into())
+    }
+}
+
+/// Ask Android to show its default-SMS role dialog.
+///
+/// Kotlin owns the platform branch (`RoleManager` on API 29+,
+/// `ACTION_CHANGE_DEFAULT` below it). This command only opens the dialog; it
+/// never reports the role as held. `get_device_facts` stays the source of truth
+/// because `MainActivity.onResume` re-reads the role holder after the dialog
+/// closes.
+#[tauri::command]
+async fn request_default_sms_role(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.try_state::<SmsBridge>().ok_or_else(|| {
+            "Changing the SMS role is not available in this build".to_string()
+        })?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestDefaultSmsRole", ())
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Changing the SMS role is only available on the phone".into())
+    }
+}
+
+/// Take the pending sms:/smsto: route from the Android shell, once.
+///
+/// `MainActivity` records it when a SENDTO/VIEW intent arrives; the webview
+/// opens the matching thread. Only a `/messages` path is accepted, so a
+/// malformed intent cannot steer the router elsewhere. A desktop build has no
+/// intents and returns `None`.
+#[tauri::command]
+async fn take_sms_route(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let Some(bridge) = app.try_state::<SmsBridge>() else {
+            return Ok(None);
+        };
+        let reply = bridge
+            .0
+            .run_mobile_plugin_async::<SmsRouteReply>("takeSmsRoute", ())
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(reply
+            .route
+            .filter(|route| route == "/messages" || route.starts_with("/messages/")))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
     }
 }
 
@@ -732,6 +798,8 @@ pub fn run() {
             carrier_inject,
             carrier_drain,
             send_sms,
+            request_default_sms_role,
+            take_sms_route,
             list_messages,
             list_messages_page,
             list_cached_flows,

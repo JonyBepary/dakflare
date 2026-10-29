@@ -1,11 +1,35 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { AlertDialog } from 'bits-ui';
+	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
-	import { app } from '$lib/stores/app.svelte';
+	import { app, DEFAULT_SMS_PACKAGE } from '$lib/stores/app.svelte';
 	import { relativeTime } from '$lib/device-state';
 
 	let baseUrl = $state('');
 	let adminToken = $state('');
+
+	// The role dialog is another Activity. When this one comes back, the shell
+	// has already written the new holder; re-read the facts rather than trusting
+	// the tap that opened the dialog.
+	onMount(() => {
+		const refresh = () => {
+			if (document.visibilityState === 'visible') void app.loadFacts();
+		};
+		window.addEventListener('focus', refresh);
+		document.addEventListener('visibilitychange', refresh);
+		return () => {
+			window.removeEventListener('focus', refresh);
+			document.removeEventListener('visibilitychange', refresh);
+		};
+	});
+
+	const defaultSmsRaw = $derived(app.facts?.default_sms_app?.trim() || null);
+	// Android writes the literal "none" when no app holds the role; that is a
+	// confirmed fact, not a missing one.
+	const noDefaultSms = $derived(defaultSmsRaw === 'none');
+	const otherDefaultSms = $derived(noDefaultSms ? null : defaultSmsRaw);
+	const isDefaultSms = $derived(defaultSmsRaw === DEFAULT_SMS_PACKAGE);
 
 	let label = $state('');
 	let platformId = $state('');
@@ -171,6 +195,49 @@
 		</form>
 	</section>
 
+	<section class="sheet" aria-labelledby="sms-role-title">
+		<h2 class="sheet-title" id="sms-role-title">Default SMS app</h2>
+		<p class="note">
+			Since Android 4.4 only the default SMS app reliably receives inbound SMS. Without the
+			role, this gateway still works only while no other app holds it.
+		</p>
+
+		<div class="rows">
+			<div class="rowline">
+				<span class="label">SMS role</span>
+				<span class="value fact-value">
+					{#if !app.factsLoaded}
+						<span class="fact-missing">reading Android's report…</span>
+					{:else if isDefaultSms}
+						<span class="state-chip" data-tone="ok">
+							<Icon name="check" size={12} /> DakFlare is the default SMS app
+						</span>
+					{:else if otherDefaultSms}
+						<span class="mono" title={otherDefaultSms}>{otherDefaultSms}</span>
+						<span class="fact-reason">Another app handles SMS on this phone.</span>
+					{:else if noDefaultSms}
+						<button
+							class="btn primary small"
+							type="button"
+							disabled={!app.backendAvailable || app.busy.defaultSms}
+							onclick={() => app.requestDefaultSmsRole()}
+						>
+							{app.busy.defaultSms ? 'Opening…' : 'Make DakFlare the default SMS app'}
+						</button>
+						<span class="fact-reason">
+							Android did not name a holder to this app. It confirms the change in its own
+							dialog.
+						</span>
+					{:else}
+						<span class="fact-missing">not reported by Android</span>
+						<span class="fact-reason">Open the Android build to request the role.</span>
+					{/if}
+				</span>
+			</div>
+		</div>
+		<Notice scope="default-sms" />
+	</section>
+
 	<section class="sheet" aria-labelledby="identity-title">
 		<h2 class="sheet-title" id="identity-title">Device identity</h2>
 		<p class="note">
@@ -328,7 +395,7 @@
 			</div>
 			<div class="rowline">
 				<span class="label">Composer</span>
-				<span class="value mono muted">next phase</span>
+				<span class="value mono">reply-only</span>
 			</div>
 		</div>
 	</section>

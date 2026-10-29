@@ -50,5 +50,8 @@
 		<path d="M12 7.5v5.5M12 16.5h.01" />
 	{:else if name === 'chevron-left'}
 		<path d="m14.5 5-7 7 7 7" />
+	{:else if name === 'send'}
+		<path d="M21 3 3 10.5l6.8 2.7L12.5 20z" />
+		<path d="M21 3 9.8 13.2" />
 	{/if}
 </svg>

@@ -120,6 +120,10 @@ textarea {
 	display: grid;
 	grid-template-rows: auto minmax(0, 1fr) auto;
 	background: var(--bg);
+	/* The keyboard, measured in the webview (see lib/keyboard.ts), because
+	   MainActivity insets the content view by system bars and cutout only.
+	   Zero when the window itself resizes, so nothing is padded twice. */
+	padding-bottom: var(--df-kb, 0px);
 }
 
 @media (min-width: 700px) {
@@ -834,10 +838,16 @@ input::placeholder {
 /* ----------------------------------------------------------- conversation */
 
 .conv-head {
+	/* The thread scrolls under this, so the peer and the way back stay put
+	   while a five-line draft takes the bottom of a short screen. */
+	position: sticky;
+	top: 0;
+	z-index: 2;
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	padding: 14px 0 10px;
+	background: var(--bg);
 	border-bottom: 1px solid var(--df-border-hairline);
 }
 
@@ -871,22 +881,204 @@ input::placeholder {
 	color: var(--df-text-meta);
 }
 
-.conversation-footer {
+/* The reply composer takes the dock's slot: one bottom bar at a time. */
+
+.composer {
+	/* 48dp is a target rule, not a preference; the component token ships 40. */
+	--df-c-composer-send-size: 48px;
 	display: flex;
-	align-items: center;
-	justify-content: center;
-	min-height: 56px;
-	padding: 10px var(--df-p-space-5);
-	background: var(--df-surface-card);
-	border-top: 1px solid var(--df-border-hairline);
+	flex-direction: column;
+	gap: var(--df-p-space-2);
+	padding: var(--df-c-composer-padding);
+	background: var(--df-c-composer-bg);
+	border-top: 1px solid var(--df-c-composer-border);
 }
 
-.conversation-footer p {
-	max-width: 44ch;
-	text-align: center;
-	font-size: 11.5px;
-	line-height: 1.45;
+.composer-row {
+	display: flex;
+	align-items: flex-end;
+	gap: var(--df-p-space-2);
+}
+
+.composer-field {
+	display: flex;
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 48px;
+	max-height: var(--df-c-composer-max-height);
+	/* The bottom padding is the field's breathing room and the textarea's clip
+	   boundary sits above it, so no half line can paint into it. */
+	padding: 0 0 var(--df-p-space-3);
+	overflow: hidden;
+	border: 1px solid var(--df-border-control);
+	border-radius: var(--df-c-composer-field-radius);
+	background: var(--df-c-composer-field-bg);
+}
+
+.composer-field:focus-within {
+	/* The ring is the system's, on the field: the border keeps its own colour
+	   so focus does not draw two concentric coral lines. */
+	outline: var(--df-p-focus-width) solid var(--df-border-focus);
+	outline-offset: var(--df-p-focus-offset);
+}
+
+.composer-input {
+	flex: 1 1 auto;
+	width: 100%;
+	min-width: 0;
+	min-height: 0;
+	padding: var(--df-p-space-3) var(--df-p-space-3) 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	color: var(--df-c-composer-field-ink);
+	font-size: var(--df-c-composer-font-size);
+	line-height: 1.4;
+	resize: none;
+	overflow-y: auto;
+}
+
+.composer-input:focus-visible {
+	/* The ring belongs on the field, not on the text inside it. */
+	outline: none;
+}
+
+.composer-input::placeholder {
+	color: var(--df-c-composer-placeholder-ink);
+	opacity: 1;
+}
+
+.composer-blocked {
+	display: flex;
+	align-items: center;
+	gap: var(--df-p-space-2);
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 48px;
+	padding: var(--df-p-space-3);
+	border: 1px dashed var(--df-border-control);
+	border-radius: var(--df-c-composer-field-radius);
+	background: var(--df-surface-well);
+	color: var(--df-text-secondary);
+	font-size: var(--df-p-text-base);
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+
+.composer-send {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: var(--df-c-composer-send-size);
+	height: var(--df-c-composer-send-size);
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--df-p-radius-pill);
+	background: var(--df-c-composer-send-bg);
+	color: var(--df-c-composer-send-ink);
+	cursor: pointer;
+	transition:
+		transform var(--df-p-dur-press) ease-out,
+		background-color 120ms ease-out;
+}
+
+.composer-send:hover:not(:disabled) {
+	background: var(--df-c-composer-send-hover-bg);
+}
+
+.composer-send:active:not(:disabled) {
+	transform: scale(0.97);
+}
+
+.composer-send:disabled {
+	/* The muted pair already carries the disabled reading; the global 0.5
+	   opacity would take it below 3:1 on the bar. */
+	background: var(--df-c-composer-send-disabled-bg);
+	color: var(--df-c-composer-send-disabled-ink);
+	opacity: 1;
+}
+
+.composer-meta {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--df-p-space-3);
+	min-width: 0;
+	/* The counter belongs to the field, so it ends where the field does rather
+	   than under the send button. */
+	padding-right: calc(var(--df-c-composer-send-size) + var(--df-p-space-2));
+	padding-left: 2px;
+}
+
+.composer-status {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	font-size: var(--df-c-composer-hint-size);
+	line-height: 1.4;
+	color: var(--df-c-composer-hint-ink);
+	overflow-wrap: anywhere;
+}
+
+.composer-mark {
+	display: grid;
+	place-items: center;
+	flex: none;
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+.composer-count {
+	display: flex;
+	flex: none;
+	align-items: baseline;
+	gap: 6px;
+	font-size: var(--df-p-text-xs);
+	line-height: 1.4;
+	color: var(--df-c-composer-counter-ink);
+	white-space: nowrap;
+}
+
+.composer-count .mono {
+	font-size: var(--df-p-text-xs);
+}
+
+.composer-encoding {
+	font-size: var(--df-p-text-2xs);
+	font-weight: 700;
+	letter-spacing: 0.04em;
 	color: var(--df-text-meta);
+}
+
+.composer-encoding[data-encoding='ucs2'] {
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+.composer-parts[data-multi='true'] {
+	font-weight: 700;
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+.composer-failure {
+	display: grid;
+	gap: 2px;
+	padding: var(--df-p-space-2) 10px;
+	border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 35%, var(--df-border-hairline));
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-state-danger-bg);
+	color: var(--df-text-primary);
+	font-size: var(--df-p-text-sm);
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.composer-failure p:first-child {
+	font-weight: 700;
+}
+
+.composer-failure-reason {
+	font-size: var(--df-p-text-xs);
+	color: var(--df-text-secondary);
 }
 
 .chat-wrap {

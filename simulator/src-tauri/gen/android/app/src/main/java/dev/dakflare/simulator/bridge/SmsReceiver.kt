@@ -28,7 +28,17 @@ import org.json.JSONObject
  */
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
+        // SMS_DELIVER is the copy Android sends to the default SMS app;
+        // SMS_RECEIVED is the ordinary broadcast every RECEIVE_SMS holder gets
+        // when no default app is set. Both carry the same PDUs and share one
+        // path. If the platform ever sends both for one message, the core's
+        // deterministic local_id (PDU timestamp + sender) reuses the first row
+        // and returns no actions, so neither storage nor a reply happens twice.
+        if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION &&
+            intent.action != Telephony.Sms.Intents.SMS_DELIVER_ACTION
+        ) {
+            return
+        }
 
         // Opening a database and sending may take longer than a receiver's
         // main-thread budget; keep the broadcast alive while a worker does it.
