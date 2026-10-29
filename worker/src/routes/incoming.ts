@@ -46,7 +46,9 @@ import {
 } from "../lib/config";
 
 /** §17: accept `received_at` inside [now - 30 days, now + 1 day]. */
-const RECEIVED_AT_PAST_MS = 30 * 24 * 60 * 60 * 1000;
+// A gateway that was switched off for months still has real messages to hand
+// over. The guard is for nonsense (epoch 0, a typo), not for an old phone.
+const RECEIVED_AT_PAST_MS = 180 * 24 * 60 * 60 * 1000;
 const RECEIVED_AT_FUTURE_MS = 24 * 60 * 60 * 1000;
 
 /** Upper bound on device-reported flow runs per batch (500 messages max anyway). */

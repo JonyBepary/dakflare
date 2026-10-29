@@ -27,8 +27,11 @@ preview_urls = false
 
 # ---------------------------------------------------------------------------
 # Durable Object: one DeviceGateway instance per device_id.
-# `[[migrations]]` with `new_sqlite_classes` remains correct for SQLite-backed
-# DOs; declarative `[exports]` is the successor syntax.
+# Declared through `exports`, which is the current lifecycle syntax: Wrangler
+# 4.151 refuses to deploy when a provisioned namespace is not declared, and
+# `exports` and `[[migrations]]` are mutually exclusive. The class name is
+# unchanged — it is the identity the deployed instances already carry, and
+# renaming it would need a new migration tag.
 # ---------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "DEVICE"
@@ -36,9 +39,9 @@ name = "DEVICE"
 # instances, and renaming it requires a new migration tag. Display name: DakFlareDeviceDO.
 class_name = "DeviceGateway"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["DeviceGateway"]
+[exports.DeviceGateway]
+type = "durable-object"
+storage = "sqlite"
 
 # ---------------------------------------------------------------------------
 # D1 — pairing codes, device registry, message log, rules.

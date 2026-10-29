@@ -460,6 +460,21 @@ pub async fn sync_flows(store: &Store, client: &DeviceClient) -> Result<usize, C
     Ok(flows.len())
 }
 
+/// The window the deployment accepts, mirroring `incoming.ts`.
+const WINDOW_PAST_MS: i64 = 180 * 24 * 60 * 60 * 1000;
+const WINDOW_FUTURE_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Split rows into the ones the deployment will accept and the ones it never
+/// will, so a single stale row cannot block every later upload.
+fn split_window(
+    rows: Vec<crate::db::Message>,
+    now: i64,
+) -> (Vec<crate::db::Message>, Vec<crate::db::Message>) {
+    rows.into_iter().partition(|message| {
+        message.created_at >= now - WINDOW_PAST_MS && message.created_at <= now + WINDOW_FUTURE_MS
+    })
+}
+
 /// Counts from one native flush.
 #[derive(Debug)]
 pub struct Flushed {
@@ -489,8 +504,26 @@ pub async fn flush_pending(
     client: &DeviceClient,
     device_id: &str,
 ) -> Result<Flushed, CarrierError> {
-    let inbound = store.list_pending_inbound(device_id, 100).await?;
-    let outbound = store.list_unmirrored_outbound(device_id, 100).await?;
+    let now = now_ms();
+    // The deployment refuses a timestamp it cannot believe. One such row used to
+    // poison the whole batch: nothing uploaded, ever, and the queue grew behind
+    // it. Rows outside the window are retired locally instead — an inbound row
+    // becomes `failed` with the reason, an outbound row stops being offered.
+    let (inbound, stale_inbound) = split_window(store.list_pending_inbound(device_id, 100).await?, now);
+    let (outbound, stale_outbound) =
+        split_window(store.list_unmirrored_outbound(device_id, 100).await?, now);
+
+    for message in &stale_inbound {
+        // `failed` keeps it out of the queue and out of the mirror, and it stays
+        // visible on the phone as what it is: a message this deployment refused.
+        let _ = store
+            .set_message_state(&message.id, "failed")
+            .await;
+    }
+    if !stale_outbound.is_empty() {
+        let ids: Vec<String> = stale_outbound.iter().map(|m| m.id.clone()).collect();
+        let _ = store.mark_mirrored(&ids).await;
+    }
 
     if inbound.is_empty() && outbound.is_empty() {
         return Ok(Flushed {
@@ -734,6 +767,31 @@ mod tests {
 
         assert_eq!(message.device_id, newer.device_id);
         assert_ne!(message.device_id, older.device_id);
+    }
+
+    #[test]
+    fn a_row_older_than_the_deployment_window_is_split_out() {
+        let now = 1_793_000_000_000i64;
+        let build = |created_at: i64| crate::db::Message {
+            id: format!("msg{created_at}"),
+            device_id: "dev_test".into(),
+            direction: "in".into(),
+            peer: "+15550001111".into(),
+            body: "hi".into(),
+            state: "received".into(),
+            local_id: Some(format!("native-{created_at}")),
+            created_at,
+            last_error: None,
+        };
+
+        let fresh = build(now - 1_000);
+        let old = build(now - WINDOW_PAST_MS - 1);
+        let future = build(now + WINDOW_FUTURE_MS + 1);
+        let (keep, drop) = split_window(vec![fresh.clone(), old, future], now);
+
+        assert_eq!(keep.len(), 1);
+        assert_eq!(keep[0].id, fresh.id);
+        assert_eq!(drop.len(), 2, "a row the deployment would refuse must not ride along");
     }
 
     #[tokio::test]
