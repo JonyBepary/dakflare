@@ -115,7 +115,10 @@ class AppStore {
 
 	/** A local record of this session's successful signed contacts. */
 	contactAt = $state<Record<string, number>>({});
+	/** Pairing recorded by this session. */
 	pairedAt = $state<Record<string, number>>({});
+	/** Pairing recorded on disk by an earlier session, per device. */
+	pairingAt = $state<Record<string, number>>({});
 
 	notices = $state<Record<string, Notice>>({});
 
@@ -268,6 +271,11 @@ class AppStore {
 		this.loading.messages = true;
 		try {
 			this.offline = await this.call<boolean>('get_offline', { deviceId: this.selectedId });
+			const paired = await this.call<number | null>('get_device_pairing', {
+				deviceId: this.selectedId
+			});
+			if (paired) this.pairingAt[this.selectedId] = paired;
+			else delete this.pairingAt[this.selectedId];
 			const page = await this.pageMessages(null);
 			this.messages = page.messages;
 			this.messagesHasMore = page.has_more;
@@ -442,6 +450,10 @@ class AppStore {
 		try {
 			const commands = await this.call<unknown[]>('poll_device', { deviceId });
 			this.contactAt[deviceId] = Date.now();
+			// A poll also backfills the pairing time for identities created before
+			// it was recorded, so re-read it rather than showing a stale "unknown".
+			const paired = await this.call<number | null>('get_device_pairing', { deviceId });
+			if (paired) this.pairingAt[deviceId] = paired;
 			this.notify(
 				`device:${deviceId}`,
 				`Signed poll OK · ${count(

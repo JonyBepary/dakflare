@@ -11,13 +11,13 @@
 	});
 
 	const device = $derived(app.selected);
-	const contact = $derived(device ? (app.contactAt[device.device_id] ?? null) : null);
+	const contact = $derived(device ? (app.contactAt[device.device_id] ?? device.updated_at ?? null) : null);
 	const deviceStatus = $derived(deviceState(app.offline, contact, now));
 	const pairing = $derived.by(() => {
 		if (!device) return '—';
-		if (app.pairedAt[device.device_id]) return 'paired this session';
-		if (app.contactAt[device.device_id]) return 'paired · signed contact answered';
-		return 'not recorded in this build';
+		const when = app.pairedAt[device.device_id] ?? app.pairingAt[device.device_id] ?? null;
+		if (when) return `paired · ${relativeTime(when, now)}`;
+		return 'not recorded on this phone';
 	});
 
 	const facts = $derived(app.facts);

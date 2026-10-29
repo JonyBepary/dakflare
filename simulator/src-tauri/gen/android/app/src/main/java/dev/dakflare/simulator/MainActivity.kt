@@ -118,7 +118,9 @@ class MainActivity : TauriActivity() {
         val info = infos.firstOrNull { it.subscriptionId == defaultSubId }
           ?: infos.firstOrNull()
         if (info != null) {
-          write("sim_slot", info.simSlotIndex.toString())
+          // SubscriptionInfo reports a 0-based slot index; every other surface
+          // in this product calls the second tray "SIM 2", so write it 1-based.
+          write("sim_slot", (info.simSlotIndex + 1).toString())
           write("sim_carrier", info.carrierName?.toString())
         }
       } catch (_: SecurityException) {

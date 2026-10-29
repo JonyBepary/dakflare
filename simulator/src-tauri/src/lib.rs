@@ -204,6 +204,7 @@ async fn pair_device(
         .pair_with_identity(&code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(|e| e.to_string())?;
+    record_pairing(&state, &device.device_id).await;
     Ok(format!("Paired as {}", device.device_id))
 }
 
@@ -243,6 +244,7 @@ async fn pair_with_code(
         .pair_with_identity(&link.code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(pair_failure)?;
+    record_pairing(&state, &device.device_id).await;
     Ok(format!("Paired as {}", device.device_id))
 }
 
@@ -283,7 +285,17 @@ async fn poll_device(
     // A receiver can leave rows pending while offline; flush them before polling
     // so opening the app clears the backlog. Best effort.
     let _ = flush_pending(&state.store, &client, &device_id).await;
-    client.poll(&[]).await.map_err(|e| e.to_string())
+    let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
+    // Both calls above are signed and were answered, so this is a real contact.
+    let _ = state.store.touch_device(&device_id).await;
+    // A deployment that answers this identity has accepted it. That backfills the
+    // pairing time for identities created before it was recorded, without
+    // overwriting the original date on later polls.
+    let key = format!("paired:{device_id}");
+    if matches!(state.store.get_setting(&key).await, Ok(None)) {
+        record_pairing(&state, &device_id).await;
+    }
+    Ok(commands)
 }
 
 /// Test-cleanup: erase this device's message log on the deployment.
@@ -298,6 +310,36 @@ async fn purge_messages(state: State<'_, AppState>, device_id: String) -> Result
 async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
     let (client, _device) = client_for(&state, &device_id).await?;
     client.revoke().await.map_err(|e| e.to_string())
+}
+
+/// Remember when this identity was paired.
+///
+/// Nothing in the local schema records it: `devices` holds the identity, not the
+/// handshake. The Device frame would otherwise have to say "not recorded" about
+/// a phone that plainly is, so the one fact that matters is kept beside it.
+async fn record_pairing(state: &State<'_, AppState>, device_id: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = state
+        .store
+        .set_setting(&format!("paired:{device_id}"), &now.to_string())
+        .await;
+}
+
+/// When this identity last completed a pairing handshake, if it ever did.
+#[tauri::command]
+async fn get_device_pairing(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Option<i64>, String> {
+    let value = state
+        .store
+        .get_setting(&format!("paired:{device_id}"))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(value.and_then(|raw| raw.trim().parse::<i64>().ok()))
 }
 
 /* ---------------------------------------------------------------- carrier */
@@ -550,6 +592,7 @@ pub fn run() {
             list_cached_flows,
             list_flow_runs,
             get_device_facts,
+            get_device_pairing,
             clear_messages,
             set_offline,
             get_offline,

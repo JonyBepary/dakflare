@@ -315,6 +315,21 @@ impl Store {
         Ok((device, identity))
     }
 
+    /// Record that this device answered a signed request.
+    ///
+    /// `updated_at` is the only local evidence of contact: the webview cannot see
+    /// the deployment's socket, so a phone that has answered a poll or a flush is
+    /// as live as this app can honestly claim.
+    pub async fn touch_device(&self, device_id: &str) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "UPDATE devices SET updated_at = ? WHERE device_id = ?",
+            params![now_ms()?, device_id],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_devices(&self) -> Result<Vec<Device>, StoreError> {
         let conn = self.db.connect()?;
         let mut rows = conn
