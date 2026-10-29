@@ -36,15 +36,84 @@ function expiredCookie(name: string, secure: boolean): string {
   return `${name}=; Max-Age=0; Path=/${secure ? "; Secure" : ""}`;
 }
 
+const SESSION_COOKIES = ["sessionToken", "sessionData", "accountData"] as const;
+
 /**
- * Turn the session Better Auth just created into a pending TOTP challenge.
+ * Turn "this user passed the first factor" into a pending TOTP challenge,
+ * without minting a session.
  *
- * The steps are the ones the plugin performs for a password sign-in, in the
- * same order and with the same identifiers: delete the session, write the
- * `2fa-` verification row, seed its attempt budget, and set the signed
- * `two_factor` cookie that `verify-totp` / `verify-backup-code` read. Those
- * endpoints then own the actual check, the attempt count and the session they
- * hand back, so no verification logic is duplicated here.
+ * This is the shared half of the passkey path: delete any session that was just
+ * created (the caller does that), write the `2fa-` verification row the plugin's
+ * `verify-totp` reads, seed its attempt budget, and set the signed `two_factor`
+ * cookie. Password sign-in calls this too, so an account with TOTP gets exactly
+ * the challenge a passkey gets — one implementation, one body shape.
+ */
+export async function startSecondFactorChallenge(
+  auth: Auth,
+  env: Env,
+  req: Request,
+  userId: string,
+  options: { headers?: Headers; factorLabel?: string } = {}
+): Promise<Response> {
+  const ctx = await auth.$context;
+  const identifier = `2fa-${crypto.randomUUID().replace(/-/g, "")}`;
+  const expiresAt = new Date(Date.now() + CHALLENGE_SECONDS * 1000);
+  await ctx.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
+  // The attempt budget `verify-totp` reads before checking a code. It starts at
+  // "0 used"; `verifyTOTP` allows five and then burns the challenge.
+  await ctx.internalAdapter.createVerificationValue({
+    value: "0",
+    identifier: `2fa-attempts-${identifier}`,
+    expiresAt,
+  });
+
+  const challengeCookie = ctx.createAuthCookie(TWO_FACTOR_COOKIE, {
+    maxAge: CHALLENGE_SECONDS,
+  });
+  const cookie = await signedCookieHeader(
+    env,
+    challengeCookie.name,
+    identifier,
+    challengeCookie.attributes,
+    CHALLENGE_SECONDS
+  );
+  if (cookie === null) {
+    return Response.json({ error: "auth_unavailable" }, { status: 503 });
+  }
+
+  const headers = options.headers ? new Headers(options.headers) : new Headers();
+  headers.delete("set-cookie");
+  headers.delete("content-length");
+  headers.set("Content-Type", "application/json");
+  headers.set("Cache-Control", "no-store");
+  headers.append("Set-Cookie", cookie);
+  // Any session cookie Better Auth just set is dropped above; expire earlier
+  // ones too, so a browser cannot keep a session minted before the challenge.
+  const secure = challengeCookie.attributes.secure === true;
+  for (const key of SESSION_COOKIES) {
+    headers.append("Set-Cookie", expiredCookie(ctx.authCookies[key].name, secure));
+  }
+
+  await writeAudit(env, {
+    action: "sign_in.second_factor",
+    actor: { userId, label: options.factorLabel ?? "password" },
+    subject: userId,
+    detail: { factor: "totp" },
+    ...requestMeta(req),
+  });
+
+  return new Response(
+    JSON.stringify({
+      twoFactorRedirect: true,
+      twoFactorMethods: ["totp"],
+    }),
+    { status: 200, headers }
+  );
+}
+
+/**
+ * The passkey path: read the user out of the session Better Auth just created,
+ * delete that session, then hand out the TOTP challenge instead.
  */
 async function beginSecondFactor(
   auth: Auth,
@@ -79,62 +148,10 @@ async function beginSecondFactor(
     return Response.json({ error: "internal_error" }, { status: 500 });
   }
 
-  const identifier = `2fa-${crypto.randomUUID().replace(/-/g, "")}`;
-  const expiresAt = new Date(Date.now() + CHALLENGE_SECONDS * 1000);
-  await ctx.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
-  // The attempt budget `verify-totp` reads before checking a code. It starts at
-  // "0 used"; `verifyTOTP` allows five and then burns the challenge.
-  await ctx.internalAdapter.createVerificationValue({
-    value: "0",
-    identifier: `2fa-attempts-${identifier}`,
-    expiresAt,
+  return await startSecondFactorChallenge(auth, env, req, userId, {
+    headers: res.headers,
+    factorLabel: "passkey",
   });
-
-  const challengeCookie = ctx.createAuthCookie(TWO_FACTOR_COOKIE, {
-    maxAge: CHALLENGE_SECONDS,
-  });
-  const cookie = await signedCookieHeader(
-    env,
-    challengeCookie.name,
-    identifier,
-    challengeCookie.attributes,
-    CHALLENGE_SECONDS
-  );
-  if (cookie === null) {
-    return Response.json({ error: "auth_unavailable" }, { status: 503 });
-  }
-
-  const headers = new Headers(res.headers);
-  headers.delete("set-cookie");
-  headers.delete("content-length");
-  headers.append("Set-Cookie", cookie);
-  // The session cookie this response would have set is dropped above; expire
-  // any earlier one too, so a browser cannot keep a session minted before the
-  // challenge existed.
-  const secure = challengeCookie.attributes.secure === true;
-  for (const name of [
-    ctx.authCookies.sessionToken.name,
-    ctx.authCookies.sessionData.name,
-    ctx.authCookies.accountData.name,
-  ]) {
-    headers.append("Set-Cookie", expiredCookie(name, secure));
-  }
-
-  await writeAudit(env, {
-    action: "sign_in.second_factor",
-    actor: { userId, label: "passkey" },
-    subject: userId,
-    detail: { factor: "totp" },
-    ...requestMeta(req),
-  });
-
-  return new Response(
-    JSON.stringify({
-      twoFactorRedirect: true,
-      twoFactorMethods: ["totp"],
-    }),
-    { status: 200, headers }
-  );
 }
 
 export async function handleAuthRequest(req: Request, env: Env): Promise<Response> {

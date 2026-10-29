@@ -16,6 +16,12 @@
  *                   401/403/200, source-mode token path, audit rows. AUTH_MODE
  *                   selects the assertions (legacy|new); point WORKER_URL at a
  *                   Worker started with the matching mode.
+ *   password        AUTH_PLAN §2 cases: salt shape/determinism, construction
+ *                   parity, mode rules, sign-in, deletion. Reads the mode from
+ *                   /v1/admin/health.
+ *   password-rotate pepper rotation end to end. Starts its own wrangler dev
+ *                   (ring v1 -> v2,v1 -> v2) on PASSWORD_ROTATE_PORT, isolated
+ *                   D1 state under /tmp/opencode.
  *   proxy           start the :8788 signing proxy for Hoppscotch.
  *   ws              connect a virtual device and hold a session open.
  *   stub            run the FCM/OAuth2 stub.
@@ -52,6 +58,86 @@ const TARGET_KEY = WORKER_HOST.host.replace(/[^A-Za-z0-9.-]/g, '_');
 const STATE_FILE = path.join(HERE, `.harness-state.${TARGET_KEY}.json`);
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/* ──────────────── password construction (AUTH_PLAN §2), independent ─────────
+ *
+ * Deliberately NOT imported from worker/src: the harness must be able to
+ * disagree with the server about the stored value. It re-implements the four
+ * lines of the contract:
+ *
+ *   material = PBKDF2-SHA256(password, salt, iterations)
+ *   peppered = HMAC-SHA256(pepper_v, salt ‖ material)
+ *   stored   = SHA-256(peppered)
+ *   row      = v1$p=<v>$k=<k>$m=<c|s>$<salt-b64>$<sha256-b64>
+ */
+const PW_ITERATIONS = 210_000;
+
+const b64Of = (buf) => Buffer.from(buf).toString('base64');
+
+function pwMaterial(password, salt, iterations = PW_ITERATIONS) {
+  return crypto.pbkdf2Sync(Buffer.from(password, 'utf8'), salt, iterations, 32, 'sha256');
+}
+
+function pwDigest(pepper, salt, material) {
+  const peppered = crypto.createHmac('sha256', pepper).update(Buffer.concat([salt, material])).digest();
+  return crypto.createHash('sha256').update(peppered).digest();
+}
+
+function pwRow({ pepper, version, iterations, mode, salt, material }) {
+  return `v1$p=${version}$k=${iterations}$m=${mode}$${b64Of(salt)}$${b64Of(pwDigest(pepper, salt, material))}`;
+}
+
+function sessionCookieOf(cookies) {
+  return (cookies ?? []).map((c) => c.split(';')[0]).find((c) => c.includes('session_token')) ?? null;
+}
+
+/** RFC 4648 base32, for a TOTP secret taken out of an otpauth:// URI. */
+function base32Decode(value) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = String(value ?? '').replace(/=+$/, '').toUpperCase();
+  let bits = 0;
+  let acc = 0;
+  const out = [];
+  for (const char of clean) {
+    const index = alphabet.indexOf(char);
+    if (index < 0) throw new Error(`bad base32 character ${char}`);
+    acc = (acc << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((acc >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+
+/** One 6-digit TOTP code, RFC 6238 (HMAC-SHA1, 30 s). */
+function totpNow(secretBase32) {
+  const counter = Math.floor(Date.now() / 30_000);
+  const message = Buffer.alloc(8);
+  message.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
+  message.writeUInt32BE(counter >>> 0, 4);
+  const mac = crypto.createHmac('sha1', base32Decode(secretBase32)).update(message).digest();
+  const offset = mac[mac.length - 1] & 0x0f;
+  const binary =
+    ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3];
+  return String(binary % 1_000_000).padStart(6, '0');
+}
+
+/** A tiny JSON-over-fetch helper scoped to an arbitrary base URL. */
+async function api(base, method, pathname, { body, cookie } = {}) {
+  const res = await fetch(base + pathname, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    redirect: 'manual',
+  });
+  const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  return { status: res.status, data: await res.json().catch(() => null), cookies };
+}
 
 /* ────────────────────────────── contract §4 vectors ───────────────────────── */
 
@@ -1960,6 +2046,461 @@ async function cmdProxy() {
   });
 }
 
+/* ─────────────────────────── password command ─────────────────────────────── */
+
+/**
+ * AUTH_PLAN §2, phase 4.
+ *
+ * Reads the mode from `/v1/admin/health` rather than the environment, so the
+ * assertion set always describes the Worker actually under test. Start the
+ * Worker with AUTH_PEPPER set (a Worker secret locally, `--var` is fine) and
+ * AUTH_PASSWORD_MODE to one of off|client-derived|server-kdf.
+ *
+ * TOTP-challenge-on-password-sign-in is exercised by construction in
+ * `auth/handler.ts` (`startSecondFactorChallenge` is the same function the
+ * passkey path calls); enrolling a real TOTP secret is phase 3's test.
+ */
+async function cmdPassword() {
+  const health = await admin('GET', '/v1/admin/health');
+  if (health.status !== 200) {
+    console.error(`cannot read /v1/admin/health (${health.status}); check ADMIN_TOKEN and the Worker`);
+    process.exit(1);
+  }
+  const mode = health.data?.password_mode ?? 'off';
+  console.log(`== password (AUTH_PASSWORD_MODE=${mode}) ==\nworker: ${WORKER_URL}\n`);
+  const rep = new Report('password');
+
+  const email = `pw-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+  const unknown = `pw-nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+  const password = 'correct horse battery staple';
+  const raw = (method, pathname, opts) => api(WORKER_URL, method, pathname, opts);
+  // Better Auth's CSRF check wants an Origin on state-changing POSTs. `api()`
+  // does not set one, so wrap the calls that reach /api/auth/* explicitly.
+  const betterAuth = async (pathname, body, cookie) => {
+    const res = await fetch(WORKER_URL + pathname, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: WORKER_URL,
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies };
+  };
+
+  // ---------------------------------------------------------------- salt shape
+  const miss1 = await raw('POST', '/v1/auth/salt', { body: { email: unknown } });
+  const miss2 = await raw('POST', '/v1/auth/salt', { body: { email: unknown } });
+  rep.check('salt for an unknown address -> 200', miss1.status, 200);
+  rep.check(
+    'salt shape is exactly {salt,iterations,mode,pepper_version}',
+    Object.keys(miss1.data ?? {}).sort(),
+    ['iterations', 'mode', 'pepper_version', 'salt']
+  );
+  rep.check('fake salt is deterministic', miss1.data?.salt, miss2.data?.salt);
+  rep.check('fake iterations are the contract 210000', miss1.data?.iterations, PW_ITERATIONS);
+  rep.check('fake mode is c', miss1.data?.mode, 'c');
+  rep.checkFn('fake salt decodes to 16 bytes', () => {
+    const bytes = Buffer.from(miss1.data?.salt ?? '', 'base64');
+    return bytes.length === 16 || `got ${bytes.length} bytes`;
+  });
+
+  // ------------------------------------------------- construction parity (pure)
+  // Same password, same salt, same iterations: the digest must not depend on
+  // who ran the inner KDF. Only the m= tag may differ.
+  {
+    const pepper = crypto.createHash('sha256').update('harness-parity-pepper').digest();
+    const salt = crypto.createHash('sha256').update('harness-parity-salt').digest().subarray(0, 16);
+    const asClient = pwRow({
+      pepper, version: 2, iterations: PW_ITERATIONS, mode: 'c', salt,
+      material: pwMaterial(password, salt),
+    });
+    const asWorker = pwRow({
+      pepper, version: 2, iterations: PW_ITERATIONS, mode: 's', salt,
+      material: pwMaterial(password, salt),
+    });
+    const withoutMode = (row) => row.split('$').filter((_, i) => i !== 3).join('$');
+    rep.check('client and Worker material are byte-identical', b64Of(pwMaterial(password, salt)), b64Of(pwMaterial(password, salt)));
+    rep.check('stored digest is identical in both modes (only m= differs)', withoutMode(asClient), withoutMode(asWorker));
+    rep.check('row matches the contract shape', /^v1\$p=\d+\$k=\d+\$m=[cs]\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/.test(asClient), true);
+  }
+
+  // ---------------------------------------------------------------- an account
+  const created = await admin('POST', '/v1/admin/invites', { email, role: 'member', expires_in_s: 300 });
+  rep.check('invite created', created.status, 200);
+  const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: created.data?.token } });
+  rep.check('invite redeemed -> 200', redeemed.status, 200);
+  const session = sessionCookieOf(redeemed.cookies);
+  rep.check('redeem sets a session cookie', typeof session, 'string');
+
+  // A real account with NO password must look exactly like an unknown address:
+  // same fields, same iteration count, same deterministic salt for the address.
+  const noPassword = await raw('POST', '/v1/auth/salt', { body: { email } });
+  const noPasswordAgain = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check(
+    'an account without a password has the same salt shape as unknown',
+    Object.keys(noPassword.data ?? {}).sort(),
+    Object.keys(miss1.data ?? {}).sort()
+  );
+  rep.check('it gets the same fake iteration count', noPassword.data?.iterations, PW_ITERATIONS);
+  rep.check('it gets fake mode c', noPassword.data?.mode, 'c');
+  rep.check('its fake salt is deterministic', noPassword.data?.salt, noPasswordAgain.data?.salt);
+
+  // ------------------------------------------------------------------ set
+  const preSalt = Buffer.from(noPassword.data.salt, 'base64');
+  const preIterations = noPassword.data.iterations;
+  const material = pwMaterial(password, preSalt, preIterations);
+
+  if (mode === 'off') {
+    const set = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('mode off refuses a set -> 403 password_disabled', [set.status, set.data?.error], [403, 'password_disabled']);
+    const sign = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('mode off refuses password sign-in -> 403 password_disabled', [sign.status, sign.data?.error], [403, 'password_disabled']);
+    const matSign = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(material) },
+    });
+    rep.check('mode off refuses material sign-in too', matSign.status, 403);
+    const allOk = rep.print();
+    console.log(allOk ? 'PASSWORD CASES PASSED' : 'PASSWORD CASES FAILED');
+    process.exit(allOk ? 0 : 1);
+  }
+
+  if (mode === 'client-derived') {
+    const plaintext = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('client-derived refuses a plaintext set -> 403', [plaintext.status, plaintext.data?.error], [403, 'password_mode_mismatch']);
+    const set = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material), salt: b64Of(preSalt), iterations: preIterations },
+    });
+    rep.check('client-derived set with {material} -> 200', set.status, 200);
+    rep.check('set reports m=c provenance via the row', (await raw('POST', '/v1/auth/salt', { body: { email } })).data?.mode, 'c');
+  } else {
+    const set = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('server-kdf set with {password} -> 200', set.status, 200);
+    rep.check('set reports m=s provenance via the row', (await raw('POST', '/v1/auth/salt', { body: { email } })).data?.mode, 's');
+  }
+
+  const stored = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check('salt after set is no longer the fake salt', stored.data?.salt === miss1.data?.salt, false);
+  rep.check('salt after set reports 210000 iterations', stored.data?.iterations, PW_ITERATIONS);
+
+  // ------------------------------------------------------- sign-in, both paths
+  const rowSalt = Buffer.from(stored.data.salt, 'base64');
+  const rowMaterial = pwMaterial(password, rowSalt, stored.data.iterations);
+
+  const wrongBody = mode === 'server-kdf' ? { password: 'definitely-not-the-password' } : { material: b64Of(crypto.randomBytes(32)) };
+  const wrong = await raw('POST', '/v1/auth/sign-in/password', { body: { email, ...wrongBody } });
+  const nobodysBody = mode === 'server-kdf' ? { password: 'definitely-not-the-password' } : { material: b64Of(crypto.randomBytes(32)) };
+  const nobodys = await raw('POST', '/v1/auth/sign-in/password', { body: { email: unknown, ...nobodysBody } });
+  rep.check('wrong secret -> 401', wrong.status, 401);
+  rep.check('unknown address -> 401', nobodys.status, 401);
+  rep.check('wrong secret and unknown address are byte-identical', wrong.data, nobodys.data);
+
+  if (mode === 'client-derived') {
+    const plaintext = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('client-derived refuses a plaintext sign-in -> 403', [plaintext.status, plaintext.data?.error], [403, 'password_mode_mismatch']);
+  }
+
+  const signedIn = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  rep.check('sign-in -> 200', signedIn.status, 200);
+  rep.check('sign-in returns the same account', signedIn.data?.user?.email, email);
+  const signedCookie = sessionCookieOf(signedIn.cookies);
+  rep.check('sign-in sets a session cookie', typeof signedCookie, 'string');
+  if (signedCookie) {
+    const me = await raw('GET', '/v1/auth/me', { cookie: signedCookie });
+    rep.check('the session minted by sign-in resolves via requireRole', me.status, 200);
+    rep.check('it is the same user', me.data?.user?.email, email);
+  }
+
+  // ---------------------------------------------------- cross-mode parity, live
+  // A row written from client material must verify with the plaintext, and a row
+  // written from the plaintext must verify with material. Same stored value,
+  // whoever ran PBKDF2 — this is the upgrade promise of AUTH_PLAN §2.
+  if (mode === 'server-kdf') {
+    const salt2 = crypto.randomBytes(16);
+    const material2 = pwMaterial(password, salt2);
+    const byMaterial = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material2), salt: b64Of(salt2), iterations: PW_ITERATIONS },
+    });
+    rep.check('server-kdf accepts a client-derived set', byMaterial.status, 200);
+    const withPassword = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('a row set from material verifies with {password}', withPassword.status, 200);
+    const withMaterial = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(material2) },
+    });
+    rep.check('…and with {material} too', withMaterial.status, 200);
+  }
+
+  // ---------------------------------------------- TOTP turns sign-in into a challenge
+  // Enrol TOTP through Better Auth's own endpoints (which now see a credential
+  // row and therefore ask for the password), then prove that password sign-in
+  // returns the challenge and NOT a session — the passkey behaviour.
+  const enable = await betterAuth('/api/auth/two-factor/enable', { password }, session);
+  rep.check('TOTP enrolment with the password -> 200', enable.status, 200);
+  const totpURI = enable.data?.totpURI;
+  const totpSecret = totpURI ? new URL(totpURI).searchParams.get('secret') : null;
+  rep.check('enable returns an otpauth URI with a secret', typeof totpSecret, 'string');
+  const verified = await betterAuth('/api/auth/two-factor/verify-totp', { code: totpNow(totpSecret) }, session);
+  rep.check('the first TOTP code verifies -> 200', verified.status, 200);
+  // The plugin rotates the session when it flips twoFactorEnabled on.
+  const totpSession = sessionCookieOf(verified.cookies) ?? session;
+  const currentCode = totpNow(totpSecret);
+  const wrongCode = String((Number(currentCode) + 1) % 1_000_000).padStart(6, '0');
+
+  const challenged = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  rep.check(
+    'password sign-in for a TOTP account returns the challenge',
+    [challenged.status, challenged.data?.twoFactorRedirect, challenged.data?.twoFactorMethods],
+    [200, true, ['totp']]
+  );
+  const challengeSessionCookies = challenged.cookies.filter((c) => c.includes('session_token='));
+  rep.check(
+    '…and no usable session cookie',
+    challengeSessionCookies.some((c) => c.split(';')[0].split('=')[1] !== ''),
+    false
+  );
+  rep.check(
+    '…any session cookie is explicitly expired',
+    challengeSessionCookies.every((c) => /Max-Age=0/.test(c)),
+    true
+  );
+  rep.check(
+    '…but a two_factor cookie',
+    challenged.cookies.some((c) => c.includes('two_factor=')),
+    true
+  );
+
+  const delNoCode = await raw('DELETE', '/v1/auth/password', { cookie: totpSession, body: { code: wrongCode } });
+  rep.check('delete with a wrong TOTP code -> 401', delNoCode.status, 401);
+  const del = await raw('DELETE', '/v1/auth/password', {
+    cookie: totpSession,
+    body: { code: totpNow(totpSecret) },
+  });
+  rep.check('delete with a fresh TOTP code -> 200', del.status, 200);
+
+  const afterDelete = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check('after delete the address falls back to its fake salt', afterDelete.data?.salt, noPasswordAgain.data?.salt);
+  const afterSignIn = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  rep.check('after delete the old secret no longer signs in -> 401', afterSignIn.status, 401);
+
+  const allOk = rep.print();
+  console.log(allOk ? 'PASSWORD CASES PASSED' : 'PASSWORD CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
+/* ──────────────────────── pepper rotation command ─────────────────────────── */
+
+const ROTATE_PORT = Number(process.env.PASSWORD_ROTATE_PORT ?? 8799);
+
+/**
+ * Pepper rotation, end to end, with its own `wrangler dev` lifecycle.
+ *
+ * A pepper version only changes meaning when the SECRET changes, so a live
+ * Worker cannot exercise "v1 row, v2 ring" in place. This command therefore:
+ *
+ *   1. starts a Worker with a v1-only ring and sets a password (row p=1);
+ *   2. restarts it with v2,v1 — the row still verifies through the v1 entry:
+ *      that is the rotation window, and the old pepper is still doing its job;
+ *   3. calls /v1/admin/auth/rotate-pepper with v2 (installed -> confirmed) and
+ *      with a v3 that is not installed (returns the ring to install, writes
+ *      nothing);
+ *   4. signs in again: the row re-wraps to p=2 at sign-in (AUTH_PLAN §8), and
+ *      /salt then reports pepper_version 2;
+ *   5. restarts with the v2-only ring and signs in once more, proving the old
+ *      pepper can be dropped.
+ *
+ * It needs BETTER_AUTH_SECRET and ADMIN_TOKEN in worker/.dev.vars, and a free
+ * port (PASSWORD_ROTATE_PORT, default 8799). D1 state is isolated under
+ * /tmp/opencode so a running dev server is untouched.
+ */
+async function cmdPasswordRotate() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-rotate-${Date.now()}`);
+  const base = `http://127.0.0.1:${ROTATE_PORT}`;
+  const rep = new Report('pepper-rotation');
+  const servers = [];
+
+  const startWorker = async (pepper, label) => {
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'dev', '--local',
+      '--port', String(ROTATE_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_PEPPER:${pepper}`,
+      '--var', 'AUTH_PASSWORD_MODE:client-derived',
+      '--var', 'AUTH_TRUSTED_ORIGINS:' + base,
+    ], { cwd: workerDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const pepperA = crypto.randomBytes(32);
+  const pepperB = crypto.randomBytes(32);
+  const pepperC = crypto.randomBytes(32);
+  const ringV1 = `v1:${b64Of(pepperA)}`;
+  const ringV2 = `v2:${b64Of(pepperB)},v1:${b64Of(pepperA)}`;
+
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    // ---- 1. a row sealed with v1 -----------------------------------------
+    let server = await startWorker(ringV1, 'ring v1');
+    const email = `rotate-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const password = 'rotation test password';
+
+    const inviteRes = await fetch(`${base}/v1/admin/invites`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+      },
+      body: JSON.stringify({ email, role: 'member', expires_in_s: 300 }),
+    });
+    const invite = await inviteRes.json().catch(() => null);
+    rep.check('invite created on the v1 ring', inviteRes.status, 200);
+
+    const redeemRes = await fetch(`${base}/v1/auth/redeem`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: invite?.token }),
+    });
+    const redeemCookies = redeemRes.headers.getSetCookie?.() ?? [];
+    const redeem = await redeemRes.json().catch(() => null);
+    const session = sessionCookieOf(redeemCookies);
+    rep.check('account created on the v1 ring', redeemRes.status, 200);
+    rep.check('redeem session cookie present', typeof session, 'string');
+
+    const salt1 = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('v1 salt is reported as pepper_version 1', salt1?.pepper_version, 1);
+    const material = pwMaterial(password, Buffer.from(salt1.salt, 'base64'), salt1.iterations);
+    const setRes = await fetch(`${base}/v1/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: session },
+      body: JSON.stringify({ material: b64Of(material), salt: salt1.salt, iterations: salt1.iterations }),
+    });
+    rep.check('password set on the v1 ring', setRes.status, 200);
+
+    await stopWorker(server);
+
+    // ---- 2. install v2, keep v1: the rotation window ----------------------
+    server = await startWorker(ringV2, 'ring v2,v1');
+    const signIn = async () => await fetch(`${base}/v1/auth/sign-in/password`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, material: b64Of(material) }),
+    });
+
+    // Nothing has signed in since the restart, so the row is still sealed with v1.
+    const saltWindow = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('after installing v2 the untouched row is still p=1', saltWindow?.pepper_version, 1);
+
+    const adminCall = async (pathname, body) => {
+      const res = await fetch(base + pathname, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ADMIN_TOKEN}`,
+          'X-Dakflare-Client': 'cli',
+        },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const confirmed = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperB) });
+    rep.check('rotate with the installed active pepper -> 200', confirmed.status, 200);
+    rep.check('rotate confirms it is installed', confirmed.data?.installed, true);
+    rep.check('rotate reports the pending p=1 row', confirmed.data?.pending, 1);
+    rep.check('rotate does not rewrite rows eagerly', confirmed.data?.migrated, 0);
+
+    const proposed = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperC) });
+    rep.check('rotate with an uninstalled pepper -> 200 (proposal)', proposed.status, 200);
+    rep.check('…reports installed=false', proposed.data?.installed, false);
+    rep.check('…returns the ring to install', proposed.data?.ring,
+      `v3:${b64Of(pepperC)},v2:${b64Of(pepperB)},v1:${b64Of(pepperA)}`);
+
+    // ---- 3. sign in: the row re-wraps to v2 ------------------------------
+    // This is the rotation window: v1 is no longer active but is still in the
+    // ring, so the p=1 row verifies; success re-derives the outer layer with v2.
+    const inWindow = await signIn();
+    rep.check('a p=1 row still verifies while v1 is in the ring', inWindow.status, 200);
+    const saltAfter = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('sign-in re-wrapped the row to pepper_version 2', saltAfter?.pepper_version, 2);
+
+    const settled = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperB) });
+    rep.check('rotate now reports no pending rows', settled.data?.pending, 0);
+
+    await stopWorker(server);
+
+    // ---- 4. drop v1: the row is fully migrated ---------------------------
+    server = await startWorker(`v2:${b64Of(pepperB)}`, 'ring v2 only');
+    const finalSignIn = await signIn();
+    rep.check('sign-in still works with the old pepper removed', finalSignIn.status, 200);
+
+    await stopWorker(server);
+  } finally {
+    for (const server of servers) {
+      await stopWorker(server).catch(() => {});
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'PEPPER ROTATION CASES PASSED' : 'PEPPER ROTATION CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ───────────────────────────────── stub command ──────────────────────────── */
 
 async function cmdStub() {
@@ -1980,6 +2521,8 @@ const COMMANDS = {
   hardening: cmdHardening,
   multidevice: cmdMultiDevice,
   auth: cmdAuth,
+  password: cmdPassword,
+  'password-rotate': cmdPasswordRotate,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,

@@ -12,7 +12,7 @@
  * which invites exist.
  */
 
-import { createSessionForUser, requireRole, sessionCookieHeader } from "../auth";
+import { issueSessionCookie, requireRole } from "../auth";
 import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
@@ -74,14 +74,9 @@ export async function handleRedeemInvite(req: Request, env: Env): Promise<Respon
     .run();
 
   const meta = requestMeta(req);
-  const session = await createSessionForUser(env, userId, meta);
-  if (session === null) {
-    return Response.json({ error: "session_failed" }, { status: 500 });
-  }
-
-  const cookie = await sessionCookieHeader(env, session.token);
-  if (cookie === null) {
-    return Response.json({ error: "auth_unavailable" }, { status: 503 });
+  const session = await issueSessionCookie(env, userId, meta);
+  if (!session.ok) {
+    return Response.json({ error: session.error }, { status: session.status });
   }
 
   const actor = { userId, label: invite.email };
@@ -106,7 +101,7 @@ export async function handleRedeemInvite(req: Request, env: Env): Promise<Respon
       user: { id: userId, email: invite.email, name, role: invite.role },
       expires_at: session.expiresAt,
     },
-    { headers: { "Set-Cookie": cookie } }
+    { headers: { "Set-Cookie": session.cookie } }
   );
 }
 

@@ -100,7 +100,7 @@ export async function requireRole(
       email: String(raw.email ?? ""),
       name: String(raw.name ?? ""),
       role,
-      twoFactorEnabled: raw.twoFactorEnabled === true,
+      twoFactorEnabled: raw.twoFactorEnabled === true || raw.twoFactorEnabled === 1,
     },
     expiresAt,
   };

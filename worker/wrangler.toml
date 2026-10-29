@@ -115,6 +115,19 @@ simple = { limit = 300, period = 60 }
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
 # (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
 AUTH_MODE = "legacy"
+# Which side runs the password KDF (AUTH_PLAN §2, phase 4):
+#   off (default) | client-derived (free tier) | server-kdf (paid plan)
+# `off` disables the whole password factor: /v1/auth/salt still answers (same
+# shape for every address), sign-in and set answer 403 password_disabled.
+# `client-derived` refuses a plaintext password outright, because 210,000
+# PBKDF2 iterations do not fit the 10 ms free-tier CPU budget; the browser
+# derives and the Worker only peppers + compares. `server-kdf` accepts both
+# shapes so an account created on free keeps working after an upgrade.
+# Changing this never rewrites stored rows: each row's m= records whether the
+# browser or the Worker derived the material.
+AUTH_PASSWORD_MODE = "off"
+# AUTH_PEPPER is a Worker secret, never a var here:
+#   wrangler secret put AUTH_PEPPER     # v2:<b64-32>,v1:<b64-32>
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"

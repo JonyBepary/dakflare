@@ -101,3 +101,27 @@ export async function sessionCookieHeader(
   const cookie = ctx.authCookies.sessionToken;
   return signedCookieHeader(env, cookie.name, token, cookie.attributes, maxAgeSeconds);
 }
+
+/**
+ * The one "this user is now signed in" step.
+ *
+ * Invite redemption and password sign-in both use this, so there is exactly one
+ * place that creates a Better Auth session row and turns it into the cookie the
+ * rest of the Worker already reads. Adding a second implementation is how the
+ * two paths would drift (different expiry, different cookie attributes).
+ */
+export type SessionIssue =
+  | { ok: true; cookie: string; expiresAt: number }
+  | { ok: false; error: "session_failed" | "auth_unavailable"; status: number };
+
+export async function issueSessionCookie(
+  env: Env,
+  userId: string,
+  meta: { ip: string | null; userAgent: string | null }
+): Promise<SessionIssue> {
+  const session = await createSessionForUser(env, userId, meta);
+  if (session === null) return { ok: false, error: "session_failed", status: 500 };
+  const cookie = await sessionCookieHeader(env, session.token);
+  if (cookie === null) return { ok: false, error: "auth_unavailable", status: 503 };
+  return { ok: true, cookie, expiresAt: session.expiresAt };
+}

@@ -35,7 +35,14 @@ import {
 } from "./routes/admin";
 import { handleAlertAck, handleAlertsList } from "./routes/alerts";
 import { requireRole, type AuthUser } from "./auth";
-import { handleAuthRequest } from "./auth";
+import {
+  handleAuthRequest,
+  handlePasswordRemove,
+  handlePasswordSalt,
+  handlePasswordSet,
+  handlePasswordSignIn,
+  handleRotatePepper,
+} from "./auth";
 import { requestMeta, writeAudit, type AdminActor } from "./audit";
 import { handleRedeemInvite, handleAuthMe } from "./routes/auth";
 import { handleBootstrap } from "./routes/bootstrap";
@@ -79,6 +86,17 @@ export interface Env {
   AUTH_RP_ID?: string;
   /** 32-byte base64. Signs sessions and encrypts TOTP secrets. Absent disables /api/auth. */
   BETTER_AUTH_SECRET?: string;
+  /**
+   * The pepper ring, `v2:<b64-32>,v1:<b64-32>` (AUTH_PLAN §2, §8). A Worker
+   * Encrypted Secret, never `[vars]`. First entry signs new hashes, all verify.
+   * Missing or malformed => password routes answer 503 naming the secret.
+   */
+  AUTH_PEPPER?: string;
+  /**
+   * Which side runs the password KDF: `off` (default), `client-derived` (free
+   * tier) or `server-kdf` (paid). Read per request; see lib/config.ts.
+   */
+  AUTH_PASSWORD_MODE?: string;
   /** Redirectable so the harness can point FCM at a local stub. */
   FCM_BASE_URL: string;
   GOOGLE_TOKEN_URL: string;
@@ -368,10 +386,33 @@ export default {
       return handleAuthMe(req, env);
     }
 
+    // Password factor (AUTH_PLAN §2). These are ours, not Better Auth's:
+    // `/api/auth/sign-in/email` stays disabled so AUTH_PASSWORD_MODE cannot be
+    // bypassed by a library route that always runs the KDF on the Worker.
+    if (method === "POST" && pathname === "/v1/auth/salt") {
+      return handlePasswordSalt(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/sign-in/password") {
+      return handlePasswordSignIn(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/password") {
+      return handlePasswordSet(req, env);
+    }
+    if (method === "DELETE" && pathname === "/v1/auth/password") {
+      return handlePasswordRemove(req, env);
+    }
+
     /* ---- admin -------------------------------------------------------- */
     // First owner, for `dakflare init`. ADMIN_TOKEN only and never a cookie.
     if (method === "POST" && pathname === "/v1/admin/bootstrap") {
       return withAdminToken(req, env, () => handleBootstrap(req, env));
+    }
+
+    // Pepper rotation is ADMIN_TOKEN only: it changes how every password row is
+    // sealed, so a human session is not enough (AUTH_PLAN §8 demotes the token to
+    // exactly this kind of machine operation).
+    if (method === "POST" && pathname === "/v1/admin/auth/rotate-pepper") {
+      return withAdminToken(req, env, () => handleRotatePepper(req, env));
     }
 
     if (method === "POST" && pathname === "/v1/admin/invites") {

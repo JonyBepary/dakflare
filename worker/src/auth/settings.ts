@@ -16,6 +16,15 @@ import { passkey } from "@better-auth/passkey";
 import { twoFactor } from "better-auth/plugins";
 import type { Env } from "../index";
 import { hasLiveInvite, normalizeEmail } from "../lib/invites";
+import { loadPepperRing } from "./pepper";
+import {
+  PASSWORD_ITERATIONS,
+  buildPasswordRow,
+  deriveMaterial,
+  parsePasswordRow,
+  randomSalt,
+  verifyPlaintext,
+} from "./password";
 
 /** Five minutes, per AUTH_PLAN §3: a short signed cookie cache over D1. */
 const COOKIE_CACHE_SECONDS = 5 * 60;
@@ -68,25 +77,58 @@ function buildAuth(env: Env) {
     secret: env.BETTER_AUTH_SECRET ?? "",
     trustedOrigins: trustedOrigins(env),
 
-    // No public registration and no password login in this phase. Accounts come
-    // only from an invite (AUTH_PLAN §4) or `POST /v1/admin/bootstrap`.
+    // No public registration and no password login route in this phase: accounts
+    // come only from an invite (AUTH_PLAN §4) or `POST /v1/admin/bootstrap`.
+    //
+    // `enabled: false` is deliberate. Better Auth's `/sign-in/email` and
+    // `/sign-up/email` would bypass AUTH_PASSWORD_MODE entirely: they always run
+    // the KDF on the Worker, and they accept a password from any client. Our
+    // `/v1/auth/sign-in/password` is the only password sign-in, so the free tier
+    // can never be made to run PBKDF2 by hitting a library route.
+    //
+    // The hasher pair below is still installed because Better Auth's TOTP
+    // management endpoints call `ctx.password.verify` whenever a credential
+    // account exists (two-factor's `allowPasswordless` asks for a password if one
+    // is present). It is the SAME construction as the endpoints use — one
+    // function pair, one place:
+    //
+    //   material = PBKDF2-SHA256(password, salt, iterations)   // client (free) or Worker (paid)
+    //   peppered = HMAC-SHA256(pepper_v, salt ‖ material)       // ALWAYS after the KDF
+    //   stored   = SHA-256(peppered)
+    //   row      = v1$p=<pepper-version>$k=<iterations>$m=<c|s>$<salt-b64>$<sha256-b64>
     emailAndPassword: {
       enabled: false,
-      // ----------------------------------------------------------------
-      // PASSWORD HASHER — deliberately NOT implemented in phase 2a.
-      //
-      // This is where AUTH_PLAN §2's construction goes when passwords are
-      // enabled. It is one function pair, kept in one place, because the
-      // stored value must be identical whether the browser or the Worker ran
-      // the inner PBKDF2:
-      //
-      //   material = PBKDF2-SHA256(password, salt, iterations)   // client (free) or Worker (paid)
-      //   peppered = HMAC-SHA256(pepper_v, salt ‖ material)       // ALWAYS after the KDF
-      //   stored   = SHA-256(peppered)
-      //   row      = v1$p=<pepper-version>$k=<iterations>$m=<c|s>$<salt-b64>$<sha256-b64>
-      //
-      // password: { hash: async (password) => { /* §2 */ }, verify: async ({ hash, password }) => { /* §2 */ } },
-      // ----------------------------------------------------------------
+      password: {
+        // Reachable only if Better Auth itself hashes a password (a path this
+        // deployment does not expose). Derive on the Worker and tag it `s` so the
+        // row is honest about who ran the KDF.
+        hash: async (password: string): Promise<string> => {
+          const loaded = loadPepperRing(env);
+          if (!loaded.ok) {
+            throw new Error("AUTH_PEPPER is missing or malformed; cannot hash a password");
+          }
+          const salt = randomSalt();
+          const material = await deriveMaterial(password, salt, PASSWORD_ITERATIONS);
+          const row = await buildPasswordRow({
+            ring: loaded.ring,
+            salt,
+            material,
+            iterations: PASSWORD_ITERATIONS,
+            mode: "s",
+          });
+          if (row === null) throw new Error("could not build a password row");
+          return row;
+        },
+        // Better Auth hands us plaintext, so this necessarily derives on the
+        // Worker. Our own sign-in path never reaches here in client-derived mode.
+        verify: async ({ hash, password }: { hash: string; password: string }): Promise<boolean> => {
+          const row = parsePasswordRow(hash);
+          if (row === null) return false;
+          const loaded = loadPepperRing(env);
+          if (!loaded.ok) return false;
+          return await verifyPlaintext(row, password, loaded.ring);
+        },
+      },
     },
 
     session: {
@@ -134,15 +176,11 @@ function buildAuth(env: Env) {
       }),
       twoFactor({
         issuer: "DakFlare",
-        // This phase has no password factor at all: `emailAndPassword.enabled`
-        // is false above, so `shouldRequirePassword()` would be true for every
-        // account and `enable`, `disable`, `generate-backup-codes` and
-        // `get-totp-uri` would each answer INVALID_PASSWORD forever. The flag
-        // makes the password optional and, with no credential row, satisfied —
-        // TOTP is then the second factor after the passkey, exactly as
-        // AUTH_PLAN §1 factor 3 describes. The moment a password factor is
-        // enabled this must be revisited: the plugin deliberately asks for the
-        // password when one exists.
+        // TOTP is optional for every account (AUTH_PLAN §10), so the plugin must
+        // not demand a password to enrol it. `allowPasswordless` does exactly
+        // that: with no credential row the check is satisfied, and when a
+        // password row exists the plugin asks for it before enable/disable —
+        // which is correct once a password is a real factor.
         allowPasswordless: true,
       }),
     ],
@@ -170,6 +208,9 @@ export function getAuth(env: Env): Auth | null {
     env.AUTH_BASE_URL ?? "",
     env.AUTH_TRUSTED_ORIGINS ?? "",
     env.AUTH_RP_ID ?? "",
+    // The hasher pair closes over `env`; a pepper rotation must not leave a
+    // cached instance holding the old ring.
+    env.AUTH_PEPPER ?? "",
   ].join("\u0000");
   if (cached !== null && cached.key === key) return cached.auth;
   const auth = buildAuth(env);

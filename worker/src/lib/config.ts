@@ -162,3 +162,29 @@ export function authMode(env: { AUTH_MODE?: string }): AuthMode {
   if (typeof raw !== "string") return "legacy";
   return raw.trim().toLowerCase() === "new" ? "new" : "legacy";
 }
+
+/**
+ * Which side runs the password KDF — AUTH_PLAN §2.
+ *
+ *   off             no password factor at all (the default)
+ *   client-derived  the browser runs PBKDF2; the Worker only peppers + compares
+ *   server-kdf      the Worker runs PBKDF2 (60–150 ms; paid plan / 30 s limit)
+ *
+ * Read per request, never cached: a deployment changes it with a `[vars]` entry.
+ * An unknown value falls back to `off`, the safe side — a typo disables the
+ * factor instead of silently running a KDF somewhere the operator did not pick.
+ *
+ * This is the deployment's capability, NOT the row's provenance. A row records
+ * its own `m=` (who derived the material) so mode changes never rewrite rows;
+ * `server-kdf` therefore accepts both request shapes, which is what keeps an
+ * account created on the free tier usable after an upgrade.
+ */
+export type PasswordMode = "off" | "client-derived" | "server-kdf";
+
+export function passwordMode(env: { AUTH_PASSWORD_MODE?: string }): PasswordMode {
+  const raw = env.AUTH_PASSWORD_MODE;
+  if (typeof raw !== "string") return "off";
+  const value = raw.trim().toLowerCase();
+  if (value === "client-derived" || value === "server-kdf") return value;
+  return "off";
+}
