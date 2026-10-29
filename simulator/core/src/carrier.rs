@@ -321,6 +321,8 @@ pub async fn inject_inbound(
                 to: message.peer.clone(),
                 body: message.body.clone(),
                 sent_at: message.created_at,
+                state: Some(message.state.clone()),
+                error: message.last_error.clone(),
             })
         })
         .collect();
@@ -477,12 +479,11 @@ pub struct Flushed {
 /// Rows are marked as accepted only after the request succeeds. A row without a
 /// `local_id` cannot be keyed, so it is skipped in the payload and left pending.
 ///
-/// M5.5 `delivered` cannot be carried by this endpoint: the Worker's `messages`
-/// table has no state column and its `ON CONFLICT(device_id, local_id) DO
-/// NOTHING` insert treats a second upload as a duplicate, not an update. The
-/// final state therefore stays in the local store, while the body is uploaded
-/// exactly like `sent` (see `list_unmirrored_outbound`). Inventing a field the
-/// Worker ignores would be a lie about what the console can see.
+/// M5.5's states travel with the row: `queued`, `sent`, `failed` and the
+/// terminal `delivered` are all reported with their `last_error`, so the
+/// console can tell a refused reply from one that is merely waiting. A later
+/// transition resets `mirrored`, which is what turns the second upload into an
+/// update of the same `(device_id, local_id)` row rather than a duplicate.
 pub async fn flush_pending(
     store: &Store,
     client: &DeviceClient,
@@ -524,6 +525,8 @@ pub async fn flush_pending(
                 to: message.peer.clone(),
                 body: message.body.clone(),
                 sent_at: message.created_at,
+                state: Some(message.state.clone()),
+                error: message.last_error.clone(),
             })
         })
         .collect();
@@ -563,6 +566,8 @@ pub async fn mirror_pending(
                 to: message.peer.clone(),
                 body: message.body.clone(),
                 sent_at: message.created_at,
+                state: Some(message.state.clone()),
+                error: message.last_error.clone(),
             })
         })
         .collect();
@@ -1015,5 +1020,167 @@ mod tests {
         assert!(store.is_offline(&device.device_id).await.unwrap());
         store.set_offline(&device.device_id, false).await.unwrap();
         assert!(!store.is_offline(&device.device_id).await.unwrap());
+    }
+
+    /// A local endpoint that accepts `expected` POSTs, records their JSON
+    /// bodies and answers with a batch-shaped 200. It observes the wire, so the
+    /// test can prove what a flush actually reports (and what it omits).
+    fn serve_batch_requests(
+        expected: usize,
+    ) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let mut bodies = Vec::new();
+            for _ in 0..expected {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+
+                    let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..header_end]);
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let lower = line.to_ascii_lowercase();
+                            lower
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    let total = header_end + 4 + length;
+                    while raw.len() < total {
+                        let read = stream.read(&mut chunk).unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&chunk[..read]);
+                    }
+
+                    bodies.push(serde_json::from_slice(&raw[header_end + 4..]).unwrap());
+                    let body = "{\"accepted\":1,\"duplicates\":0,\"commands\":[]}";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    break;
+                }
+            }
+            bodies
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    /// A refused reply must reach the console, once, with its reason. A later
+    /// `sent` transition is the SAME report (same local id), not a second row.
+    #[tokio::test]
+    async fn failed_outbound_is_mirrored_once_with_its_error_and_a_retry_updates_it() {
+        let (_dir, store, device) = paired_store().await;
+        let identity = crate::generate_identity().unwrap();
+
+        store
+            .record_message(
+                &device.device_id,
+                "out",
+                "+15550001111",
+                "refused reply",
+                "queued",
+                Some("native-1-reply-0"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "failed")
+                .await
+                .unwrap()
+        );
+
+        let (base_url, server) = serve_batch_requests(2);
+        let client = DeviceClient::new(
+            Target::new(base_url, None).unwrap(),
+            device.device_id.clone(),
+            identity.private_key_pkcs8_pem.clone(),
+        );
+
+        // First flush: the failed row is uploaded once and marked accepted.
+        let flushed = flush_pending(&store, &client, &device.device_id)
+            .await
+            .unwrap();
+        assert_eq!(flushed.outbound, 1);
+        assert!(
+            store
+                .list_unmirrored_outbound(&device.device_id, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a mirrored failed row is not uploaded again unchanged"
+        );
+
+        // M5.5 retries it and the radio accepts: the state transition re-opens
+        // the row for mirroring so the deployment's copy can be updated.
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "sent")
+                .await
+                .unwrap()
+        );
+        let flushed = flush_pending(&store, &client, &device.device_id)
+            .await
+            .unwrap();
+        assert_eq!(flushed.outbound, 1);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+
+        let first = requests[0]["outbound"].as_array().expect("outbound array");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["local_id"], "native-1-reply-0");
+        assert_eq!(first[0]["to"], "+15550001111");
+        assert_eq!(first[0]["state"], "failed");
+        assert_eq!(first[0]["error"], "send_rejected");
+
+        let second = requests[1]["outbound"].as_array().expect("outbound array");
+        assert_eq!(
+            second.len(),
+            1,
+            "a retry updates one report, it never creates a second"
+        );
+        assert_eq!(second[0]["local_id"], "native-1-reply-0");
+        assert_eq!(second[0]["state"], "sent");
+        assert!(
+            second[0].get("error").is_none(),
+            "a sent row must not carry the previous failure reason"
+        );
+
+        // One local row throughout; nothing left pending after the second flush.
+        assert_eq!(
+            store
+                .list_messages(&device.device_id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .list_unmirrored_outbound(&device.device_id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

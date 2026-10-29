@@ -73,6 +73,15 @@ export interface CommandInfo {
 	expires_at: number;
 }
 
+/**
+ * What happened to a reply, from the phone's outbound mirror.
+ *
+ * Only four things are reported: the phone's queue, the radio's verdict, the
+ * carrier's receipt, and failure. `PENDING`/`DISPATCHED` from the command state
+ * both arrive here as `queued`; this console does not guess between them.
+ */
+export type ReplyState = 'queued' | 'sent' | 'failed' | 'delivered';
+
 export interface Message {
 	id: string;
 	device_id: string;
@@ -86,8 +95,17 @@ export interface Message {
 	reply_source?: 'rule' | string | null;
 	/** The rule id that answered, when `reply_source` is `'rule'`. */
 	reply_ref?: string | null;
-	/** The ordinary outbound command created for the rule reply. */
+	/** The ordinary outbound command created for the rule reply. Equal to the reply row's `id`. */
 	reply_command_id?: string | null;
+	/**
+	 * On an outbound row, the fate of that send. An inbound row carries `null`:
+	 * it has no send state, and the console reads its reply's fate from the
+	 * outbound row whose id is `reply_command_id`. `null` also covers older
+	 * rows written before the phone reported state.
+	 */
+	reply_state?: ReplyState | string | null;
+	/** The phone's own failure reason, when `reply_state` is `'failed'`. */
+	reply_error?: string | null;
 }
 
 export interface MessagesResult {

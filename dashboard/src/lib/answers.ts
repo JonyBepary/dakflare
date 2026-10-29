@@ -11,11 +11,11 @@
 
 import type { Message } from './types';
 
-export type AnswerSource = 'rule' | 'flow' | 'none';
+export type AnswerSource = 'rule' | 'flow' | 'unknown' | 'none';
 
 type AnswerFields = Pick<
 	Message,
-	'direction' | 'reply_source' | 'reply_ref' | 'auto_reply'
+	'direction' | 'reply_source' | 'reply_ref' | 'auto_reply' | 'reply_command_id'
 >;
 
 /** `null` for an outbound row: the question does not apply to it. */
@@ -26,6 +26,9 @@ export function answerOf(message: AnswerFields): AnswerSource | null {
 	// phone answering on its own, and `auto_reply` is the older signal for it.
 	if (message.reply_source) return 'flow';
 	if (message.auto_reply) return 'flow';
+	// A reply command exists, so something answered even if this row no longer
+	// says what. "Not answered" is reserved for a message nothing ever tried.
+	if (message.reply_command_id) return 'unknown';
 	return 'none';
 }
 
@@ -40,6 +43,8 @@ export function answerPhrase(message: AnswerFields, ruleName?: string | null): s
 			return ruleName ? `Answered by rule ${ruleName}` : 'Answered by a rule';
 		case 'flow':
 			return 'Answered on the phone';
+		case 'unknown':
+			return 'Answered';
 		case 'none':
 			return 'Not answered';
 		default:

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import {
 		describeError,
 		getDeviceCommands,
@@ -17,6 +17,7 @@
 		isTerminalCommand
 	} from '$lib/commands';
 	import { answerOf, answerPhrase } from '$lib/answers';
+	import { replyFatesOf } from '$lib/replies';
 	import {
 		PRESENCE_META,
 		deviceLabel,
@@ -33,6 +34,7 @@
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
 	import RelativeTime from './RelativeTime.svelte';
+	import ReplyFate from './ReplyFate.svelte';
 	import SendSmsForm from './SendSmsForm.svelte';
 	import Spinner from './Spinner.svelte';
 
@@ -77,6 +79,8 @@
 
 	let sendOpen = $state(false);
 	let purgedNotice = $state<string | null>(null);
+	let linked = $state<string | null>(null);
+	let linkedTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let revokeOpen = $state(false);
 	let revoking = $state(false);
@@ -100,6 +104,43 @@
 		// The phone stores the 1-based tray number (`simSlotIndex + 1`); a stored 0
 		// is a pre-fix record and is honestly "not reported".
 		return typeof slot === 'number' && slot >= 1 && slot <= 2 ? `SIM ${slot}` : null;
+	});
+
+	// The same words as the message log and the tracker. A reply says its own
+	// fate; a question inherits it from the reply row, when that row is loaded.
+	const fates = $derived(replyFatesOf(messages));
+
+	function messageRowId(id: string): string {
+		return `dlog-${uid}-${id}`;
+	}
+
+	async function followReply(id: string): Promise<void> {
+		linked = id;
+		await tick();
+		const row = document.getElementById(messageRowId(id));
+		if (!row) return;
+		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		// Scroll the drawer's body, never the dialog: scrolling the dialog would
+		// carry its header (and the device's name) out of view.
+		const body = dialog?.querySelector<HTMLElement>('.drawer-body');
+		if (body) {
+			const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top;
+			body.scrollBy({
+				top: offset - (body.clientHeight - row.offsetHeight) / 2,
+				behavior: reduced ? 'auto' : 'smooth'
+			});
+		} else {
+			row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
+		}
+		row.focus({ preventScroll: true });
+		if (linkedTimer) clearTimeout(linkedTimer);
+		linkedTimer = setTimeout(() => {
+			linked = null;
+		}, 2_400);
+	}
+
+	onDestroy(() => {
+		if (linkedTimer) clearTimeout(linkedTimer);
 	});
 
 	$effect(() => {
@@ -560,7 +601,15 @@
 							{@const outbound = message.direction === 'out'}
 							{@const answer = answerPhrase(message)}
 							{@const answerSource = answerOf(message)}
-							<li class="dlog-row" data-dir={outbound ? 'out' : 'in'}>
+							{@const fate = fates.get(message.id) ?? null}
+							{@const failedReply = !outbound && fate?.state === 'failed'}
+							<li
+								id={messageRowId(message.id)}
+								class="dlog-row"
+								class:is-linked={linked === message.id}
+								data-dir={outbound ? 'out' : 'in'}
+								tabindex="-1"
+							>
 								<span class="dlog-icon" aria-hidden="true">
 									<Icon name={outbound ? 'arrow-up-right' : 'arrow-down-left'} size={13} />
 								</span>
@@ -577,6 +626,21 @@
 									{#if answer}
 										<p class="dlog-answer" data-source={answerSource}>
 											{answer}
+										</p>
+									{/if}
+									{#if fate && (outbound || failedReply)}
+										<p class="dlog-fate">
+											<ReplyFate
+												state={fate.state}
+												error={fate.error}
+												variant={outbound ? 'out' : 'in'}
+												href={failedReply
+													? `#${messageRowId(message.reply_command_id ?? '')}`
+													: null}
+												onfollow={failedReply
+													? () => void followReply(message.reply_command_id ?? '')
+													: null}
+											/>
 										</p>
 									{/if}
 								</div>
@@ -1008,6 +1072,16 @@
 		gap: var(--df-p-space-2);
 		padding: var(--df-p-space-2) var(--df-p-space-3);
 		border-bottom: 1px solid var(--df-border-hairline);
+		scroll-margin-top: var(--df-p-space-6);
+		transition: background-color var(--df-p-dur-lift) ease;
+	}
+
+	.dlog-row:focus-visible {
+		outline-offset: -2px;
+	}
+
+	.dlog-row.is-linked {
+		background: var(--df-accent-soft);
 	}
 
 	.dlog-row:last-child {
@@ -1078,6 +1152,15 @@
 		color: var(--df-state-warn-ink);
 	}
 
+	.dlog-answer[data-source='unknown'] {
+		color: var(--df-text-meta);
+	}
+
+	.dlog-fate {
+		margin-top: 2px;
+		font-size: var(--df-p-text-2xs);
+	}
+
 	@media (max-width: 620px) {
 		.drawer {
 			border-radius: 0;
@@ -1110,6 +1193,10 @@
 	@media (prefers-reduced-motion: reduce) {
 		.drawer[open] {
 			animation: none;
+		}
+
+		.dlog-row {
+			transition: none;
 		}
 	}
 </style>

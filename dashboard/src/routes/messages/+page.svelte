@@ -13,6 +13,7 @@
 		wakeMode
 	} from '$lib/presence';
 	import { answerOf, answerPhrase } from '$lib/answers';
+	import { replyFatesOf } from '$lib/replies';
 	import { formatAbsolute, formatRelative } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import CommandTracker from '$lib/components/CommandTracker.svelte';
@@ -22,6 +23,7 @@
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import PresenceChip from '$lib/components/PresenceChip.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
+	import ReplyFate from '$lib/components/ReplyFate.svelte';
 	import SendSmsForm from '$lib/components/SendSmsForm.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
@@ -54,6 +56,8 @@
 	let lastUpdatedAt = $state<number | null>(null);
 	let clock = $state(Date.now());
 	let trackers = $state<Set<string>>(new Set());
+	let linked = $state<string | null>(null);
+	let linkedTimer: ReturnType<typeof setTimeout> | undefined;
 	let liveInFlight = false;
 	let lastLivePoll = 0;
 	let logVersion = 0;
@@ -82,6 +86,9 @@
 			? messages
 			: messages.filter((message) => message.direction === direction)
 	);
+
+	/** One fate per row: a reply says its own, a question inherits its reply's. */
+	const fates = $derived(replyFatesOf(messages));
 
 	async function loadDevices(): Promise<void> {
 		devicesError = null;
@@ -261,6 +268,26 @@
 		expanded = next;
 	}
 
+	/**
+	 * Take the operator from a failed reply's question to the reply row itself.
+	 * The direction filter can hide the row, so widen it first rather than
+	 * linking to nothing. The mark fades on its own; it is not a selection.
+	 */
+	async function followReply(messageId: string): Promise<void> {
+		if (direction === 'in') direction = 'all';
+		linked = messageId;
+		await tick();
+		if (linkedTimer) clearTimeout(linkedTimer);
+		const row = document.getElementById(`msg-${messageId}`);
+		if (!row) return;
+		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
+		row.focus({ preventScroll: true });
+		linkedTimer = setTimeout(() => {
+			linked = null;
+		}, 2_400);
+	}
+
 	async function openCompose(): Promise<void> {
 		if (devices.length === 0) return;
 		if (!composeDevice) composeDevice = selected;
@@ -319,6 +346,7 @@
 
 		return () => {
 			if (interval) clearInterval(interval);
+			if (linkedTimer) clearTimeout(linkedTimer);
 			document.removeEventListener('visibilitychange', onVisible);
 		};
 	});
@@ -535,7 +563,16 @@
 									: null}
 							{@const answer = answerPhrase(message, ruleName)}
 							{@const answerSource = answerOf(message)}
-							<li class="log-row" data-dir={outbound ? 'out' : 'in'} class:is-new={isNew}>
+							{@const fate = fates.get(message.id) ?? null}
+							{@const failedReply = !outbound && fate?.state === 'failed'}
+							<li
+								id={`msg-${message.id}`}
+								class="log-row"
+								class:is-new={isNew}
+								class:is-linked={linked === message.id}
+								data-dir={outbound ? 'out' : 'in'}
+								tabindex="-1"
+							>
 								<span class="dir" aria-hidden="true">
 									<Icon name={outbound ? 'arrow-up-right' : 'arrow-down-left'} size={14} />
 								</span>
@@ -565,10 +602,25 @@
 											{isExpanded ? 'Show less' : 'Show full message'}
 										</button>
 									{/if}
-									{#if answer || (message.reply_command_id && !outbound)}
+									{#if answer || (fate && (outbound || failedReply)) || (message.reply_command_id && !outbound)}
 										<div class="msg-meta">
 											{#if answer}
 												<span class="answer" data-source={answerSource}>{answer}</span>
+											{/if}
+											{#if fate && (outbound || failedReply)}
+												<span class="fate-slot">
+													<ReplyFate
+														state={fate.state}
+														error={fate.error}
+														variant={outbound ? 'out' : 'in'}
+														href={failedReply
+															? `#msg-${message.reply_command_id}`
+															: null}
+														onfollow={failedReply
+															? () => void followReply(message.reply_command_id ?? '')
+															: null}
+													/>
+												</span>
 											{/if}
 											{#if message.reply_command_id && !outbound}
 												<span class="spacer"></span>
@@ -761,6 +813,7 @@
 		gap: var(--df-p-space-3);
 		padding: var(--df-p-space-3) var(--df-p-space-4);
 		border-bottom: 1px solid var(--df-border-hairline);
+		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-6));
 		transition: background-color var(--df-p-dur-lift) ease;
 	}
 
@@ -770,6 +823,15 @@
 
 	.log-row:hover {
 		background: var(--df-surface-hover);
+	}
+
+	.log-row:focus-visible {
+		outline-offset: -2px;
+	}
+
+	/* The reply a failed question points at. A wash, not a second alarm. */
+	.log-row.is-linked {
+		background: var(--df-accent-soft);
 	}
 
 	/* New since the last check: a coral edge and a word, never a badge. */
@@ -959,6 +1021,30 @@
 			grid-template-columns: 24px minmax(0, 1fr);
 			gap: var(--df-p-space-2);
 			padding: var(--df-p-space-3);
+		}
+
+		/* Answer and Delivery share the first line; the failure gets its own
+		   line underneath instead of pushing Delivery onto a third. */
+		.msg-meta {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			align-items: baseline;
+			gap: 2px var(--df-p-space-3);
+		}
+
+		.msg-meta .spacer {
+			display: none;
+		}
+
+		.msg-meta .track-btn {
+			grid-column: 2;
+			grid-row: 1;
+			justify-self: end;
+		}
+
+		.msg-meta .fate-slot {
+			grid-column: 1 / -1;
+			min-width: 0;
 		}
 
 		.compose-meta {

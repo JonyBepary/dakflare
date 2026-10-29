@@ -537,16 +537,8 @@ impl DeviceClient {
             })
             .collect();
 
-        let mut payload = payload;
-        payload.extend(outbound.iter().map(|report| {
-            json!({
-                "local_id": report.local_id,
-                "sender_e164": report.to,
-                "body": report.body,
-                "received_at": report.sent_at,
-                "direction": "out",
-            })
-        }));
+        let outbound_payload: Vec<Value> =
+            outbound.iter().map(OutboundReport::to_json).collect();
 
         let runs_payload: Vec<Value> = runs
             .iter()
@@ -560,7 +552,11 @@ impl DeviceClient {
             })
             .collect();
 
-        let mut body = json!({ "messages": payload, "ack_command_ids": ack_command_ids });
+        let mut body = json!({
+            "messages": payload,
+            "ack_command_ids": ack_command_ids,
+            "outbound": outbound_payload,
+        });
         if let Some(map) = body.as_object_mut() {
             map.insert("flow_runs".into(), Value::Array(runs_payload));
         }
@@ -968,13 +964,40 @@ pub struct OutboundReport {
     pub to: String,
     pub body: String,
     pub sent_at: i64,
+    /// `queued` | `sent` | `failed` | `delivered`. `None` lets a caller that
+    /// does not know the state omit the key rather than invent one.
+    pub state: Option<String>,
+    /// Why a send failed, from the row's `last_error`. Omitted when absent.
+    pub error: Option<String>,
+}
+
+impl OutboundReport {
+    /// The frozen `outbound[]` entry. `state`/`error` are serialized only when
+    /// present, so a client that knows nothing about them keeps sending the
+    /// original four-field shape.
+    fn to_json(&self) -> Value {
+        let mut entry = json!({
+            "local_id": self.local_id,
+            "to": self.to,
+            "body": self.body,
+            "sent_at": self.sent_at,
+        });
+        if let Some(state) = &self.state {
+            entry["state"] = json!(state);
+        }
+        if let Some(error) = &self.error {
+            entry["error"] = json!(error);
+        }
+        entry
+    }
 }
 
 impl DeviceClient {
     /// Mirror locally-sent SMS into the deployment's message log.
     ///
-    /// Sent through the same inbound endpoint with `direction: "out"`, so the
-    /// `(device_id, local_id)` idempotency key makes retries free.
+    /// Sent through the inbound endpoint's `outbound[]` array, so the
+    /// `(device_id, local_id)` idempotency key makes retries free and a later
+    /// `sent`/`delivered` report updates the row instead of duplicating it.
     pub async fn upload_outbound(
         &self,
         reports: &[OutboundReport],
@@ -982,22 +1005,11 @@ impl DeviceClient {
         if reports.is_empty() {
             return Ok(Value::Null);
         }
-        let payload: Vec<Value> = reports
-            .iter()
-            .map(|report| {
-                json!({
-                    "local_id": report.local_id,
-                    "sender_e164": report.to,
-                    "body": report.body,
-                    "received_at": report.sent_at,
-                    "direction": "out",
-                })
-            })
-            .collect();
+        let payload: Vec<Value> = reports.iter().map(OutboundReport::to_json).collect();
 
         self.signed_post(
             "/v1/sms/incoming/batch",
-            json!({ "messages": payload, "ack_command_ids": [] }),
+            json!({ "messages": [], "ack_command_ids": [], "outbound": payload }),
         )
         .await
     }

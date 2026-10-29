@@ -711,6 +711,119 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── outbound reply state ──────────────────────────────────────────────── */
+  console.log('-- outbound reply state --');
+  {
+    const rep = new Report('reply state');
+    const readLog = async () =>
+      (await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=200`)).data?.messages ?? [];
+    const readRows = async (localId) => (await readLog()).filter((m) => m.local_id === localId);
+
+    /* 1. A `sent` report is stored and returned. -------------------------- */
+    const localId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const sentAt = new Date().toISOString();
+    const entry = (extra = {}) => ({
+      local_id: localId,
+      to: '+15550001111',
+      body: 'reply state probe',
+      sent_at: sentAt,
+      ...extra,
+    });
+
+    const sent = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'sent' })],
+      ack_command_ids: [],
+    });
+    rep.check('outbound[] sent -> 200', sent.status, 200);
+    const sentRow = (await readRows(localId))[0];
+    rep.check('outbound row is visible in /v1/messages', Boolean(sentRow), true);
+    rep.check('...direction=out', sentRow?.direction, 'out');
+    rep.check('...reply_state=sent', sentRow?.reply_state, 'sent');
+    rep.check('...reply_error is null', sentRow?.reply_error, null);
+    const firstId = sentRow?.id;
+
+    /* 2. Re-upload with `delivered` updates the same row ------------------- */
+    const delivered = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'delivered' })],
+      ack_command_ids: [],
+    });
+    rep.check('re-upload as delivered -> 200', delivered.status, 200);
+    const deliveredRows = await readRows(localId);
+    rep.check('...still exactly one row (dedupe key intact)', deliveredRows.length, 1);
+    rep.check('...row id did not change', deliveredRows[0]?.id, firstId);
+    rep.check('...reply_state updated to delivered', deliveredRows[0]?.reply_state, 'delivered');
+
+    /* 3. A failed reply is visible with its capped error ------------------- */
+    const failedId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const longError = `radio refused ${'x'.repeat(240)}`;
+    const failed = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [{
+        ...entry({ state: 'failed', error: longError }),
+        local_id: failedId,
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('failed outbound -> 200', failed.status, 200);
+    const failedRow = (await readRows(failedId))[0];
+    rep.check('failed row is visible (not silently dropped)', Boolean(failedRow), true);
+    rep.check('...reply_state=failed', failedRow?.reply_state, 'failed');
+    rep.check('...reply_error capped at 200 chars', failedRow?.reply_error?.length, 200);
+    rep.check('...error text preserved up to the cap',
+      failedRow?.reply_error, longError.slice(0, 200));
+
+    /* 4. An unknown state is rejected, never stored ------------------------ */
+    const badState = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'exploded' })],
+      ack_command_ids: [],
+    });
+    rep.check('unknown state -> 400', badState.status, 400);
+    rep.check('...error is bad_request', badState.data?.error, 'bad_request');
+    rep.check('...no row was written', (await readRows(localId)).length, 1);
+
+    /* 5. A failed outbound never marks an inbound message answered --------- */
+    const inboundId = `state_in_${crypto.randomBytes(6).toString('hex')}`;
+    await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: inboundId,
+        sender: '+8801999999998',
+        body: 'reply state probe, no rule matches this',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    const failedReplyId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [{
+        ...entry({ state: 'failed', error: 'radio refused' }),
+        local_id: failedReplyId,
+      }],
+      ack_command_ids: [],
+    });
+    const inboundRow = (await readRows(inboundId))[0];
+    rep.check('inbound row still reads reply_state null', inboundRow?.reply_state, null);
+    rep.check('a failed outbound did not set auto_reply on the inbound row',
+      inboundRow?.auto_reply, 0);
+    rep.check('...and did not claim a rule replied', inboundRow?.reply_source, null);
+
+    /* 6. Older clients: direction:"out" entries still carry state ---------- */
+    const legacyId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const legacy = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: legacyId,
+        sender_e164: '+15550001112',
+        body: 'legacy outbound shape',
+        received_at: new Date().toISOString(),
+        direction: 'out',
+        state: 'sent',
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('direction:"out" + state -> 200', legacy.status, 200);
+    rep.check('...reply_state=sent', (await readRows(legacyId))[0]?.reply_state, 'sent');
+
+    run(rep);
+  }
+
   /* ── auth rejection ────────────────────────────────────────────────────── */
   console.log('-- auth rejection (§1.1, §3.2) --');
   {

@@ -148,6 +148,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // existed start at zero, which is the same budget a fresh row gets.
         "ALTER TABLE messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
     ),
+    (
+        10,
+        // Why the last send failed. Written when the row enters `failed`
+        // (the platform rejected it, or transient retries ran out) and cleared
+        // when it goes back to `queued`/`sent`/`delivered`, so the mirror never
+        // uploads a stale reason as if it were current. NULL means "no reason
+        // recorded", never an invented default.
+        "ALTER TABLE messages ADD COLUMN last_error TEXT",
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +192,9 @@ pub struct Message {
     pub state: String,
     pub local_id: Option<String>,
     pub created_at: i64,
+    /// Why the row last entered `failed`; `None` when no reason was recorded,
+    /// and cleared on a retry so it cannot outlive the state it describes.
+    pub last_error: Option<String>,
 }
 
 /// What one failed send attempt did to the row. `attempts` is the value after
@@ -553,6 +565,7 @@ impl Store {
             state: state.to_string(),
             local_id: local_id.map(str::to_string),
             created_at: now,
+            last_error: None,
         })
     }
 
@@ -687,7 +700,7 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages WHERE device_id = ? AND local_id = ?",
                 params![device_id, local_id],
             )
@@ -702,6 +715,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             })),
             None => Ok(None),
         }
@@ -725,7 +739,7 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages WHERE device_id = ?
                   ORDER BY created_at DESC, id DESC LIMIT ?",
                 params![device_id, limit],
@@ -743,6 +757,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             });
         }
         Ok(out)
@@ -764,7 +779,7 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ?
                     AND (created_at < ? OR (created_at = ? AND id < ?))
@@ -790,6 +805,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             });
         }
         Ok(out)
@@ -820,12 +836,15 @@ impl Store {
 
     /// Outbound rows the deployment has not accepted yet.
     ///
-    /// A `failed` row is deliberately excluded: a reply that never left the
-    /// phone is not outbound history. M5.5's retry queue owns it and must flip
-    /// it back to `queued` before it becomes eligible again. `delivered` is the
-    /// final state and stays eligible until it has been mirrored once; the
-    /// Worker's message log has no per-row state, so what is uploaded is still
-    /// the body and the transition itself remains local (see `flush_pending`).
+    /// `failed` is included: a reply the radio refused is the row the operator
+    /// most needs to see, and it is uploaded exactly once with its `state` and
+    /// reason. If M5.5 later retries it to `sent`/`delivered`, that transition
+    /// resets `mirrored`, so the same `(device_id, local_id)` is uploaded again
+    /// and the Worker updates it instead of inserting a second row.
+    ///
+    /// `delivered` is the final state and stays eligible until it has been
+    /// mirrored once. The deployment's `messages` row now carries `reply_state`,
+    /// so the whole transition is visible to the console.
     pub async fn list_unmirrored_outbound(
         &self,
         device_id: &str,
@@ -834,10 +853,10 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ? AND direction = 'out' AND mirrored = 0
-                    AND state IN ('queued', 'sent', 'delivered')
+                    AND state IN ('queued', 'sent', 'failed', 'delivered')
                   ORDER BY created_at ASC LIMIT ?",
                 params![device_id, limit],
             )
@@ -854,6 +873,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             });
         }
         Ok(out)
@@ -872,7 +892,7 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ? AND direction = 'in' AND state = 'received'
                   ORDER BY created_at ASC LIMIT ?",
@@ -891,6 +911,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             });
         }
         Ok(out)
@@ -962,6 +983,11 @@ impl Store {
     /// `queued` is also how M5.5 flips a transiently failed row back for retry
     /// (see [`Store::record_send_failure_by_local_id`]). Returns `false` when no
     /// outbound row matched (a re-delivery with no reply, or a stale id).
+    ///
+    /// A transition clears `mirrored`, so the deployment sees the new state on
+    /// the next flush even when this row was already mirrored as `failed` or
+    /// `sent`. `failed` records a reason in `last_error`; every other state
+    /// clears it, so a reason never outlives the failure it describes.
     pub async fn set_message_state_by_local_id(
         &self,
         device_id: &str,
@@ -971,6 +997,16 @@ impl Store {
         if !matches!(state, "queued" | "sent" | "failed" | "delivered") {
             return Err(StoreError::InvalidState(state.to_string()));
         }
+
+        // The native bridge calls `markOutbound(..., "failed")` for a platform
+        // result that is neither OK nor a retryable radio error. The result code
+        // is not on this path, so store the one truthful fact we have rather
+        // than fabricate a carrier message.
+        let last_error = if state == "failed" {
+            Some("send_rejected")
+        } else {
+            None
+        };
 
         let conn = self.db.connect()?;
         // Read and write in one transaction: the `delivered` rule depends on
@@ -1004,7 +1040,8 @@ impl Store {
                 }
                 if current != "delivered" {
                     tx.execute(
-                        "UPDATE messages SET state = 'delivered'
+                        "UPDATE messages SET state = 'delivered', last_error = NULL,
+                                mirrored = 0
                           WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                         params![device_id, local_id],
                     )
@@ -1017,7 +1054,8 @@ impl Store {
                 // late `sent` is a no-op rather than a downgrade.
                 if current != "delivered" {
                     tx.execute(
-                        "UPDATE messages SET state = 'sent'
+                        "UPDATE messages SET state = 'sent', last_error = NULL,
+                                mirrored = 0
                           WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                         params![device_id, local_id],
                     )
@@ -1026,9 +1064,9 @@ impl Store {
             }
             _ => {
                 tx.execute(
-                    "UPDATE messages SET state = ?
+                    "UPDATE messages SET state = ?, last_error = ?, mirrored = 0
                       WHERE device_id = ? AND local_id = ? AND direction = 'out'",
-                    params![state, device_id, local_id],
+                    params![state, last_error, device_id, local_id],
                 )
                 .await?;
             }
@@ -1078,7 +1116,8 @@ impl Store {
             "delivered" => {}
             "sent" => {
                 tx.execute(
-                    "UPDATE messages SET state = 'delivered'
+                    "UPDATE messages SET state = 'delivered', last_error = NULL,
+                            mirrored = 0
                       WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                     params![device_id, local_id],
                 )
@@ -1088,13 +1127,15 @@ impl Store {
                 // One transaction, so the persisted history is `queued` then
                 // `delivered` with the intermediate `sent` mark applied first.
                 tx.execute(
-                    "UPDATE messages SET state = 'sent'
+                    "UPDATE messages SET state = 'sent', last_error = NULL,
+                            mirrored = 0
                       WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                     params![device_id, local_id],
                 )
                 .await?;
                 tx.execute(
-                    "UPDATE messages SET state = 'delivered'
+                    "UPDATE messages SET state = 'delivered', last_error = NULL,
+                            mirrored = 0
                       WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                     params![device_id, local_id],
                 )
@@ -1134,7 +1175,8 @@ impl Store {
         if !transient {
             let affected = conn
                 .execute(
-                    "UPDATE messages SET state = 'failed'
+                    "UPDATE messages SET state = 'failed', last_error = 'send_rejected',
+                            mirrored = 0
                       WHERE device_id = ? AND local_id = ? AND direction = 'out'",
                     params![device_id, local_id],
                 )
@@ -1174,10 +1216,18 @@ impl Store {
 
         let next_attempts = attempts + 1;
         let next_state = if next_attempts >= 3 { "failed" } else { "queued" };
+        // Only an exhausted retry budget is a recorded failure. A row going
+        // back to `queued` clears the reason, because the next attempt has not
+        // failed yet.
+        let last_error = if next_state == "failed" {
+            Some("radio_off_or_no_service")
+        } else {
+            None
+        };
         tx.execute(
-            "UPDATE messages SET state = ?, attempts = ?
+            "UPDATE messages SET state = ?, attempts = ?, last_error = ?, mirrored = 0
               WHERE device_id = ? AND local_id = ? AND direction = 'out'",
-            params![next_state, next_attempts, device_id, local_id],
+            params![next_state, next_attempts, last_error, device_id, local_id],
         )
         .await?;
         tx.commit().await?;
@@ -1228,7 +1278,7 @@ impl Store {
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ? AND direction = 'out' AND state = 'queued'
                     AND attempts < 3 AND created_at < ?
@@ -1248,6 +1298,7 @@ impl Store {
                 state: row.get(5)?,
                 local_id: row.get(6)?,
                 created_at: row.get(7)?,
+                last_error: row.get(8)?,
             });
         }
         Ok(out)
@@ -1645,7 +1696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_outbound_rows_are_not_mirrored() {
+    async fn failed_outbound_rows_are_mirrored_like_any_other_state() {
         let (_dir, store) = open_temp().await;
         let (device, _) = store
             .create_device(NewDevice {
@@ -1685,24 +1736,34 @@ mod tests {
         // `created_at` values is not guaranteed; only the set matters here.
         let mut states: Vec<&str> = pending.iter().map(|m| m.state.as_str()).collect();
         states.sort_unstable();
-        assert_eq!(states, vec!["delivered", "queued", "sent"]);
+        assert_eq!(states, vec!["delivered", "failed", "queued", "sent"]);
 
-        // M5.5's retry flips a failed row back to queued; only then does it
-        // become eligible for the mirror again.
+        // Mirroring is what stops a repeat upload of the same state.
+        let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+        store.mark_mirrored(&ids).await.unwrap();
+        assert!(
+            store
+                .list_unmirrored_outbound(&device.device_id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A later transition re-opens exactly that row, so the deployment gets
+        // an update for the same local id instead of a duplicate.
         assert!(
             store
                 .set_message_state_by_local_id(&device.device_id, "reply-2", "queued")
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            store
-                .list_unmirrored_outbound(&device.device_id, 10)
-                .await
-                .unwrap()
-                .len(),
-            4
-        );
+        let reopened = store
+            .list_unmirrored_outbound(&device.device_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].local_id.as_deref(), Some("reply-2"));
+        assert_eq!(reopened[0].state, "queued");
     }
 
     #[tokio::test]
