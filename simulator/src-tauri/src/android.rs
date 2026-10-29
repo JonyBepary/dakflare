@@ -175,6 +175,68 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_getDevice
     to_jstring(&mut env, json)
 }
 
+/// `dev.dakflare.simulator.bridge.NativeBridge.messageByLocalId`
+///
+/// Reads one stored message by its deterministic local id. The `SENT` receipt
+/// carries only ids, so the status receiver uses this to recover the address,
+/// body and timestamp for the system provider's Sent row:
+/// `{"ok":true,"peer":"…","body":"…","created_at":<ms>}` or
+/// `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+///
+/// The body crosses JNI because the caller must write it; it is never logged.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_messageByLocalId(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match (
+            java_string(&mut env, &app_dir),
+            java_string(&mut env, &device_id),
+            java_string(&mut env, &local_id),
+        ) {
+            (Ok(app_dir), Ok(device_id), Ok(local_id)) => {
+                if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+                    return error_json("bad_input");
+                }
+                if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+                    return error_json("bad_input");
+                }
+                if local_id.is_empty() || local_id.len() > MAX_LOCAL_ID_LEN {
+                    return error_json("bad_input");
+                }
+
+                let found = open_store_blocking(&app_dir).and_then(|store| {
+                    tauri::async_runtime::block_on(store.message_by_local_id(&device_id, &local_id))
+                        .map_err(map_store_error)
+                });
+                match found {
+                    Ok(Some(message)) => serde_json::json!({
+                        "ok": true,
+                        "peer": message.peer,
+                        "body": message.body,
+                        "created_at": message.created_at,
+                    })
+                    .to_string(),
+                    Ok(None) => error_json("not_found"),
+                    Err(code) => error_json(code),
+                }
+            }
+            _ => error_json("bad_input"),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] messageByLocalId panicked");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
 /// `dev.dakflare.simulator.bridge.NativeBridge.setDeviceFact`
 ///
 /// Persists one whitelisted handset fact (`self_number`, `sim_slot`,

@@ -138,6 +138,61 @@ object NativeBridge {
     }
 
     /**
+     * Read one stored message by its deterministic local id.
+     *
+     * The `SENT` receipt carries only ids; [SendStatusReceiver] uses this to
+     * recover the address, body and timestamp it needs for the system Sent row.
+     * Returns `{"ok":true,"peer":"…","body":"…","created_at":<ms>}` or
+     * `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+     */
+    @JvmStatic
+    external fun messageByLocalId(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): String
+
+    /** One stored row, as the sent-provider write needs it. */
+    class StoredMessage(
+        val peer: String,
+        val body: String,
+        val createdAt: Long,
+    )
+
+    /**
+     * Safe wrapper around [messageByLocalId]: never throws, and returns `null`
+     * for a missing symbol, a missing row or a store error. Only the exception
+     * class is logged.
+     */
+    fun messageByLocalIdSafely(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): StoredMessage? {
+        if (loadFailure != null) return null
+        if (appDir.isEmpty() || deviceId.isEmpty() || localId.isEmpty()) return null
+
+        return try {
+            val parsed = JSONObject(messageByLocalId(appDir, deviceId, localId))
+            if (!parsed.optBoolean("ok")) {
+                null
+            } else {
+                StoredMessage(
+                    peer = parsed.optString("peer"),
+                    body = parsed.optString("body"),
+                    createdAt = parsed.optLong("created_at"),
+                )
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "messageByLocalId symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "messageByLocalId failed: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
      * Read one stored handset fact (`self_number`, `sim_slot`, …).
      *
      * Returns `null` when the fact was never written or the store cannot be read.

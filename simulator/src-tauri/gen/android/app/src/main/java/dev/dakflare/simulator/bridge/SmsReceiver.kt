@@ -88,10 +88,11 @@ class SmsReceiver : BroadcastReceiver() {
         // second database the UI never reads.
         val appDir = context.applicationInfo.dataDir
         for ((sender, group) in bySender) {
+            val body = group.body.toString()
             val result = NativeBridge.processIncomingSafely(
                 appDir = appDir,
                 sender = sender,
-                body = group.body.toString(),
+                body = body,
                 receivedAtMs = group.receivedAtMs,
             )
             val outcome = parse(result)
@@ -104,6 +105,31 @@ class SmsReceiver : BroadcastReceiver() {
                 Log.w(TAG, "inbound was not answered: ${outcome.error}")
                 continue
             }
+
+            // The store succeeded, so the message is safe before the provider is
+            // touched. The write is best effort and time-bounded: a wedged
+            // provider must not keep an ordered SMS_DELIVER alive past budget.
+            val write = SmsProvider.writeInboxBounded(
+                context = context,
+                address = sender,
+                body = body,
+                dateMs = group.receivedAtMs,
+                subscriptionId = subscriptionId,
+            )
+            Log.i(TAG, "inbox provider=${write.name.lowercase()}")
+
+            // Announce a genuinely new delivery once. A duplicate provider row
+            // means the first delivery already announced it; without the role
+            // the notifier's own delivery-key set is the same decision.
+            if (write != SmsProvider.InboxWrite.DUPLICATE) {
+                SmsNotifier.notifyInbound(
+                    context = context,
+                    peer = sender,
+                    body = body,
+                    deliveryKey = "${group.receivedAtMs}:$sender",
+                )
+            }
+
             reply(context, appDir, outcome.deviceId, sender, subscriptionId, outcome.actions)
         }
     }
