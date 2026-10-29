@@ -110,6 +110,21 @@ object NativeBridge {
     external fun retryableOutbound(appDir: String, deviceId: String): String
 
     /**
+     * Read the stored row a retry may send, by `local_id` only.
+     *
+     * Returns `{"ok":true,"peer":"…","body":"…","sim_slot":<n>}` or
+     * `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`. The recipient and
+     * body never cross the JNI boundary as arguments; Kotlin reads them from the
+     * store and hands them to `SmsManager`.
+     */
+    @JvmStatic
+    external fun resendOutbound(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): String
+
+    /**
      * Upload everything the deployment has not accepted yet — pending inbound
      * SMS, their flow runs and replies already marked `sent` — in one request.
      *
@@ -446,6 +461,46 @@ object NativeBridge {
         } catch (error: Throwable) {
             Log.e(TAG, "retryableOutbound failed: ${error.javaClass.simpleName}")
             emptyList()
+        }
+    }
+
+    /** One stored row prepared for a retry; read by id, never passed in. */
+    class RetryRow(
+        val peer: String,
+        val body: String,
+        val simSlot: Int,
+    )
+
+    /**
+     * Read a still-queued row for a retry. Never throws: a missing symbol, a row
+     * that already finished or a store error returns `null`, so a stale id is
+     * skipped rather than re-sent. Neither the number nor the body is logged.
+     */
+    fun resendOutboundSafely(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): RetryRow? {
+        if (loadFailure != null) return null
+        if (appDir.isEmpty() || deviceId.isEmpty() || localId.isEmpty()) return null
+
+        return try {
+            val parsed = JSONObject(resendOutbound(appDir, deviceId, localId))
+            if (!parsed.optBoolean("ok")) {
+                null
+            } else {
+                RetryRow(
+                    peer = parsed.optString("peer"),
+                    body = parsed.optString("body"),
+                    simSlot = parsed.optInt("sim_slot"),
+                )
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "resendOutbound symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "resendOutbound failed: ${error.javaClass.simpleName}")
+            null
         }
     }
 

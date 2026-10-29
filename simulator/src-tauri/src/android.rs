@@ -271,6 +271,57 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_retryable
     to_jstring(&mut env, json)
 }
 
+/// `dev.dakflare.simulator.bridge.NativeBridge.resendOutbound`
+///
+/// Reads the stored row a retry may send. It takes only the row's `local_id`:
+/// the recipient, body and SIM slot come back from the store, so they never
+/// cross the JNI boundary as arguments. Kotlin owns the `SmsManager` call; this
+/// entry is the one place the retry reads its payload from.
+///
+/// Returns `{"ok":true,"peer":"…","body":"…","sim_slot":<n>}` or
+/// `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`. A row that is no
+/// longer `queued` is `not_found`, so a stale id cannot re-send a finished row.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_resendOutbound(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_local_id_inputs(&mut env, &app_dir, &device_id, &local_id) {
+            Ok((app_dir, device_id, local_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    retry_row_blocking(&app_dir, &device_id, &local_id)
+                })) {
+                    Ok(Ok(Some(row))) => serde_json::json!({
+                        "ok": true,
+                        "peer": row.peer,
+                        "body": row.body,
+                        "sim_slot": row.sim_slot,
+                    })
+                    .to_string(),
+                    Ok(Ok(None)) => error_json("not_found"),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] resendOutbound panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] resendOutbound panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
 /// `dev.dakflare.simulator.bridge.NativeBridge.getDeviceFact`
 ///
 /// Reads one whitelisted handset fact back. The receiver uses it for
@@ -974,6 +1025,46 @@ fn retryable_blocking(app_dir: &str, device_id: &str) -> Result<Vec<String>, &'s
     tauri::async_runtime::block_on(store.list_retryable_outbound(device_id, now, 10))
         .map(|messages| messages.into_iter().filter_map(|message| message.local_id).collect())
         .map_err(map_store_error)
+}
+
+struct RetryRow {
+    peer: String,
+    body: String,
+    sim_slot: i64,
+}
+
+/// Load one retry row from the store. Only a still-`queued` outbound row is
+/// eligible: a sent, delivered or failed row must not be re-sent by a stale id.
+fn retry_row_blocking(
+    app_dir: &str,
+    device_id: &str,
+    local_id: &str,
+) -> Result<Option<RetryRow>, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(async {
+        let Some(message) = store
+            .message_by_local_id(device_id, local_id)
+            .await
+            .map_err(|_| "storage")?
+        else {
+            return Ok(None);
+        };
+        if message.direction != "out" || message.state != "queued" {
+            return Ok(None);
+        }
+        let sim_slot = store
+            .get_setting("sim_slot")
+            .await
+            .map_err(|_| "storage")?
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+
+        Ok(Some(RetryRow {
+            peer: message.peer,
+            body: message.body,
+            sim_slot,
+        }))
+    })
 }
 
 fn fact_blocking(app_dir: &str, key: &str, value: &str) -> Result<(), &'static str> {

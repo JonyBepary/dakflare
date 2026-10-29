@@ -120,19 +120,22 @@ object SmsSender {
         return handed
     }
 
-    /** One retry from the stored row; no body or recipient crosses JNI as an argument. */
-    private fun resend(
+    /**
+     * One retry from the stored row. This is the send entry the gateway calls
+     * per local id; the recipient, body and SIM slot are read back from the
+     * store by [NativeBridge.resendOutboundSafely], never passed in.
+     */
+    @JvmStatic
+    fun resend(
         context: Context,
         appDir: String,
         deviceId: String,
         localId: String,
     ): Boolean {
-        val row = NativeBridge.messageByLocalIdSafely(appDir, deviceId, localId) ?: return false
-        val simSlot = NativeBridge.getDeviceFactSafely(appDir, "sim_slot")
-            ?.toIntOrNull() ?: 0
+        val row = NativeBridge.resendOutboundSafely(appDir, deviceId, localId) ?: return false
 
         val manager = try {
-            smsManager(context, subscriptionId(context, simSlot))
+            smsManager(context, subscriptionId(context, row.simSlot))
         } catch (error: Throwable) {
             markFailed(appDir, deviceId, localId)
             Log.e(TAG, "retry manager unavailable: ${error.javaClass.simpleName}")
