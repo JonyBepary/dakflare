@@ -23,6 +23,10 @@ use jni::sys::{jlong, jstring};
 
 const MAX_SENDER_LEN: usize = 64;
 const MAX_BODY_LEN: usize = 4096;
+/// Compose is a person typing into one SMS, not a stored carrier payload: the
+/// sender refuses anything longer and this entry enforces the same ceiling.
+const MAX_COMPOSE_BODY_LEN: usize = 1600;
+const MAX_RECIPIENT_LEN: usize = 64;
 const MAX_DEVICE_ID_LEN: usize = 64;
 const MAX_LOCAL_ID_LEN: usize = 200;
 const MAX_STATE_LEN: usize = 16;
@@ -86,6 +90,29 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIn
     to_jstring(&mut env, json)
 }
 
+/// `dev.dakflare.simulator.bridge.NativeBridge.queueOutbound`
+///
+/// Queues one SMS typed on this phone before the radio is touched:
+/// `{"ok":true,"local_id":"compose-…"}` or
+/// `{"ok":false,"error":"bad_input"|"storage"}`. The returned id is what the
+/// sender hands to the `SENT` broadcast so the row can reach `sent` or `failed`.
+///
+/// An identical send that is still `queued` resolves to the row that already
+/// exists, so a double tap cannot create two rows for one send. The number and
+/// the body are never logged.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_queueOutbound(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    to: JString,
+    body: JString,
+) -> jstring {
+    let json = queue_guarded(&mut env, &app_dir, &device_id, &to, &body);
+    to_jstring(&mut env, json)
+}
+
 /// `dev.dakflare.simulator.bridge.NativeBridge.markOutbound`
 ///
 /// Records what happened to a queued reply row:
@@ -102,6 +129,49 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     state: JString,
 ) -> jstring {
     let json = mark_guarded(&mut env, &app_dir, &device_id, &local_id, &state);
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.getDeviceFact`
+///
+/// Reads one whitelisted handset fact back. The receiver uses it for
+/// `self_number`: a cold start cannot always read the phone number from the
+/// radio yet, and the self-number guard must not silently switch itself off.
+/// Returns `{"ok":true,"value":"…"|null}` or `{"ok":false,"error":"bad_input"|"storage"}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_getDeviceFact(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    key: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match (java_string(&mut env, &app_dir), java_string(&mut env, &key)) {
+            (Ok(app_dir), Ok(key)) => {
+                if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+                    return error_json("bad_input");
+                }
+                if !dakflare_core::is_device_fact_key(&key) {
+                    return error_json("bad_input");
+                }
+                let value = open_store_blocking(&app_dir).and_then(|store| {
+                    tauri::async_runtime::block_on(store.get_setting(&key))
+                        .map_err(|_| "storage")
+                });
+                match value {
+                    Ok(found) => serde_json::json!({ "ok": true, "value": found }).to_string(),
+                    Err(code) => error_json(code),
+                }
+            }
+            _ => error_json("bad_input"),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] getDeviceFact panicked");
+            error_json("storage")
+        }
+    };
     to_jstring(&mut env, json)
 }
 
@@ -302,6 +372,45 @@ fn fact_guarded(env: &mut JNIEnv, app_dir: &JString, key: &JString, value: &JStr
     }
 }
 
+/// The compose queue path has the same two panic guards as every other entry:
+/// no panic crosses JNI and every result is JSON. The recipient and body are
+/// bounded here, so an oversized send never reaches the database.
+fn queue_guarded(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    device_id: &JString,
+    to: &JString,
+    body: &JString,
+) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_queue_inputs(env, app_dir, device_id, to, body) {
+            Ok((app_dir, device_id, to, body)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    queue_blocking(&app_dir, &device_id, &to, &body)
+                })) {
+                    Ok(Ok(local_id)) => serde_json::json!({
+                        "ok": true,
+                        "local_id": local_id,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] queueOutbound panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] queueOutbound panicked before storage");
+            error_json("storage")
+        }
+    }
+}
+
 fn to_jstring(env: &mut JNIEnv, json: String) -> jstring {
     match env.new_string(json) {
         Ok(value) => value.into_raw(),
@@ -415,6 +524,38 @@ fn read_fact_inputs(
     Ok((app_dir, key, value))
 }
 
+/// Decode and validate one composed SMS. Same rules as every other entry: copy
+/// the strings, bound their lengths, and never touch the database on bad input.
+/// The body limit is counted in characters, matching what the sender checks, so
+/// a Bangla message is not refused for being multi-byte in UTF-8.
+fn read_queue_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    device_id: &JString,
+    to: &JString,
+    body: &JString,
+) -> Result<(String, String, String, String), &'static str> {
+    let app_dir = java_string(env, app_dir)?;
+    let device_id = java_string(env, device_id)?;
+    let to = java_string(env, to)?;
+    let body = java_string(env, body)?;
+
+    if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+        return Err("bad_input");
+    }
+    if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+        return Err("bad_input");
+    }
+    if to.trim().is_empty() || to.len() > MAX_RECIPIENT_LEN {
+        return Err("bad_input");
+    }
+    if body.trim().is_empty() || body.chars().count() > MAX_COMPOSE_BODY_LEN {
+        return Err("bad_input");
+    }
+
+    Ok((app_dir, device_id, to, body))
+}
+
 fn java_string(env: &mut JNIEnv, value: &JString) -> Result<String, &'static str> {
     env.get_string(value)
         .map(Into::into)
@@ -471,6 +612,28 @@ fn mark_blocking(
 fn fact_blocking(app_dir: &str, key: &str, value: &str) -> Result<(), &'static str> {
     let store = open_store_blocking(app_dir)?;
     tauri::async_runtime::block_on(store.set_device_fact(key, value)).map_err(map_store_error)
+}
+
+/// Queue one composed SMS. An unknown device is `bad_input`: the command checks
+/// the pairing first, so a row created against a deleted device is never right.
+fn queue_blocking(
+    app_dir: &str,
+    device_id: &str,
+    to: &str,
+    body: &str,
+) -> Result<String, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(async {
+        store
+            .get_device(device_id)
+            .await
+            .map_err(|_| "storage")?
+            .ok_or("bad_input")?;
+        store
+            .queue_composed_outbound(device_id, to, body)
+            .await
+            .map_err(map_store_error)
+    })
 }
 
 /// Build the same signed client the app uses from the stored target and

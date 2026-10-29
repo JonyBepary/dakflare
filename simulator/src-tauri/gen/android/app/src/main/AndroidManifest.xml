@@ -54,6 +54,19 @@
             </intent-filter>
         </receiver>
 
+        <!--
+            Finishes a composed send. `PendingIntent.getBroadcast` targets this
+            component with the SENT action, so the broadcast is explicit and the
+            receiver stays unexported; no other app can mark a row.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.SendStatusReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.dakflare.simulator.SMS_SENT" />
+            </intent-filter>
+        </receiver>
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

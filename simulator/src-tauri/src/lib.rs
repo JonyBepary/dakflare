@@ -11,6 +11,8 @@ use dakflare_core::{
     Store, Target, carrier::flush_pending, drain_outbox, inject_inbound, parse_pair_link,
 };
 use serde::Serialize;
+#[cfg(target_os = "android")]
+use serde::Deserialize;
 use tauri::{Manager, State};
 
 /// Direct JNI surface for the Android `SmsReceiver`. Not compiled on desktop.
@@ -430,6 +432,141 @@ async fn carrier_drain(
         .map_err(|e| e.to_string())
 }
 
+/* ---------------------------------------------------------------- compose */
+
+/// The composer's one hard limit, matching `SmsSender` on the Android side.
+const MAX_COMPOSE_BODY_CHARS: usize = 1600;
+
+/// `send_sms` reply. The UI pairs this id with the row it later reads back.
+#[derive(Serialize)]
+struct SendSmsReply {
+    local_id: String,
+}
+
+/// Rust → Kotlin bridge for the composer.
+///
+/// A registered Tauri mobile plugin rather than a direct JNI call: it is the
+/// sanctioned mechanism (`PluginApi::register_android_plugin` +
+/// `run_mobile_plugin_async`), it dispatches to the Android context without this
+/// crate needing a `JavaVM` of its own (`ndk_context` is not a dependency), and
+/// it uses the same class-loading and main-thread plumbing as the bundled path
+/// plugin. A direct JNI call would have to cache a VM during some Kotlin→Rust
+/// call that may not have happened yet.
+#[cfg(target_os = "android")]
+struct SmsBridge(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmsPluginRequest<'a> {
+    device_id: &'a str,
+    to: &'a str,
+    body: &'a str,
+    /// 1-based tray index, exactly as the device row holds it.
+    sim_slot: i64,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct SmsPluginReply {
+    local_id: String,
+}
+
+#[cfg(target_os = "android")]
+fn sms_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("dakflare-sms")
+        .setup(|app, api| {
+            let handle =
+                api.register_android_plugin("dev.dakflare.simulator.bridge", "SmsPlugin")?;
+            app.manage(SmsBridge(handle));
+            Ok(())
+        })
+        .build()
+}
+
+/// Turn a plugin failure into the composer's plain-string contract. Kotlin only
+/// rejects with its own worded refusals, so nothing here can carry a number or a
+/// body.
+#[cfg(target_os = "android")]
+fn sms_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
+    use tauri::plugin::mobile::PluginInvokeError;
+
+    match error {
+        PluginInvokeError::InvokeRejected(response) => response
+            .message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The phone could not send the message".to_string()),
+        other => {
+            // Carries no number and no body; only the JNI/deserialisation reason.
+            eprintln!("[sms] mobile plugin failed: {other}");
+            "The phone could not send the message".to_string()
+        }
+    }
+}
+
+/// Send one SMS composed in the webview.
+///
+/// Kotlin writes the `queued` row (`queueOutbound`) before the radio is touched
+/// and reports the real outcome with a `SENT` broadcast, so this command never
+/// claims delivery: it returns the row's id, and the row moves to `sent` or
+/// `failed` on its own. A device with no row is `Not paired`, which is what the
+/// composer shows as its empty state.
+#[tauri::command]
+async fn send_sms(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    device_id: String,
+    to: String,
+    body: String,
+) -> Result<SendSmsReply, String> {
+    let device = state
+        .store
+        .get_device(&device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Not paired".to_string())?;
+
+    let to = to.trim();
+    if to.is_empty() {
+        return Err("A recipient is required".into());
+    }
+    if body.trim().is_empty() {
+        return Err("A message is required".into());
+    }
+    if body.chars().count() > MAX_COMPOSE_BODY_CHARS {
+        return Err("That message is too long".into());
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<SmsBridge>()
+            .ok_or_else(|| "Sending SMS is not available in this build".to_string())?;
+        let reply = bridge
+            .0
+            .run_mobile_plugin_async::<SmsPluginReply>(
+                "send",
+                SmsPluginRequest {
+                    device_id: &device.device_id,
+                    to,
+                    body: body.as_str(),
+                    sim_slot: device.sim_slot,
+                },
+            )
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(SendSmsReply {
+            local_id: reply.local_id,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, device);
+        Err("Sending SMS is only available on the phone".into())
+    }
+}
+
 #[tauri::command]
 async fn list_messages(
     state: State<'_, AppState>,
@@ -554,7 +691,14 @@ async fn schema_version(state: State<'_, AppState>) -> Result<i64, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Mobile plugins need an Android class to drive. Desktop keeps the command
+    // but reports that sending is phone-only.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(sms_plugin());
+
+    builder
         .setup(|app| {
             let dir = app
                 .path()
@@ -587,6 +731,7 @@ pub fn run() {
             revoke_device,
             carrier_inject,
             carrier_drain,
+            send_sms,
             list_messages,
             list_messages_page,
             list_cached_flows,

@@ -92,6 +92,82 @@ object NativeBridge {
     external fun setDeviceFact(appDir: String, key: String, value: String): String
 
     /**
+     * Queue one SMS typed on this phone, before the radio is touched.
+     *
+     * Returns `{"ok":true,"local_id":"compose-…"}` or
+     * `{"ok":false,"error":"bad_input"|"storage"}`. The id is the row the
+     * `SENT` broadcast later marks; an identical send still `queued` returns the
+     * same id, so a double tap cannot create two rows.
+     */
+    @JvmStatic
+    external fun queueOutbound(
+        appDir: String,
+        deviceId: String,
+        to: String,
+        body: String,
+    ): String
+
+    /**
+     * Safe wrapper for the sender: returns the local id, or `null` when the
+     * store refused or the native symbol is missing. Never throws, and never
+     * logs the recipient or the body.
+     */
+    fun queueOutboundSafely(
+        appDir: String,
+        deviceId: String,
+        to: String,
+        body: String,
+    ): String? {
+        if (loadFailure != null) return null
+        if (appDir.isEmpty() || deviceId.isEmpty()) return null
+
+        return try {
+            val result = JSONObject(queueOutbound(appDir, deviceId, to, body))
+            if (result.optBoolean("ok")) {
+                result.optString("local_id").ifEmpty { null }
+            } else {
+                null
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "queueOutbound symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "queueOutbound failed: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
+     * Read one stored handset fact (`self_number`, `sim_slot`, …).
+     *
+     * Returns `null` when the fact was never written or the store cannot be read.
+     */
+    @JvmStatic
+    external fun getDeviceFact(appDir: String, key: String): String
+
+    /**
+     * The stored value of one handset fact, or `null`. Never throws and logs only
+     * an exception class: a missing value must degrade to "unknown" rather than
+     * take down a broadcast receiver.
+     */
+    fun getDeviceFactSafely(appDir: String, key: String): String? {
+        if (loadFailure != null) return null
+        if (appDir.isEmpty() || key.isEmpty()) return null
+
+        return try {
+            val parsed = JSONObject(getDeviceFact(appDir, key))
+            if (!parsed.optBoolean("ok") || parsed.isNull("value")) return null
+            parsed.optString("value").ifEmpty { null }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "getDeviceFact symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "getDeviceFact failed: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
      * Safe wrapper for the receiver: never throws, including when the JNI symbol
      * is missing (which only fails on invocation, not on `loadLibrary`).
      */

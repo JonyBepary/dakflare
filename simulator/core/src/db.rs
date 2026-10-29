@@ -539,6 +539,63 @@ impl Store {
         })
     }
 
+    /// Queue one SMS composed on this phone and return the device-local id the
+    /// sender must later mark.
+    ///
+    /// The row is written before the radio is touched, so a send that dies on
+    /// the way to `SmsManager` still leaves an honest `queued` row for the
+    /// status receiver to finish. The id is a fresh `compose-<hex>`; the
+    /// `UNIQUE(device_id, local_id)` key is the same idempotency rule the reply
+    /// path uses, and an identical send that is still `queued` is resolved to
+    /// the row that already exists. A double tap therefore cannot create two
+    /// rows for one send. Once the row leaves `queued` (`sent` or `failed`), a
+    /// new send of the same text is a new row.
+    pub async fn queue_composed_outbound(
+        &self,
+        device_id: &str,
+        to: &str,
+        body: &str,
+    ) -> Result<String, StoreError> {
+        let conn = self.db.connect()?;
+        // One transaction so the lookup and the insert cannot interleave with
+        // another queue call on a second connection.
+        let tx = conn.transaction().await?;
+
+        let mut rows = tx
+            .query(
+                "SELECT local_id FROM messages
+                  WHERE device_id = ? AND direction = 'out' AND peer = ? AND body = ?
+                    AND state = 'queued' AND local_id LIKE 'compose-%'
+                  ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![device_id, to, body],
+            )
+            .await?;
+        let existing: Option<String> = match rows.next().await? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        };
+        drop(rows);
+
+        if let Some(local_id) = existing {
+            tx.commit().await?;
+            return Ok(local_id);
+        }
+
+        let id = format!("msg{}", random_hex(12)?);
+        let local_id = format!("compose-{}", random_hex(12)?);
+        let now = now_ms()?;
+        tx.execute(
+            "INSERT INTO messages
+                (id, device_id, direction, peer, body, state, local_id, created_at)
+             VALUES (?, ?, 'out', ?, ?, 'queued', ?, ?)",
+            params![id, device_id, to, body, local_id.as_str(), now],
+        )
+        .await?;
+        tx.commit().await?;
+
+        Ok(local_id)
+    }
+
     /// Persist one flow run for an inbound message.
     ///
     /// `(device_id, local_id, flow_id, flow_version)` is the dedupe key shared
@@ -1170,6 +1227,66 @@ mod tests {
         // No device at all: an empty slice must not reach the database.
         let runs = store.list_runs_for_inbound("dev_missing", &[]).await.unwrap();
         assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn composed_sends_queue_once_per_identical_send() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "compose",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 1,
+            })
+            .await
+            .unwrap();
+
+        let first = store
+            .queue_composed_outbound(&device.device_id, "+15550001111", "hello")
+            .await
+            .unwrap();
+        assert!(first.starts_with("compose-"));
+        assert_eq!(first.len(), "compose-".len() + 24);
+
+        let row = store
+            .message_by_local_id(&device.device_id, &first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.direction, "out");
+        assert_eq!(row.state, "queued");
+        assert_eq!(row.peer, "+15550001111");
+        assert_eq!(row.body, "hello");
+
+        // A double tap while the first row is still queued is the same send.
+        let second = store
+            .queue_composed_outbound(&device.device_id, "+15550001111", "hello")
+            .await
+            .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(
+            store.list_messages(&device.device_id, 10).await.unwrap().len(),
+            1
+        );
+
+        // Once the row is finished, the same text is a new send.
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, &first, "sent")
+                .await
+                .unwrap()
+        );
+        let third = store
+            .queue_composed_outbound(&device.device_id, "+15550001111", "hello")
+            .await
+            .unwrap();
+        assert_ne!(third, first);
+        assert_eq!(
+            store.list_messages(&device.device_id, 10).await.unwrap().len(),
+            2
+        );
     }
 
     #[tokio::test]

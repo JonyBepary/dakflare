@@ -247,3 +247,25 @@ makes the retry a no-op on the Worker.
   has no signing config. Everything above is a debug APK installed with `adb`;
   reboot survival, `am kill` versus a user force-stop, and battery-optimisation
   soak are M5.3.
+
+### Correction, 2026-10-29 (later the same day)
+
+The M5.2 section above claims a real reply. It does not hold on this handset.
+
+`SmsReceiver` called `SmsManager.sendTextMessage` with no `SENT` intent and marked the
+row `sent` when the call returned. On this Mi A3 the radio rejects every mobile-originated
+SMS: `result=16 (RESULT_MODEM_ERROR)`, `111 (RESULT_RIL_MODEM_ERR)` over the CS path, and
+the stock `com.android.messaging` app shows "Not sent" for the same number, including for
+the replies this gateway believed it had sent. Mobile-terminated SMS works — inbound rows
+and the carrier's own multipart promotion arrive normally.
+
+So at that gate: receiving, the flow run, the queue and the console mirror were real; the
+`out … sent` row was not evidence that anything left the phone.
+
+What changed as a result: the reply path now passes a `SENT` `PendingIntent` and only marks
+`sent` on `RESULT_OK`, so a rejected reply lands as `failed` and is not mirrored. The
+composer uses the same receipt.
+
+Still open, and not a software question: whether this SIM may send at all (carrier barring,
+plan, or the LineageOS 23 modem/IMS stack on `laurel_sprout`). Test order: the same SIM in
+another handset, then another SIM in this handset.
