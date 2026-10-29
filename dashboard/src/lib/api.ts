@@ -40,13 +40,29 @@ export class ApiError extends Error {
 	readonly code: string | null;
 	/** The endpoint's machine-readable payload when it sends one (`details` on a 400). */
 	readonly details: unknown;
+	/**
+	 * Seconds the endpoint asked us to wait, when it said so. `null` means it
+	 * did not: no countdown is invented from a bare 429.
+	 */
+	readonly retryAfter: number | null;
+	/** The endpoint's own sentence, kept when our copy is the one shown. */
+	readonly serverMessage: string | null;
 
-	constructor(message: string, status: number, code: string | null = null, details: unknown = null) {
+	constructor(
+		message: string,
+		status: number,
+		code: string | null = null,
+		details: unknown = null,
+		retryAfter: number | null = null,
+		serverMessage: string | null = null
+	) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
 		this.code = code;
 		this.details = details;
+		this.retryAfter = retryAfter;
+		this.serverMessage = serverMessage;
 	}
 }
 
@@ -69,7 +85,19 @@ const CODE_MESSAGES: Record<string, string> = {
 	already_registered: 'That address already has an account. Sign in instead.',
 	session_failed: 'The invite worked, but no session was issued. Open the link again.',
 	auth_unavailable: 'This deployment has no auth secret yet.',
-	owner_exists: 'This deployment already has an owner. Sign in instead.'
+	owner_exists: 'This deployment already has an owner. Sign in instead.',
+	// Better Auth's two-factor error codes (plugins/two-factor/error-code.ts).
+	// Each names the next action rather than echoing the wire.
+	INVALID_CODE: 'That code was not accepted. Check the authenticator and use the code showing now.',
+	INVALID_BACKUP_CODE: 'That recovery code was not accepted. Each one works once — check the one you typed.',
+	TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE: 'Too many attempts. Sign in with your passkey again to start over.',
+	ACCOUNT_TEMPORARILY_LOCKED: 'Too many failed codes on this account.',
+	INVALID_TWO_FACTOR_COOKIE: 'This sign-in expired before the code was entered. Start again with your passkey.',
+	TOTP_ALREADY_ENABLED: 'An authenticator is already set up on this account.',
+	TOTP_NOT_ENABLED: 'No authenticator is set up on this account yet.',
+	TOTP_NOT_CONFIGURED: 'Authenticator codes are not available on this deployment.',
+	TWO_FACTOR_NOT_ENABLED: 'Two-factor is not set up on this account.',
+	INVALID_PASSWORD: 'This deployment asked for a password to change two-factor, and this account has none.'
 };
 
 
@@ -212,15 +240,21 @@ export async function authRequest<T>(
 	path: string,
 	init: { method?: string; body?: unknown } = {}
 ): Promise<{ data: T; status: number }> {
+	const method = init.method ?? 'GET';
+	// Better Auth's router answers 415 to a POST with no JSON content type, and
+	// `/sign-out` has no body of its own. Sending `{}` keeps every POST on the
+	// mount well-formed — without it a sign-out silently did nothing.
+	const body = init.body ?? (method === 'GET' || method === 'HEAD' ? undefined : {});
+
 	const headers = new Headers({ Accept: 'application/json' });
-	if (init.body !== undefined) headers.set('Content-Type', 'application/json');
+	if (body !== undefined) headers.set('Content-Type', 'application/json');
 
 	let response: Response;
 	try {
 		response = await fetch(`${AUTH_BASE}${path}`, {
-			method: init.method ?? 'GET',
+			method,
 			headers,
-			...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+			...(body === undefined ? {} : { body: JSON.stringify(body) }),
 			credentials: 'same-origin',
 			signal: AbortSignal.timeout(20_000)
 		});
@@ -244,10 +278,42 @@ export async function authRequest<T>(
 	if (!response.ok) {
 		const code = extractCode(payload) ?? extractField(payload, 'code');
 		const fallback = `Request failed (${response.status}).`;
-		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code);
+		const retryAfter = readRetryAfter(response, payload);
+		throw new ApiError(
+			code ? (CODE_MESSAGES[code] ?? fallback) : fallback,
+			response.status,
+			code,
+			null,
+			retryAfter,
+			extractField(payload, 'message')
+		);
 	}
 
 	return { data: payload as T, status: response.status };
+}
+
+/**
+ * The wait the server itself asked for: a `Retry-After` header (seconds, or an
+ * HTTP date), or a `retryAfter` field in the body. `null` when it said nothing,
+ * so no timer is ever invented on the screen.
+ */
+function readRetryAfter(response: Response, payload: unknown): number | null {
+	const header = response.headers.get('retry-after');
+	if (header !== null) {
+		const seconds = Number(header.trim());
+		if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+		const date = Date.parse(header);
+		if (Number.isFinite(date)) {
+			const delta = Math.ceil((date - Date.now()) / 1000);
+			if (delta > 0) return delta;
+		}
+	}
+	if (payload && typeof payload === 'object') {
+		const value = (payload as Record<string, unknown>).retryAfter;
+		const seconds = typeof value === 'number' ? value : Number(value);
+		if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+	}
+	return null;
 }
 
 /** The current Better Auth session, or `null`. Throws 503 when `/api/auth` is off. */

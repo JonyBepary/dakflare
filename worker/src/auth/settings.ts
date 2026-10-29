@@ -134,6 +134,16 @@ function buildAuth(env: Env) {
       }),
       twoFactor({
         issuer: "DakFlare",
+        // This phase has no password factor at all: `emailAndPassword.enabled`
+        // is false above, so `shouldRequirePassword()` would be true for every
+        // account and `enable`, `disable`, `generate-backup-codes` and
+        // `get-totp-uri` would each answer INVALID_PASSWORD forever. The flag
+        // makes the password optional and, with no credential row, satisfied —
+        // TOTP is then the second factor after the passkey, exactly as
+        // AUTH_PLAN §1 factor 3 describes. The moment a password factor is
+        // enabled this must be revisited: the plugin deliberately asks for the
+        // password when one exists.
+        allowPasswordless: true,
       }),
     ],
 

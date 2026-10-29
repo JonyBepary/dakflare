@@ -1,9 +1,12 @@
 /**
- * Session cookie minting for sessions we create server-side.
+ * Cookie minting for the two things Better Auth hands back as a value we must
+ * put on the wire ourselves: a session we created server-side (invite
+ * redemption) and, in `handler.ts`, the second-factor challenge cookie for a
+ * passkey sign-in.
  *
- * Better Auth creates the session row; this turns its opaque token into the
- * cookie the rest of Better Auth (and therefore `requireRole`) already reads.
- * The signing is Better Auth's own scheme (`better-call`): value is
+ * Better Auth creates the rows; this turns an opaque token into the cookie the
+ * rest of Better Auth (and therefore `requireRole`) already reads. The signing
+ * is Better Auth's own scheme (`better-call`): value is
  * `token.<base64 HMAC-SHA256(secret, token)>`, URI-encoded, with the cookie
  * name and attributes taken from the live auth context so the `__Secure-`
  * prefix and SameSite policy cannot drift from the library's.
@@ -13,6 +16,13 @@ import type { Env } from "../index";
 import { getAuth } from "./settings";
 
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
+
+interface CookieAttributes {
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: string | boolean;
+}
 
 /**
  * Create a session row for a user we just created (invite redemption).
@@ -39,17 +49,19 @@ export async function createSessionForUser(
   };
 }
 
-export async function sessionCookieHeader(
+/**
+ * `<name>=<signed value>; Max-Age=…` — the attributes come from the live auth
+ * context, never from a literal here.
+ */
+export async function signedCookieHeader(
   env: Env,
+  name: string,
   token: string,
-  maxAgeSeconds: number = SESSION_SECONDS
+  attributes: CookieAttributes,
+  maxAgeSeconds: number
 ): Promise<string | null> {
-  const auth = getAuth(env);
   const secret = env.BETTER_AUTH_SECRET;
-  if (auth === null || secret === undefined || secret === "") return null;
-
-  const ctx = await auth.$context;
-  const cookie = ctx.authCookies.sessionToken;
+  if (secret === undefined || secret === "") return null;
 
   const key = await crypto.subtle.importKey(
     "raw",
@@ -65,14 +77,27 @@ export async function sessionCookieHeader(
   for (const byte of signature) binary += String.fromCharCode(byte);
   const value = encodeURIComponent(`${token}.${btoa(binary)}`);
 
-  const attrs = cookie.attributes;
-  const parts = [`${cookie.name}=${value}`, `Max-Age=${Math.floor(maxAgeSeconds)}`];
-  if (attrs.path) parts.push(`Path=${attrs.path}`);
-  if (attrs.httpOnly) parts.push("HttpOnly");
-  if (attrs.secure) parts.push("Secure");
-  if (attrs.sameSite) {
-    const sameSite = String(attrs.sameSite);
+  const parts = [`${name}=${value}`];
+  if (maxAgeSeconds <= 0) parts.push("Max-Age=0");
+  else parts.push(`Max-Age=${Math.floor(maxAgeSeconds)}`);
+  if (attributes.path) parts.push(`Path=${attributes.path}`);
+  if (attributes.httpOnly) parts.push("HttpOnly");
+  if (attributes.secure) parts.push("Secure");
+  if (attributes.sameSite) {
+    const sameSite = String(attributes.sameSite);
     parts.push(`SameSite=${sameSite.charAt(0).toUpperCase()}${sameSite.slice(1)}`);
   }
   return parts.join("; ");
+}
+
+export async function sessionCookieHeader(
+  env: Env,
+  token: string,
+  maxAgeSeconds: number = SESSION_SECONDS
+): Promise<string | null> {
+  const auth = getAuth(env);
+  if (auth === null) return null;
+  const ctx = await auth.$context;
+  const cookie = ctx.authCookies.sessionToken;
+  return signedCookieHeader(env, cookie.name, token, cookie.attributes, maxAgeSeconds);
 }

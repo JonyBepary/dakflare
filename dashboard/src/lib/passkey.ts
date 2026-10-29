@@ -122,10 +122,11 @@ function describeCeremonyError(error: unknown): PasskeyFailure {
 
 /**
  * Ask the browser for a discoverable passkey and hand the answer to Better Auth.
- * Returns once the server has accepted it; whether a session exists is the
- * caller's next question, because a TOTP account answers without one.
+ * Returns once the server has accepted it, with whatever the endpoint said:
+ * `{ twoFactorRedirect: true }` means the session was withheld pending an
+ * authenticator code, so the caller must not look for one.
  */
-export async function signInWithPasskey(): Promise<void> {
+export async function signInWithPasskey(): Promise<{ twoFactorRedirect: boolean }> {
 	const support = passkeySupport();
 	if (support !== 'yes') {
 		throw new PasskeyFailure(
@@ -169,23 +170,27 @@ export async function signInWithPasskey(): Promise<void> {
 	}
 
 	const response = credential.response as AuthenticatorAssertionResponse;
-	await authRequest<unknown>('/passkey/verify-authentication', {
-		method: 'POST',
-		body: {
-			response: {
-				id: credential.id,
-				rawId: bytesToB64url(credential.rawId),
-				type: credential.type,
+	const { data } = await authRequest<{ twoFactorRedirect?: boolean }>(
+		'/passkey/verify-authentication',
+		{
+			method: 'POST',
+			body: {
 				response: {
-					clientDataJSON: bytesToB64url(response.clientDataJSON),
-					authenticatorData: bytesToB64url(response.authenticatorData),
-					signature: bytesToB64url(response.signature),
-					userHandle: response.userHandle ? bytesToB64url(response.userHandle) : null
-				},
-				clientExtensionResults: credential.getClientExtensionResults()
+					id: credential.id,
+					rawId: bytesToB64url(credential.rawId),
+					type: credential.type,
+					response: {
+						clientDataJSON: bytesToB64url(response.clientDataJSON),
+						authenticatorData: bytesToB64url(response.authenticatorData),
+						signature: bytesToB64url(response.signature),
+						userHandle: response.userHandle ? bytesToB64url(response.userHandle) : null
+					},
+					clientExtensionResults: credential.getClientExtensionResults()
+				}
 			}
 		}
-	});
+	);
+	return { twoFactorRedirect: data?.twoFactorRedirect === true };
 }
 
 /* -------------------------------------------------------------- enrol */

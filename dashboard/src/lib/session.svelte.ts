@@ -42,6 +42,17 @@ class SessionStore {
 		return this.role === null && this.authMode !== 'new';
 	}
 
+	/**
+	 * Factors belong to an account, and an admin-token session has none: in
+	 * `legacy` the cookie is a machine credential with no user row, so there is
+	 * nothing to enrol a second factor for. The Security page reads this instead
+	 * of `canViewSecurity` for its controls.
+	 */
+	get canManageFactors(): boolean {
+		if (this.status !== 'authed' || this.authMode !== 'new') return false;
+		return this.role === 'owner' || this.role === 'admin';
+	}
+
 	/** Resolve the cookie session. Never throws: the layout renders the result. */
 	async check(): Promise<SessionStatus> {
 		this.status = 'unknown';

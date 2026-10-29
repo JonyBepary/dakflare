@@ -23,7 +23,10 @@ export const ROUTES = {
 	invite: resolve('/invite'),
 	enrol: resolve('/enrol'),
 	// Owner/admin only (AUTH_PLAN §5); the nav hides it for members.
-	audit: resolve('/audit')
+	audit: resolve('/audit'),
+	// Owner/admin only as well: the account's factors are managed next to the
+	// log that records their use.
+	security: resolve('/security')
 } as const;
 
 export const BASE = ROUTES.overview.replace(/\/$/, '');

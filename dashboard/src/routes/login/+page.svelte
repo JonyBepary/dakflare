@@ -13,6 +13,7 @@
 		signOutAccount
 	} from '$lib/api';
 	import { passkeySupport, signInWithPasskey, verifyAuthenticatorCode, verifyRecoveryCode } from '$lib/passkey';
+	import { isWellFormedCode } from '$lib/totp';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import Brand from '$lib/components/Brand.svelte';
@@ -54,6 +55,12 @@
 	let codeInput = $state<HTMLInputElement | null>(null);
 	let passkeyBusy = $state(false);
 	let passkeyError = $state<string | null>(null);
+	/**
+	 * True once the server has burned the challenge: too many wrong codes, or the
+	 * ten-minute window closed. The only way forward is a new passkey assertion,
+	 * so the form stops offering a retry that cannot work.
+	 */
+	let challengeSpent = $state(false);
 
 	const nextTarget = $derived.by(() => {
 		const requested = page.url.searchParams.get('next');
@@ -216,14 +223,17 @@
 		passkeyError = null;
 		error = null;
 		try {
-			await signInWithPasskey();
-			// A TOTP account answers without a session; ask rather than assume.
+			const result = await signInWithPasskey();
+			// The Worker withholds the session when the account has an
+			// authenticator; ask anyway, so an older Worker that does not is also
+			// handled the same way.
+			if (result.twoFactorRedirect) {
+				await beginSecondFactorStep();
+				return;
+			}
 			const current = await getAuthSession();
 			if (current === null) {
-				step = 'second-factor';
-				useRecovery = false;
-				await tick();
-				codeInput?.focus();
+				await beginSecondFactorStep();
 				return;
 			}
 			await landAccountSession();
@@ -237,6 +247,24 @@
 		}
 	}
 
+	async function beginSecondFactorStep(): Promise<void> {
+		step = 'second-factor';
+		useRecovery = false;
+		challengeSpent = false;
+		await tick();
+		codeInput?.focus();
+	}
+
+	/** Back to the passkey step: a spent challenge cannot be revived. */
+	async function startOver(): Promise<void> {
+		step = 'passkey';
+		useRecovery = false;
+		challengeSpent = false;
+		passkeyError = null;
+		await tick();
+		document.getElementById('passkey-start')?.focus();
+	}
+
 	function errorCopy(failure: unknown): string {
 		if (failure instanceof Error && failure.message) return failure.message;
 		return 'The passkey step did not finish. Try again.';
@@ -244,12 +272,21 @@
 
 	async function submitCode(event: SubmitEvent) {
 		event.preventDefault();
-		if (passkeyBusy) return;
+		if (passkeyBusy || challengeSpent) return;
 		const value = codeInput?.value.trim() ?? '';
 		if (value === '') {
 			passkeyError = useRecovery
 				? 'Enter one of the recovery codes you saved.'
 				: 'Enter the 6-digit code from the authenticator app.';
+			codeInput?.focus();
+			return;
+		}
+		// Local shape check only: a malformed value cannot be right, and the
+		// server spends one of five attempts on every code it is asked about.
+		if (!isWellFormedCode(value, useRecovery)) {
+			passkeyError = useRecovery
+				? 'A recovery code looks like abcde-fghij, with the dash. Check what you saved.'
+				: 'Six digits, no spaces. Check the code the app is showing now.';
 			codeInput?.focus();
 			return;
 		}
@@ -262,21 +299,39 @@
 			const current = await getAuthSession();
 			if (current === null) {
 				passkeyError = useRecovery
-					? 'That recovery code was not accepted. Check it and try again.'
+					? 'That recovery code was not accepted. Each one works once; check the one you typed.'
 					: 'That code was not accepted. Wait for the next one and try again.';
 				codeInput?.focus();
 				return;
 			}
 			await landAccountSession();
 		} catch (failure) {
-			passkeyError =
-				failure instanceof ApiError && failure.status === 401
-					? 'That code was not accepted. Wait for the next one and try again.'
-					: errorCopy(failure);
-			codeInput?.focus();
+			reportCodeFailure(failure);
 		} finally {
 			passkeyBusy = false;
 		}
+	}
+
+	/**
+	 * Say what the server said. A retry hint appears only when the response
+	 * carried one (`Retry-After` or `retryAfter`); nothing counts down on its own.
+	 */
+	function reportCodeFailure(failure: unknown): void {
+		if (!(failure instanceof ApiError)) {
+			passkeyError = errorCopy(failure);
+			return;
+		}
+		const spent =
+			failure.code === 'TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE' ||
+			failure.code === 'INVALID_TWO_FACTOR_COOKIE' ||
+			failure.status === 429;
+		challengeSpent = spent;
+		const hint =
+			failure.retryAfter !== null
+				? ` Try again in ${failure.retryAfter} ${failure.retryAfter === 1 ? 'second' : 'seconds'}.`
+				: '';
+		passkeyError = `${failure.message}${hint}`;
+		if (!spent) void tick().then(() => codeInput?.focus());
 	}
 
 	function availableSupport(): string | null {
@@ -356,66 +411,113 @@
 						<Icon name="refresh" size={14} /> Try again
 					</button>
 				{:else if gate.kind === 'new'}
-					<p class="eyebrow">Operator access</p>
-					<h1>Sign in to the console</h1>
-					<p class="login-lede">
-						This deployment signs in with a passkey. The key stays on this device; there is no
-						password.
-					</p>
-
 					{#if step === 'second-factor'}
-						<form onsubmit={submitCode} novalidate>
-							<div class="field">
-								<label class="label" for="second-factor">
-									{useRecovery ? 'Recovery code' : 'Authenticator code'}
-								</label>
-								<input
-									bind:this={codeInput}
-									id="second-factor"
-									class="input input-mono"
-									inputmode={useRecovery ? 'text' : 'numeric'}
-									autocomplete="one-time-code"
-									autocapitalize="none"
-									spellcheck="false"
-									placeholder={useRecovery ? 'xxxx-xxxx' : '000000'}
-									disabled={passkeyBusy}
-									aria-invalid={passkeyError ? 'true' : undefined}
-									aria-describedby="second-factor-hint"
-								/>
-								<p id="second-factor-hint" class="hint">
-									{useRecovery
-										? 'One of the single-use codes saved when two-factor was set up. Each works once.'
-										: 'The 6-digit code from the authenticator app on the account.'}
-								</p>
-							</div>
+						<p class="eyebrow">Two steps · 2 of 2</p>
+						<h1>Enter your {useRecovery ? 'recovery code' : 'authenticator code'}</h1>
+						<p class="login-lede">
+							{#if challengeSpent}
+								This sign-in challenge was used up. Start again with the passkey to get a fresh one.
+							{:else if useRecovery}
+								One of the single-use codes saved when the authenticator was set up. Each one works
+								once and cannot be reused.
+							{:else}
+								The passkey was accepted. One code from the authenticator app on this account
+								finishes the sign-in.
+							{/if}
+						</p>
 
+						<p class="step-done">
+							<span class="step-tick" aria-hidden="true"><Icon name="check" size={12} /></span>
+							Passkey accepted
+						</p>
+
+						{#if challengeSpent}
 							{#if passkeyError}
 								<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
 							{/if}
-
-							<button
-								type="submit"
-								class="btn btn-primary btn-wide login-submit"
-								disabled={passkeyBusy}
-								aria-busy={passkeyBusy}
-							>
-								{#if passkeyBusy}<Spinner />{:else}<Icon name="shield" size={14} />{/if}
-								{passkeyBusy ? 'Checking' : 'Continue'}
-							</button>
 							<button
 								type="button"
-								class="link-btn login-alternate"
-								onclick={async () => {
-									useRecovery = !useRecovery;
-									passkeyError = null;
-									await tick();
-									codeInput?.focus();
-								}}
+								class="btn btn-primary btn-wide login-submit"
+								onclick={() => void startOver()}
 							>
-								{useRecovery ? 'Use the authenticator instead' : 'Use a recovery code instead'}
+								<Icon name="fingerprint" size={15} /> Start again with the passkey
 							</button>
-						</form>
+						{:else}
+							<form onsubmit={submitCode} novalidate>
+								<div class="field">
+									<label class="label" for="second-factor">
+										{useRecovery ? 'Recovery code' : 'Authenticator code'}
+									</label>
+									<input
+										bind:this={codeInput}
+										id="second-factor"
+										class="input input-mono code-field"
+										class:is-recovery={useRecovery}
+										inputmode={useRecovery ? 'text' : 'numeric'}
+										autocomplete="one-time-code"
+										autocapitalize="none"
+										autocorrect="off"
+										spellcheck="false"
+										maxlength={useRecovery ? 11 : 6}
+										placeholder={useRecovery ? 'abcde-fghij' : '000000'}
+										disabled={passkeyBusy}
+										aria-invalid={passkeyError ? 'true' : undefined}
+										aria-describedby="second-factor-hint"
+									/>
+									<p id="second-factor-hint" class="hint">
+										{useRecovery
+											? 'Each recovery code signs you in once. Copy it exactly as saved, dash included.'
+											: 'The 6-digit code from the authenticator app, which changes every 30 seconds.'}
+									</p>
+								</div>
+
+								{#if passkeyError}
+									<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
+								{/if}
+
+								<button
+									type="submit"
+									class="btn btn-primary btn-wide login-submit"
+									disabled={passkeyBusy}
+									aria-busy={passkeyBusy}
+								>
+									{#if passkeyBusy}<Spinner />{:else}<Icon name="shield" size={14} />{/if}
+									{passkeyBusy ? 'Checking' : 'Continue'}
+								</button>
+								<button
+									type="button"
+									class="link-btn login-alternate"
+									onclick={async () => {
+										useRecovery = !useRecovery;
+										passkeyError = null;
+										if (codeInput) codeInput.value = '';
+										await tick();
+										codeInput?.focus();
+									}}
+								>
+									{useRecovery ? 'Use the authenticator instead' : 'Use a recovery code instead'}
+								</button>
+							</form>
+						{/if}
+
+						{#if !challengeSpent}
+							<p class="login-note">
+								<span class="note-icon"><Icon name="shield" size={13} /></span>
+								<span>
+									{useRecovery
+										? 'Codes are replaced, not topped up: when the set runs low, make a new one from Sign-in security.'
+										: 'Five wrong codes end this sign-in; the passkey starts a fresh one.'}
+								</span>
+							</p>
+						{/if}
 					{:else}
+						<p class="eyebrow">Operator access</p>
+						<h1>Sign in to the console</h1>
+						<p class="login-lede">
+							This deployment signs in with a passkey. The key stays on this device; there is no
+							password.
+						</p>
+
 						{#if supportNote}
 							<Notice tone="warn" title="This browser cannot use passkeys">{supportNote}</Notice>
 							<a class="btn btn-primary btn-wide login-submit" href={ROUTES.invite}>
@@ -749,6 +851,52 @@
 		display: block;
 		margin: var(--s-3) auto 0;
 		font-size: 12px;
+	}
+
+	/* Step one is finished and nothing else can undo it; the line is a receipt,
+	   not a control. */
+	.step-done {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin-top: calc(var(--s-2) * -1);
+		margin-bottom: var(--s-4);
+		color: var(--ink-3);
+		font-size: 11.5px;
+	}
+
+	.step-tick {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: color-mix(in srgb, var(--ok) 14%, transparent);
+		color: var(--ok);
+	}
+
+	.code-field {
+		letter-spacing: 0.2em;
+		text-align: center;
+		min-height: 44px;
+		font-size: var(--text-md);
+	}
+
+	@media (max-width: 720px) {
+		/* A code is typed with a thumb and the submit finishes the whole
+		   sign-in: both get the 48dp target on a phone. */
+		.code-field,
+		.login-submit {
+			min-height: 48px;
+		}
+	}
+
+	/* A recovery code is read character by character against something saved on
+	   paper: wide tracking makes that harder, not easier. */
+	.code-field.is-recovery {
+		letter-spacing: 0.06em;
+		font-size: var(--text-base);
 	}
 
 	.login-more {

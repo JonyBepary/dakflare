@@ -56,7 +56,10 @@
 		{
 			label: 'Security',
 			ownersOnly: true,
-			items: [{ href: ROUTES.audit, label: 'Audit log', icon: 'history' }]
+			items: [
+				{ href: ROUTES.audit, label: 'Audit log', icon: 'history' },
+				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield' }
+			]
 		}
 	];
 
@@ -100,6 +103,11 @@
 	}
 
 	const activeLabel = $derived(nav.find(isActive)?.label ?? 'Console');
+
+	/** The rail's section for the current page: the header names where you are. */
+	const activeSection = $derived(
+		visibleSections.find((section) => section.items.some(isActive))?.label ?? 'Console'
+	);
 
 	/** Who is signed in. The token gate has no user row, so it stays "Operator". */
 	const operatorName = $derived(
@@ -314,7 +322,7 @@
 				<span class="topbar-brand-name">DakFlare</span>
 
 				<div class="topbar-context">
-					<span class="eyebrow">Console</span>
+					<span class="eyebrow">{activeSection}</span>
 					<span class="topbar-section">{activeLabel}</span>
 				</div>
 
