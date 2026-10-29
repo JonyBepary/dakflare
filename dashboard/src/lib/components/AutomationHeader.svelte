@@ -84,7 +84,10 @@
 	}
 
 	.tab:hover {
-		background: color-mix(in srgb, var(--df-surface-card) 60%, transparent);
+		background: light-dark(
+			color-mix(in srgb, var(--df-surface-card) 60%, transparent),
+			var(--df-surface-press)
+		);
 		color: var(--df-text-primary);
 		text-decoration: none;
 	}
@@ -94,8 +97,10 @@
 		outline-offset: 2px;
 	}
 
+	/* The active tab is the raised object. Card is lighter than well in light
+	   and darker in dark, so the press step carries it in the dark scheme. */
 	.tab.is-active {
-		background: var(--df-surface-card);
+		background: light-dark(var(--df-surface-card), var(--df-surface-press));
 		color: var(--df-text-primary);
 		box-shadow: var(--df-shadow-card);
 	}

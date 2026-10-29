@@ -1187,7 +1187,12 @@
 	.meta-item + .meta-item::before {
 		content: '·';
 		margin-right: var(--df-p-space-2);
-		color: var(--df-border-control);
+		/* A separator is punctuation, not a hairline: in dark the control border
+		   is 1.6:1 on the card and the dots vanish between the facts. */
+	color: light-dark(
+		var(--df-border-control),
+		color-mix(in srgb, var(--df-text-meta) 65%, transparent)
+	);
 	}
 
 	.scope-name {

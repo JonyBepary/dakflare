@@ -746,20 +746,24 @@
 		justify-content: space-between;
 		gap: var(--df-p-space-4);
 		padding: var(--df-p-space-4);
+		border: 1px solid var(--df-c-tint-edge-neutral);
 		border-radius: var(--df-p-radius-lg);
 		background: var(--df-state-neutral-bg);
 	}
 
 	.state-block[data-presence='live'],
 	.state-block[data-presence='synced'] {
+		border-color: var(--df-c-tint-edge-ok);
 		background: var(--df-state-ok-bg);
 	}
 
 	.state-block[data-presence='stale'] {
+		border-color: var(--df-c-tint-edge-warn);
 		background: var(--df-state-warn-bg);
 	}
 
 	.state-block[data-presence='offline'] {
+		border-color: var(--df-c-tint-edge-danger);
 		background: var(--df-state-danger-bg);
 	}
 

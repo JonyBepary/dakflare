@@ -966,7 +966,7 @@
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-lg);
 		overflow: hidden;
-		background: var(--df-surface-well);
+		background: light-dark(var(--df-surface-well), var(--df-surface-page));
 		transition: border-color 160ms ease;
 	}
 

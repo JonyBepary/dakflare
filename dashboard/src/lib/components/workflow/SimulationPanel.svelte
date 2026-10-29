@@ -288,22 +288,26 @@
 		align-items: flex-start;
 		gap: 8px;
 		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid transparent;
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-surface-well);
 		box-shadow: inset 3px 0 0 var(--df-text-meta);
 	}
 
 	.sim-verdict.ok {
+		border-color: var(--df-c-tint-edge-ok);
 		background: var(--df-state-ok-bg);
 		box-shadow: inset 3px 0 0 var(--df-state-ok-ink);
 	}
 
 	.sim-verdict.warn {
+		border-color: var(--df-c-tint-edge-warn);
 		background: var(--df-state-warn-bg);
 		box-shadow: inset 3px 0 0 var(--df-state-warn-ink);
 	}
 
 	.sim-verdict.danger {
+		border-color: var(--df-c-tint-edge-danger);
 		background: var(--df-state-danger-bg);
 		box-shadow: inset 3px 0 0 var(--df-state-danger-ink);
 	}
@@ -478,6 +482,7 @@
 
 	.sim-warnings {
 		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-c-tint-edge-warn);
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-state-warn-bg);
 	}

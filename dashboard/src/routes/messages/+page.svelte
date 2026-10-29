@@ -2,6 +2,8 @@
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
 	import { describeError, getDevices, getDeviceStatus, getMessages, getRules } from '$lib/api';
+	import { consoleCounts } from '$lib/console-counts.svelte';
+	import { formatCount } from '$lib/format';
 	import type { Device, DeviceStatus, Message, Rule } from '$lib/types';
 	import {
 		deviceOptionLabel,
@@ -23,7 +25,10 @@
 	import SendSmsForm from '$lib/components/SendSmsForm.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
-	const PAGE_SIZE = 50;
+	/* One request is one page. The Worker clamps at 500 and has no total, so the
+	   log never implies it holds the whole history: it says how many rows are
+	   loaded and how many the gateway keeps. */
+	const PAGE_SIZE = 100;
 	const LIVE_POLL_MS = 5_000;
 
 	let devices = $state<Device[]>([]);
@@ -38,6 +43,9 @@
 	let devicesError = $state<string | null>(null);
 	let messagesError = $state<string | null>(null);
 	let hasMore = $state(false);
+	/* Set when a full page adds nothing: every row in it shares the cursor
+	   millisecond, and `/v1/messages` has no id tiebreaker to page past that. */
+	let stalled = $state(false);
 	let expanded = $state<Set<string>>(new Set());
 
 	let rules = $state<Rule[]>([]);
@@ -66,6 +74,9 @@
 		return name.length > 26 ? `${name.slice(0, 24)}…` : name;
 	});
 	const rulesById = $derived(new Map(rules.map((rule) => [rule.id, rule])));
+	// Fleet-wide total from the shell's health read; null until it answers, so the
+	// log says "100 shown" rather than inventing a total it does not have.
+	const totalMessages = $derived(consoleCounts.messages);
 	const visibleMessages = $derived(
 		direction === 'all'
 			? messages
@@ -108,14 +119,21 @@
 		try {
 			const result = await getMessages(target, PAGE_SIZE, before);
 			if (version !== logVersion || target !== selected) return;
+			let added = result.messages.length;
 			if (reset) {
 				messages = result.messages;
 				newIds = new Set();
 			} else {
 				const seen = new Set(messages.map((message) => message.id));
-				messages = [...messages, ...result.messages.filter((message) => !seen.has(message.id))];
+				const fresh = result.messages.filter((message) => !seen.has(message.id));
+				added = fresh.length;
+				messages = [...messages, ...fresh];
 			}
-			hasMore = result.messages.length >= result.limit;
+			// `before` is a millisecond cursor, so a page can return rows already
+			// shown when more than a page shares one received_at. Do not offer a
+			// control that cannot move: stop at the tie rather than loop.
+			hasMore = result.messages.length >= result.limit && added > 0;
+			stalled = !reset && result.messages.length >= result.limit && added === 0;
 			lastUpdatedAt = Date.now();
 			clock = Date.now();
 		} catch (failure) {
@@ -216,6 +234,7 @@
 		newIds = new Set();
 		lastUpdatedAt = null;
 		hasMore = false;
+		stalled = false;
 		syncUrl();
 		deviceStatus = null;
 		await loadMessages(true);
@@ -444,14 +463,20 @@
 						<span class="mono muted">link unknown</span>
 					{/if}
 					<span class="toolbar-sep" aria-hidden="true"></span>
-					<span class="mono shown">
+					<span
+						class="mono shown"
+						title={totalMessages === null
+							? 'Rows loaded in this device’s log'
+							: `${formatCount(totalMessages)} is every message kept in the gateway; this window has ${formatCount(visibleMessages.length)} loaded`}
+					>
 						{#if loading}
 							<Spinner />
 						{:else if messagesError}
 							<span title="The log did not load">—</span>
+						{:else if totalMessages !== null}
+							{formatCount(totalMessages)} messages · showing {formatCount(visibleMessages.length)}
 						{:else}
-							{visibleMessages.length}
-							{visibleMessages.length === 1 ? 'message' : 'messages'}
+							showing {formatCount(visibleMessages.length)}
 						{/if}
 					</span>
 					<span class="toolbar-sep" aria-hidden="true"></span>
@@ -577,7 +602,13 @@
 
 					<div class="log-foot">
 						<span class="mono muted">
-							{messages.length} loaded{#if direction !== 'all'} · {visibleMessages.length} shown{/if}
+							{#if hasMore || stalled}
+								newest {formatCount(messages.length)} loaded{#if direction !== 'all'}
+									· {formatCount(visibleMessages.length)} shown{/if}
+							{:else}
+								all {formatCount(messages.length)} loaded{#if direction !== 'all'}
+									· {formatCount(visibleMessages.length)} shown{/if}
+							{/if}
 						</span>
 						<span class="spacer"></span>
 						{#if hasMore}
@@ -591,8 +622,12 @@
 								{#if loadingMore}<Spinner />{:else}<Icon name="chevron-down" size={13} />{/if}
 								Load older
 							</button>
+						{:else if stalled}
+							<span class="hint">
+								Older rows share a timestamp; this log cannot page past them yet.
+							</span>
 						{:else}
-							<span class="hint">Beginning of this device's history</span>
+							<span class="hint">Beginning of this device’s history</span>
 						{/if}
 					</div>
 				{/if}
@@ -734,7 +769,7 @@
 	}
 
 	.log-row:hover {
-		background: var(--df-c-table-row-bg-hover);
+		background: var(--df-surface-hover);
 	}
 
 	/* New since the last check: a coral edge and a word, never a badge. */

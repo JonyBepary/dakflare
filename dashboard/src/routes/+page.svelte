@@ -700,12 +700,12 @@
 
 	.status[data-tone='warn'] {
 		background: var(--df-state-warn-bg);
-		border-color: transparent;
+		border-color: var(--df-c-tint-edge-warn);
 	}
 
 	.status[data-tone='danger'] {
 		background: var(--df-state-danger-bg);
-		border-color: transparent;
+		border-color: var(--df-c-tint-edge-danger);
 	}
 
 	.beacon {

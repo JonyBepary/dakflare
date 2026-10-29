@@ -11,9 +11,15 @@
    ========================================================================== */
 
 .svelte-flow.svelte-flow {
-	--xy-background-color: var(--df-surface-well);
-	--xy-background-pattern-color: var(--df-border-control);
-	--xy-background-pattern-dots-color: var(--df-border-control);
+	--xy-background-color: light-dark(var(--df-surface-well), var(--df-surface-page));
+	--xy-background-pattern-color: light-dark(
+		var(--df-border-control),
+		color-mix(in srgb, var(--df-p-mist-500) 55%, transparent)
+	);
+	--xy-background-pattern-dots-color: light-dark(
+		var(--df-border-control),
+		color-mix(in srgb, var(--df-p-mist-500) 55%, transparent)
+	);
 
 	--xy-edge-stroke: var(--df-border-control);
 	--xy-edge-stroke-selected: var(--df-accent-text);
@@ -46,11 +52,11 @@
 	--xy-edge-label-color: var(--df-text-secondary);
 
 	font-family: var(--df-p-font-sans);
-	background: var(--df-surface-well);
+	background: light-dark(var(--df-surface-well), var(--df-surface-page));
 }
 
 .svelte-flow .svelte-flow__background {
-	background-color: var(--df-surface-well);
+	background-color: light-dark(var(--df-surface-well), var(--df-surface-page));
 }
 
 .svelte-flow .svelte-flow__attribution {

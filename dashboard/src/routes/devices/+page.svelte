@@ -944,6 +944,7 @@
 	.rotate-note {
 		margin-top: var(--df-p-space-2);
 		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-c-tint-edge-warn);
 		border-left: 2px solid var(--df-state-warn-ink);
 		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
 		background: var(--df-state-warn-bg);
@@ -995,12 +996,12 @@
 	}
 
 	.pair-state-ok {
-		border-color: transparent;
+		border-color: var(--df-c-tint-edge-ok);
 		background: var(--df-state-ok-bg);
 	}
 
 	.pair-state-expired {
-		border-color: transparent;
+		border-color: var(--df-c-tint-edge-warn);
 		background: var(--df-state-warn-bg);
 	}
 
@@ -1189,7 +1190,7 @@
 	}
 
 	.fleet-row:hover {
-		background: var(--df-c-table-row-bg-hover);
+		background: var(--df-surface-hover);
 	}
 
 	.cell-device {

@@ -340,6 +340,7 @@
 
 	.draft-note {
 		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-c-tint-edge-warn);
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-state-warn-bg);
 		color: var(--df-text-secondary);

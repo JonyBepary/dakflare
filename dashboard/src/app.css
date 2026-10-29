@@ -54,6 +54,36 @@
 	--danger-ink: var(--df-text-on-danger);
 	--info: var(--df-state-info-ink);
 
+	/* A row hover is a lift in dark and a wash in light. The dark value is
+	   mixed towards the ink, not the well: a 55% well over a card lands on the
+	   card's own pixel and the row never moves. */
+	--df-surface-hover: light-dark(
+		color-mix(in srgb, var(--df-surface-well) 55%, transparent),
+		color-mix(in srgb, var(--df-p-mist-50) 8%, var(--df-surface-card))
+	);
+
+	/* In dark a tinted container sits within 1.2:1 of a card, so its fill can no
+	   longer carry the state; a 1px edge can. Light keeps today's borderless
+	   fill, where the pastel is already far from the cream card. Each edge is
+	   that container's own state ink, so the pair is measured once per tone. */
+	--df-c-tint-edge-ok: light-dark(
+		transparent,
+		color-mix(in srgb, var(--df-state-ok-ink) 32%, transparent)
+	);
+	--df-c-tint-edge-info: light-dark(
+		transparent,
+		color-mix(in srgb, var(--df-state-info-ink) 32%, transparent)
+	);
+	--df-c-tint-edge-warn: light-dark(
+		transparent,
+		color-mix(in srgb, var(--df-state-warn-ink) 30%, transparent)
+	);
+	--df-c-tint-edge-danger: light-dark(
+		transparent,
+		color-mix(in srgb, var(--df-state-danger-ink) 30%, transparent)
+	);
+	--df-c-tint-edge-neutral: light-dark(transparent, var(--df-border-hairline));
+
 	/* atmosphere */
 	--shadow: var(--df-shadow-card);
 	--shadow-dialog: var(--df-shadow-dialog);
@@ -99,8 +129,14 @@
 /* Dark is the night palette from design/tokens.css primitives: night surfaces,
    mist ink, and 100% opaque state containers with light ink. A 12% pastel keeps
    the old ink at 1.4–2:1, so the containers are solid, not translucent.
+   Four values are hand-picked, because no primitive sits between night-500 and
+   the mist inks: --df-border-hairline (#3d352c), --df-border-control (#6f6455),
+   --df-surface-press (#463d33) and --df-surface-selected (#53483b). Their
+   measured pairs, and the reason each step exists, are in the console-dark
+   review; they are the candidates for a night-550 / night-650 pair.
    The `prefers-color-scheme` copy and the `data-theme` copy are identical; edit
-   both or merge them with light-dark() in one change. */
+   both, or add the next dark-only value as a `light-dark()` component token
+   (app.css already does that for hover, tint edges and the nav pill). */
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme='light']) {
 		color-scheme: dark;
@@ -108,25 +144,27 @@
 		--df-surface-page: var(--df-p-night-800);
 		--df-surface-card: var(--df-p-night-700);
 		--df-surface-well: var(--df-p-night-600);
-		--df-surface-press: var(--df-p-night-500);
+		--df-surface-press: #463d33;
 		--df-surface-field: var(--df-p-night-900);
-		--df-surface-selected: var(--df-p-night-500);
+		--df-surface-selected: #53483b;
 
 		--df-text-primary: var(--df-p-mist-50);
 		--df-text-secondary: var(--df-p-mist-300);
 		--df-text-meta: var(--df-p-mist-500);
 
-		--df-border-hairline: var(--df-p-night-600);
-		--df-border-control: color-mix(in srgb, var(--df-p-mist-500) 38%, var(--df-p-night-700));
+		--df-border-hairline: #3d352c;
+		--df-border-control: #6f6455;
 		--df-border-focus: var(--df-p-coral-300);
 
 		--df-accent-text: var(--df-p-coral-300);
 		--df-accent-text-hover: var(--df-p-coral-100);
-		--df-text-on-accent: var(--df-p-cream-50);
-		--df-accent-fill: var(--df-p-coral-600);
-		--df-accent-fill-hover: var(--df-p-coral-700);
-		--df-accent-fill-press: var(--df-p-coral-800);
-		--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, transparent);
+		/* The fill inverts in dark: a lighter coral carries near-black ink, and
+		   hover lightens rather than darkens, so every state clears 4.5:1. */
+		--df-text-on-accent: var(--df-p-umber-1000);
+		--df-accent-fill: var(--df-p-coral-400);
+		--df-accent-fill-hover: var(--df-p-coral-300);
+		--df-accent-fill-press: var(--df-p-coral-500);
+		--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700));
 		--df-accent-decor: var(--df-p-coral-400);
 
 		--df-state-ok-bg: var(--df-p-mint-900);
@@ -144,10 +182,16 @@
 		--df-state-filter-ink: var(--df-p-lilac-300);
 		--df-text-on-danger: var(--df-p-cream-50);
 
-		--df-shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03);
-		--df-shadow-raised: 0 12px 28px -18px rgba(0, 0, 0, 0.8);
-		--df-shadow-dialog: 0 30px 80px -24px rgba(0, 0, 0, 0.8);
-		--df-c-dialog-scrim: rgba(0, 0, 0, 0.6);
+		/* Dark needs a real drop shadow, not a 3% white line: the page is nearly
+		   black, so black at 45-95% is what separates a card from it. */
+		--df-shadow-card:
+			0 1px 0 rgba(255, 253, 248, 0.035),
+			0 1px 2px rgba(0, 0, 0, 0.5);
+		--df-shadow-raised:
+			0 2px 6px rgba(0, 0, 0, 0.45),
+			0 18px 44px -22px rgba(0, 0, 0, 0.85);
+		--df-shadow-dialog: 0 40px 100px -32px rgba(0, 0, 0, 0.95);
+		--df-c-dialog-scrim: rgba(0, 0, 0, 0.65);
 	}
 }
 
@@ -157,25 +201,27 @@
 	--df-surface-page: var(--df-p-night-800);
 	--df-surface-card: var(--df-p-night-700);
 	--df-surface-well: var(--df-p-night-600);
-	--df-surface-press: var(--df-p-night-500);
+	--df-surface-press: #463d33;
 	--df-surface-field: var(--df-p-night-900);
-	--df-surface-selected: var(--df-p-night-500);
+	--df-surface-selected: #53483b;
 
 	--df-text-primary: var(--df-p-mist-50);
 	--df-text-secondary: var(--df-p-mist-300);
 	--df-text-meta: var(--df-p-mist-500);
 
-	--df-border-hairline: var(--df-p-night-600);
-	--df-border-control: color-mix(in srgb, var(--df-p-mist-500) 38%, var(--df-p-night-700));
+	--df-border-hairline: #3d352c;
+	--df-border-control: #6f6455;
 	--df-border-focus: var(--df-p-coral-300);
 
 	--df-accent-text: var(--df-p-coral-300);
 	--df-accent-text-hover: var(--df-p-coral-100);
-	--df-text-on-accent: var(--df-p-cream-50);
-	--df-accent-fill: var(--df-p-coral-600);
-	--df-accent-fill-hover: var(--df-p-coral-700);
-	--df-accent-fill-press: var(--df-p-coral-800);
-	--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, transparent);
+	/* The fill inverts in dark: a lighter coral carries near-black ink, and
+	   hover lightens rather than darkens, so every state clears 4.5:1. */
+	--df-text-on-accent: var(--df-p-umber-1000);
+	--df-accent-fill: var(--df-p-coral-400);
+	--df-accent-fill-hover: var(--df-p-coral-300);
+	--df-accent-fill-press: var(--df-p-coral-500);
+	--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700));
 	--df-accent-decor: var(--df-p-coral-400);
 
 	--df-state-ok-bg: var(--df-p-mint-900);
@@ -193,10 +239,16 @@
 	--df-state-filter-ink: var(--df-p-lilac-300);
 	--df-text-on-danger: var(--df-p-cream-50);
 
-	--df-shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03);
-	--df-shadow-raised: 0 12px 28px -18px rgba(0, 0, 0, 0.8);
-	--df-shadow-dialog: 0 30px 80px -24px rgba(0, 0, 0, 0.8);
-	--df-c-dialog-scrim: rgba(0, 0, 0, 0.6);
+	/* Dark needs a real drop shadow, not a 3% white line: the page is nearly
+	   black, so black at 45-95% is what separates a card from it. */
+	--df-shadow-card:
+		0 1px 0 rgba(255, 253, 248, 0.035),
+		0 1px 2px rgba(0, 0, 0, 0.5);
+	--df-shadow-raised:
+		0 2px 6px rgba(0, 0, 0, 0.45),
+		0 18px 44px -22px rgba(0, 0, 0, 0.85);
+	--df-shadow-dialog: 0 40px 100px -32px rgba(0, 0, 0, 0.95);
+	--df-c-dialog-scrim: rgba(0, 0, 0, 0.65);
 }
 
 /* --------------------------------------------------------------------------
@@ -460,7 +512,9 @@ time {
 	height: 20px;
 	padding: 0 7px;
 	border-radius: var(--df-p-radius-pill);
-	background: var(--df-surface-card);
+	/* A pill is a raised object. In dark the card is darker than the rail, so
+	   the light value would read as a hole; press is the step above the rail. */
+	background: light-dark(var(--df-surface-card), var(--df-surface-press));
 	border: 1px solid var(--df-border-hairline);
 	color: var(--df-text-secondary);
 	font-family: var(--df-p-font-mono);
@@ -471,7 +525,7 @@ time {
 }
 
 .nav-link[aria-current='page'] .nav-pill {
-	background: var(--df-surface-card);
+	background: light-dark(var(--df-surface-card), var(--df-surface-press));
 	border-color: transparent;
 	color: var(--df-text-primary);
 }
@@ -714,17 +768,17 @@ time {
 
 .card.tint-mint {
 	background: var(--df-state-ok-bg);
-	border-color: transparent;
+	border-color: var(--df-c-tint-edge-ok);
 }
 
 .card.tint-butter {
 	background: var(--df-state-warn-bg);
-	border-color: transparent;
+	border-color: var(--df-c-tint-edge-warn);
 }
 
 .card.tint-peach {
 	background: var(--df-state-danger-bg);
-	border-color: transparent;
+	border-color: var(--df-c-tint-edge-danger);
 }
 
 .card-head {
@@ -795,13 +849,6 @@ time {
 
 .panel-title svg {
 	color: var(--df-text-meta);
-}
-
-.panel-meta {
-	font-family: var(--df-p-font-mono);
-	font-size: var(--df-p-text-xs);
-	color: var(--df-text-meta);
-	letter-spacing: 0.03em;
 }
 
 .panel-body {
@@ -879,6 +926,14 @@ time {
 
 .btn-primary svg {
 	opacity: 1;
+}
+
+/* The default ring is the accent text colour; on an accent fill that is only
+   2.3:1 in dark (1.3:1 in light). Ink on the fill, cream in the dark, clears
+   both the button and the surface behind it. */
+.btn-primary:focus-visible,
+.btn-danger-solid:focus-visible {
+	outline-color: light-dark(var(--df-text-primary), var(--df-p-cream-50));
 }
 
 .btn-danger {
@@ -1072,19 +1127,23 @@ time {
 
 .callout[data-tone='info'] {
 	background: var(--df-state-info-bg);
+	border-color: var(--df-c-tint-edge-info);
 }
 
 .callout[data-tone='ok'] {
 	background: var(--df-state-ok-bg);
+	border-color: var(--df-c-tint-edge-ok);
 }
 
 .callout[data-tone='warn'] {
 	background: var(--df-state-warn-bg);
+	border-color: var(--df-c-tint-edge-warn);
 }
 
 .callout[data-tone='danger'],
 .notice-danger {
 	background: var(--df-state-danger-bg);
+	border-color: var(--df-c-tint-edge-danger);
 }
 
 .callout[data-tone='info'] svg {
@@ -1314,15 +1373,6 @@ select.input {
    tables
    -------------------------------------------------------------------------- */
 
-.table-scroll {
-	width: 100%;
-	overflow-x: auto;
-	overscroll-behavior-x: contain;
-	border-radius: 0 0 var(--df-p-radius-md) var(--df-p-radius-md);
-	scrollbar-width: thin;
-	scrollbar-color: var(--df-border-control) transparent;
-}
-
 .table {
 	width: 100%;
 	border-collapse: collapse;
@@ -1362,7 +1412,7 @@ select.input {
 }
 
 .table tbody tr:hover {
-	background: var(--df-c-table-row-bg-hover);
+	background: var(--df-surface-hover);
 }
 
 .table th:first-child,
@@ -1528,7 +1578,7 @@ select.input {
 }
 
 .dialog::backdrop {
-	background: rgba(10, 12, 10, 0.45);
+	background: var(--df-c-dialog-scrim);
 	backdrop-filter: blur(2px);
 }
 
@@ -1566,31 +1616,6 @@ select.input {
 	background: color-mix(in srgb, var(--df-surface-well) 55%, var(--df-surface-card));
 	border-radius: 0 0 var(--r-lg) var(--r-lg);
 	flex-wrap: wrap;
-}
-
-/* --------------------------------------------------------------------------
-   definition lists
-   -------------------------------------------------------------------------- */
-
-.kv {
-	display: grid;
-	grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
-	gap: 9px var(--df-p-space-3);
-	align-items: baseline;
-	font-size: var(--df-p-text-base);
-}
-
-.kv dt {
-	font-family: var(--df-p-font-mono);
-	font-size: 10px;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--df-text-meta);
-}
-
-.kv dd {
-	margin: 0;
-	overflow-wrap: anywhere;
 }
 
 /* --------------------------------------------------------------------------
