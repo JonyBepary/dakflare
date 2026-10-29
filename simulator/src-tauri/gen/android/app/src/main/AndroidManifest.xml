@@ -22,6 +22,15 @@
         cannot open a push. Requested once at runtime on Android 13+.
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+        M5.3: the gateway's offline drain is a foreground service. The type is
+        `remoteMessaging` (an SMS gateway is that category), which is one of the
+        types Android 15 still allows to start from BOOT_COMPLETED.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- Bring the service back after a reboot; BootReceiver starts it only when paired. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -85,6 +94,30 @@
             <intent-filter>
                 <action android:name="android.provider.Telephony.SMS_DELIVER" />
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            M5.3: one low-importance foreground service drains pending rows while
+            the process lives. Not on the receive path for a single SMS — the
+            receiver is enough — so the notification is not required to receive.
+            `remoteMessaging` is the platform's own category for this work.
+        -->
+        <service
+            android:name="dev.dakflare.simulator.bridge.GatewayService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <!--
+            Reboot survival. The receiver checks the local store for a paired
+            identity and does nothing when there is none; exported=false is
+            enough because BOOT_COMPLETED is a protected system broadcast.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 

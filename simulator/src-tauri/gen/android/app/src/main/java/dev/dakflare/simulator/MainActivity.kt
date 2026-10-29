@@ -17,6 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import dev.dakflare.simulator.bridge.AppVisibility
+import dev.dakflare.simulator.bridge.GatewayService
 import dev.dakflare.simulator.bridge.NativeBridge
 import dev.dakflare.simulator.bridge.SmsNotifier
 import dev.dakflare.simulator.bridge.SmsRoute
@@ -67,6 +68,11 @@ class MainActivity : TauriActivity() {
     // push. The result is recorded in the `permissions` fact.
     SmsNotifier.ensureChannel(this)
     requestRuntimePermissions()
+
+    // M5.3: the foreground service owns the offline drain. It starts only when
+    // this store holds a paired identity, and starting it is best effort — the
+    // UI must open even when the platform refuses a background start.
+    GatewayService.sync(this)
   }
 
   /** SMS pair first, then the one-time notification request; both end in facts. */
@@ -135,6 +141,12 @@ class MainActivity : TauriActivity() {
     super.onResume()
     AppVisibility.foreground = true
     writeDefaultSmsFact()
+
+    // `delete_device` / `revoke_device` are Rust commands with no Kotlin call
+    // site, so returning to the UI is the earliest point the shell can notice
+    // that the identity is gone and stop the service. The service's own loop
+    // rechecks the identity as the backstop.
+    GatewayService.sync(this)
   }
 
   /**

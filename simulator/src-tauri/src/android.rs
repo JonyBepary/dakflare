@@ -303,6 +303,67 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
     to_jstring(&mut env, json)
 }
 
+/// `dev.dakflare.simulator.bridge.NativeBridge.hasIdentity`
+///
+/// Reports the paired identity in this store:
+/// `{"ok":true,"device_id":"…"}` or
+/// `{"ok":false,"error":"bad_input"|"unpaired"|"storage"}`.
+///
+/// The gateway service needs the id to flush, while the boot receiver and the
+/// UI only need yes/no; one call answers both. A device row without a private
+/// key is not a usable identity and is reported as `unpaired`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_hasIdentity(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match java_string(&mut env, &app_dir) {
+            Ok(app_dir) => {
+                if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+                    return error_json("bad_input");
+                }
+
+                let identity = open_store_blocking(&app_dir).and_then(|store| {
+                    tauri::async_runtime::block_on(async {
+                        let Some(device) =
+                            store.latest_device().await.map_err(|_| "storage")?
+                        else {
+                            return Err("unpaired");
+                        };
+                        let key = store
+                            .private_key(&device.device_id)
+                            .await
+                            .map_err(|_| "storage")?;
+                        if key.is_none() {
+                            return Err("unpaired");
+                        }
+                        Ok::<String, &'static str>(device.device_id)
+                    })
+                });
+
+                match identity {
+                    Ok(device_id) => serde_json::json!({
+                        "ok": true,
+                        "device_id": device_id,
+                    })
+                    .to_string(),
+                    Err(code) => error_json(code),
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] hasIdentity panicked");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
 /// Decode arguments, run the blocking call and render JSON. Both guards end as
 /// the same `storage` error, so a panic can never unwind across JNI.
 fn guarded(

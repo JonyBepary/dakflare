@@ -82,6 +82,17 @@ object NativeBridge {
     external fun flushPending(appDir: String, deviceId: String): String
 
     /**
+     * The paired identity in this store, if there is one.
+     *
+     * Returns `{"ok":true,"device_id":"…"}` or
+     * `{"ok":false,"error":"bad_input"|"unpaired"|"storage"}`. The gateway
+     * service needs the id to flush, and both the boot receiver and the UI need
+     * the yes/no answer; one small call gives both without a second symbol.
+     */
+    @JvmStatic
+    external fun hasIdentity(appDir: String): String
+
+    /**
      * Persist one whitelisted handset fact (`self_number`, `sim_slot`,
      * `sim_carrier`, `permissions`, `battery_optimized`, `default_sms_app`).
      *
@@ -326,6 +337,30 @@ object NativeBridge {
         } catch (error: Throwable) {
             Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
             false
+        }
+    }
+
+    /**
+     * The paired device id, or `null` when this store has no identity.
+     *
+     * Never throws: a missing symbol or a store error degrades to "not paired",
+     * which keeps the gateway off rather than starting a service that cannot
+     * flush. Only the exception class is logged.
+     */
+    fun identitySafely(appDir: String): String? {
+        if (loadFailure != null) return null
+        if (appDir.isEmpty()) return null
+
+        return try {
+            val parsed = JSONObject(hasIdentity(appDir))
+            if (!parsed.optBoolean("ok")) null
+            else parsed.optString("device_id").ifEmpty { null }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "hasIdentity symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "hasIdentity failed: ${error.javaClass.simpleName}")
+            null
         }
     }
 

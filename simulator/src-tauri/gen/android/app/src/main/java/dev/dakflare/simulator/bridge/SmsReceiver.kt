@@ -106,6 +106,13 @@ class SmsReceiver : BroadcastReceiver() {
                 continue
             }
 
+            // M5.3: a successful store proves the phone is paired, so ask the
+            // foreground service to take over the drain when this broadcast's
+            // own flush would outlive the receiver budget. Best effort only: a
+            // platform or OEM refusal must not cost the message, so `start`
+            // catches everything and logs just the exception class.
+            GatewayService.start(context)
+
             // The store succeeded, so the message is safe before the provider is
             // touched. The write is best effort and time-bounded: a wedged
             // provider must not keep an ordered SMS_DELIVER alive past budget.
