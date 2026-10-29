@@ -572,7 +572,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_hasIdenti
                         let key = store
                             .private_key(&device.device_id)
                             .await
-                            .map_err(|_| "storage")?;
+                            .map_err(map_store_error)?;
                         if key.is_none() {
                             return Err("unpaired");
                         }
@@ -977,10 +977,18 @@ fn incoming_blocking(
 
 /// The one place a receiver opens the store. Both the inbound and the state
 /// mark path use it, so they always resolve the same database file.
+///
+/// The Keystore cipher is installed here too: this is the coldest entry point in
+/// the app (a broadcast with no Activity), and an identity stored by an older
+/// build is wrapped before the caller can sign with it.
 fn open_store_blocking(app_dir: &str) -> Result<Store, &'static str> {
     let dir = Path::new(app_dir);
     std::fs::create_dir_all(dir).map_err(|_| "storage")?;
-    tauri::async_runtime::block_on(Store::open(dir.join(DB_FILE))).map_err(|_| "storage")
+    tauri::async_runtime::block_on(Store::open_with_cipher(
+        dir.join(DB_FILE),
+        std::sync::Arc::new(crate::vault::JniKeyCipher),
+    ))
+    .map_err(|_| "storage")
 }
 
 fn mark_blocking(
@@ -1120,7 +1128,7 @@ fn signed_client_blocking(store: &Store, device_id: &str) -> Result<DeviceClient
         let private_key = store
             .private_key(device_id)
             .await
-            .map_err(|_| "storage")?
+            .map_err(map_store_error)?
             .ok_or("unpaired")?;
 
         let target = Target::new(base_url, admin_token).map_err(|_| "storage")?;
@@ -1149,6 +1157,7 @@ fn map_carrier_error(error: CarrierError) -> &'static str {
     match error {
         CarrierError::Unpaired => "unpaired",
         CarrierError::InvalidInput(_) => "bad_input",
+        CarrierError::Store(StoreError::KeyLocked) => "locked",
         CarrierError::Store(_) | CarrierError::Protocol(_) => "storage",
     }
 }
@@ -1160,6 +1169,7 @@ fn map_network_error(error: CarrierError) -> &'static str {
     match error {
         CarrierError::Unpaired => "unpaired",
         CarrierError::InvalidInput(_) => "bad_input",
+        CarrierError::Store(StoreError::KeyLocked) => "locked",
         CarrierError::Store(_) => "storage",
         CarrierError::Protocol(ProtocolError::Http(_) | ProtocolError::Url(_)) => "network",
         CarrierError::Protocol(_) => "protocol",
@@ -1171,10 +1181,25 @@ fn map_store_error(error: StoreError) -> &'static str {
         StoreError::InvalidState(_) => "bad_input",
         StoreError::InvalidDeviceId(_) => "bad_input",
         StoreError::InvalidFact(_) => "bad_input",
+        // A wrapped key without its wrapping key (or a blob that does not
+        // authenticate). Distinct from `unpaired` so the log names the real
+        // reason, and never retried as a network fault.
+        StoreError::KeyLocked => "locked",
+        StoreError::Vault(_) => "storage",
         StoreError::Database(_) | StoreError::Corrupt(_) | StoreError::Clock => "storage",
     }
 }
 
 fn error_json(code: &'static str) -> String {
+    // `locked` carries the sentence the phone must show, so Kotlin can log the
+    // real reason without inventing one. Everything else stays a bare code.
+    if code == "locked" {
+        return serde_json::json!({
+            "ok": false,
+            "error": code,
+            "message": dakflare_core::UNLOCK_ERROR,
+        })
+        .to_string();
+    }
     serde_json::json!({ "ok": false, "error": code }).to_string()
 }

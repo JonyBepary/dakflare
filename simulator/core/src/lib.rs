@@ -8,6 +8,7 @@ pub mod carrier;
 pub mod db;
 pub mod flowrun;
 pub mod identity;
+pub mod keyvault;
 pub mod protocol;
 
 pub use carrier::{
@@ -21,8 +22,10 @@ pub use db::{
 };
 pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
 pub use identity::{
-    Identity, IdentityError, generate_identity, is_valid_device_id, sign_p1363, verify_p1363,
+    Identity, IdentityError, generate_identity, is_valid_device_id, public_key_spki_b64,
+    sign_p1363, verify_p1363,
 };
+pub use keyvault::{KEYSTORE_PREFIX, KeyCipher, KeyVaultError, UNLOCK_ERROR};
 pub use protocol::{
     DeviceClient, InboundMessage, PairLink, PairLinkError, PairRequest, ProtocolError,
     SignedHeaders, Target, canonical_string, parse_pair_link, sign_request,

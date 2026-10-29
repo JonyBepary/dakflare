@@ -20,6 +20,10 @@ use tauri::{Manager, State};
 #[cfg(target_os = "android")]
 mod android;
 
+/// Android Keystore bridge for the identity vault. Not compiled on desktop.
+#[cfg(target_os = "android")]
+mod vault;
+
 struct AppState {
     store: Arc<Store>,
 }
@@ -815,10 +819,22 @@ pub fn run() {
 
             // Opening the store is async; setup runs before the event loop, so a
             // blocking open here is simpler than racing the UI against a lazy DB.
-            let store = tauri::async_runtime::block_on(Store::open(dir.join("simulator.db")))
-                .map_err(|e| {
-                    std::io::Error::other(format!("could not open local database: {e}"))
-                })?;
+            //
+            // On Android the store is opened with the Keystore cipher, so any
+            // plaintext key left by an older build is wrapped in place (and
+            // proven) before a single command can sign with it.
+            let db_path = dir.join("simulator.db");
+            #[cfg(target_os = "android")]
+            let store = tauri::async_runtime::block_on(Store::open_with_cipher(
+                db_path,
+                Arc::new(vault::JniKeyCipher),
+            ))
+            .map_err(|e| std::io::Error::other(format!("could not open local database: {e}")))?;
+
+            #[cfg(not(target_os = "android"))]
+            let store = tauri::async_runtime::block_on(Store::open(db_path)).map_err(|e| {
+                std::io::Error::other(format!("could not open local database: {e}"))
+            })?;
 
             app.manage(AppState {
                 store: Arc::new(store),

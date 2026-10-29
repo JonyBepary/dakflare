@@ -38,6 +38,10 @@ import org.json.JSONObject
  */
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    // Cache the Keystore bridge *before* super.onCreate(): Tauri's setup opens
+    // the store there, and that open is where a legacy plaintext identity key is
+    // wrapped and proven. The vault needs the JVM + class reference to do it.
+    KeyVault.install()
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
 

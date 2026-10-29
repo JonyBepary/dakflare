@@ -1,6 +1,7 @@
 package dev.dakflare.simulator.bridge
 
 import android.util.Log
+import dev.dakflare.simulator.KeyVault
 import org.json.JSONObject
 
 /**
@@ -26,6 +27,19 @@ object NativeBridge {
         // without the native library still starts the app.
         Log.e(TAG, "simulator_lib unavailable: ${error.javaClass.simpleName}")
         error
+    }
+
+    /**
+     * Cache the Keystore bridge once the library is in memory.
+     *
+     * Every receiver/service/UI path reaches Rust through this object, so this
+     * is the earliest guaranteed point for a process that starts with no
+     * Activity (an SMS broadcast or BOOT_COMPLETED). Without it the identity key
+     * cannot be unwrapped and every signed request fails closed.
+     */
+    private val vaultReady: Boolean = run {
+        if (loadFailure == null) KeyVault.install()
+        true
     }
 
     /**
@@ -559,8 +573,16 @@ object NativeBridge {
 
         return try {
             val parsed = JSONObject(hasIdentity(appDir))
-            if (!parsed.optBoolean("ok")) null
-            else parsed.optString("device_id").ifEmpty { null }
+            if (!parsed.optBoolean("ok")) {
+                // `locked` is the one answer that is not "not paired": the row
+                // exists but the Keystore key cannot open it. Say so, because
+                // the gateway then stays off and never signs unsigned.
+                Log.w(
+                    TAG,
+                    "hasIdentity: ${parsed.optString("error")} ${parsed.optString("message")}".trim(),
+                )
+                null
+            } else parsed.optString("device_id").ifEmpty { null }
         } catch (error: UnsatisfiedLinkError) {
             Log.e(TAG, "hasIdentity symbol missing: ${error.javaClass.simpleName}")
             null

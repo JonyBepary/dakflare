@@ -6,6 +6,7 @@
 //! on one side and a Rust one on the other.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{Builder, Database, params};
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::flowrun::{FlowRunReport, RemoteFlow};
 use crate::identity::{Identity, is_valid_device_id};
+use crate::keyvault::{self, KeyCipher, UNLOCK_ERROR};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -28,6 +30,15 @@ pub enum StoreError {
     InvalidFact(String),
     #[error("time went backwards")]
     Clock,
+    /// A `keystore:v1:` blob with no wrapping key, a tampered blob, or a cipher
+    /// that refused. Never downgraded to plaintext and never ignored: the
+    /// signing path must stop instead of sending an unsigned request.
+    #[error("{UNLOCK_ERROR}")]
+    KeyLocked,
+    /// The wrapping key exists but the platform could not encrypt (or the
+    /// round-trip proof failed). The old plaintext value is left in place.
+    #[error("the device key cannot be protected on this phone: {0}")]
+    Vault(String),
 }
 
 /// Facts the native shell may report. Anything else is refused, so a caller
@@ -242,13 +253,48 @@ pub struct DeviceFacts {
 
 pub struct Store {
     db: Database,
+    /// `Some` on Android, where a non-exportable Keystore key can wrap the
+    /// identity. `None` on desktop, which keeps the plaintext column.
+    cipher: Option<Arc<dyn KeyCipher>>,
 }
 
 impl Store {
     /// Open (or create) the database and bring the schema up to date.
+    ///
+    /// No wrapping cipher: this is the desktop path and the store keeps the
+    /// PKCS#8 column exactly as it always has. Android uses
+    /// [`Store::open_with_cipher`].
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_inner(path, None).await
+    }
+
+    /// Open the store with the platform's at-rest wrapping key.
+    ///
+    /// Every plaintext key already in the file is wrapped before the caller
+    /// gets the store. Migration is best effort by design: a Keystore that
+    /// cannot produce the key must not brick a phone that can still sign, so
+    /// the failure is logged and retried by the next open (and by
+    /// [`Store::private_key`]). A value that is *already* wrapped is the
+    /// opposite case — it fails closed, never back to plaintext.
+    pub async fn open_with_cipher(
+        path: impl AsRef<Path>,
+        cipher: Arc<dyn KeyCipher>,
+    ) -> Result<Self, StoreError> {
+        let store = Self::open_inner(path, Some(cipher)).await?;
+        match store.migrate_device_keys().await {
+            Ok(0) => {}
+            Ok(count) => eprintln!("[vault] wrapped {count} device key(s) at rest"),
+            Err(error) => eprintln!("[vault] key migration deferred: {error}"),
+        }
+        Ok(store)
+    }
+
+    async fn open_inner(
+        path: impl AsRef<Path>,
+        cipher: Option<Arc<dyn KeyCipher>>,
+    ) -> Result<Self, StoreError> {
         let db = Builder::new_local(path.as_ref()).build().await?;
-        let store = Self { db };
+        let store = Self { db, cipher };
         store.migrate().await?;
         Ok(store)
     }
@@ -301,12 +347,27 @@ impl Store {
     }
 
     /// Create a device with a freshly generated P-256 identity.
+    ///
+    /// With a cipher installed the private half is wrapped and proven before
+    /// the row is written, so a fresh install never puts plaintext on disk.
     pub async fn create_device(&self, new: NewDevice<'_>) -> Result<(Device, Identity), StoreError> {
         let identity = crate::identity::generate_identity()
             .map_err(|e| StoreError::InvalidDeviceId(e.to_string()))?;
         if !is_valid_device_id(&identity.device_id) {
             return Err(StoreError::InvalidDeviceId(identity.device_id));
         }
+
+        let stored_key = match &self.cipher {
+            Some(cipher) => {
+                self.wrap_and_prove(
+                    cipher.as_ref(),
+                    &identity.private_key_pkcs8_pem,
+                    &identity.public_key_spki_b64,
+                )
+                .await?
+            }
+            None => identity.private_key_pkcs8_pem.clone(),
+        };
 
         let now = now_ms()?;
         let conn = self.db.connect()?;
@@ -318,7 +379,7 @@ impl Store {
             params![
                 identity.device_id.clone(),
                 identity.public_key_spki_b64.clone(),
-                identity.private_key_pkcs8_pem.clone(),
+                stored_key,
                 new.platform,
                 new.platform_id,
                 new.label,
@@ -443,18 +504,172 @@ impl Store {
         }
     }
 
-    /// Private key for signing. Simulator-only API surface.
+    /// The PKCS#8 PEM used to sign, resolved from the stored value.
+    ///
+    /// This is the one place the plaintext exists on the Android build: it is
+    /// returned for the lifetime of the `DeviceClient` that asked for it and
+    /// dropped with it. There is no plaintext on disk because:
+    ///
+    /// * a `keystore:v1:` blob is unwrapped through the platform key, and a
+    ///   missing or invalid key is [`StoreError::KeyLocked`] — never a
+    ///   plaintext fallback;
+    /// * a legacy plaintext value is wrapped, proven and overwritten here on
+    ///   first use (also attempted for every row on open), so a phone that
+    ///   already held a key migrates without a new device id or re-pairing.
+    ///
+    /// A failed wrap leaves the legacy value usable and is logged: the phone
+    /// keeps signing while the migration is retried. Only a *wrapped* value
+    /// that cannot be unwrapped is fatal.
     pub async fn private_key(&self, device_id: &str) -> Result<Option<String>, StoreError> {
+        let Some((stored, spki)) = self.stored_key(device_id).await? else {
+            return Ok(None);
+        };
+
+        if keyvault::is_wrapped(&stored) {
+            let cipher = self.cipher.as_deref().ok_or(StoreError::KeyLocked)?;
+            return keyvault::unwrap(cipher, &stored)
+                .map(Some)
+                .map_err(|_| StoreError::KeyLocked);
+        }
+
+        // Legacy plaintext: still the value we can sign with, but wrap it now.
+        if let Some(cipher) = self.cipher.clone() {
+            match self
+                .wrap_plaintext_key(cipher.as_ref(), device_id, &spki, &stored)
+                .await
+            {
+                Ok(true) => self.compact().await,
+                Ok(false) => {}
+                Err(error) => eprintln!("[vault] key not wrapped yet: {error}"),
+            }
+        }
+
+        Ok(Some(stored))
+    }
+
+    /// Wrap every plaintext key in this store. Returns how many rows changed.
+    ///
+    /// Idempotent: an already-wrapped row is skipped, and a lost compare-and-
+    /// swap (another writer wrapped it first) is a no-op rather than an error.
+    /// A row whose round-trip proof fails is left untouched, so a crash or a
+    /// bad wrap can never cost the identity.
+    pub async fn migrate_device_keys(&self) -> Result<usize, StoreError> {
+        let Some(cipher) = self.cipher.clone() else {
+            return Ok(0);
+        };
+
         let conn = self.db.connect()?;
         let mut rows = conn
             .query(
-                "SELECT private_key_pkcs8 FROM devices WHERE device_id = ?",
+                "SELECT device_id, public_key_spki, private_key_pkcs8 FROM devices",
+                (),
+            )
+            .await?;
+        let mut plaintext = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let device_id: String = row.get(0)?;
+            let spki: String = row.get(1)?;
+            let stored: String = row.get(2)?;
+            if !keyvault::is_wrapped(&stored) {
+                plaintext.push((device_id, spki, stored));
+            }
+        }
+        drop(rows);
+        drop(conn);
+
+        let mut migrated = 0;
+        for (device_id, spki, stored) in plaintext {
+            if self
+                .wrap_plaintext_key(cipher.as_ref(), &device_id, &spki, &stored)
+                .await?
+            {
+                migrated += 1;
+            }
+        }
+        if migrated > 0 {
+            self.compact().await;
+        }
+        Ok(migrated)
+    }
+
+    /// Read the stored key column and the SPKI it must match.
+    async fn stored_key(&self, device_id: &str) -> Result<Option<(String, String)>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT private_key_pkcs8, public_key_spki FROM devices WHERE device_id = ?",
                 params![device_id],
             )
             .await?;
         match rows.next().await? {
-            Some(row) => Ok(Some(row.get(0)?)),
+            Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
             None => Ok(None),
+        }
+    }
+
+    /// Wrap `plaintext`, prove the round-trip and only then overwrite the row.
+    ///
+    /// The UPDATE is the commit point: a process that dies before it leaves the
+    /// old value in place, and the compare-and-swap means a concurrent writer
+    /// cannot be overwritten with a second (still valid) wrap.
+    async fn wrap_plaintext_key(
+        &self,
+        cipher: &dyn KeyCipher,
+        device_id: &str,
+        spki: &str,
+        plaintext: &str,
+    ) -> Result<bool, StoreError> {
+        let wrapped = self.wrap_and_prove(cipher, plaintext, spki).await?;
+
+        let conn = self.db.connect()?;
+        let affected = conn
+            .execute(
+                "UPDATE devices SET private_key_pkcs8 = ?
+                  WHERE device_id = ? AND private_key_pkcs8 = ?",
+                params![wrapped, device_id, plaintext],
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
+    /// Encrypt `plaintext` and unwrap it back, refusing unless the recovered
+    /// key's public half is exactly the stored SPKI.
+    async fn wrap_and_prove(
+        &self,
+        cipher: &dyn KeyCipher,
+        plaintext: &str,
+        spki: &str,
+    ) -> Result<String, StoreError> {
+        let wrapped =
+            keyvault::wrap(cipher, plaintext).map_err(|e| StoreError::Vault(e.to_string()))?;
+        let recovered =
+            keyvault::unwrap(cipher, &wrapped).map_err(|e| StoreError::Vault(e.to_string()))?;
+        let derived = crate::identity::public_key_spki_b64(&recovered)
+            .map_err(|e| StoreError::Vault(e.to_string()))?;
+        if derived != spki {
+            return Err(StoreError::Vault(
+                "round-trip does not match the stored public key".into(),
+            ));
+        }
+        Ok(wrapped)
+    }
+
+    /// Rewrite the file after a migration so no stale page or WAL frame still
+    /// holds the old PEM. Best effort: a database that cannot compact is still
+    /// correct, only larger.
+    ///
+    /// VACUUM rebuilds every page from live rows; the checkpoint that follows
+    /// leaves an empty WAL, which is what makes `strings simulator.db` (and the
+    /// whole app directory) free of `BEGIN PRIVATE KEY`.
+    async fn compact(&self) {
+        let Ok(conn) = self.db.connect() else {
+            return;
+        };
+        if conn.execute("VACUUM", ()).await.is_err() {
+            return;
+        }
+        if let Ok(mut rows) = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+            while let Ok(Some(_)) = rows.next().await {}
         }
     }
 
@@ -1481,6 +1696,303 @@ mod tests {
             crate::identity::verify_p1363(&device.public_key_spki, canonical, &signature).unwrap()
         );
         assert_eq!(identity.device_id, device.device_id);
+    }
+
+    /* ------------------------------------------------------- identity vault */
+
+    use crate::keyvault::testing::StubCipher;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    async fn raw_key(store: &Store, device_id: &str) -> String {
+        let conn = store.db.connect().unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT private_key_pkcs8 FROM devices WHERE device_id = ?",
+                params![device_id],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
+    }
+
+    /// True when the database file (or either sidecar) still contains the PEM
+    /// header. This is the `strings simulator.db | grep BEGIN PRIVATE KEY`
+    /// check, run against every file SQLite may keep.
+    fn pem_on_disk(path: &std::path::Path) -> bool {
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+            if let Ok(bytes) = std::fs::read(&candidate) {
+                if bytes.windows(17).any(|window| window == b"BEGIN PRIVATE KEY") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Insert one device row with an explicit plaintext key. This is the shape
+    /// a phone that predates the vault has on disk.
+    async fn insert_plaintext(
+        store: &Store,
+        identity: &crate::identity::Identity,
+    ) -> crate::db::Device {
+        let conn = store.db.connect().unwrap();
+        conn.execute(
+            "INSERT INTO devices
+                (device_id, public_key_spki, private_key_pkcs8, platform, platform_id,
+                 label, carrier, sim_slot, created_at, updated_at)
+             VALUES (?, ?, ?, 'simulator', NULL, 'legacy', NULL, 0, 1, 1)",
+            params![
+                identity.device_id.clone(),
+                identity.public_key_spki_b64.clone(),
+                identity.private_key_pkcs8_pem.clone()
+            ],
+        )
+        .await
+        .unwrap();
+        store.get_device(&identity.device_id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn opening_with_a_cipher_wraps_an_existing_key_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let identity = crate::identity::generate_identity().unwrap();
+
+        {
+            let store = Store::open(&path).await.unwrap();
+            insert_plaintext(&store, &identity).await;
+            assert!(raw_key(&store, &identity.device_id)
+                .await
+                .starts_with("-----BEGIN PRIVATE KEY-----"));
+            assert!(pem_on_disk(&path));
+        }
+
+        // First Android open: the legacy row is wrapped, proven, overwritten.
+        let store = Store::open_with_cipher(
+            &path,
+            std::sync::Arc::new(StubCipher::new(0x5A)),
+        )
+        .await
+        .unwrap();
+
+        let stored = raw_key(&store, &identity.device_id).await;
+        assert!(stored.starts_with(crate::keyvault::KEYSTORE_PREFIX));
+        assert!(crate::keyvault::parse(&stored).is_ok());
+        assert!(!pem_on_disk(&path), "the plaintext key is still on disk");
+
+        // Same device id, same SPKI: no re-enrolment, only the at-rest form
+        // changed.
+        let device = store.get_device(&identity.device_id).await.unwrap().unwrap();
+        assert_eq!(device.public_key_spki, identity.public_key_spki_b64);
+
+        // The key still signs, and the signature verifies against the stored
+        // public half.
+        let pem = store.private_key(&identity.device_id).await.unwrap().unwrap();
+        assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        let canonical = "POST\n/v1/sms/outgoing/poll\n1776470400000\nabc\ne3b0";
+        let signature = crate::identity::sign_p1363(&pem, canonical).unwrap();
+        assert!(
+            crate::identity::verify_p1363(&device.public_key_spki, canonical, &signature).unwrap()
+        );
+
+        // One-way: a second pass finds nothing to do and rewrites nothing.
+        let before = raw_key(&store, &identity.device_id).await;
+        assert_eq!(store.migrate_device_keys().await.unwrap(), 0);
+        assert_eq!(raw_key(&store, &identity.device_id).await, before);
+    }
+
+    #[tokio::test]
+    async fn a_device_created_with_a_cipher_is_never_written_in_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let store = Store::open_with_cipher(
+            &path,
+            std::sync::Arc::new(StubCipher::new(0x33)),
+        )
+        .await
+        .unwrap();
+
+        let (device, identity) = store
+            .create_device(NewDevice {
+                label: "fresh",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let stored = raw_key(&store, &device.device_id).await;
+        assert!(stored.starts_with(crate::keyvault::KEYSTORE_PREFIX));
+        assert!(!pem_on_disk(&path));
+        assert_eq!(device.public_key_spki, identity.public_key_spki_b64);
+
+        let pem = store.private_key(&device.device_id).await.unwrap().unwrap();
+        assert_eq!(pem, identity.private_key_pkcs8_pem);
+    }
+
+    #[tokio::test]
+    async fn a_wrapped_key_without_its_cipher_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let identity = crate::identity::generate_identity().unwrap();
+
+        {
+            let store = Store::open(&path).await.unwrap();
+            insert_plaintext(&store, &identity).await;
+        }
+        {
+            let store = Store::open_with_cipher(
+                &path,
+                std::sync::Arc::new(StubCipher::new(0x5A)),
+            )
+            .await
+            .unwrap();
+            assert!(store
+                .private_key(&identity.device_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .starts_with("-----BEGIN PRIVATE KEY-----"));
+        }
+
+        // A desktop build has no Keystore, and a phone that lost its key looks
+        // the same: a wrapped blob with no way to open it.
+        let store = Store::open(&path).await.unwrap();
+        let error = store.private_key(&identity.device_id).await.unwrap_err();
+        assert!(matches!(error, StoreError::KeyLocked));
+        assert_eq!(
+            error.to_string(),
+            "The device key cannot be unlocked on this phone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blob_from_a_different_wrapping_key_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let identity = crate::identity::generate_identity().unwrap();
+
+        {
+            let store = Store::open(&path).await.unwrap();
+            insert_plaintext(&store, &identity).await;
+        }
+        {
+            let store = Store::open_with_cipher(
+                &path,
+                std::sync::Arc::new(StubCipher::new(0x5A)),
+            )
+            .await
+            .unwrap();
+            store.private_key(&identity.device_id).await.unwrap();
+        }
+
+        // The Keystore entry was deleted or never restored from a backup; the
+        // platform now has a different key. Never fall back to anything.
+        let store = Store::open_with_cipher(
+            &path,
+            std::sync::Arc::new(StubCipher::new(0x01)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            store.private_key(&identity.device_id).await,
+            Err(StoreError::KeyLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tampered_blob_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let identity = crate::identity::generate_identity().unwrap();
+
+        {
+            let store = Store::open(&path).await.unwrap();
+            insert_plaintext(&store, &identity).await;
+        }
+        let store = Store::open_with_cipher(
+            &path,
+            std::sync::Arc::new(StubCipher::new(0x5A)),
+        )
+        .await
+        .unwrap();
+
+        // Flip one bit of the ciphertext, leaving the framing intact.
+        let stored = raw_key(&store, &identity.device_id).await;
+        let fields: Vec<&str> = stored.split(':').collect();
+        assert_eq!(fields.len(), 4);
+        let mut ciphertext = STANDARD.decode(fields[3]).unwrap();
+        ciphertext[0] ^= 0x01;
+        let tampered = format!(
+            "keystore:v1:{}:{}",
+            fields[2],
+            STANDARD.encode(&ciphertext)
+        );
+        {
+            let conn = store.db.connect().unwrap();
+            conn.execute(
+                "UPDATE devices SET private_key_pkcs8 = ? WHERE device_id = ?",
+                params![tampered, identity.device_id.as_str()],
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(matches!(
+            store.private_key(&identity.device_id).await,
+            Err(StoreError::KeyLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_round_trip_leaves_the_old_key_usable() {
+        /// Encrypts, then refuses to decrypt: the equivalent of a Keystore that
+        /// accepted the wrap but cannot return the same bytes.
+        struct BrokenCipher(StubCipher);
+
+        impl KeyCipher for BrokenCipher {
+            fn encrypt(&self, plaintext: &str) -> Result<(String, String), crate::keyvault::KeyVaultError> {
+                self.0.encrypt(plaintext)
+            }
+            fn decrypt(
+                &self,
+                _iv_b64: &str,
+                _ciphertext_b64: &str,
+            ) -> Result<String, crate::keyvault::KeyVaultError> {
+                Err(crate::keyvault::KeyVaultError::Invalid)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let identity = crate::identity::generate_identity().unwrap();
+        {
+            let store = Store::open(&path).await.unwrap();
+            insert_plaintext(&store, &identity).await;
+        }
+
+        let store = Store::open_with_cipher(
+            &path,
+            std::sync::Arc::new(BrokenCipher(StubCipher::new(0x5A))),
+        )
+        .await
+        .unwrap();
+
+        // Open swallowed the failure; the migration itself reports it...
+        assert!(store.migrate_device_keys().await.is_err());
+        // ...and the row still holds the exact plaintext it started with.
+        assert_eq!(
+            raw_key(&store, &identity.device_id).await,
+            identity.private_key_pkcs8_pem
+        );
+        // A phone in this state keeps working while the next open retries.
+        assert_eq!(
+            store.private_key(&identity.device_id).await.unwrap().unwrap(),
+            identity.private_key_pkcs8_pem
+        );
     }
 
     #[tokio::test]
