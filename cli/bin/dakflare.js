@@ -1311,6 +1311,11 @@ async function commandSend(argv) {
 
 /* ───────────────────────────── audit ───────────────────────────── */
 
+/** The console's own invite URL — clickable in any browser, unlike the app scheme. */
+function webInvite(base, token) {
+  return `${base.replace(/\/+$/, '')}/admin/invite?code=${encodeURIComponent(token)}`;
+}
+
 async function commandAuth(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('auth');
@@ -1337,17 +1342,25 @@ async function commandAuthBootstrap(argv) {
 
   const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email, role: 'owner' });
   if (result.status === 409) {
-    const message = 'an owner already exists on this deployment';
-    if (json) out(JSON.stringify({ ok: false, error: 'owner_exists' }, null, 2));
-    else out(message);
+    const reason = result.data?.error === 'already_registered' ? 'that address already has an account' : 'an owner already exists on this deployment';
+    if (json) out(JSON.stringify({ ok: false, error: result.data?.error ?? 'owner_exists' }, null, 2));
+    else out(reason);
     return 1;
   }
   if (result.status !== 200) throw requestFailure('bootstrap', result);
 
-  if (json) out(JSON.stringify({ ok: true, email, role: 'owner' }, null, 2));
+  // The first owner is an invite, not an account: an account with no credential
+  // has no way to obtain one once the flag flips. Redeeming creates it.
+  const token = result.data?.token ?? null;
+  const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
+  if (json) out(JSON.stringify({ ok: true, email, role: 'owner', link }, null, 2));
   else {
-    out(`Owner created: ${email}`);
-    out('  next: open the console and enrol a passkey, or `dakflare auth invite` another operator.');
+    out(`Owner invite for ${email}`);
+    if (link) {
+      out(`  open           ${webInvite(cfg.url, token)}`);
+      out(`  app            ${link}`);
+    } else out('  link           not returned; re-run this command for a fresh one');
+    out('  next           open the link, redeem it, then create a passkey.');
   }
   return 0;
 }
@@ -1384,8 +1397,10 @@ async function commandAuthInvite(argv) {
     out(JSON.stringify({ ok: true, email, role, link, expires_in: ttlSeconds }, null, 2));
   } else {
     out(`Invite for ${email} (${role})`);
-    if (link) out(`  link           ${link}`);
-    else out('  link           not returned by this deployment; use `dakflare auth invites`');
+    if (link) {
+      out(`  open           ${webInvite(cfg.url, token)}`);
+      out(`  app            ${link}`);
+    } else out('  link           not returned by this deployment; use `dakflare auth invites`');
     out(`  expires        in ${ttlSeconds} seconds`);
   }
   return 0;

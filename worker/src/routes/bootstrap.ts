@@ -1,11 +1,17 @@
 /**
- * `POST /v1/admin/bootstrap` — the first owner, for `dakflare init` (AUTH_PLAN §4).
+ * `POST /v1/admin/bootstrap` — the first owner, for `dakflare` (AUTH_PLAN §4).
  *
  * ADMIN_TOKEN only: this route never accepts a session cookie, because its whole
- * purpose is to exist before any user does. It creates a user with `role=owner`
- * and NO credential; the owner then enrols a passkey from the console. Refused
- * once an owner exists in `AUTH_MODE=new`, so a leaked machine token cannot mint
- * a second owner after the ladder is live.
+ * purpose is to exist before any user does.
+ *
+ * It mints an **owner invite** rather than creating a user. A user created here
+ * would have no credential and, once `AUTH_MODE=new`, no way to obtain one — the
+ * console has no password field by design and `state` invites refuse an address
+ * that already has an account. One path in instead: redeem the invite, create the
+ * account, enrol a passkey.
+ *
+ * Refused once an owner exists in `AUTH_MODE=new`, so a leaked machine token
+ * cannot mint a second owner after the ladder is live.
  */
 
 import type { Env } from "../index";
@@ -13,7 +19,12 @@ import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { authMode, MAX_BODY_BYTES } from "../lib/config";
-import { normalizeEmail } from "../lib/invites";
+import {
+  clampInviteTtlSeconds,
+  hashInviteToken,
+  mintInviteToken,
+  normalizeEmail,
+} from "../lib/invites";
 
 export async function handleBootstrap(req: Request, env: Env): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
@@ -22,13 +33,9 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
   const email = normalizeEmail(parsed.value.email);
   if (email === null) return err("bad_request", 400);
 
-  const rawName = parsed.value.name;
-  const name =
-    typeof rawName === "string" && rawName.trim() !== ""
-      ? rawName.trim().slice(0, 120)
-      : email.split("@")[0] || email;
+  const mode = authMode(env);
 
-  if (authMode(env) === "new") {
+  if (mode === "new") {
     const owner = await env.DB.prepare(
       `SELECT 1 AS ok FROM "user" WHERE role = 'owner' LIMIT 1`
     ).first<{ ok: number }>();
@@ -37,6 +44,8 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
     }
   }
 
+  // An address that already has an account cannot bootstrap again — it already
+  // exists and needs an invite from an owner, not a second identity.
   const existing = await env.DB.prepare(`SELECT id FROM "user" WHERE email = ?`)
     .bind(email)
     .first<{ id: string }>();
@@ -44,22 +53,36 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
     return Response.json({ error: "already_registered", id: existing.id }, { status: 409 });
   }
 
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
+  // A rerun means "give me a working link". Only the hash of a token is stored,
+  // so an earlier open invite cannot be re-shown — it is replaced instead, which
+  // also revokes a link that may have leaked before the operator used it.
   await env.DB.prepare(
-    `INSERT INTO "user" (id, name, email, "emailVerified", image, "createdAt", "updatedAt", "twoFactorEnabled", role)
-     VALUES (?, ?, ?, 1, NULL, ?, ?, 0, 'owner')`
+    `DELETE FROM invite WHERE email = ? AND role = 'owner' AND used_at IS NULL`
   )
-    .bind(id, name, email, now, now)
+    .bind(email)
+    .run();
+
+  const ttlSeconds = clampInviteTtlSeconds(parsed.value.expires_in_s);
+  const token = mintInviteToken();
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  const expiresAt = now + ttlSeconds * 1000;
+
+  await env.DB.prepare(
+    `INSERT INTO invite (id, email, role, token_hash, expires_at, used_at, created_by, created_at)
+     VALUES (?, ?, 'owner', ?, ?, NULL, NULL, ?)`
+  )
+    .bind(id, email, await hashInviteToken(token), expiresAt, now)
     .run();
 
   await writeAudit(env, {
-    action: "user.bootstrap",
+    action: "invite.bootstrap",
     actor: { userId: null, label: "admin-token" },
     subject: id,
-    detail: { email, role: "owner", auth_mode: authMode(env) },
+    detail: { email, role: "owner", auth_mode: mode, expires_at: expiresAt },
     ...requestMeta(req),
   });
 
-  return Response.json({ ok: true, user: { id, email, name, role: "owner" } });
+  // The raw token appears here and nowhere else, ever.
+  return Response.json({ ok: true, id, email, role: "owner", expires_at: expiresAt, token });
 }
