@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DakFlare — warm console, direction preview</title>
+<style>
+  :root {
+    --bg: #FBF6EE;
+    --surface: #FFFDF8;
+    --surface-2: #F6EFE3;
+    --surface-3: #EDE3D3;
+    --ink: #241F1A;
+    --ink-2: #5B5348;
+    --ink-3: #6B6053;
+    --line: #E7DCCB;
+    --line-strong: #D3C4AC;
+    --accent: #B93F22;
+    --accent-fill: #C9482A;
+    --accent-soft: #FBE3DA;
+    --mint: #DDF3E4; --mint-ink: #1F6B45;
+    --sky: #DDEBFB; --sky-ink: #2A5488;
+    --butter: #FBEBC8; --butter-ink: #7A5310;
+    --peach: #FBE0D3; --peach-ink: #A33218;
+    --lilac: #E9E3FB; --lilac-ink: #4A3A8C;
+    --stone: #EDE7DC; --stone-ink: #5B5348;
+    --r-sm: 8px; --r: 12px; --r-lg: 20px; --r-xl: 28px;
+    --shadow-1: 0 1px 2px rgba(74,52,26,.06);
+    --shadow-2: 0 2px 4px rgba(74,52,26,.06), 0 12px 28px -18px rgba(74,52,26,.35);
+    --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--font-sans); font-size: 15px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- stage ---------- */
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  .frame {
+    display: grid; grid-template-columns: 248px minmax(0, 1fr);
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--r-xl); box-shadow: var(--shadow-2); overflow: hidden;
+    min-height: 780px;
+  }
+
+  /* ---------- sidebar ---------- */
+  .side { background: var(--surface-2); border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 16px; }
+  .brand-mark { width: 34px; height: 34px; border-radius: 11px; background: var(--accent-soft); display: grid; place-items: center; }
+  .brand-name { font-weight: 700; letter-spacing: -.01em; }
+  .brand-sub { font-size: 11px; color: var(--ink-3); }
+  .nav-label { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); padding: 10px 10px 4px; }
+  .nav a {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: var(--r);
+    color: var(--ink-2); text-decoration: none; font-size: 14px;
+    transition: background .16s ease, transform .16s ease;
+  }
+  .nav a:hover { background: var(--surface-3); transform: translateX(1px); }
+  .nav a[aria-current="page"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+  .nav a .pill { margin-left: auto; font-size: 11px; padding: 1px 7px; border-radius: 999px; }
+  .side-foot { margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--line); }
+
+  /* ---------- main ---------- */
+  main { min-width: 0; }
+  .top {
+    position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 14px;
+    padding: 14px 24px; background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+  }
+  .greet h1 { margin: 0; font-size: 26px; line-height: 1.15; letter-spacing: -.02em; font-weight: 650; }
+  .greet p { margin: 2px 0 0; color: var(--ink-3); font-size: 13px; }
+  .top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 13px; font-weight: 600;
+    padding: 8px 14px; border-radius: var(--r-sm); border: 1px solid var(--line-strong);
+    background: var(--surface); color: var(--ink); cursor: pointer;
+    transition: transform .09s ease-out, box-shadow .16s ease;
+  }
+  .btn:hover { box-shadow: var(--shadow-1); }
+  .btn:active { transform: scale(.97); }
+  .btn.primary { background: var(--accent-fill); border-color: transparent; color: #fff; }
+  .btn.ghost { border-color: transparent; background: transparent; }
+  .icon-btn {
+    width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center;
+    border: 1px solid var(--line); background: var(--surface); cursor: pointer;
+    transition: transform .09s ease-out;
+  }
+  .icon-btn:active { transform: scale(.94); }
+
+  .content { padding: 24px; display: grid; gap: 24px; }
+  .bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+    box-shadow: var(--shadow-1); padding: 18px; min-width: 0;
+    transition: transform .16s ease, box-shadow .16s ease;
+  }
+  .card.lift:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+  .span3 { grid-column: span 3; } .span4 { grid-column: span 4; }
+  .span6 { grid-column: span 6; } .span8 { grid-column: span 8; } .span12 { grid-column: span 12; }
+
+  .eyebrow { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 6px; }
+  .stat { display: flex; flex-direction: column; gap: 10px; }
+  .stat .num { font-size: 34px; line-height: 1; font-weight: 650; letter-spacing: -.03em; }
+  .stat .row { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+  .delta { font-size: 12px; font-weight: 600; }
+  .card.mint { background: var(--mint); border-color: transparent; }
+  .card.lilac { background: var(--lilac); border-color: transparent; }
+  .card.butter { background: var(--butter); border-color: transparent; }
+  .card.peach { background: var(--peach); border-color: transparent; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+  .chip.live { background: var(--mint); color: var(--mint-ink); }
+  .chip.synced { background: var(--sky); color: var(--sky-ink); }
+  .chip.stale { background: var(--butter); color: var(--butter-ink); }
+  .chip.offline { background: var(--peach); color: var(--peach-ink); }
+  .chip.unknown { background: var(--stone); color: var(--stone-ink); }
+  .chip.push { background: var(--lilac); color: var(--lilac-ink); }
+  .beacon { width: 10px; height: 10px; border-radius: 999px; background: var(--mint-ink); box-shadow: 0 0 0 4px rgba(31,107,69,.14); animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
+
+  .avatars { display: inline-flex; align-items: center; }
+  .av {
+    width: 28px; height: 28px; border-radius: 999px; border: 2px solid var(--surface);
+    display: grid; place-items: center; font-size: 11px; font-weight: 700; margin-left: -8px;
+  }
+  .av:first-child { margin-left: 0; }
+  .av.a { background: var(--lilac); color: var(--lilac-ink); }
+  .av.b { background: var(--mint); color: var(--mint-ink); }
+  .av.c { background: var(--butter); color: var(--butter-ink); }
+  .av.more { background: var(--stone); color: var(--stone-ink); font-size: 10px; }
+
+  /* device rows */
+  .rows { display: grid; }
+  .devrow { display: grid; grid-template-columns: 22px minmax(0,1fr) auto auto; align-items: center; gap: 14px; padding: 12px 6px; border-top: 1px solid var(--line); border-radius: var(--r); }
+  .devrow:first-child { border-top: 0; }
+  .devrow:hover { background: var(--surface-2); }
+  .devname { font-weight: 600; font-size: 14px; }
+  .devmeta { font-size: 12px; color: var(--ink-3); display: flex; gap: 8px; align-items: center; }
+  .devicon { width: 20px; height: 20px; color: var(--ink-3); }
+
+  .head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .head h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  .head .spacer { margin-left: auto; }
+
+  /* board */
+  .board { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+  .lane { background: var(--surface-2); border-radius: var(--r); padding: 10px; display: grid; gap: 8px; align-content: start; }
+  .lane-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650; padding: 2px 4px 4px; }
+  .lane-head .count { color: var(--ink-3); font-weight: 600; }
+  .lane.l1 { background: var(--lilac); } .lane.l2 { background: var(--butter); }
+  .lane.l3 { background: var(--sky); } .lane.l4 { background: var(--mint); }
+  .bcard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px; box-shadow: var(--shadow-1); transition: transform .16s ease, box-shadow .16s ease; }
+  .bcard:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+  .bcard .t { font-size: 13px; font-weight: 600; }
+  .bcard .s { font-size: 11px; color: var(--ink-3); margin-top: 3px; }
+  .tag { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: var(--surface-3); color: var(--ink-2); }
+
+  /* message */
+  .msg { display: grid; grid-template-columns: 56px minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 12px 6px; border-top: 1px solid var(--line); }
+  .msg:first-of-type { border-top: 0; }
+  .bodyline { font-size: 14px; }
+  .bylabel { font-size: 11px; color: var(--ink-3); }
+
+  /* quiet / mascot */
+  .quiet { display: grid; place-items: center; text-align: center; gap: 6px; padding: 8px 4px 0; }
+  .mascot { animation: bob 4s ease-in-out infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-3px) } }
+  .quiet p { margin: 0; font-size: 13px; color: var(--ink-3); }
+  .quiet strong { display: block; font-size: 15px; color: var(--ink); }
+
+  .alert { display: grid; gap: 10px; }
+  .alert-row { display: flex; gap: 10px; align-items: flex-start; }
+
+  /* phone */
+  .phone-strip { display: grid; grid-template-columns: 360px minmax(0,1fr); gap: 24px; align-items: start; margin-top: 28px; }
+  .phone { width: 340px; border-radius: 40px; background: #14110E; padding: 12px; box-shadow: var(--shadow-2); }
+  .phone-screen { background: var(--bg); border-radius: 30px; padding: 20px 18px 24px; display: grid; gap: 14px; }
+  .phone h3 { margin: 0; font-size: 19px; letter-spacing: -.02em; }
+  .phone .sheet { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 14px; }
+  .field { border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 9px 11px; background: #fff; font-size: 13px; }
+  .field.mono { font-size: 12px; }
+  .success { background: var(--mint); border-radius: var(--r-lg); padding: 14px; display: flex; gap: 12px; align-items: center; }
+  .success strong { display: block; font-size: 14px; }
+  .success span { font-size: 12px; color: var(--mint-ink); }
+
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .sw { border-radius: var(--r); padding: 12px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); }
+  .sw small { display: block; font-family: var(--font-mono); font-weight: 400; opacity: .8; margin-top: 4px; }
+
+  .motion-demo { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .mdemo { padding: 10px 14px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); font-size: 13px; transition: transform .16s ease, box-shadow .16s ease; cursor: default; }
+  .mdemo:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+
+  .note { font-size: 12px; color: var(--ink-3); }
+
+  @media (max-width: 560px) {
+    .top { flex-wrap: wrap; row-gap: 10px; }
+    .top-right { width: 100%; justify-content: flex-end; }
+    .greet h1 { font-size: 20px; }
+    .board { grid-template-columns: 1fr; }
+    .devrow { grid-template-columns: 20px minmax(0,1fr); row-gap: 6px; }
+    .devrow .chip { grid-column: 2; justify-self: start; }
+    .phone-strip { gap: 16px; }
+    .swatches { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 900px) {
+    .wrap { padding: 14px; }
+    .frame { grid-template-columns: 1fr; border-radius: var(--r-lg); }
+    .side { display: none; }
+    .top { padding: 12px 14px; }
+    .greet h1 { font-size: 21px; }
+    .content { padding: 14px; gap: 14px; }
+    .span3, .span4, .span6, .span8 { grid-column: span 12; }
+    .board { grid-template-columns: 1fr 1fr; }
+    .phone-strip { grid-template-columns: 1fr; }
+    .phone { width: 100%; }
+    .devrow { grid-template-columns: 20px minmax(0,1fr) auto; }
+    .devrow .avatars { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="frame">
+    <aside class="side">
+      <div class="brand">
+        <span class="brand-mark">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#B93F22" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8.5 6.5a5 5 0 1 0 7 0"/><circle cx="12" cy="17.5" r="1.5"/></svg>
+        </span>
+        <div>
+          <div class="brand-name">DakFlare</div>
+          <div class="brand-sub mono">prod · v5.1.0</div>
+        </div>
+      </div>
+
+      <p class="nav-label">Console</p>
+      <nav class="nav">
+        <a href="#" aria-current="page"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 16l4-5 3 3 4-6 5 8"/></svg> Overview</a>
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg> Devices <span class="pill chip live">2 live</span></a>
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 5.5h16v10H9l-5 4z"/></svg> Messages</a>
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 7h6M5 12h4M5 17h6"/><path d="M15 10l3 3 3-6"/></svg> Automation</a>
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 3l8 4v6c0 4-3.5 7-8 8-4.5-1-8-4-8-8V7z"/></svg> Alerts <span class="pill chip offline">1</span></a>
+      </nav>
+
+      <p class="nav-label">Bench</p>
+      <nav class="nav">
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l3 2"/></svg> Activity</a>
+        <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 4v16M18 4v16M6 9h12M6 15h12"/></svg> Flows</a>
+      </nav>
+
+      <div class="side-foot">
+        <span class="av a" style="margin:0">JB</span>
+        <div style="min-width:0">
+          <div style="font-size:13px;font-weight:600">Jony</div>
+          <div class="mono" style="font-size:11px;color:var(--ink-3)">operator</div>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <div class="top">
+        <div class="greet">
+          <h1>Good evening, Jony</h1>
+          <p>2 phones answering · last sync <span class="mono">18s</span> ago</p>
+        </div>
+        <div class="top-right">
+          <div class="avatars" aria-label="3 devices">
+            <span class="av a">M3</span><span class="av b">P8</span><span class="av c">A2</span><span class="av more">+2</span>
+          </div>
+          <button class="icon-btn" aria-label="Alerts" style="position:relative">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
+            <span style="position:absolute;top:5px;right:6px;width:7px;height:7px;border-radius:9px;background:var(--accent-fill)"></span>
+          </button>
+          <button class="btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 12a8 8 0 0 1 13.5-5.8L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.5 5.8L4 16"/><path d="M4 20v-4h4"/></svg> Refresh</button>
+        </div>
+      </div>
+
+      <div class="content">
+
+        <div class="bento">
+          <div class="card span3 lift stat mint">
+            <p class="eyebrow">Phones live</p>
+            <div class="row"><span class="num">2</span><span class="chip live"><span class="dot"></span>live</span></div>
+            <div class="note">of 4 paired · 1 stale</div>
+          </div>
+
+          <div class="card span3 lift stat">
+            <p class="eyebrow">Messages · 24 h</p>
+            <div class="row">
+              <span class="num">18</span>
+              <svg width="70" height="34" viewBox="0 0 70 34" fill="none" aria-hidden="true">
+                <path d="M2 28 L12 24 L22 26 L32 16 L42 19 L52 9 L62 12 L68 5" stroke="#B93F22" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="note"><span class="delta" style="color:var(--mint-ink)">+6</span> vs yesterday</div>
+          </div>
+
+          <div class="card span3 lift stat butter">
+            <p class="eyebrow">Replies sent</p>
+            <div class="row"><span class="num">12</span><span class="tag">wf_gate</span></div>
+            <div class="note">1 message left the phone 4 min ago</div>
+          </div>
+
+          <div class="card span3 lift stat">
+            <p class="eyebrow">Needs you</p>
+            <div class="row"><span class="num">1</span><span class="chip offline"><span class="dot"></span>alert</span></div>
+            <div class="note">Pixel 8 silent 16 h</div>
+          </div>
+        </div>
+
+        <div class="bento">
+          <div class="card span8">
+            <div class="head">
+              <h2>Phones</h2>
+              <span class="chip synced">poll-only</span>
+              <span class="spacer"></span>
+              <button class="btn ghost" style="font-size:12px">All devices →</button>
+            </div>
+            <div class="rows">
+              <div class="devrow">
+                <svg class="devicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+                <div>
+                  <div class="devname">Mi A3 · Grameenphone</div>
+                  <div class="devmeta mono">dev29b9c2… · sim 2 · +8801•••2829</div>
+                </div>
+                <span class="chip live"><span class="dot"></span>live</span>
+                <div class="avatars"><span class="av b">M3</span></div>
+              </div>
+              <div class="devrow">
+                <svg class="devicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+                <div>
+                  <div class="devname">Pixel 8 · Banglalink</div>
+                  <div class="devmeta mono">devaed94… · sim 1 · +8801•••6080</div>
+                </div>
+                <span class="chip stale"><span class="dot"></span>stale</span>
+                <div class="avatars"><span class="av a">P8</span></div>
+              </div>
+              <div class="devrow">
+                <svg class="devicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+                <div>
+                  <div class="devname">Redmi note · bench</div>
+                  <div class="devmeta mono">dev7c1aa2… · never synced</div>
+                </div>
+                <span class="chip unknown"><span class="dot"></span>unknown</span>
+                <div class="avatars"><span class="av c">RN</span></div>
+              </div>
+            </div>
+
+            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+              <div class="head"><h2>Latest message</h2><span class="spacer"></span><span class="bylabel mono">18:42 · +8801•••6080</span></div>
+              <div style="display:flex;gap:14px;align-items:flex-start;background:var(--surface-2);border-radius:var(--r);padding:12px">
+                <span class="av b" style="margin:0;flex:none">M3</span>
+                <div style="min-width:0">
+                  <div class="bodyline">DAKFLARE-GATE-1 hello from the bench</div>
+                  <div class="bylabel" style="margin-top:4px">answered by <span class="mono">wf_gate</span> v2 · sent <span class="mono">+8801•••6080</span> · <span style="color:var(--mint-ink);font-weight:700">sent</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card span4">
+            <div class="head"><h2>The bench is quiet</h2></div>
+            <div class="quiet">
+              <svg class="mascot" width="120" height="96" viewBox="0 0 120 96" fill="none" aria-hidden="true">
+                <rect x="34" y="10" width="52" height="76" rx="14" stroke="#241F1A" stroke-width="2.2"/>
+                <rect x="26" y="34" width="26" height="34" rx="8" fill="#DDF3E4" stroke="#241F1A" stroke-width="2.2"/>
+                <path d="M32 50l4 4 8-9" stroke="#1F6B45" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="52" cy="34" r="2.6" fill="#241F1A"/>
+                <circle cx="68" cy="34" r="2.6" fill="#241F1A"/>
+                <path d="M52 44c3.4 4 12.6 4 16 0" stroke="#241F1A" stroke-width="2.4" stroke-linecap="round"/>
+                <path d="M86 26c6 0 10 4 10 10" stroke="#241F1A" stroke-width="2.2" stroke-linecap="round"/>
+                <path d="M96 44c3 0 5 2 5 5" stroke="#241F1A" stroke-width="2.2" stroke-linecap="round"/>
+              </svg>
+              <strong>Nothing is on fire</strong>
+              <p>One stale phone and no failed sends.<br>Alerts land here, not in your sleep.</p>
+              <button class="btn" style="margin-top:6px">Open alerts</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="bento">
+        <div class="card span12">
+          <div class="head">
+            <h2>Automation</h2>
+            <span class="chip push">rules 2</span>
+            <span class="chip synced">flows 3</span>
+            <span class="spacer"></span>
+            <button class="btn ghost" style="font-size:12px">New flow</button>
+          </div>
+          <div class="board">
+            <div class="lane l1">
+              <div class="lane-head">Draft <span class="count">1</span></div>
+              <div class="bcard"><div class="t">Resend failed replies</div><div class="s">needs retry queue · M5.5</div></div>
+              <div class="bcard" style="border-style:dashed;box-shadow:none;background:transparent;color:var(--ink-3)">+ new flow</div>
+            </div>
+            <div class="lane l2">
+              <div class="lane-head">Rules <span class="count">2</span></div>
+              <div class="bcard"><div class="t">STOP unsubscribe</div><div class="s mono">priority 10 · 5/60 min</div></div>
+              <div class="bcard"><div class="t">OTP forward</div><div class="s mono">priority 20 · 20/60 min</div></div>
+            </div>
+            <div class="lane l3">
+              <div class="lane-head">Flows <span class="count">3</span></div>
+              <div class="bcard"><div class="t">wf_gate · v2</div><div class="s">keyword → reply → stop</div></div>
+              <div class="bcard"><div class="t">wf_extract_code</div><div class="s">regex capture → reply</div></div>
+              <div class="bcard"><div class="t">wf_quiet_hours</div><div class="s">condition → stop</div></div>
+            </div>
+            <div class="lane l4">
+              <div class="lane-head">Live on the phone <span class="count">1</span></div>
+              <div class="bcard"><div class="t">wf_gate · v2</div><div class="s">cached 18:40 · ran 4 min ago</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card span12">
+          <div class="head"><h2>Today's thread</h2><span class="spacer"></span><span class="bylabel mono">Mi A3</span></div>
+          <div class="msg">
+            <span class="chip synced">in</span>
+            <div><div class="bodyline">DAKFLARE-GATE-1 second run</div><div class="bylabel mono">+8801•••96080 · 18:42:07</div></div>
+            <span class="bylabel">received</span>
+          </div>
+          <div class="msg">
+            <span class="chip live">out</span>
+            <div><div class="bodyline">DakFlare gate ok. You said: DAKFLARE-GATE-1 second run</div><div class="bylabel mono">→ +8801•••96080 · wf_gate v2</div></div>
+            <span class="bylabel" style="color:var(--mint-ink);font-weight:700">sent</span>
+          </div>
+          <div class="msg">
+            <span class="chip synced">in</span>
+            <div><div class="bodyline">আপনার অফারটি আজই নিন…</div><div class="bylabel mono">GP Info · mask · 2 parts</div></div>
+            <span class="bylabel">not answered</span>
+          </div>
+        </div>
+
+        <div class="card span12">
+          <div class="head"><h2>Motion &amp; colour</h2><span class="spacer"></span><span class="bylabel">hover a tile · press a button</span></div>
+          <div class="motion-demo" style="margin-bottom:16px">
+            <span class="mdemo">lift · 160ms</span>
+            <span class="mdemo">lift · 160ms</span>
+            <button class="btn primary">press · 90ms</button>
+            <span class="chip live"><span class="dot"></span>pulse · 2.4s</span>
+            <span class="av a">M3</span><span class="av b">P8</span>
+          </div>
+          <div class="swatches">
+            <div class="sw" style="background:var(--bg)">bg<small>#FBF6EE</small></div>
+            <div class="sw" style="background:var(--surface)">surface<small>#FFFDF8</small></div>
+            <div class="sw" style="background:var(--surface-2)">surface-2<small>#F6EFE3</small></div>
+            <div class="sw" style="background:var(--accent-fill);color:#fff">accent-fill<small>#C9482A</small></div>
+            <div class="sw" style="background:var(--accent-soft);color:var(--accent)">accent-soft<small>#FBE3DA</small></div>
+            <div class="sw" style="background:var(--mint);color:var(--mint-ink)">mint<small>#DDF3E4</small></div>
+            <div class="sw" style="background:var(--sky);color:var(--sky-ink)">sky<small>#DDEBFB</small></div>
+            <div class="sw" style="background:var(--butter);color:var(--butter-ink)">butter<small>#FBEBC8</small></div>
+            <div class="sw" style="background:var(--peach);color:var(--peach-ink)">peach<small>#FBE0D3</small></div>
+            <div class="sw" style="background:var(--lilac);color:var(--lilac-ink)">lilac<small>#E9E3FB</small></div>
+          </div>
+        </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <div class="phone-strip">
+    <div class="phone">
+      <div class="phone-screen">
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <h3>DakFlare</h3><span class="mono" style="font-size:10px;color:var(--ink-3)">schema v8</span>
+        </div>
+        <div class="sheet">
+          <p class="eyebrow">Target</p>
+          <div class="field mono" style="margin-bottom:8px">dakflare-worker.sohel…workers.dev</div>
+          <button class="btn" style="width:100%;justify-content:center">Save target</button>
+        </div>
+        <div class="sheet">
+          <p class="eyebrow">Pair with code</p>
+          <div class="field mono" style="letter-spacing:.14em">A6C3 F079 1514</div>
+          <button class="btn primary" style="width:100%;justify-content:center;margin-top:8px">Pair with code</button>
+        </div>
+        <div class="success">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#1F6B45" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>
+          <div><strong>Paired</strong><span class="mono">dev29b9c2…</span></div>
+        </div>
+        <div class="sheet">
+          <p class="eyebrow">Carrier</p>
+          <div class="field mono">+8801•••2829</div>
+          <div class="note" style="margin-top:6px">native SMS layer is live · flow cached</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h2 style="margin:0 0 8px;font-size:20px;letter-spacing:-.02em">The same language on the phone</h2>
+      <p style="margin:0 0 14px;color:var(--ink-2);max-width:52ch">Cream sheets, pastel containers, one coral action per screen, mono for anything an operator will compare with a log. Pairing success is the only dopamine moment — it pops once and stays still.</p>
+      <ul style="margin:0;padding-left:18px;color:var(--ink-2);display:grid;gap:6px;font-size:14px">
+        <li>Pastel is a container, never body text.</li>
+        <li>Ids, numbers and timestamps stay mono and unmasked where the protocol allows.</li>
+        <li><span class="mono">prefers-reduced-motion</span> turns every animation off, not down.</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
