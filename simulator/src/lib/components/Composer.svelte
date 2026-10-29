@@ -7,6 +7,7 @@
 	import { decodePeer, replyBlock } from '$lib/reply-target';
 	import { app } from '$lib/stores/app.svelte';
 	import { composer } from '$lib/stores/composer.svelte';
+	import { bodyWords, checkBody } from '$lib/sms-text';
 
 	const rawPeer = $derived(page.params.peer ?? '');
 	const peer = $derived(decodePeer(rawPeer));
@@ -15,7 +16,10 @@
 		replyBlock({ peer, device: app.selected, facts: app.facts, offline: app.offline })
 	);
 	const typed = $derived(composer.draft.length > 0);
-	const canSend = $derived(!blocked && !composer.sending && composer.draft.trim().length > 0);
+	/** The hard cap, checked before send so the radio never sees an oversize body. */
+	const message = $derived(checkBody(composer.draft));
+	const overCap = $derived(!message.ok && message.code === 'long' ? message : null);
+	const canSend = $derived(!blocked && !composer.sending && message.ok);
 
 	let field = $state<HTMLTextAreaElement | null>(null);
 
@@ -126,7 +130,13 @@
 			class="composer-send"
 			type="button"
 			aria-label={composer.sending ? `Sending to ${peer}` : `Send to ${peer}`}
-			title={blocked ? blocked.reason : composer.sending ? 'Sending' : 'Send'}
+			title={blocked
+				? blocked.reason
+				: composer.sending
+					? 'Sending'
+					: overCap
+						? bodyWords(overCap)
+						: 'Send'}
 			disabled={!canSend}
 			onclick={() => void submit()}
 		>
@@ -136,12 +146,19 @@
 
 	{#if !blocked}
 		<div class="composer-meta">
-			<p class="composer-status" id="composer-status" aria-live="polite">
-				{composer.sending
-					? 'Sending…'
-					: typed
-						? ''
-						: `Replying from ${app.selected?.label ?? 'this phone'}`}
+			<p
+				class="composer-status"
+				id="composer-status"
+				aria-live="polite"
+				data-tone={overCap ? 'error' : undefined}
+			>
+				{#if overCap}
+					{overCap.reason} <span class="mono">{overCap.count}</span>
+				{:else if composer.sending}
+					Sending…
+				{:else if !typed}
+					Replying from {app.selected?.label ?? 'this phone'}
+				{/if}
 			</p>
 
 			{#if typed}

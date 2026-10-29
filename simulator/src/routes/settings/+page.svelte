@@ -3,19 +3,54 @@
 	import { AlertDialog } from 'bits-ui';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
-	import { app, DEFAULT_SMS_PACKAGE } from '$lib/stores/app.svelte';
+	import { app, DEFAULT_SMS_PACKAGE, retentionKept, retentionWords } from '$lib/stores/app.svelte';
 	import { relativeTime } from '$lib/device-state';
 
 	let baseUrl = $state('');
 	let adminToken = $state('');
 
+	const KEEP_OPTIONS = [
+		{ policy: 'days:90', name: '90 days', detail: 'Older messages go.' },
+		{ policy: 'days:30', name: '30 days', detail: 'Older messages go.' },
+		{ policy: 'messages:1000', name: '1,000 messages', detail: 'Only the newest 1,000 stay.' },
+		{ policy: 'forever', name: 'Forever', detail: 'Nothing is removed.' }
+	];
+
+	// The rule the frame shows selected. Kept beside the store so a refused
+	// change snaps back instead of leaving the radio on the wrong rule.
+	let policy = $state('forever');
+	$effect(() => {
+		if (app.retention) policy = app.retention.policy;
+	});
+
+	const keptBy = $derived(retentionKept(policy));
+	const removalNote = $derived.by(() => {
+		if (!app.retention) return 'reading the local database…';
+		if (app.retention.last_purge_at === null) return 'never run';
+		const removed = app.retention.last_deleted ?? 0;
+		const when = relativeTime(app.retention.last_purge_at);
+		return removed === 0 ? `${when} · nothing removed` : `${when} · ${removed} removed`;
+	});
+
+	async function chooseRetention(next: string) {
+		if (next === policy) return;
+		policy = next;
+		const saved = await app.saveRetention(next);
+		if (!saved) policy = app.retention?.policy ?? 'forever';
+	}
+
 	// The role dialog is another Activity. When this one comes back, the shell
 	// has already written the new holder; re-read the facts rather than trusting
-	// the tap that opened the dialog.
+	// the tap that opened the dialog. Retention runs on the gateway tick, so a
+	// return to this frame re-reads when it last ran.
 	onMount(() => {
 		const refresh = () => {
-			if (document.visibilityState === 'visible') void app.loadFacts();
+			if (document.visibilityState === 'visible') {
+				void app.loadFacts();
+				void app.loadRetention();
+			}
 		};
+		void app.loadRetention();
 		window.addEventListener('focus', refresh);
 		document.addEventListener('visibilitychange', refresh);
 		return () => {
@@ -238,6 +273,49 @@
 		<Notice scope="default-sms" />
 	</section>
 
+	<section class="sheet" aria-labelledby="retention-title">
+		<div class="sheet-head">
+			<h2 class="sheet-title" id="retention-title">Local message log</h2>
+			<span class="pill" data-state={policy === 'forever' ? 'unknown' : 'live'}>
+				{retentionWords(policy)}
+			</span>
+		</div>
+		<p class="note">
+			Messages stay on this phone until this rule removes them. It runs when you open the app
+			and on the phone's own schedule. The deployment's copy is not touched, and a message the
+			gateway has not received yet is never removed.
+		</p>
+
+		<fieldset class="keep" disabled={!app.backendAvailable || app.busy.retention}>
+			<legend class="keep-title">Keep messages</legend>
+			{#each KEEP_OPTIONS as option (option.policy)}
+				<label class="keep-option" data-selected={policy === option.policy}>
+					<input
+						type="radio"
+						name="retention"
+						value={option.policy}
+						checked={policy === option.policy}
+						onchange={() => chooseRetention(option.policy)}
+					/>
+					<span class="keep-name">{option.name}</span>
+					<span class="keep-detail">{option.detail}</span>
+				</label>
+			{/each}
+		</fieldset>
+
+		<div class="rows">
+			<div class="rowline">
+				<span class="label">Kept</span>
+				<span class="value">{keptBy}</span>
+			</div>
+			<div class="rowline">
+				<span class="label">Last run</span>
+				<span class="value mono">{removalNote}</span>
+			</div>
+		</div>
+		<Notice scope="retention" />
+	</section>
+
 	<section class="sheet" aria-labelledby="identity-title">
 		<h2 class="sheet-title" id="identity-title">Device identity</h2>
 		<p class="note">
@@ -400,3 +478,77 @@
 		</div>
 	</section>
 </section>
+
+<style>
+	/* The one control on this screen where a wrong tap deletes history, so it
+	   is four named cards rather than a dropdown that hides the consequences. */
+	.keep {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 8px;
+		margin: 14px 0 0;
+		padding: 0;
+		border: 0;
+	}
+
+	.keep-title {
+		grid-column: 1 / -1;
+		padding: 0;
+		margin-bottom: 1px;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--ink-2);
+	}
+
+	.keep-option {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-height: 54px;
+		padding: 9px 11px;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--df-surface-well);
+		cursor: pointer;
+		transition:
+			border-color 140ms ease-out,
+			background-color 140ms ease-out;
+	}
+
+	.keep-option[data-selected='true'] {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+	}
+
+	.keep-option:has(input:focus-visible) {
+		outline: 2px solid var(--df-border-focus);
+		outline-offset: 2px;
+	}
+
+	.keep-option input {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.keep-name {
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--ink);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.keep-detail {
+		font-size: 10.5px;
+		line-height: 1.35;
+		color: var(--ink-3);
+	}
+
+	.keep:disabled .keep-option {
+		opacity: 0.55;
+		cursor: default;
+	}
+</style>

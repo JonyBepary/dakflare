@@ -104,6 +104,52 @@ for (const digit of '0123456789') GSM_BASIC.add(digit);
 for (const letter of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') GSM_BASIC.add(letter);
 for (const letter of 'abcdefghijklmnopqrstuvwxyz') GSM_BASIC.add(letter);
 
+/**
+ * One typed message, not a carrier payload. The same cap as
+ * `MAX_COMPOSE_BODY_CHARS` in `dakflare_core::compose` and `SmsSender.kt`.
+ *
+ * Counted in UTF-16 code units, which is what `body.length` returns and what
+ * Kotlin counts: an emoji is two, as it is on the wire. This is deliberately
+ * separate from the segment arithmetic above; the cap is a hard limit, not a
+ * sixth segment label.
+ */
+export const MAX_BODY_CHARS = 1600;
+
+export type BodyProblemCode = 'empty' | 'long';
+
+export type BodyCheck =
+	| { ok: true; units: number }
+	| {
+			ok: false;
+			code: BodyProblemCode;
+			/** The sentence, without its count; the screen sets the count in mono. */
+			reason: string;
+			/** The units counted, present only for `long`. */
+			count?: number;
+	  };
+
+export function checkBody(body: string): BodyCheck {
+	if (body.trim().length === 0) {
+		return { ok: false, code: 'empty', reason: 'The message is empty' };
+	}
+	const units = body.length;
+	if (units > MAX_BODY_CHARS) {
+		return {
+			ok: false,
+			code: 'long',
+			reason: `A message holds at most ${MAX_BODY_CHARS} characters; this one has`,
+			count: units
+		};
+	}
+	return { ok: true, units };
+}
+
+/** The whole sentence as one string, for a title or aria-label. */
+export function bodyWords(check: BodyCheck): string {
+	if (check.ok) return 'Send';
+	return check.count === undefined ? check.reason : `${check.reason} ${check.count}`;
+}
+
 const GSM_SINGLE = 160;
 const GSM_PART = 153;
 const UCS2_SINGLE = 70;

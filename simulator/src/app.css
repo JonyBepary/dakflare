@@ -1021,6 +1021,10 @@ input::placeholder {
 	overflow-wrap: anywhere;
 }
 
+.composer-status[data-tone='error'] {
+	color: var(--df-state-danger-ink);
+}
+
 .composer-mark {
 	display: grid;
 	place-items: center;
@@ -1321,8 +1325,21 @@ input::placeholder {
 
 .compose-meta {
 	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
 	justify-content: flex-end;
+	gap: var(--df-p-space-3);
 	min-height: 16px;
+}
+
+/* The hard cap is a sentence of its own, beside the segment meter rather than
+   inside it: the meter counts parts, this says the body will not be sent. */
+.compose-meta .composer-cap {
+	margin-right: auto;
+	font-size: var(--df-c-composer-hint-size);
+	line-height: 1.4;
+	color: var(--df-state-danger-ink);
+	overflow-wrap: anywhere;
 }
 
 .compose-actions {

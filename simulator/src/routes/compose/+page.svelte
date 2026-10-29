@@ -7,15 +7,18 @@
 	import { watchKeyboard } from '$lib/keyboard';
 	import { checkRecipient, recipientWords } from '$lib/recipient';
 	import { sendBlock } from '$lib/reply-target';
+	import { bodyWords, checkBody } from '$lib/sms-text';
 	import { app } from '$lib/stores/app.svelte';
 	import { composer } from '$lib/stores/composer.svelte';
 
 	const recipient = $derived(checkRecipient(composer.newMessage.to));
-	const bodyTyped = $derived(composer.newMessage.body.trim().length > 0);
+	/** The same cap the reply bar uses, checked before the radio is asked. */
+	const message = $derived(checkBody(composer.newMessage.body));
+	const overCap = $derived(!message.ok && message.code === 'long' ? message : null);
 	const blocked = $derived(
 		sendBlock({ device: app.selected, facts: app.facts, offline: app.offline })
 	);
-	const canSend = $derived(!blocked && recipient.ok && bodyTyped && !composer.sending);
+	const canSend = $derived(!blocked && recipient.ok && message.ok && !composer.sending);
 
 	/** The backend's exact words, kept here rather than in the reply bar. */
 	let failure = $state<string | null>(null);
@@ -26,7 +29,11 @@
 		if (blocked) return blocked.reason;
 		if (!recipient.ok) return recipientWords(recipient);
 		if (composer.sending) return `Sending to ${recipient.to}`;
-		if (!bodyTyped) return 'Type the message first';
+		if (!message.ok) {
+			// An empty body keeps the screen's own prompt; the cap uses the
+			// backend's sentence, count included, so both name the same limit.
+			return message.code === 'empty' ? 'Type the message first' : bodyWords(message);
+		}
 		return `Send to ${recipient.to}`;
 	}
 
@@ -172,6 +179,11 @@
 				></textarea>
 				{#if composer.newMessage.body.length > 0}
 					<div class="compose-meta" id="compose-count">
+						{#if overCap}
+							<p class="composer-cap" role="status">
+								{overCap.reason} <span class="mono">{overCap.count}</span>
+							</p>
+						{/if}
 						<SegmentMeter body={composer.newMessage.body} />
 					</div>
 				{/if}

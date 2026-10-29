@@ -170,6 +170,19 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+/// The one rule for a row retention may delete: the deployment already has it,
+/// it is not waiting on the radio, and it is not waiting on an upload.
+///
+/// `mirrored = 1` is the outer gate on purpose. A queued send, a failed send
+/// that was never uploaded, and an inbound `received` row that no flush has
+/// taken yet are all local-only history — deleting one would lose the only
+/// copy. The two explicit clauses below keep the intent visible in the SQL
+/// itself, after `mirrored` has changed on a retry.
+const RETENTION_DELETABLE: &str = "mirrored = 1
+            AND NOT (direction = 'out' AND state IN ('queued', 'failed'))
+            AND NOT (direction = 'in' AND state = 'received')";
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
     pub device_id: String,
@@ -206,6 +219,90 @@ pub struct Message {
     /// Why the row last entered `failed`; `None` when no reason was recorded,
     /// and cleared on a retry so it cannot outlive the state it describes.
     pub last_error: Option<String>,
+}
+
+/// How much of the local message log this phone keeps.
+///
+/// Stored in `settings` as `forever`, `days:<n>` or `messages:<n>`.
+/// [`Retention::Forever`] is the default and deletes nothing: a rule has to be
+/// chosen before a single row can go. A value that does not parse falls back to
+/// `Forever` for the same reason — a typo must never read as "delete".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retention {
+    Forever,
+    /// Keep messages younger than this many days.
+    Days(u32),
+    /// Keep this many newest messages per device.
+    Messages(u32),
+}
+
+/// The `settings` key holding the operator's retention rule.
+pub const RETENTION_SETTING: &str = "retention_policy";
+/// When the last purge ran, in milliseconds since the epoch.
+pub const RETENTION_LAST_PURGE: &str = "retention_last_purge";
+/// How many rows the last purge removed. Written even when that is zero, so
+/// "last run removed nothing" is a fact rather than a stale number.
+pub const RETENTION_LAST_DELETED: &str = "retention_last_deleted";
+
+/// Retention is applied from the app open and from the phone's service tick,
+/// which each reopen the store. The open path is throttled so a receiver that
+/// opens the store twice a minute does not purge twice a minute.
+pub const RETENTION_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1000;
+
+/// Search returns at most this many rows. A phone with a long history answers
+/// with its newest matches instead of materialising the whole table.
+pub const MAX_SEARCH_HITS: i64 = 100;
+/// One character matches most of a log; the floor keeps a stray keystroke from
+/// turning into a full scan.
+pub const MIN_SEARCH_CHARS: usize = 2;
+/// A phone number or a sentence fragment fits well inside this; the cap keeps
+/// a pasted document out of the LIKE pattern.
+pub const MAX_SEARCH_CHARS: usize = 128;
+
+impl Retention {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw == "forever" {
+            return Some(Self::Forever);
+        }
+        let (kind, value) = raw.split_once(':')?;
+        let value: u32 = value.trim().parse().ok()?;
+        if value == 0 {
+            return None;
+        }
+        match kind {
+            "days" => Some(Self::Days(value)),
+            "messages" => Some(Self::Messages(value)),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> String {
+        match self {
+            Self::Forever => "forever".to_string(),
+            Self::Days(days) => format!("days:{days}"),
+            Self::Messages(count) => format!("messages:{count}"),
+        }
+    }
+}
+
+/// What the Settings frame shows about retention: the rule in force, and the
+/// last time it actually ran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionStatus {
+    /// The stored rule (`forever` until the operator picks one).
+    pub policy: String,
+    pub last_purge_at: Option<i64>,
+    /// Rows the last purge removed. `None` when retention has never run.
+    pub last_deleted: Option<u64>,
+}
+
+/// Bounded search answer. `truncated` means more rows matched than `limit`; the
+/// frame says so instead of pretending the list is complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHits {
+    pub messages: Vec<Message>,
+    pub truncated: bool,
 }
 
 /// What one failed send attempt did to the row. `attempts` is the value after
@@ -296,6 +393,15 @@ impl Store {
         let db = Builder::new_local(path.as_ref()).build().await?;
         let store = Self { db, cipher };
         store.migrate().await?;
+        // Retention rides the store open: the desktop shell opens once at
+        // launch, and the Android shell reopens for every JNI entry — including
+        // each gateway tick — so this one place covers both without the Kotlin
+        // side needing a call site. It is throttled and never fatal: a phone
+        // that cannot purge still boots, and `Forever` (the default) is a bare
+        // settings read that deletes nothing.
+        if let Err(error) = store.apply_retention().await {
+            eprintln!("[retention] purge deferred: {error}");
+        }
         Ok(store)
     }
 
@@ -1034,6 +1140,214 @@ impl Store {
         Ok(deleted as u64)
     }
 
+    /* ------------------------------------------------------------ retention */
+
+    /// The retention rule in force. A missing or unreadable setting is
+    /// [`Retention::Forever`]: a bad value must never read as "delete".
+    pub async fn retention(&self) -> Result<Retention, StoreError> {
+        Ok(self
+            .get_setting(RETENTION_SETTING)
+            .await?
+            .as_deref()
+            .and_then(Retention::parse)
+            .unwrap_or(Retention::Forever))
+    }
+
+    /// Persist the operator's rule. Nothing is deleted here; the caller decides
+    /// whether to run [`Store::purge_expired_messages`] straight away.
+    pub async fn set_retention(&self, retention: Retention) -> Result<(), StoreError> {
+        self.set_setting(RETENTION_SETTING, &retention.as_str())
+            .await
+    }
+
+    /// What the Settings frame shows: the rule, when it last ran, and how many
+    /// rows that run removed.
+    pub async fn retention_status(&self) -> Result<RetentionStatus, StoreError> {
+        let policy = self.retention().await?;
+        Ok(RetentionStatus {
+            policy: policy.as_str(),
+            last_purge_at: self
+                .get_setting(RETENTION_LAST_PURGE)
+                .await?
+                .and_then(|value| value.trim().parse::<i64>().ok()),
+            last_deleted: self
+                .get_setting(RETENTION_LAST_DELETED)
+                .await?
+                .and_then(|value| value.trim().parse::<u64>().ok()),
+        })
+    }
+
+    /// Apply the stored rule if it is due, at most once per
+    /// [`RETENTION_CHECK_INTERVAL_MS`].
+    ///
+    /// This is the path the store open uses (app launch, and every Android JNI
+    /// entry, which includes each gateway tick). `Forever` answers without a
+    /// write, so the default costs one settings read per open.
+    pub async fn apply_retention(&self) -> Result<u64, StoreError> {
+        let retention = self.retention().await?;
+        if retention == Retention::Forever {
+            return Ok(0);
+        }
+        let now = now_ms()?;
+        if let Some(last) = self.last_purge_at().await? {
+            if now.saturating_sub(last) < RETENTION_CHECK_INTERVAL_MS {
+                return Ok(0);
+            }
+        }
+        self.purge_with(retention, now).await
+    }
+
+    /// Apply the stored rule now, with no throttle. Used when the operator
+    /// chooses a rule; a `Forever` rule still deletes nothing.
+    pub async fn purge_expired_messages(&self) -> Result<u64, StoreError> {
+        let retention = self.retention().await?;
+        if retention == Retention::Forever {
+            return Ok(0);
+        }
+        let now = now_ms()?;
+        self.purge_with(retention, now).await
+    }
+
+    async fn last_purge_at(&self) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .get_setting(RETENTION_LAST_PURGE)
+            .await?
+            .and_then(|value| value.trim().parse::<i64>().ok()))
+    }
+
+    /// The purge itself. Per-device, because "1,000 messages" means the newest
+    /// 1,000 on each device in this store rather than a global budget one phone
+    /// can eat. Returns the total removed.
+    async fn purge_with(&self, retention: Retention, now: i64) -> Result<u64, StoreError> {
+        if retention == Retention::Forever {
+            return Ok(0);
+        }
+        let device_ids = self.message_device_ids().await?;
+        let conn = self.db.connect()?;
+        let mut deleted: u64 = 0;
+
+        for device_id in device_ids {
+            let affected = match retention {
+                Retention::Forever => 0,
+                Retention::Days(days) => {
+                    let cutoff = now.saturating_sub(i64::from(days) * 86_400_000);
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM messages
+                              WHERE device_id = ? AND created_at < ?
+                                AND {RETENTION_DELETABLE}"
+                        ),
+                        params![device_id.as_str(), cutoff],
+                    )
+                    .await?
+                }
+                Retention::Messages(keep) => conn
+                    .execute(
+                        &format!(
+                            "DELETE FROM messages
+                              WHERE device_id = ? AND {RETENTION_DELETABLE}
+                                AND id NOT IN (
+                                    SELECT id FROM messages
+                                     WHERE device_id = ?
+                                     ORDER BY created_at DESC, id DESC LIMIT ?
+                                )"
+                        ),
+                        params![device_id.as_str(), device_id.as_str(), i64::from(keep)],
+                    )
+                    .await?,
+            };
+            deleted += affected as u64;
+        }
+
+        // Recorded even when nothing went, so the Settings row can say when the
+        // rule last looked, and the open path can throttle on the same value.
+        self.set_setting(RETENTION_LAST_PURGE, &now.to_string())
+            .await?;
+        self.set_setting(RETENTION_LAST_DELETED, &deleted.to_string())
+            .await?;
+        Ok(deleted)
+    }
+
+    async fn message_device_ids(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query("SELECT DISTINCT device_id FROM messages", ())
+            .await?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await? {
+            ids.push(row.get(0)?);
+        }
+        Ok(ids)
+    }
+
+    /* --------------------------------------------------------------- search */
+
+    /// Newest messages whose peer or body contains `query`, case-insensitively.
+    ///
+    /// Scoped to one device and bounded on both ends: the pattern is capped at
+    /// [`MAX_SEARCH_CHARS`], `limit` is capped at [`MAX_SEARCH_HITS`], and one
+    /// extra row is fetched to report `truncated`. `%`, `_` and `\` are escaped
+    /// so `100%` means those three characters — a pasted wildcard cannot ask the
+    /// phone for its whole table. Fewer than [`MIN_SEARCH_CHARS`] characters
+    /// answers empty without touching the database.
+    ///
+    /// There is no index that can serve a leading-wildcard match, so this does
+    /// one pass over one device's rows. The caps above are what keep that answer
+    /// small and predictable.
+    pub async fn search_messages(
+        &self,
+        device_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<SearchHits, StoreError> {
+        let trimmed = query.trim();
+        if trimmed.chars().count() < MIN_SEARCH_CHARS {
+            return Ok(SearchHits {
+                messages: Vec::new(),
+                truncated: false,
+            });
+        }
+
+        let bounded: String = trimmed.chars().take(MAX_SEARCH_CHARS).collect();
+        let pattern = like_pattern(&bounded);
+        let limit = limit.clamp(1, MAX_SEARCH_HITS);
+
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
+                   FROM messages
+                  WHERE device_id = ?
+                    AND (peer LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')
+                  ORDER BY created_at DESC, id DESC LIMIT ?",
+                params![device_id, pattern.as_str(), pattern.as_str(), limit + 1],
+            )
+            .await?;
+
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next().await? {
+            messages.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+                last_error: row.get(8)?,
+            });
+        }
+
+        let truncated = messages.len() as i64 > limit;
+        messages.truncate(limit as usize);
+        Ok(SearchHits {
+            messages,
+            truncated,
+        })
+    }
+
+
     /// Airplane-mode switch. Persisted per device so it survives a restart.
     pub async fn set_offline(&self, device_id: &str, offline: bool) -> Result<(), StoreError> {
         self.set_setting(&format!("offline:{device_id}"), if offline { "1" } else { "0" })
@@ -1617,6 +1931,21 @@ impl Store {
         }
         Ok(flows)
     }
+}
+
+/// Wrap `query` in the wildcards that make it a substring match, escaping the
+/// characters LIKE treats specially so each stands for itself.
+fn like_pattern(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('%');
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(character);
+    }
+    out.push('%');
+    out
 }
 
 fn random_hex(bytes: usize) -> Result<String, StoreError> {
@@ -2839,6 +3168,416 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /* -------------------------------------------------- search + retention */
+
+    #[tokio::test]
+    async fn search_treats_like_wildcards_as_literal_text() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "search",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        for (index, (peer, body)) in [
+            ("+15550001111", "100% cotton"),
+            ("+15550002222", "100 cotton"),
+            ("+15550003333", "a_b"),
+            ("+15550004444", "axb"),
+            ("+15550005555", r"back\slash"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            store
+                .record_message(
+                    &device.device_id,
+                    "in",
+                    peer,
+                    body,
+                    "uploaded",
+                    Some(&format!("in-{index}")),
+                )
+                .await
+                .unwrap();
+        }
+
+        // `%` stands for itself, not "anything".
+        let hits = store
+            .search_messages(&device.device_id, "100%", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 1);
+        assert_eq!(hits.messages[0].body, "100% cotton");
+
+        // `_` does too, so "a_b" does not also match "axb".
+        let hits = store
+            .search_messages(&device.device_id, "a_b", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 1);
+        assert_eq!(hits.messages[0].body, "a_b");
+
+        // A bare wildcard is not a way to list the table, and a single
+        // character is below the floor.
+        for query in ["%", "_", "a"] {
+            assert!(
+                store
+                    .search_messages(&device.device_id, query, 100)
+                    .await
+                    .unwrap()
+                    .messages
+                    .is_empty(),
+                "{query} must not match everything"
+            );
+        }
+
+        // A backslash is literal, not an escape for the next character.
+        let hits = store
+            .search_messages(&device.device_id, r"back\s", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 1);
+        assert_eq!(hits.messages[0].body, r"back\slash");
+
+        // Body and peer are both searched, ASCII case-insensitively.
+        assert_eq!(
+            store
+                .search_messages(&device.device_id, "COTTON", 100)
+                .await
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .search_messages(&device.device_id, "0002222", 100)
+                .await
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+
+        // Another device's rows are never in this device's answer.
+        assert!(
+            store
+                .search_messages("dev_missing", "cotton", 100)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_is_bounded_and_says_when_it_truncated() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "bounded",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        for index in 0..8 {
+            store
+                .record_message(
+                    &device.device_id,
+                    "in",
+                    "+1555",
+                    &format!("needle {index}"),
+                    "uploaded",
+                    Some(&format!("in-{index}")),
+                )
+                .await
+                .unwrap();
+        }
+
+        let hits = store
+            .search_messages(&device.device_id, "needle", 3)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 3);
+        assert!(hits.truncated, "8 matches behind a limit of 3");
+
+        let hits = store
+            .search_messages(&device.device_id, "needle", 100)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 8);
+        assert!(!hits.truncated);
+
+        // A caller cannot ask for more than the cap.
+        let hits = store
+            .search_messages(&device.device_id, "needle", 10_000)
+            .await
+            .unwrap();
+        assert_eq!(hits.messages.len(), 8);
+        assert!(!hits.truncated);
+    }
+
+    /// Insert one row with an explicit age, direction, state and mirror flag.
+    /// `mirrored` is what the upload path would have set.
+    async fn seed(
+        store: &Store,
+        device_id: &str,
+        local_id: &str,
+        direction: &str,
+        state: &str,
+        mirrored: bool,
+        created_at: i64,
+    ) {
+        store
+            .record_message(device_id, direction, "+1555", "seed", state, Some(local_id))
+            .await
+            .unwrap();
+        let conn = store.db.connect().unwrap();
+        conn.execute(
+            "UPDATE messages SET created_at = ?, mirrored = ?
+              WHERE device_id = ? AND local_id = ?",
+            params![created_at, if mirrored { 1 } else { 0 }, device_id, local_id],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn local_ids(store: &Store, device_id: &str) -> Vec<String> {
+        let mut ids: Vec<String> = store
+            .list_messages(device_id, 500)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| message.local_id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[tokio::test]
+    async fn retention_never_deletes_rows_the_deployment_does_not_have() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "retention",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let now = now_ms().unwrap();
+        let old = now - 40 * 86_400_000;
+
+        // Old rows, one per state the mirror or a flush still owns.
+        seed(&store, &device.device_id, "old-sent", "out", "sent", true, old).await;
+        seed(&store, &device.device_id, "old-queued", "out", "queued", false, old).await;
+        seed(&store, &device.device_id, "old-failed", "out", "failed", false, old).await;
+        seed(&store, &device.device_id, "old-received", "in", "received", false, old).await;
+        seed(&store, &device.device_id, "old-uploaded", "in", "uploaded", true, old).await;
+        // Mirrored rows still waiting on the radio are covered twice over.
+        seed(&store, &device.device_id, "old-queued-mirrored", "out", "queued", true, old).await;
+        // A row the store has, but the upload forgot to mark.
+        seed(&store, &device.device_id, "old-unmirrored", "out", "sent", false, old).await;
+
+        // Default is `Forever`: even an explicit purge must not delete these.
+        assert_eq!(store.retention().await.unwrap(), Retention::Forever);
+        assert_eq!(store.purge_expired_messages().await.unwrap(), 0);
+        assert_eq!(local_ids(&store, &device.device_id).await.len(), 7);
+
+        store.set_retention(Retention::Days(30)).await.unwrap();
+        let deleted = store.purge_expired_messages().await.unwrap();
+        assert_eq!(deleted, 2, "only mirrored, settled rows go");
+
+        assert_eq!(
+            local_ids(&store, &device.device_id).await,
+            vec![
+                "old-failed".to_string(),
+                "old-queued".to_string(),
+                "old-queued-mirrored".to_string(),
+                "old-received".to_string(),
+                "old-unmirrored".to_string(),
+            ]
+        );
+
+        // The run is recorded, and it is what the Settings row reads.
+        let status = store.retention_status().await.unwrap();
+        assert_eq!(status.policy, "days:30");
+        assert_eq!(status.last_deleted, Some(2));
+        assert!(status.last_purge_at.unwrap() >= now);
+    }
+
+    #[tokio::test]
+    async fn retention_counts_match_each_rule() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "counts",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+        let (other, _) = store
+            .create_device(NewDevice {
+                label: "second",
+                platform: "simulator",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let now = now_ms().unwrap();
+        // 12 settled rows on this device, oldest first by id.
+        for index in 0..12 {
+            let local_id = format!("row-{index:02}");
+            seed(
+                &store,
+                &device.device_id,
+                &local_id,
+                "in",
+                "uploaded",
+                true,
+                now - 100_000 + index,
+            )
+            .await;
+        }
+        // A second device with its own history: the message rule is per device.
+        for index in 0..6 {
+            let local_id = format!("other-{index:02}");
+            seed(
+                &store,
+                &other.device_id,
+                &local_id,
+                "in",
+                "uploaded",
+                true,
+                now - 100_000 + index,
+            )
+            .await;
+        }
+
+        // Keep the newest 5 per device: 7 go here, 1 goes there.
+        store.set_retention(Retention::Messages(5)).await.unwrap();
+        assert_eq!(store.purge_expired_messages().await.unwrap(), 8);
+        assert_eq!(local_ids(&store, &device.device_id).await.len(), 5);
+        assert_eq!(local_ids(&store, &other.device_id).await.len(), 5);
+        assert_eq!(
+            local_ids(&store, &device.device_id).await,
+            (7..12)
+                .map(|index| format!("row-{index:02}"))
+                .collect::<Vec<_>>(),
+            "the newest rows are the ones kept"
+        );
+
+        // `Forever` deletes nothing, even by an explicit purge.
+        store.set_retention(Retention::Forever).await.unwrap();
+        assert_eq!(store.purge_expired_messages().await.unwrap(), 0);
+        assert_eq!(local_ids(&store, &device.device_id).await.len(), 5);
+
+        // 30 days: one row far enough back goes, the rest are fresh.
+        seed(
+            &store,
+            &device.device_id,
+            "ancient",
+            "in",
+            "uploaded",
+            true,
+            now - 31 * 86_400_000,
+        )
+        .await;
+        seed(
+            &store,
+            &device.device_id,
+            "recent",
+            "in",
+            "uploaded",
+            true,
+            now - 2 * 86_400_000,
+        )
+        .await;
+        store.set_retention(Retention::Days(30)).await.unwrap();
+        assert_eq!(store.purge_expired_messages().await.unwrap(), 1);
+        let remaining = local_ids(&store, &device.device_id).await;
+        assert!(!remaining.iter().any(|id| id == "ancient"));
+        assert!(remaining.iter().any(|id| id == "recent"));
+
+        // A corrupt setting reads as `Forever`, never as a delete rule.
+        store.set_setting(RETENTION_SETTING, "days:banana").await.unwrap();
+        assert_eq!(store.retention().await.unwrap(), Retention::Forever);
+        assert_eq!(store.purge_expired_messages().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn retention_on_open_is_throttled_and_silent_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        let now = now_ms().unwrap();
+
+        let device_id;
+        {
+            let store = Store::open(&path).await.unwrap();
+            let (device, _) = store
+                .create_device(NewDevice {
+                    label: "open",
+                    platform: "simulator",
+                    platform_id: None,
+                    carrier: None,
+                    sim_slot: 0,
+                })
+                .await
+                .unwrap();
+            device_id = device.device_id.clone();
+            seed(
+                &store,
+                &device_id,
+                "old",
+                "in",
+                "uploaded",
+                true,
+                now - 40 * 86_400_000,
+            )
+            .await;
+            // `Forever`: reopening must leave the old row alone.
+        }
+
+        {
+            let store = Store::open(&path).await.unwrap();
+            assert_eq!(local_ids(&store, &device_id).await.len(), 1);
+            store.set_retention(Retention::Days(30)).await.unwrap();
+            assert_eq!(store.apply_retention().await.unwrap(), 1);
+            assert_eq!(local_ids(&store, &device_id).await.len(), 0);
+        }
+
+        // A second open inside the throttle window does no work and records no
+        // new purge: the value stays exactly where the first run left it.
+        let prompt = {
+            let store = Store::open(&path).await.unwrap();
+            store.retention_status().await.unwrap().last_purge_at.unwrap()
+        };
+        let store = Store::open(&path).await.unwrap();
+        assert_eq!(
+            store.retention_status().await.unwrap().last_purge_at,
+            Some(prompt)
         );
     }
 }

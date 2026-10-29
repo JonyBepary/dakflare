@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, Message, NewDevice, ProtocolError,
-    Store, Target, carrier::flush_pending, drain_outbox, inject_inbound, parse_pair_link,
+    CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, MAX_SEARCH_HITS, Message, NewDevice,
+    ProtocolError, Retention, RetentionStatus, SearchHits, Store, Target,
+    carrier::flush_pending, check_send, drain_outbox, inject_inbound, parse_pair_link,
     sync_flows as sync_flows_core,
 };
 use serde::Serialize;
@@ -479,9 +480,6 @@ async fn carrier_drain(
 
 /* ---------------------------------------------------------------- compose */
 
-/// The composer's one hard limit, matching `SmsSender` on the Android side.
-const MAX_COMPOSE_BODY_CHARS: usize = 1600;
-
 /// `send_sms` reply. The UI pairs this id with the row it later reads back.
 #[derive(Serialize)]
 struct SendSmsReply {
@@ -563,6 +561,13 @@ fn sms_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
 /// claims delivery: it returns the row's id, and the row moves to `sent` or
 /// `failed` on its own. A device with no row is `Not paired`, which is what the
 /// composer shows as its empty state.
+///
+/// The recipient and body policy is enforced *here*, before the device lookup
+/// and before the plugin call, because the composer is not the only caller: an
+/// sms:/smsto: intent, the inline-reply receiver and tests all reach the same
+/// command. The rules and their exact sentences live in
+/// `dakflare_core::compose`, so this refusal and the field cannot disagree.
+/// Nothing below logs a recipient or a body; refusals carry counts only.
 #[tauri::command]
 async fn send_sms(
     app: tauri::AppHandle,
@@ -571,23 +576,14 @@ async fn send_sms(
     to: String,
     body: String,
 ) -> Result<SendSmsReply, String> {
+    let to = check_send(&to, &body).map_err(|problem| problem.sentence())?;
+
     let device = state
         .store
         .get_device(&device_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Not paired".to_string())?;
-
-    let to = to.trim();
-    if to.is_empty() {
-        return Err("A recipient is required".into());
-    }
-    if body.trim().is_empty() {
-        return Err("A message is required".into());
-    }
-    if body.chars().count() > MAX_COMPOSE_BODY_CHARS {
-        return Err("That message is too long".into());
-    }
 
     #[cfg(target_os = "android")]
     {
@@ -614,7 +610,7 @@ async fn send_sms(
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app, device);
+        let _ = (app, device, to);
         Err("Sending SMS is only available on the phone".into())
     }
 }
@@ -723,6 +719,70 @@ async fn list_messages_page(
     let has_more = messages.len() as i64 > limit;
     messages.truncate(limit as usize);
     Ok(MessagePage { messages, has_more })
+}
+
+/// Bounded search over this device's local log: peer or body, case-insensitive.
+///
+/// The store escapes LIKE wildcards, caps the pattern, and returns at most
+/// [`MAX_SEARCH_HITS`] rows plus a `truncated` flag; the Threads frame prints
+/// that instead of a count it cannot support.
+#[tauri::command]
+async fn search_messages(
+    state: State<'_, AppState>,
+    device_id: String,
+    query: String,
+    limit: Option<i64>,
+) -> Result<SearchHits, String> {
+    state
+        .store
+        .search_messages(&device_id, &query, limit.unwrap_or(MAX_SEARCH_HITS))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The retention rule in force, when it last ran and what that run removed.
+#[tauri::command]
+async fn get_retention(state: State<'_, AppState>) -> Result<RetentionStatus, String> {
+    state
+        .store
+        .retention_status()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Choose a retention rule and apply it now.
+///
+/// `forever` is a valid choice and deletes nothing. An unknown rule is refused
+/// before it is stored, so a typo cannot become the setting the next open reads.
+/// The stores' own rule decides what may go: mirrored rows only, never a queued
+/// send, an unuploaded failure or a pending inbound row.
+#[tauri::command]
+async fn set_retention(
+    state: State<'_, AppState>,
+    policy: String,
+) -> Result<RetentionStatus, String> {
+    let Some(retention) = Retention::parse(&policy) else {
+        return Err(
+            "That is not a retention rule. Choose 90 days, 30 days, 1,000 messages or forever."
+                .into(),
+        );
+    };
+    state
+        .store
+        .set_retention(retention)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Choosing a rule is the instruction to apply it, not just to record it.
+    state
+        .store
+        .purge_expired_messages()
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .store
+        .retention_status()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The cached flow set, readable by the Flows frame. A corrupt graph keeps its
@@ -860,6 +920,9 @@ pub fn run() {
             take_sms_route,
             list_messages,
             list_messages_page,
+            search_messages,
+            get_retention,
+            set_retention,
             list_cached_flows,
             list_flow_runs,
             get_device_facts,

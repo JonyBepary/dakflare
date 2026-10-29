@@ -32,6 +32,37 @@ export type Message = {
 /** One keyset page from `list_messages_page`; newest first. */
 export type MessagePage = { messages: Message[]; has_more: boolean };
 
+/** One bounded answer from `search_messages`. `truncated` means more matched. */
+export type SearchHits = { messages: Message[]; truncated: boolean };
+
+/** The retention rule in force, and the last time it actually ran. */
+export type RetentionStatus = {
+	policy: string;
+	last_purge_at: number | null;
+	last_deleted: number | null;
+};
+
+/** "days:90" → "90 days", "messages:1000" → "1,000 messages". */
+export function retentionWords(policy: string): string {
+	const [kind, raw] = policy.split(':');
+	const value = Number(raw);
+	if (kind === 'days' && Number.isFinite(value)) return `${value} days`;
+	if (kind === 'messages' && Number.isFinite(value)) {
+		return `${value.toLocaleString('en-US')} messages`;
+	}
+	return 'forever';
+}
+
+/** What the rule keeps, in one sentence fragment. */
+export function retentionKept(policy: string): string {
+	const [kind, raw] = policy.split(':');
+	if (kind === 'days' && Number.isFinite(Number(raw))) return `${Number(raw)} days of messages.`;
+	if (kind === 'messages' && Number.isFinite(Number(raw))) {
+		return `The newest ${retentionWords(policy)}.`;
+	}
+	return 'Everything on this phone.';
+}
+
 /** `poll_device` also reports the best-effort flow sync it ran. */
 export type PollResult = {
 	commands?: unknown[];
@@ -131,6 +162,9 @@ class AppStore {
 	pairingAt = $state<Record<string, number>>({});
 
 	notices = $state<Record<string, Notice>>({});
+
+	/** The retention rule, as the store last reported it. */
+	retention = $state<RetentionStatus | null>(null);
 
 	selected = $derived(this.devices.find((d) => d.device_id === this.selectedId) ?? null);
 	configured = $derived(Boolean(this.target.base_url));
@@ -268,6 +302,62 @@ class AppStore {
 			beforeId: before ? before.id : null,
 			limit
 		});
+	}
+
+	/**
+	 * Bounded search over this phone's log: the number or the text of a message.
+	 * The store escapes LIKE wildcards and caps the answer at 100 rows.
+	 */
+	async searchMessages(query: string, limit = 100): Promise<SearchHits> {
+		if (!this.selectedId) return { messages: [], truncated: false };
+		return await this.call<SearchHits>('search_messages', {
+			deviceId: this.selectedId,
+			query,
+			limit
+		});
+	}
+
+	async loadRetention() {
+		if (!this.backendAvailable) {
+			this.retention = null;
+			return;
+		}
+		try {
+			this.retention = await this.call<RetentionStatus>('get_retention');
+		} catch {
+			this.retention = null;
+		}
+	}
+
+	/**
+	 * Store the chosen rule and apply it now. The store decides what may go:
+	 * mirrored rows only, never a queued send, an unuploaded failure or a
+	 * pending inbound row. The reply is the real count, which the frame says
+	 * out loud instead of implying a clean sweep.
+	 */
+	async saveRetention(policy: string) {
+		this.busy.retention = true;
+		this.clearNotice('retention');
+		try {
+			const status = await this.call<RetentionStatus>('set_retention', { policy });
+			this.retention = status;
+			const removed = status.last_deleted ?? 0;
+			this.notify(
+				'retention',
+				removed === 0
+					? `Kept: ${retentionWords(policy)}. Nothing was removed.`
+					: `Kept: ${retentionWords(policy)}. Removed ${count(removed, 'message', 'messages')}.`,
+				'ok'
+			);
+			// The log changed: re-read Threads so no deleted row stays on screen.
+			await this.refreshSelected();
+			return true;
+		} catch (error) {
+			this.fail('retention', error);
+			return false;
+		} finally {
+			this.busy.retention = false;
+		}
 	}
 
 	/**

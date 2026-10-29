@@ -172,6 +172,22 @@
             </intent-filter>
         </receiver>
 
+        <!--
+            The "Reply" action on a message notification. The action's
+            PendingIntent is explicit (this component) and MUTABLE so the platform
+            can attach the RemoteInput text; unexported means only a holder of
+            that PendingIntent can reach it, and no Activity is involved, so a
+            reply works after the process was killed (the broadcast cold-starts
+            it). The send goes through SmsSender, like the composer.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.SmsReplyReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.dakflare.simulator.SMS_REPLY" />
+            </intent-filter>
+        </receiver>
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

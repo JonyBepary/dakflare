@@ -56,5 +56,10 @@
 	{:else if name === 'compose'}
 		<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
 		<path d="M18.4 2.6a2.1 2.1 0 1 1 3 3L12 15l-4 1 1-4z" />
+	{:else if name === 'search'}
+		<circle cx="10.5" cy="10.5" r="6.5" />
+		<path d="m15.5 15.5 4.5 4.5" />
+	{:else if name === 'close'}
+		<path d="m6 6 12 12M18 6 6 18" />
 	{/if}
 </svg>

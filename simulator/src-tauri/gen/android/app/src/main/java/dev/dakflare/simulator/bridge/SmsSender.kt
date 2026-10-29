@@ -24,12 +24,6 @@ import android.util.Log
 object SmsSender {
     private const val TAG = "DakFlareSms"
 
-    /** One typed message, not a carrier payload; the Rust entry enforces the same cap. */
-    private const val MAX_BODY_CHARS = 1600
-
-    /** Masks and shortcodes are never valid destinations for a conversation. */
-    private const val MIN_DIGITS = 10
-
     /**
      * A refusal the composer can show verbatim. It never carries the recipient
      * or the body; `message` is the whole user-facing text.
@@ -61,11 +55,8 @@ object SmsSender {
         }
 
         val recipient = to.trim()
-        if (recipient.isEmpty() || skipReason(recipient) != null) {
-            throw Refused("That number is not a reply target")
-        }
-        if (body.isBlank()) throw Refused("That message is empty")
-        if (body.length > MAX_BODY_CHARS) throw Refused("That message is too long")
+        // One policy with Rust and the webview: same rules, same sentence.
+        NativeBridge.checkSendSafely(recipient, body)?.let { throw Refused(it) }
 
         // The row exists before the radio is touched. A double tap reaches this
         // point twice but resolves to the same row, because an identical send
@@ -220,16 +211,6 @@ object SmsSender {
         if (!NativeBridge.markOutboundSafely(appDir, deviceId, localId, "failed")) {
             Log.w(TAG, "compose state not recorded; row stays queued")
         }
-    }
-
-    /**
-     * Same rule as `SmsReceiver.skipReason`: letters mean an alphanumeric mask,
-     * fewer than ten digits means a shortcode. Returns a word-only reason.
-     */
-    private fun skipReason(number: String): String? = when {
-        number.any { it.isLetter() } -> "mask"
-        number.count { it.isDigit() } < MIN_DIGITS -> "shortcode"
-        else -> null
     }
 
     /** Keep at most the last four characters of a number; never log it whole. */

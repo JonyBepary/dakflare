@@ -322,6 +322,37 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_resendOut
     to_jstring(&mut env, json)
 }
 
+/// `dev.dakflare.simulator.bridge.NativeBridge.checkSend`
+///
+/// The one recipient/body policy, so Kotlin cannot drift from Rust or from the
+/// webview. Returns `{"ok":true}` or `{"ok":false,"error":"<sentence>"}` where
+/// the sentence is the one the UI already shows. No number or body is logged.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_checkSend(
+    mut env: JNIEnv,
+    _class: JClass,
+    to: JString,
+    body: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match (java_string(&mut env, &to), java_string(&mut env, &body)) {
+            (Ok(to), Ok(body)) => match dakflare_core::check_send(&to, &body) {
+                Ok(_) => serde_json::json!({ "ok": true }).to_string(),
+                Err(problem) => serde_json::json!({
+                    "ok": false,
+                    "error": problem.sentence(),
+                })
+                .to_string(),
+            },
+            _ => error_json("bad_input"),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => error_json("storage"),
+    };
+    to_jstring(&mut env, json)
+}
+
 /// `dev.dakflare.simulator.bridge.NativeBridge.getDeviceFact`
 ///
 /// Reads one whitelisted handset fact back. The receiver uses it for

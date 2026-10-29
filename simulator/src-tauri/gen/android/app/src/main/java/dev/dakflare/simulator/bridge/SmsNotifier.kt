@@ -12,6 +12,7 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 import dev.dakflare.simulator.MainActivity
 
 /**
@@ -23,6 +24,9 @@ import dev.dakflare.simulator.MainActivity
  *
  * Tapping a notification reuses [SmsRoute]: it launches [MainActivity] with a
  * `sms:<peer>` VIEW intent, which the Activity turns into `/messages/<peer>`.
+ * The notification also carries a free-text "Reply" action: [SmsReply] hands
+ * the typed text to [SmsReplyReceiver], which sends through [SmsSender] without
+ * an Activity, and [replied] clears only the thread the reply belonged to.
  *
  * Two suppressions are deliberate: a message the app itself sent never reaches
  * this object, and an inbound message for the thread currently in front of the
@@ -34,6 +38,7 @@ object SmsNotifier {
     private const val TAG = "DakFlareSms"
     private const val GROUP = "dakflare.messages"
     private const val NOTIFICATION_TAG = "dakflare-message"
+    private const val REPLY_FAILED_TAG = "dakflare-message-refused"
     private const val SUMMARY_ID = 0x0DAF1
     private const val MMS_ID = 0x0DAF2
 
@@ -102,6 +107,7 @@ object SmsNotifier {
             .setGroup(GROUP)
             .setAutoCancel(true)
             .setContentIntent(threadIntent(context, peer))
+            .addAction(replyAction(context, peer, id))
             .build()
 
         try {
@@ -153,19 +159,129 @@ object SmsNotifier {
 
     /** Group summary, posted once more than one message notification is alive. */
     private fun postSummaryIfNeeded(context: Context, manager: NotificationManagerCompat) {
-        val count = try {
-            manager.activeNotifications.count {
-                it.tag == NOTIFICATION_TAG && it.id != SUMMARY_ID
-            }
-        } catch (_: Throwable) {
+        val count = childCount(manager)
+        Log.i(TAG, "notification children=$count")
+        if (count <= 1) return
+        postSummary(context, manager, count)
+    }
+
+    /**
+     * The "Reply" action: free text, delivered to [SmsReplyReceiver] as an
+     * explicit broadcast.
+     *
+     * The tap intent is untouched; this action is the only mutable part of the
+     * notification, and it is mutable because the platform will not attach
+     * RemoteInput results to an immutable PendingIntent. The request code is the
+     * per-message id, so two messages never share one pending reply.
+     */
+    private fun replyAction(
+        context: Context,
+        peer: String,
+        notificationId: Int,
+    ): NotificationCompat.Action {
+        val remoteInput = RemoteInput.Builder(SmsReply.RESULT_KEY)
+            .setLabel("Reply")
+            .setAllowFreeFormInput(true)
+            .build()
+        return NotificationCompat.Action.Builder(
+            android.R.drawable.ic_menu_send,
+            "Reply",
+            SmsReply.pendingIntent(context, peer, notificationId),
+        )
+            .addRemoteInput(remoteInput)
+            .build()
+    }
+
+    /**
+     * The reply was handed to the radio: clear the notification it was typed in,
+     * then settle the group summary from what is actually still posted.
+     *
+     * A reply to one thread must never clear another. Only this message's child
+     * notification is cancelled; the summary is reposted with the remaining
+     * count, or cancelled only when no child is left.
+     */
+    fun replied(context: Context, notificationId: Int) {
+        val manager = NotificationManagerCompat.from(context)
+        try {
+            manager.cancel(NOTIFICATION_TAG, notificationId)
+        } catch (error: Throwable) {
+            Log.w(TAG, "notification clear failed: ${error.javaClass.simpleName}")
+        }
+
+        val remaining = childCount(manager, notificationId)
+        if (remaining <= 0) {
+            cancelSummary(manager)
+        } else {
+            postSummary(context, manager, remaining)
+        }
+    }
+
+    /**
+     * The reply could not be sent. Name the reason and keep the typed text, so
+     * nothing the user wrote is lost silently; the message notification stays,
+     * because the message and its Reply action are still valid.
+     */
+    fun notifyReplyRefused(
+        context: Context,
+        peer: String,
+        text: String,
+        reason: String,
+    ) {
+        if (!canNotify(context)) {
+            Log.i(TAG, "reply refusal not shown: notifications not granted")
             return
         }
-        if (count <= 1) return
+        ensureChannel(context)
 
+        val body = if (text.isBlank()) reason else text
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Reply not sent")
+            .setContentText(reason)
+            .setSubText(peer)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_ERROR)
+            .setAutoCancel(true)
+            .setContentIntent(threadIntent(context, peer))
+            .build()
+
+        try {
+            // Separate tag and id from the message notifications: a refusal must
+            // not change the group count or replace the inbound it answers.
+            NotificationManagerCompat.from(context)
+                .notify(REPLY_FAILED_TAG, peer.hashCode(), notification)
+        } catch (error: Throwable) {
+            Log.e(TAG, "reply refusal notification failed: ${error.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * How many per-message notifications (not the summary) are still posted.
+     *
+     * `excludeId` is the notification just cancelled: the platform removes a
+     * cancellation asynchronously, so a query racing it can still list the
+     * child that was cleared. Counting it again would leave a summary behind
+     * with nothing to summarise.
+     */
+    private fun childCount(
+        manager: NotificationManagerCompat,
+        excludeId: Int? = null,
+    ): Int = try {
+        manager.activeNotifications.count {
+            it.tag == NOTIFICATION_TAG && it.id != SUMMARY_ID && it.id != excludeId
+        }
+    } catch (error: Throwable) {
+        Log.w(TAG, "notification query failed: ${error.javaClass.simpleName}")
+        0
+    }
+
+    /** The summary for [count] live threads. */
+    private fun postSummary(context: Context, manager: NotificationManagerCompat, count: Int) {
         val summary = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle("DakFlare")
-            .setContentText("$count new messages")
+            .setContentText(if (count == 1) "1 new message" else "$count new messages")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setGroup(GROUP)
@@ -178,6 +294,14 @@ object SmsNotifier {
             manager.notify(NOTIFICATION_TAG, SUMMARY_ID, summary)
         } catch (error: Throwable) {
             Log.e(TAG, "notification summary failed: ${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun cancelSummary(manager: NotificationManagerCompat) {
+        try {
+            manager.cancel(NOTIFICATION_TAG, SUMMARY_ID)
+        } catch (error: Throwable) {
+            Log.w(TAG, "notification summary clear failed: ${error.javaClass.simpleName}")
         }
     }
 

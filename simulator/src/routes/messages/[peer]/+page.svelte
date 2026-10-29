@@ -14,6 +14,9 @@
 	const hasDevice = $derived(Boolean(app.selected));
 	const canRead = $derived(app.backendAvailable && hasDevice);
 
+	/** A search hit names the row it wants; the route opens on it if it can. */
+	const focusId = $derived(page.url.searchParams.get('at') ?? '');
+
 	let messages = $state<Message[]>([]); // newest first while paging
 	let hasMore = $state(false);
 	let loading = $state(true);
@@ -23,6 +26,13 @@
 	let error = $state<string | null>(null);
 	let scroller: HTMLElement | null = null;
 	let pinned = true;
+	/** The row a search sent us to, highlighted while the reader looks at it. */
+	let hitId = $state('');
+	let hitTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Why the view could not land on the said row, when that happens. */
+	let jumpNote = $state<string | null>(null);
+	/** The search hit waiting for the thread to be on screen. */
+	let focusPending = $state('');
 
 	/** A real row, or one the composer wrote and the database has not returned yet. */
 	type Bubble = Message & { pending?: boolean };
@@ -67,6 +77,9 @@
 	// before one of its messages appears. The cap keeps one tap bounded; the
 	// button stays available when the cap was the reason we stopped.
 	const MAX_PAGES = 40;
+	// A search hit may be older than the first page. This is the extra budget
+	// spent looking for it once on open, so one tap stays bounded.
+	const SEEK_PAGES = 20;
 
 	async function fetchPeerPages(start: Message | null, stopAtFirst: boolean) {
 		const collected: Message[] = [];
@@ -111,16 +124,97 @@
 		});
 	}
 
+	/**
+	 * Bring a search hit into view. The row is only there if its page was
+	 * loaded; the caller decides what to say when it is not.
+	 */
+	async function revealHit(id: string): Promise<boolean> {
+		await tick();
+		const node = document.getElementById(`msg-${id}`);
+		if (!node) return false;
+		pinned = false;
+		ready = true;
+		node.scrollIntoView({ block: 'center' });
+		hitId = id;
+		if (hitTimer) clearTimeout(hitTimer);
+		// A wayfinding cue, not a permanent mark: it fades out of the way once
+		// the reader has found the row.
+		hitTimer = setTimeout(() => {
+			if (hitId === id) hitId = '';
+		}, 6000);
+		return true;
+	}
+
+	/** Page the raw device log until `id` appears, within a bounded budget. */
+	async function seekTo(id: string): Promise<boolean> {
+		let pages = 0;
+		let cursor: Message | null = messages[messages.length - 1] ?? null;
+		while (hasMore && pages < SEEK_PAGES) {
+			const result = await app.pageMessages(cursor, PAGE);
+			pages += 1;
+			if (result.messages.length === 0) {
+				hasMore = result.has_more;
+				break;
+			}
+			cursor = result.messages[result.messages.length - 1];
+			const mine = result.messages.filter((message) => message.peer === peer);
+			if (mine.length > 0) messages = [...messages, ...mine];
+			hasMore = result.has_more;
+			if (result.messages.some((message) => message.id === id)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Land on the search hit, or say why the view could not. Runs after the
+	 * thread is painted: before that the rows are not in the document at all,
+	 * so a lookup here would always miss.
+	 */
+	async function settleFocus(id: string) {
+		if (await revealHit(id)) return;
+		jumpNote = hasMore
+			? 'Opened the thread. That match is older than the pages this view loads; use Load older messages to reach it.'
+			: 'Opened the thread. That message is not in the local thread any more; the keep-messages rule or a clear may have removed it.';
+		// Stay at the top, where the note and the control that continues the
+		// search are. `pinned` off stops the resize observer from pulling the
+		// view back to the newest message, which would hide the note.
+		pinned = false;
+		await tick();
+		scroller ??= document.querySelector<HTMLElement>('.app-main');
+		if (scroller) scroller.scrollTop = 0;
+	}
+
+	/** The hit is held here until the rows exist, then handled once. */
+	$effect(() => {
+		const id = focusPending;
+		if (!id || loading) return;
+		focusPending = '';
+		void settleFocus(id);
+	});
+
 	async function loadInitial() {
 		loading = true;
 		error = null;
+		jumpNote = null;
 		try {
 			const result = await fetchPeerPages(null, false);
 			messages = result.collected;
 			hasMore = result.more;
+
+			// A search hit can sit far below the first page of this thread.
+			const focus = focusId;
+			if (focus && !messages.some((message) => message.id === focus) && hasMore) {
+				await seekTo(focus);
+			}
+
 			composer.settle(peer, messages);
 			await tick();
-			await scrollToNewest();
+
+			if (focus) {
+				focusPending = focus;
+			} else {
+				await scrollToNewest();
+			}
 		} catch (failure) {
 			error = String(failure);
 		} finally {
@@ -232,6 +326,7 @@
 		return () => {
 			observer.disconnect();
 			scroller?.removeEventListener('scroll', onScroll);
+			if (hitTimer) clearTimeout(hitTimer);
 		};
 	});
 </script>
@@ -289,6 +384,9 @@
 		</section>
 	{:else}
 		<div class="chat-wrap">
+			{#if jumpNote}
+				<div class="notice jump-note" role="status">{jumpNote}</div>
+			{/if}
 			<div class="chat-tools">
 				{#if hasMore}
 					<button
@@ -315,8 +413,10 @@
 					{:else}
 						<li
 							class="bubble-row"
+							id={`msg-${row.message.id}`}
 							data-dir={row.message.direction}
 							data-pending={row.message.pending ? 'true' : undefined}
+							data-hit={hitId === row.message.id ? 'true' : undefined}
 						>
 							<div class="bubble">
 								<p class="bubble-body">{row.message.body}</p>
@@ -341,3 +441,35 @@
 		</div>
 	{/if}
 </section>
+
+<style>
+	.jump-note {
+		margin: 8px 0 0;
+	}
+
+	/* The row a search sent the reader to. The ring fades once the eye has
+	   found it; the outline stays while the note is on screen. */
+	.bubble-row[data-hit='true'] .bubble {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+
+	.bubble-row[data-hit='true'] .bubble {
+		animation: hit-ring 2.4s ease-out 1;
+	}
+
+	@keyframes hit-ring {
+		0% {
+			box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 24%, transparent);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.bubble-row[data-hit='true'] .bubble {
+			animation: none;
+		}
+	}
+</style>

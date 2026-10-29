@@ -282,6 +282,32 @@ object NativeBridge {
     }
 
     /**
+     * The one recipient/body policy, shared with Rust and the webview.
+     *
+     * Returns `{"ok":true}` or `{"ok":false,"error":"<sentence>"}`.
+     */
+    @JvmStatic
+    external fun checkSend(to: String, body: String): String
+
+    /**
+     * The refusal sentence, or `null` when the send is allowed. Never throws: a
+     * missing symbol returns `null` rather than blocking every send.
+     */
+    fun checkSendSafely(to: String, body: String): String? {
+        if (loadFailure != null) return null
+        return try {
+            val parsed = JSONObject(checkSend(to, body))
+            if (parsed.optBoolean("ok")) null else parsed.optString("error").ifEmpty { null }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "checkSend symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "checkSend failed: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
      * Read one stored handset fact (`self_number`, `sim_slot`, …).
      *
      * Returns `null` when the fact was never written or the store cannot be read.
