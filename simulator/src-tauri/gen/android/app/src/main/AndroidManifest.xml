@@ -159,14 +159,16 @@
 
         <!--
             Finishes a composed send. `PendingIntent.getBroadcast` targets this
-            component with the SENT action, so the broadcast is explicit and the
-            receiver stays unexported; no other app can mark a row.
+            component with the SENT and DELIVERED actions, so the broadcasts are
+            explicit and the receiver stays unexported; no other app can mark a
+            row.
         -->
         <receiver
             android:name="dev.dakflare.simulator.bridge.SendStatusReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="dev.dakflare.simulator.SMS_SENT" />
+                <action android:name="dev.dakflare.simulator.SMS_DELIVERED" />
             </intent-filter>
         </receiver>
 

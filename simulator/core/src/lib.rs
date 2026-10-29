@@ -17,7 +17,7 @@ pub use carrier::{
 pub use dakflare_flow::Action;
 pub use db::{
     CachedFlow, DEVICE_FACT_KEYS, Device, DeviceFacts, FlowRunRow, MAX_DEVICE_FACT_LEN, Message,
-    NewDevice, Store, StoreError, is_device_fact_key,
+    NewDevice, SendFailureOutcome, Store, StoreError, is_device_fact_key,
 };
 pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
 pub use identity::{

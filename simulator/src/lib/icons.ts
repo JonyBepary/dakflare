@@ -9,4 +9,5 @@ export type IconName =
 	| 'check'
 	| 'alert'
 	| 'chevron-left'
-	| 'send';
+	| 'send'
+	| 'compose';

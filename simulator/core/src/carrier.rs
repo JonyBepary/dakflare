@@ -476,6 +476,13 @@ pub struct Flushed {
 ///
 /// Rows are marked as accepted only after the request succeeds. A row without a
 /// `local_id` cannot be keyed, so it is skipped in the payload and left pending.
+///
+/// M5.5 `delivered` cannot be carried by this endpoint: the Worker's `messages`
+/// table has no state column and its `ON CONFLICT(device_id, local_id) DO
+/// NOTHING` insert treats a second upload as a duplicate, not an update. The
+/// final state therefore stays in the local store, while the body is uploaded
+/// exactly like `sent` (see `list_unmirrored_outbound`). Inventing a field the
+/// Worker ignores would be a lie about what the console can see.
 pub async fn flush_pending(
     store: &Store,
     client: &DeviceClient,

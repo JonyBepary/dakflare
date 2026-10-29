@@ -117,8 +117,10 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_queueOutb
 ///
 /// Records what happened to a queued reply row:
 /// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
-/// Only `queued`, `sent` and `failed` are accepted; a `failed` row is not
-/// mirrored until M5.5's retry flips it back to `queued`.
+/// `queued`, `sent`, `failed` and `delivered` are accepted; `delivered` may only
+/// follow `sent` (a direct delivery mark on a queued row is refused, use
+/// `markDelivered` for a real carrier report). A `failed` row is not mirrored
+/// until M5.5's retry flips it back to `queued`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbound(
     mut env: JNIEnv,
@@ -129,6 +131,143 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     state: JString,
 ) -> jstring {
     let json = mark_guarded(&mut env, &app_dir, &device_id, &local_id, &state);
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.markDelivered`
+///
+/// Marks a reply row `delivered` from a carrier delivery report:
+/// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+///
+/// A delivery report is the one caller allowed to promote a row that is still
+/// `queued` (the report arrived before the `SENT` broadcast); the core writes
+/// `sent` then `delivered` in one transaction. A `failed` row is refused.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markDelivered(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_local_id_inputs(&mut env, &app_dir, &device_id, &local_id) {
+            Ok((app_dir, device_id, local_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mark_delivered_blocking(&app_dir, &device_id, &local_id)
+                })) {
+                    Ok(Ok(true)) => serde_json::json!({ "ok": true }).to_string(),
+                    // Missing row or a row the radio already failed: an honest
+                    // no-op, not a storage fault.
+                    Ok(Ok(false)) => error_json("not_found"),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] markDelivered panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] markDelivered panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.recordTransientFailure`
+///
+/// Records one radio failure that is worth retrying (`RADIO_OFF` or
+/// `NO_SERVICE`). The core puts the row back to `queued` and spends one attempt,
+/// or turns it `failed` once the third attempt is spent. Returns
+/// `{"ok":true,"state":"queued"|"failed","attempts":<n>}` or
+/// `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_recordTransientFailure(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_local_id_inputs(&mut env, &app_dir, &device_id, &local_id) {
+            Ok((app_dir, device_id, local_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    record_transient_failure_blocking(&app_dir, &device_id, &local_id)
+                })) {
+                    Ok(Ok(Some(outcome))) => serde_json::json!({
+                        "ok": true,
+                        "state": outcome.state,
+                        "attempts": outcome.attempts,
+                    })
+                    .to_string(),
+                    // A late report against a row that already left `queued`
+                    // is a no-op, not a new failure.
+                    Ok(Ok(None)) => error_json("not_found"),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] recordTransientFailure panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] recordTransientFailure panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.retryableOutbound`
+///
+/// Lists the local ids the gateway tick may retry (queued, fewer than three
+/// attempts, older than 60 s): `{"ok":true,"local_ids":["…"]}` or
+/// `{"ok":false,"error":"bad_input"|"storage"}`. Only ids cross this boundary;
+/// the body and recipient are read back from the stored row before a re-send.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_retryableOutbound(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(&mut env, &app_dir, &device_id) {
+            Ok((app_dir, device_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    retryable_blocking(&app_dir, &device_id)
+                })) {
+                    Ok(Ok(local_ids)) => serde_json::json!({
+                        "ok": true,
+                        "local_ids": local_ids,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] retryableOutbound panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] retryableOutbound panicked before storage");
+            error_json("storage")
+        }
+    };
     to_jstring(&mut env, json)
 }
 
@@ -651,6 +790,31 @@ fn read_mark_inputs(
     Ok((app_dir, device_id, local_id, state))
 }
 
+/// Decode and validate a local id that identifies a stored outbound row. Same
+/// bounds as the state-mark path, minus the state string. No value is logged.
+fn read_local_id_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    device_id: &JString,
+    local_id: &JString,
+) -> Result<(String, String, String), &'static str> {
+    let app_dir = java_string(env, app_dir)?;
+    let device_id = java_string(env, device_id)?;
+    let local_id = java_string(env, local_id)?;
+
+    if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+        return Err("bad_input");
+    }
+    if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+        return Err("bad_input");
+    }
+    if local_id.is_empty() || local_id.len() > MAX_LOCAL_ID_LEN {
+        return Err("bad_input");
+    }
+
+    Ok((app_dir, device_id, local_id))
+}
+
 /// Decode and validate the flush arguments. Same rules as the state-mark path:
 /// copy the strings, bound their lengths, and never touch the database on bad
 /// input.
@@ -776,6 +940,39 @@ fn mark_blocking(
 ) -> Result<bool, &'static str> {
     let store = open_store_blocking(app_dir)?;
     tauri::async_runtime::block_on(store.set_message_state_by_local_id(device_id, local_id, state))
+        .map_err(map_store_error)
+}
+
+fn mark_delivered_blocking(
+    app_dir: &str,
+    device_id: &str,
+    local_id: &str,
+) -> Result<bool, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(store.mark_delivered_by_local_id(device_id, local_id))
+        .map_err(map_store_error)
+}
+
+fn record_transient_failure_blocking(
+    app_dir: &str,
+    device_id: &str,
+    local_id: &str,
+) -> Result<Option<dakflare_core::SendFailureOutcome>, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(store.record_send_failure_by_local_id(
+        device_id, local_id, true,
+    ))
+    .map_err(map_store_error)
+}
+
+fn retryable_blocking(app_dir: &str, device_id: &str) -> Result<Vec<String>, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .map_err(|_| "storage")?;
+    tauri::async_runtime::block_on(store.list_retryable_outbound(device_id, now, 10))
+        .map(|messages| messages.into_iter().filter_map(|message| message.local_id).collect())
         .map_err(map_store_error)
 }
 

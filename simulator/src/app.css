@@ -1059,6 +1059,7 @@ input::placeholder {
 	color: var(--df-c-composer-counter-warn-ink);
 }
 
+/* Shared by the reply bar and the new-message screen. */
 .composer-failure {
 	display: grid;
 	gap: 2px;
@@ -1200,6 +1201,175 @@ input::placeholder {
 	border-radius: 999px;
 	background: var(--df-c-bubble-status-failed-bg);
 	color: var(--df-c-bubble-status-failed-ink);
+}
+
+/* ---------------------------------------------------------------- compose */
+
+/* Threads' one action that is not a section: writing to a number. */
+.screen-actions {
+	display: flex;
+	flex: none;
+	gap: var(--df-p-space-2);
+}
+
+.icon-btn.compose-open {
+	border-color: transparent;
+	background: var(--df-accent-fill);
+	color: var(--df-text-on-accent);
+	text-decoration: none;
+	transition:
+		transform var(--df-p-dur-press) ease-out,
+		background-color 120ms ease-out;
+}
+
+.icon-btn.compose-open:hover {
+	background: var(--df-accent-fill-hover);
+	color: var(--df-text-on-accent);
+}
+
+.icon-btn.compose-open:active {
+	transform: scale(0.94);
+}
+
+.compose-screen {
+	padding-bottom: var(--df-p-space-6);
+}
+
+/* The same sticky header as a conversation, with a title instead of a peer. */
+.compose-head h1 {
+	font-family: var(--display);
+	font-size: var(--df-p-text-lg);
+	font-weight: 800;
+	letter-spacing: -0.015em;
+}
+
+.compose-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--df-p-space-4);
+	margin-top: var(--df-p-space-4);
+	animation: compose-in var(--df-p-dur-settle) var(--df-p-ease-standard) both;
+}
+
+/* One reveal when the screen opens; the reduced state is the final state. */
+@keyframes compose-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+}
+
+.compose-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+}
+
+.compose-label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--df-text-meta);
+}
+
+/* A number is an identity: mono, tabular, and never shortened. */
+.compose-to {
+	min-height: 52px;
+	font-family: var(--mono);
+	font-size: var(--df-p-text-lg);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0.01em;
+}
+
+/* A text field is always the place the caret is, so it always shows the ring;
+   the global rule only promises it for keyboard focus. */
+.compose-to:focus,
+.compose-body:focus {
+	outline: var(--df-p-focus-width) solid var(--df-border-focus);
+	outline-offset: var(--df-p-focus-offset);
+}
+
+.compose-hint {
+	min-height: 16px;
+	font-size: 11.5px;
+	line-height: 1.45;
+	color: var(--df-text-meta);
+	overflow-wrap: anywhere;
+}
+
+.compose-hint[data-tone='error'] {
+	color: var(--df-state-danger-ink);
+}
+
+.compose-dialled {
+	font-size: var(--df-p-text-sm);
+	font-weight: 600;
+	color: var(--df-text-primary);
+}
+
+.compose-body {
+	min-height: 132px;
+	padding: var(--df-p-space-3);
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-surface-field);
+	font-size: var(--df-c-composer-font-size);
+	line-height: 1.5;
+	resize: none;
+}
+
+.compose-meta {
+	display: flex;
+	justify-content: flex-end;
+	min-height: 16px;
+}
+
+.compose-actions {
+	display: flex;
+	flex-direction: column;
+	gap: var(--df-p-space-2);
+}
+
+.compose-send {
+	min-height: 52px;
+	font-size: var(--df-p-text-md);
+}
+
+/* The same disabled reading as the composer's send: a muted fill with legible
+   ink, not a washed-out coral that still looks pressable. */
+.compose-send:disabled {
+	border-color: transparent;
+	background: var(--df-c-composer-send-disabled-bg);
+	color: var(--df-c-composer-send-disabled-ink);
+	opacity: 1;
+}
+
+.compose-blocked {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--df-p-space-2);
+	padding: 10px var(--df-p-space-3);
+	border: 1px dashed var(--df-border-control);
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-surface-well);
+	color: var(--df-text-secondary);
+	font-size: 12.5px;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.compose-settings {
+	align-self: center;
+}
+
+/* The 48dp target rule applies to the From picker too; the shared control is 44. */
+.compose-screen select {
+	min-height: 48px;
+}
+
+.compose-screen .picker.compact {
+	margin-top: var(--df-p-space-4);
 }
 
 /* ---------------------------------------------------------------- device */

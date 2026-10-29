@@ -197,20 +197,32 @@ class SmsReceiver : BroadcastReceiver() {
                 // The receipt is the only proof the radio accepted the message:
                 // the send call returning proves only that the request was
                 // accepted for dispatch. [SendStatusReceiver] marks the row
-                // `sent` on RESULT_OK and `failed` otherwise, then flushes.
+                // `sent` on RESULT_OK and `failed` otherwise, then flushes. A
+                // delivery report is attached alongside it so `delivered` is
+                // recorded only when the carrier says so.
                 val sent = SendReceipt.pendingIntent(context, deviceId, action.localId)
+                val delivered = SendReceipt.deliveryIntent(context, deviceId, action.localId)
                 if (parts.size > 1) {
-                    // `sendMultipartTextMessage` takes one sentIntent per part.
-                    // The same intent is repeated, as [SmsSender] does: every
-                    // part reports the same row and the store keeps the last
-                    // report. The platform sends one report per part, so a
-                    // radio rejection reports a failure instead of a false
-                    // `sent`.
+                    // `sendMultipartTextMessage` takes one intent per part. The
+                    // same intents are repeated, as [SmsSender] does: every part
+                    // reports the same row and the store keeps the last report.
+                    // The platform sends one report per part, so a radio
+                    // rejection reports a failure instead of a false `sent`.
                     val sentIntents = ArrayList<PendingIntent>(parts.size)
-                    repeat(parts.size) { sentIntents.add(sent) }
-                    manager.sendMultipartTextMessage(action.to, null, parts, sentIntents, null)
+                    val deliveryIntents = ArrayList<PendingIntent>(parts.size)
+                    repeat(parts.size) {
+                        sentIntents.add(sent)
+                        deliveryIntents.add(delivered)
+                    }
+                    manager.sendMultipartTextMessage(
+                        action.to,
+                        null,
+                        parts,
+                        sentIntents,
+                        deliveryIntents,
+                    )
                 } else {
-                    manager.sendTextMessage(action.to, null, action.body, sent, null)
+                    manager.sendTextMessage(action.to, null, action.body, sent, delivered)
                 }
                 Log.i(TAG, "reply handed to radio to=${mask(action.to)} parts=${parts.size}")
             } catch (error: Throwable) {

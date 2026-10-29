@@ -4,20 +4,29 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import android.util.Log
 
 /**
- * Finishes a send: the `SENT` broadcast that [SendReceipt] attaches to every
- * part reports what the radio actually did, for a composed message and for a
- * flow reply alike.
+ * Finishes a send from the two receipts [SendReceipt] attaches to every part: a
+ * composed message and a flow reply alike.
  *
- * `RESULT_OK` marks the row `sent` and writes the system provider's Sent row;
- * any error code marks it `failed`, which keeps it out of the mirror instead of
- * uploading a message that never left the phone. A rejected send writes no
- * provider row at all.
+ * `SENT` (the radio's verdict):
+ *  - `RESULT_OK` marks the row `sent` and writes the system provider's Sent row;
+ *  - `RESULT_ERROR_RADIO_OFF` / `RESULT_ERROR_NO_SERVICE` records a transient
+ *    failure — the row goes back to `queued`, spends one of its three attempts
+ *    and is retried by [GatewayService];
+ *  - any other code marks it `failed`, which keeps it out of the mirror instead
+ *    of uploading a message that never left the phone.
  *
- * The intent carries the row id and the result code, never the body; the
+ * `DELIVERED` (the carrier's report) marks the row `delivered`. A report that
+ * arrives before the `SENT` broadcast is not lost: the core promotes the still
+ * `queued` row with `sent` then `delivered` in one transaction. A non-OK
+ * delivery report is logged and ignored — it does not downgrade a message that
+ * the radio already accepted.
+ *
+ * The intents carry the row id and the result code, never the body; the
  * recipient and body needed for the provider row are read back from the local
  * store by that id. The row state is written before the provider is touched, so
  * a provider failure can never change it. Only ids, codes and exception classes
@@ -25,8 +34,14 @@ import android.util.Log
  */
 class SendStatusReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != SendReceipt.ACTION_SENT) return
+        when (intent.action) {
+            SendReceipt.ACTION_SENT -> handleSent(context, intent)
+            SendReceipt.ACTION_DELIVERED -> handleDelivered(context, intent)
+            else -> return
+        }
+    }
 
+    private fun handleSent(context: Context, intent: Intent) {
         val localId = intent.getStringExtra(SendReceipt.EXTRA_LOCAL_ID) ?: return
         val deviceId = intent.getStringExtra(SendReceipt.EXTRA_DEVICE_ID) ?: return
         // The platform sets the broadcast result code from SmsManager's report.
@@ -39,23 +54,51 @@ class SendStatusReceiver : BroadcastReceiver() {
             {
                 try {
                     val appDir = context.applicationInfo.dataDir
-                    val state = if (result == Activity.RESULT_OK) "sent" else "failed"
-                    val stored = NativeBridge.markOutboundSafely(
-                        appDir,
-                        deviceId,
-                        localId,
-                        state,
-                    )
-                    Log.i(TAG, "send status id=$localId result=$result state=$state stored=$stored")
+                    when {
+                        result == Activity.RESULT_OK -> {
+                            val stored = NativeBridge.markOutboundSafely(
+                                appDir,
+                                deviceId,
+                                localId,
+                                "sent",
+                            )
+                            Log.i(TAG, "send status id=$localId result=$result state=sent stored=$stored")
 
-                    if (result == Activity.RESULT_OK) {
-                        // Same worker that marked the row, after the mark: the
-                        // provider copy is a record of a real send, not a reason
-                        // to change the row.
-                        writeSentRow(context, appDir, deviceId, localId)
-                    } else {
-                        // Nothing left the phone, so there is no Sent row to add.
-                        Log.i(TAG, "provider write skipped state=failed")
+                            // Same worker that marked the row, after the mark: the
+                            // provider copy is a record of a real send, not a reason
+                            // to change the row.
+                            writeSentRow(context, appDir, deviceId, localId)
+                        }
+
+                        result == SmsManager.RESULT_ERROR_RADIO_OFF ||
+                            result == SmsManager.RESULT_ERROR_NO_SERVICE -> {
+                            // The radio is off or has no service: the message never
+                            // left, but the send is still worth retrying. Spend one
+                            // attempt; the core turns the third one into `failed`.
+                            val outcome = NativeBridge.recordTransientFailureSafely(
+                                appDir,
+                                deviceId,
+                                localId,
+                            )
+                            Log.i(
+                                TAG,
+                                "send status id=$localId result=$result " +
+                                    "state=${outcome?.state ?: "unknown"} " +
+                                    "attempts=${outcome?.attempts ?: -1}",
+                            )
+                            // No provider row: nothing left the phone.
+                        }
+
+                        else -> {
+                            val stored = NativeBridge.markOutboundSafely(
+                                appDir,
+                                deviceId,
+                                localId,
+                                "failed",
+                            )
+                            Log.i(TAG, "send status id=$localId result=$result state=failed stored=$stored")
+                            Log.i(TAG, "provider write skipped state=failed")
+                        }
                     }
 
                     // Best effort: a failed flush leaves the row pending for the
@@ -69,6 +112,43 @@ class SendStatusReceiver : BroadcastReceiver() {
                 }
             },
             "dakflare-sms-status",
+        ).start()
+    }
+
+    /**
+     * A carrier delivery report is terminal evidence: it may promote a row that
+     * is still `queued` (the report arrived first), but it never rewrites a row
+     * the radio reported as failed.
+     */
+    private fun handleDelivered(context: Context, intent: Intent) {
+        val localId = intent.getStringExtra(SendReceipt.EXTRA_LOCAL_ID) ?: return
+        val deviceId = intent.getStringExtra(SendReceipt.EXTRA_DEVICE_ID) ?: return
+        val result = resultCode
+
+        val pending = goAsync()
+        Thread(
+            {
+                try {
+                    val appDir = context.applicationInfo.dataDir
+                    if (result != Activity.RESULT_OK) {
+                        // A delivery failure report does not prove the message
+                        // was never sent; leave the honest `sent` row alone.
+                        Log.i(TAG, "delivery status id=$localId result=$result ignored")
+                    } else {
+                        val marked = NativeBridge.markDeliveredSafely(appDir, deviceId, localId)
+                        Log.i(TAG, "delivery status id=$localId result=$result delivered=$marked")
+                    }
+
+                    // The transition is local-only (the Worker's log has no state
+                    // column), but the flush still uploads an unmirrored body.
+                    NativeBridge.flushPendingSafely(appDir, deviceId)
+                } catch (error: Throwable) {
+                    Log.e(TAG, "delivery status failed: ${error.javaClass.simpleName}")
+                } finally {
+                    pending.finish()
+                }
+            },
+            "dakflare-sms-delivery",
         ).start()
     }
 

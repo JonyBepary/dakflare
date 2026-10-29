@@ -82,18 +82,8 @@ object SmsSender {
         }
 
         try {
-            val parts = manager.divideMessage(body)
-            val sent = SendReceipt.pendingIntent(context, deviceId, localId)
-            if (parts.size > 1) {
-                // One PendingIntent for every part: each part reports the same
-                // row, and marking it twice is a no-op in the store.
-                val sentIntents = ArrayList<PendingIntent>(parts.size)
-                repeat(parts.size) { sentIntents.add(sent) }
-                manager.sendMultipartTextMessage(recipient, null, parts, sentIntents, null)
-            } else {
-                manager.sendTextMessage(recipient, null, body, sent, null)
-            }
-            Log.i(TAG, "compose handed to radio to=${mask(recipient)} parts=${parts.size}")
+            val parts = handToRadio(context, deviceId, localId, recipient, body, manager)
+            Log.i(TAG, "compose handed to radio to=${mask(recipient)} parts=$parts")
         } catch (error: Throwable) {
             markFailed(appDir, deviceId, localId)
             // Class name only: an exception message could carry the body.
@@ -102,6 +92,95 @@ object SmsSender {
         }
 
         return localId
+    }
+
+    /**
+     * Re-send the queued rows the gateway tick is allowed to retry.
+     *
+     * Only local ids cross the Rust boundary. Each row's recipient, body and SM
+     * slot are read back from the store here, never passed in, so a retry can
+     * only send what was actually queued. Returns how many were handed to the
+     * radio; the `SENT`/`DELIVERED` receipts finish each row exactly as they do
+     * for a first send.
+     */
+    @JvmStatic
+    fun retryQueued(context: Context, appDir: String, deviceId: String): Int {
+        if (deviceId.isBlank()) return 0
+        if (context.checkSelfPermission(Manifest.permission.SEND_SMS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return 0
+        }
+
+        val localIds = NativeBridge.retryableOutboundSafely(appDir, deviceId)
+        var handed = 0
+        for (localId in localIds) {
+            if (resend(context, appDir, deviceId, localId)) handed += 1
+        }
+        return handed
+    }
+
+    /** One retry from the stored row; no body or recipient crosses JNI as an argument. */
+    private fun resend(
+        context: Context,
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): Boolean {
+        val row = NativeBridge.messageByLocalIdSafely(appDir, deviceId, localId) ?: return false
+        val simSlot = NativeBridge.getDeviceFactSafely(appDir, "sim_slot")
+            ?.toIntOrNull() ?: 0
+
+        val manager = try {
+            smsManager(context, subscriptionId(context, simSlot))
+        } catch (error: Throwable) {
+            markFailed(appDir, deviceId, localId)
+            Log.e(TAG, "retry manager unavailable: ${error.javaClass.simpleName}")
+            return false
+        }
+
+        return try {
+            val parts = handToRadio(context, deviceId, localId, row.peer, row.body, manager)
+            Log.i(TAG, "retry handed to radio to=${mask(row.peer)} parts=$parts")
+            true
+        } catch (error: Throwable) {
+            // A thrown send has no result code, so it is not known to be
+            // transient. The honest outcome is `failed`, as for a first send.
+            markFailed(appDir, deviceId, localId)
+            Log.e(TAG, "retry failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Divide, attach both receipts and hand one message to the radio. Shared by
+     * a first send and a retry so the two paths cannot diverge on receipts.
+     */
+    private fun handToRadio(
+        context: Context,
+        deviceId: String,
+        localId: String,
+        recipient: String,
+        body: String,
+        manager: SmsManager,
+    ): Int {
+        val parts = manager.divideMessage(body)
+        val sent = SendReceipt.pendingIntent(context, deviceId, localId)
+        val delivered = SendReceipt.deliveryIntent(context, deviceId, localId)
+        if (parts.size > 1) {
+            // One receipt per part: each part reports the same row, and marking
+            // it twice is a no-op in the store.
+            val sentIntents = ArrayList<PendingIntent>(parts.size)
+            val deliveryIntents = ArrayList<PendingIntent>(parts.size)
+            repeat(parts.size) {
+                sentIntents.add(sent)
+                deliveryIntents.add(delivered)
+            }
+            manager.sendMultipartTextMessage(recipient, null, parts, sentIntents, deliveryIntents)
+        } else {
+            manager.sendTextMessage(recipient, null, body, sent, delivered)
+        }
+        return parts.size
     }
 
     /**

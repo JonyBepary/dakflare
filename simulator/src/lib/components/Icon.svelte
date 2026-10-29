@@ -53,5 +53,8 @@
 	{:else if name === 'send'}
 		<path d="M21 3 3 10.5l6.8 2.7L12.5 20z" />
 		<path d="M21 3 9.8 13.2" />
+	{:else if name === 'compose'}
+		<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+		<path d="M18.4 2.6a2.1 2.1 0 1 1 3 3L12 15l-4 1 1-4z" />
 	{/if}
 </svg>

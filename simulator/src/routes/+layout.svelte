@@ -12,9 +12,11 @@
 
 	// A conversation is a push below Threads, so it swaps the dock for the reply
 	// composer: one bottom bar at a time, and the composer sits above the
-	// keyboard instead of a dock floating over it. Android back pops the push
-	// and restores the dock.
+	// keyboard instead of a dock floating over it. The new-message form is a
+	// push too, but its primary send lives in the form, so it needs no bar.
+	// Android back pops either push and restores the dock.
 	const conversation = $derived(/^\/messages\/[^/]+\/?$/.test(page.url.pathname));
+	const composing = $derived(/^\/compose\/?$/.test(page.url.pathname));
 	// A thread with no messages has nothing to reply to, so the route closes the
 	// bar rather than offering a first message to an unproven number.
 	const replyable = $derived(conversation && !app.loading.boot && composer.repliesOpen);
@@ -66,7 +68,7 @@
 
 	{#if replyable}
 		<Composer />
-	{:else if !conversation}
+	{:else if !conversation && !composing}
 		<Dock />
 	{/if}
 </div>

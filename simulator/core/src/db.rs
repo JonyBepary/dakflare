@@ -140,6 +140,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
             PRIMARY KEY (id, version)
         )",
     ),
+    (
+        9,
+        // M5.5 retry budget. A send that the radio refuses for a transient
+        // reason goes back to `queued` and spends one attempt; after the third
+        // it becomes `failed` and stops retrying. Rows from before this column
+        // existed start at zero, which is the same budget a fresh row gets.
+        "ALTER TABLE messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +183,15 @@ pub struct Message {
     pub state: String,
     pub local_id: Option<String>,
     pub created_at: i64,
+}
+
+/// What one failed send attempt did to the row. `attempts` is the value after
+/// the update, so the native receiver can log a truthful retry budget without a
+/// second read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendFailureOutcome {
+    pub state: String,
+    pub attempts: i64,
 }
 
 /// One row of the cached flow set. `node_count` is parsed from the stored graph
@@ -805,7 +822,10 @@ impl Store {
     ///
     /// A `failed` row is deliberately excluded: a reply that never left the
     /// phone is not outbound history. M5.5's retry queue owns it and must flip
-    /// it back to `queued` before it becomes eligible again.
+    /// it back to `queued` before it becomes eligible again. `delivered` is the
+    /// final state and stays eligible until it has been mirrored once; the
+    /// Worker's message log has no per-row state, so what is uploaded is still
+    /// the body and the transition itself remains local (see `flush_pending`).
     pub async fn list_unmirrored_outbound(
         &self,
         device_id: &str,
@@ -817,7 +837,7 @@ impl Store {
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at
                    FROM messages
                   WHERE device_id = ? AND direction = 'out' AND mirrored = 0
-                    AND state <> 'failed'
+                    AND state IN ('queued', 'sent', 'delivered')
                   ORDER BY created_at ASC LIMIT ?",
                 params![device_id, limit],
             )
@@ -928,29 +948,309 @@ impl Store {
     /// Record the outcome of an outbound send by its device-local id.
     ///
     /// The receiver learns the id from the JNI reply and reports what actually
-    /// happened, so the mirror never uploads a reply that was never sent. Only
-    /// the reply lifecycle states are accepted; `queued` is also how M5.5 flips
-    /// a failed row back for retry. Returns `false` when no outbound row matched
-    /// (a re-delivery with no reply, or a stale id).
+    /// happened, so the mirror never uploads a reply that was never sent. The
+    /// accepted states are `queued`, `sent`, `failed` and the terminal
+    /// `delivered`.
+    ///
+    /// `delivered` has a stricter rule than the others: it may only follow
+    /// `sent` (or repeat an existing `delivered`). A delivery mark on a
+    /// `queued` or `failed` row is refused with [`StoreError::InvalidState`]
+    /// rather than coerced, so a caller cannot skip the radio's verdict. A
+    /// late `sent` report must likewise not erase an earlier `delivered`; that
+    /// case is a no-op success.
+    ///
+    /// `queued` is also how M5.5 flips a transiently failed row back for retry
+    /// (see [`Store::record_send_failure_by_local_id`]). Returns `false` when no
+    /// outbound row matched (a re-delivery with no reply, or a stale id).
     pub async fn set_message_state_by_local_id(
         &self,
         device_id: &str,
         local_id: &str,
         state: &str,
     ) -> Result<bool, StoreError> {
-        if !matches!(state, "queued" | "sent" | "failed") {
+        if !matches!(state, "queued" | "sent" | "failed" | "delivered") {
             return Err(StoreError::InvalidState(state.to_string()));
         }
 
         let conn = self.db.connect()?;
-        let affected = conn
-            .execute(
-                "UPDATE messages SET state = ?
+        // Read and write in one transaction: the `delivered` rule depends on
+        // the current state, and two reports can race in a broadcast receiver.
+        let tx = conn.transaction().await?;
+        let mut rows = tx
+            .query(
+                "SELECT state FROM messages
                   WHERE device_id = ? AND local_id = ? AND direction = 'out'",
-                params![state, device_id, local_id],
+                params![device_id, local_id],
             )
             .await?;
-        Ok(affected > 0)
+        let current: Option<String> = match rows.next().await? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        };
+        drop(rows);
+
+        let Some(current) = current else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+
+        match state {
+            "delivered" => {
+                if current != "sent" && current != "delivered" {
+                    // Dropping the transaction rolls it back; nothing changed.
+                    return Err(StoreError::InvalidState(format!(
+                        "delivered after {current}"
+                    )));
+                }
+                if current != "delivered" {
+                    tx.execute(
+                        "UPDATE messages SET state = 'delivered'
+                          WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                        params![device_id, local_id],
+                    )
+                    .await?;
+                }
+            }
+            "sent" => {
+                // A delivery report can beat the SENT broadcast. The final
+                // state is stronger evidence than the intermediate one, so a
+                // late `sent` is a no-op rather than a downgrade.
+                if current != "delivered" {
+                    tx.execute(
+                        "UPDATE messages SET state = 'sent'
+                          WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                        params![device_id, local_id],
+                    )
+                    .await?;
+                }
+            }
+            _ => {
+                tx.execute(
+                    "UPDATE messages SET state = ?
+                      WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                    params![state, device_id, local_id],
+                )
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Mark a row `delivered` from a carrier delivery report.
+    ///
+    /// A delivery report is proof that the carrier accepted the message, so it
+    /// is the one caller allowed to promote a `queued` row. That promotion is
+    /// done as `sent` then `delivered` inside one transaction: an observer never
+    /// sees a delivered row that skipped the state rule, and a report that
+    /// arrived before the SENT broadcast is not lost.
+    ///
+    /// A `failed` row is refused (`Ok(false)`): the radio said the message never
+    /// left, and a delivery report that contradicts that is not trusted to
+    /// rewrite history. A missing row is also `Ok(false)`.
+    pub async fn mark_delivered_by_local_id(
+        &self,
+        device_id: &str,
+        local_id: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.db.connect()?;
+        let tx = conn.transaction().await?;
+        let mut rows = tx
+            .query(
+                "SELECT state FROM messages
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                params![device_id, local_id],
+            )
+            .await?;
+        let current: Option<String> = match rows.next().await? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        };
+        drop(rows);
+
+        let Some(current) = current else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+
+        match current.as_str() {
+            "delivered" => {}
+            "sent" => {
+                tx.execute(
+                    "UPDATE messages SET state = 'delivered'
+                      WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                    params![device_id, local_id],
+                )
+                .await?;
+            }
+            "queued" => {
+                // One transaction, so the persisted history is `queued` then
+                // `delivered` with the intermediate `sent` mark applied first.
+                tx.execute(
+                    "UPDATE messages SET state = 'sent'
+                      WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                    params![device_id, local_id],
+                )
+                .await?;
+                tx.execute(
+                    "UPDATE messages SET state = 'delivered'
+                      WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                    params![device_id, local_id],
+                )
+                .await?;
+            }
+            // `failed` (or a state this build does not know) is not evidence
+            // that can be rewritten. Leave it alone and say so.
+            _ => {
+                tx.commit().await?;
+                return Ok(false);
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Record one failed send attempt.
+    ///
+    /// `transient` is the radio's own verdict (`RESULT_ERROR_RADIO_OFF` or
+    /// `RESULT_ERROR_NO_SERVICE`): the row goes back to `queued` and spends one
+    /// attempt, except that the third such failure turns it `failed` so it stops
+    /// retrying. A permanent refusal (`failed`) is unchanged and spends no
+    /// budget, because retrying it would only repeat the same refusal.
+    ///
+    /// Returns `None` when no `queued` outbound row matched a transient report
+    /// (a late duplicate or a stale id); the row is otherwise reported with its
+    /// post-update state and attempt count.
+    pub async fn record_send_failure_by_local_id(
+        &self,
+        device_id: &str,
+        local_id: &str,
+        transient: bool,
+    ) -> Result<Option<SendFailureOutcome>, StoreError> {
+        let conn = self.db.connect()?;
+
+        if !transient {
+            let affected = conn
+                .execute(
+                    "UPDATE messages SET state = 'failed'
+                      WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                    params![device_id, local_id],
+                )
+                .await?;
+            if affected == 0 {
+                return Ok(None);
+            }
+            return self
+                .send_failure_outcome(&conn, device_id, local_id)
+                .await;
+        }
+
+        let tx = conn.transaction().await?;
+        let mut rows = tx
+            .query(
+                "SELECT state, attempts FROM messages
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                params![device_id, local_id],
+            )
+            .await?;
+        let current: Option<(String, i64)> = match rows.next().await? {
+            Some(row) => Some((row.get(0)?, row.get(1)?)),
+            None => None,
+        };
+        drop(rows);
+
+        let Some((state, attempts)) = current else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        // Only a row that is still waiting for the radio can spend an attempt.
+        // A late report against a `sent`/`delivered`/`failed` row is a no-op.
+        if state != "queued" {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let next_attempts = attempts + 1;
+        let next_state = if next_attempts >= 3 { "failed" } else { "queued" };
+        tx.execute(
+            "UPDATE messages SET state = ?, attempts = ?
+              WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+            params![next_state, next_attempts, device_id, local_id],
+        )
+        .await?;
+        tx.commit().await?;
+
+        Ok(Some(SendFailureOutcome {
+            state: next_state.to_string(),
+            attempts: next_attempts,
+        }))
+    }
+
+    async fn send_failure_outcome(
+        &self,
+        conn: &libsql::Connection,
+        device_id: &str,
+        local_id: &str,
+    ) -> Result<Option<SendFailureOutcome>, StoreError> {
+        let mut rows = conn
+            .query(
+                "SELECT state, attempts FROM messages
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                params![device_id, local_id],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(SendFailureOutcome {
+                state: row.get(0)?,
+                attempts: row.get(1)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Queued outbound rows M5.5 may retry.
+    ///
+    /// Only rows that are still `queued`, have spent fewer than three attempts
+    /// and are older than the 60 s grace period are eligible. The grace period
+    /// keeps a send that is merely slow to report from being handed to the radio
+    /// twice; the age is measured from `created_at`, the same timestamp the
+    /// mirror uploads, so the rule is visible in one place.
+    pub async fn list_retryable_outbound(
+        &self,
+        device_id: &str,
+        now: i64,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let cutoff = now.saturating_sub(60_000);
+        let limit = limit.clamp(1, 100);
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, device_id, direction, peer, body, state, local_id, created_at
+                   FROM messages
+                  WHERE device_id = ? AND direction = 'out' AND state = 'queued'
+                    AND attempts < 3 AND created_at < ?
+                  ORDER BY created_at ASC LIMIT ?",
+                params![device_id, cutoff, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(Message {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                direction: row.get(2)?,
+                peer: row.get(3)?,
+                body: row.get(4)?,
+                state: row.get(5)?,
+                local_id: row.get(6)?,
+                created_at: row.get(7)?,
+            });
+        }
+        Ok(out)
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
@@ -1330,7 +1630,7 @@ mod tests {
 
         // Only the reply lifecycle is allowed; a typo must not reach the table.
         let error = store
-            .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "delivered")
+            .set_message_state_by_local_id(&device.device_id, "native-1-reply-0", "nonsense")
             .await
             .unwrap_err();
         assert!(matches!(error, StoreError::InvalidState(_)));
@@ -1362,6 +1662,7 @@ mod tests {
             ("reply-0", "queued"),
             ("reply-1", "sent"),
             ("reply-2", "failed"),
+            ("reply-3", "delivered"),
         ] {
             store
                 .record_message(
@@ -1384,7 +1685,7 @@ mod tests {
         // `created_at` values is not guaranteed; only the set matters here.
         let mut states: Vec<&str> = pending.iter().map(|m| m.state.as_str()).collect();
         states.sort_unstable();
-        assert_eq!(states, vec!["queued", "sent"]);
+        assert_eq!(states, vec!["delivered", "queued", "sent"]);
 
         // M5.5's retry flips a failed row back to queued; only then does it
         // become eligible for the mirror again.
@@ -1400,7 +1701,7 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            3
+            4
         );
     }
 
@@ -1707,5 +2008,264 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, StoreError::InvalidFact(_)));
         assert_eq!(store.get_setting("sim_carrier").await.unwrap(), None);
+    }
+
+    async fn outbound(
+        store: &Store,
+        device_id: &str,
+        local_id: &str,
+        state: &str,
+        created_at: i64,
+        attempts: i64,
+    ) {
+        store
+            .record_message(device_id, "out", "+1555", "hi", state, Some(local_id))
+            .await
+            .unwrap();
+        let conn = store.db.connect().unwrap();
+        conn.execute(
+            "UPDATE messages SET created_at = ?, attempts = ?
+              WHERE device_id = ? AND local_id = ?",
+            params![created_at, attempts, device_id, local_id],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn row_state(store: &Store, device_id: &str, local_id: &str) -> (String, i64) {
+        let conn = store.db.connect().unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT state, attempts FROM messages WHERE device_id = ? AND local_id = ?",
+                params![device_id, local_id],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        (row.get(0).unwrap(), row.get(1).unwrap())
+    }
+
+    #[tokio::test]
+    async fn delivered_must_follow_sent() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "delivery",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_message(&device.device_id, "out", "+1555", "hi", "queued", Some("r-0"))
+            .await
+            .unwrap();
+
+        // A delivered mark on a queued row is refused, not coerced.
+        let error = store
+            .set_message_state_by_local_id(&device.device_id, "r-0", "delivered")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidState(_)));
+        assert_eq!(row_state(&store, &device.device_id, "r-0").await.0, "queued");
+
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "r-0", "sent")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "r-0", "delivered")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            row_state(&store, &device.device_id, "r-0").await.0,
+            "delivered"
+        );
+
+        // A late SENT broadcast must not erase the stronger final state.
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "r-0", "sent")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            row_state(&store, &device.device_id, "r-0").await.0,
+            "delivered"
+        );
+
+        // A failed row cannot be promoted by a direct delivered mark.
+        store
+            .record_message(&device.device_id, "out", "+1555", "no", "failed", Some("r-1"))
+            .await
+            .unwrap();
+        let error = store
+            .set_message_state_by_local_id(&device.device_id, "r-1", "delivered")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidState(_)));
+
+        // The delivery-report path is the one caller allowed to promote a
+        // queued row, and it writes sent then delivered in one transaction.
+        store
+            .record_message(&device.device_id, "out", "+1555", "yes", "queued", Some("r-2"))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .mark_delivered_by_local_id(&device.device_id, "r-2")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            row_state(&store, &device.device_id, "r-2").await.0,
+            "delivered"
+        );
+
+        // It still refuses a row the radio marked failed.
+        assert!(
+            !store
+                .mark_delivered_by_local_id(&device.device_id, "r-1")
+                .await
+                .unwrap()
+        );
+        assert_eq!(row_state(&store, &device.device_id, "r-1").await.0, "failed");
+    }
+
+    #[tokio::test]
+    async fn retryable_outbound_respects_attempts_and_age() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "retry",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        let now = now_ms().unwrap();
+        let old = now - 120_000;
+        outbound(&store, &device.device_id, "young", "queued", now, 0).await;
+        outbound(&store, &device.device_id, "fresh", "queued", old, 0).await;
+        outbound(&store, &device.device_id, "second", "queued", old + 1_000, 2).await;
+        outbound(&store, &device.device_id, "spent", "queued", old, 3).await;
+        outbound(&store, &device.device_id, "sent", "sent", old, 0).await;
+        outbound(&store, &device.device_id, "failed", "failed", old, 0).await;
+
+        let retryable = store
+            .list_retryable_outbound(&device.device_id, now, 10)
+            .await
+            .unwrap();
+        let local_ids: Vec<&str> = retryable
+            .iter()
+            .filter_map(|message| message.local_id.as_deref())
+            .collect();
+        assert_eq!(local_ids, vec!["fresh", "second"]);
+        assert!(retryable.iter().all(|message| message.state == "queued"));
+
+        // Another device's rows are never eligible for this one.
+        assert!(
+            store
+                .list_retryable_outbound("dev_missing", now, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_failure_requeues_and_permanent_one_fails() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "attempts",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        for local_id in ["t-0", "p-0"] {
+            store
+                .record_message(
+                    &device.device_id,
+                    "out",
+                    "+1555",
+                    "hi",
+                    "queued",
+                    Some(local_id),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Two transient failures leave the row retryable.
+        for expected in 1..=2 {
+            let outcome = store
+                .record_send_failure_by_local_id(&device.device_id, "t-0", true)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(outcome.state, "queued");
+            assert_eq!(outcome.attempts, expected);
+        }
+        assert_eq!(
+            row_state(&store, &device.device_id, "t-0").await,
+            ("queued".to_string(), 2)
+        );
+
+        // The third spends the last attempt and gives up.
+        let outcome = store
+            .record_send_failure_by_local_id(&device.device_id, "t-0", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.state, "failed");
+        assert_eq!(outcome.attempts, 3);
+        assert_eq!(
+            row_state(&store, &device.device_id, "t-0").await,
+            ("failed".to_string(), 3)
+        );
+        // A fourth report has nothing left to spend.
+        assert!(
+            store
+                .record_send_failure_by_local_id(&device.device_id, "t-0", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A permanent refusal fails immediately and spends no budget.
+        let outcome = store
+            .record_send_failure_by_local_id(&device.device_id, "p-0", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.state, "failed");
+        assert_eq!(outcome.attempts, 0);
+        assert_eq!(
+            row_state(&store, &device.device_id, "p-0").await,
+            ("failed".to_string(), 0)
+        );
+
+        assert!(
+            store
+                .record_send_failure_by_local_id(&device.device_id, "missing", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

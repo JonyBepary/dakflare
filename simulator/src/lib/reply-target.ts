@@ -23,9 +23,12 @@ export function decodePeer(value: string): string {
 	}
 }
 
-/** A carrier mask is an alphanumeric sender id: it has letters in it. */
+/**
+ * A carrier mask is an alphanumeric sender id: it has letters in it. Any
+ * script counts, so a Bangla sender id is a mask too, not a number to dial.
+ */
 export function isMaskSender(peer: string): boolean {
-	return /[a-z]/i.test(peer);
+	return /\p{L}/u.test(peer);
 }
 
 /** A shortcode is a bare run of digits too short to be a phone number. */
@@ -36,18 +39,15 @@ export function isShortcode(peer: string): boolean {
 	return /^\d{3,6}$/.test(digits);
 }
 
-export function replyBlock(input: {
-	peer: string;
+/**
+ * The radio-side reasons only, for a screen that chooses its own recipient.
+ * The wording is shared with the reply composer so the two never drift.
+ */
+export function sendBlock(input: {
 	device: Device | null;
 	facts: DeviceFacts | null;
 	offline: boolean;
 }): ReplyBlock | null {
-	if (isMaskSender(input.peer)) {
-		return { code: 'mask', reason: 'This sender is a mask; replies are not sent to it' };
-	}
-	if (isShortcode(input.peer)) {
-		return { code: 'shortcode', reason: 'This sender is a shortcode; replies are not sent to it' };
-	}
 	if (!input.device) {
 		return { code: 'no-device', reason: 'No device is selected on this phone' };
 	}
@@ -62,4 +62,19 @@ export function replyBlock(input: {
 		return { code: 'carrier-off', reason: 'The carrier is off on this phone' };
 	}
 	return null;
+}
+
+export function replyBlock(input: {
+	peer: string;
+	device: Device | null;
+	facts: DeviceFacts | null;
+	offline: boolean;
+}): ReplyBlock | null {
+	if (isMaskSender(input.peer)) {
+		return { code: 'mask', reason: 'This sender is a mask; replies are not sent to it' };
+	}
+	if (isShortcode(input.peer)) {
+		return { code: 'shortcode', reason: 'This sender is a shortcode; replies are not sent to it' };
+	}
+	return sendBlock(input);
 }

@@ -22,13 +22,14 @@ import java.util.Date
  * The long-lived half of the gateway: one `remoteMessaging` foreground service
  * that drains what the deployment has not accepted yet.
  *
- * It owns one job. Every [INTERVAL_MS] while this process lives it calls
+ * It owns two jobs. Every [INTERVAL_MS] while this process lives it calls
  * [NativeBridge.flushPendingSafely] so inbound rows stored while offline, their
- * flow runs and replies already marked `sent` reach the deployment, then
- * [NativeBridge.syncFlowsSafely] so a Worker-side flow edit reaches a phone the
- * operator never opens. It does not execute queued commands, does not send SMS
- * and makes no other network calls — the receive path stays in [SmsReceiver]
- * and needs no service.
+ * flow runs and replies already marked `sent` reach the deployment; then it asks
+ * [SmsSender.retryQueued] to re-send queued rows whose earlier attempt failed for
+ * a transient radio reason. Last it calls [NativeBridge.syncFlowsSafely] so a
+ * Worker-side flow edit reaches a phone the operator never opens. It does not
+ * execute queued commands and makes no other network calls — the receive path
+ * stays in [SmsReceiver] and needs no service.
  *
  * Started from [MainActivity] when the app opens with a paired identity, from
  * [SmsReceiver] after a successful inbound store, and from [BootReceiver] after
@@ -117,6 +118,12 @@ class GatewayService : Service() {
 
                     val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
                     if (ok) saveLastContact(System.currentTimeMillis())
+                    // M5.5: after the flush, give queued rows whose radio
+                    // failure was transient another chance. The store only
+                    // offers rows older than 60 s with attempts left, so this
+                    // cannot race a send that is merely slow to report. Each
+                    // retry is finished by its own SENT/DELIVERED receipt.
+                    val retried = SmsSender.retryQueued(this, appDir, deviceId)
                     // Flows ride the same tick: at most one fetch per interval,
                     // never more often than the flush. A failed sync keeps the
                     // cached set, so the receive path is unaffected.
@@ -124,7 +131,7 @@ class GatewayService : Service() {
                     // Counts are deliberately absent: the notification shows a
                     // timestamp, which cannot drift from the store.
                     updateNotification(deviceId, lastContact())
-                    Log.i(TAG, "gateway flush ok=$ok flows ok=$flowsOk")
+                    Log.i(TAG, "gateway flush ok=$ok retried=$retried flows ok=$flowsOk")
 
                     synchronized(sleeper) {
                         if (!running) return@Thread

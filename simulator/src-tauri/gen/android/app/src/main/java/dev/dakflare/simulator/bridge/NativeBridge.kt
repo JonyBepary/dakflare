@@ -59,7 +59,8 @@ object NativeBridge {
     ): String
 
     /**
-     * Record what happened to a queued reply row (`queued`, `sent`, `failed`).
+     * Record what happened to a queued reply row (`queued`, `sent`, `failed`,
+     * `delivered`).
      *
      * Returns `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
      */
@@ -70,6 +71,43 @@ object NativeBridge {
         localId: String,
         state: String,
     ): String
+
+    /**
+     * Mark one reply row `delivered` from a carrier delivery report.
+     *
+     * A report that arrived before the `SENT` broadcast is promoted with `sent`
+     * then `delivered` in one transaction. Returns `{"ok":true}` or
+     * `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+     */
+    @JvmStatic
+    external fun markDelivered(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): String
+
+    /**
+     * Record a radio failure that is worth retrying (`RADIO_OFF` or
+     * `NO_SERVICE`). The row goes back to `queued` and spends one attempt, or
+     * becomes `failed` after the third. Returns
+     * `{"ok":true,"state":"queued"|"failed","attempts":<n>}` or
+     * `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
+     */
+    @JvmStatic
+    external fun recordTransientFailure(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): String
+
+    /**
+     * The local ids of queued outbound rows the gateway tick may retry (younger
+     * than 60 s and with fewer than three attempts are excluded). Returns
+     * `{"ok":true,"local_ids":["…"]}` or `{"ok":false,"error":"bad_input"|"storage"}`.
+     * Only ids travel here; the row itself holds the recipient and body.
+     */
+    @JvmStatic
+    external fun retryableOutbound(appDir: String, deviceId: String): String
 
     /**
      * Upload everything the deployment has not accepted yet — pending inbound
@@ -327,6 +365,87 @@ object NativeBridge {
         } catch (error: Throwable) {
             Log.e(TAG, "markOutbound failed: ${error.javaClass.simpleName}")
             false
+        }
+    }
+
+    /**
+     * Best-effort delivery mark. Never throws: a missing symbol or a store error
+     * returns `false`, leaving the row at `sent`, which is the honest "no proof"
+     * state. Only the exception class is logged.
+     */
+    fun markDeliveredSafely(appDir: String, deviceId: String, localId: String): Boolean {
+        if (loadFailure != null) return false
+        if (deviceId.isEmpty() || localId.isEmpty()) return false
+
+        return try {
+            isOk(markDelivered(appDir, deviceId, localId))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "markDelivered symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "markDelivered failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /** The post-failure state and attempt count, as the core reports them. */
+    class SendFailure(val state: String, val attempts: Int)
+
+    /**
+     * Best-effort transient-failure record. Never throws: a missing symbol, a
+     * stale id or a store error returns `null`, leaving the row where it was.
+     */
+    fun recordTransientFailureSafely(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+    ): SendFailure? {
+        if (loadFailure != null) return null
+        if (deviceId.isEmpty() || localId.isEmpty()) return null
+
+        return try {
+            val parsed = JSONObject(recordTransientFailure(appDir, deviceId, localId))
+            if (!parsed.optBoolean("ok")) {
+                null
+            } else {
+                SendFailure(
+                    state = parsed.optString("state"),
+                    attempts = parsed.optInt("attempts"),
+                )
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "recordTransientFailure symbol missing: ${error.javaClass.simpleName}")
+            null
+        } catch (error: Throwable) {
+            Log.e(TAG, "recordTransientFailure failed: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    /**
+     * The retryable local ids, or an empty list when the store cannot be read.
+     * Never throws; only ids are read, so no body or number is logged.
+     */
+    fun retryableOutboundSafely(appDir: String, deviceId: String): List<String> {
+        if (loadFailure != null) return emptyList()
+        if (appDir.isEmpty() || deviceId.isEmpty()) return emptyList()
+
+        return try {
+            val parsed = JSONObject(retryableOutbound(appDir, deviceId))
+            if (!parsed.optBoolean("ok")) return emptyList()
+            val array = parsed.optJSONArray("local_ids") ?: return emptyList()
+            val ids = ArrayList<String>(array.length())
+            for (index in 0 until array.length()) {
+                val id = array.optString(index)
+                if (id.isNotEmpty()) ids += id
+            }
+            ids
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "retryableOutbound symbol missing: ${error.javaClass.simpleName}")
+            emptyList()
+        } catch (error: Throwable) {
+            Log.e(TAG, "retryableOutbound failed: ${error.javaClass.simpleName}")
+            emptyList()
         }
     }
 

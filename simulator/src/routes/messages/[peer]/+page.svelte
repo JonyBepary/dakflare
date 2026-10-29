@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import Icon from '$lib/components/Icon.svelte';
 	import { app, type Message } from '$lib/stores/app.svelte';
-	import { composer } from '$lib/stores/composer.svelte';
+	import { composer, isAnswered } from '$lib/stores/composer.svelte';
 	import { formatClock, formatDay } from '$lib/device-state';
 	import { sendStateTone, sendStateWord } from '$lib/message-state';
 	import { decodePeer } from '$lib/reply-target';
@@ -33,15 +33,7 @@
 	const optimistic = $derived.by<Bubble[]>(() => {
 		return composer
 			.pendingFor(peer)
-			.filter(
-				(row) =>
-					!messages.some(
-						(message) =>
-							message.direction === 'out' &&
-							message.body === row.body &&
-							message.created_at >= row.created_at - 60_000
-					)
-			)
+			.filter((row) => !isAnswered(row, messages))
 			.map((row) => ({
 				id: row.key,
 				device_id: app.selectedId,
@@ -126,6 +118,7 @@
 			const result = await fetchPeerPages(null, false);
 			messages = result.collected;
 			hasMore = result.more;
+			composer.settle(peer, messages);
 			await tick();
 			await scrollToNewest();
 		} catch (failure) {
@@ -151,6 +144,7 @@
 		const updated = messages.map((message) => incoming.get(message.id) ?? message);
 		const fresh = result.collected.filter((message) => !known.has(message.id));
 		messages = [...fresh, ...updated];
+		composer.settle(peer, messages);
 		await tick();
 		if (atBottom) await scrollToNewest();
 	}

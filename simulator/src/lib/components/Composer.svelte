@@ -2,8 +2,8 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import Icon from '$lib/components/Icon.svelte';
+	import SegmentMeter from '$lib/components/SegmentMeter.svelte';
 	import { watchKeyboard } from '$lib/keyboard';
-	import { measureSms } from '$lib/sms-text';
 	import { decodePeer, replyBlock } from '$lib/reply-target';
 	import { app } from '$lib/stores/app.svelte';
 	import { composer } from '$lib/stores/composer.svelte';
@@ -14,13 +14,8 @@
 	const blocked = $derived(
 		replyBlock({ peer, device: app.selected, facts: app.facts, offline: app.offline })
 	);
-	const measure = $derived(measureSms(composer.draft));
 	const typed = $derived(composer.draft.length > 0);
 	const canSend = $derived(!blocked && !composer.sending && composer.draft.trim().length > 0);
-
-	const segments = $derived(
-		`${measure.segments} ${measure.segments === 1 ? 'segment' : 'segments'}`
-	);
 
 	let field = $state<HTMLTextAreaElement | null>(null);
 
@@ -150,21 +145,7 @@
 			</p>
 
 			{#if typed}
-				<p class="composer-count">
-					<span
-						class="composer-encoding"
-						data-encoding={measure.encoding}
-						title={measure.encoding === 'ucs2'
-							? 'UCS-2: a character outside the GSM alphabet, at 70 per segment'
-							: 'GSM-7: 160 characters fit in one segment'}
-					>
-						{measure.encoding === 'ucs2' ? 'UCS-2' : 'GSM-7'}
-					</span>
-					<span class="mono">{measure.units}/{measure.capacity}</span>
-					<span class="composer-parts mono" data-multi={measure.segments > 1 ? 'true' : 'false'}>
-						{segments}
-					</span>
-				</p>
+				<SegmentMeter body={composer.draft} />
 			{/if}
 		</div>
 	{/if}

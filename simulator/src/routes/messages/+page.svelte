@@ -56,16 +56,26 @@
 			<h1>Threads</h1>
 			<p class="screen-meta">{meta}</p>
 		</div>
-		<button
-			class="icon-btn"
-			type="button"
-			aria-label="Refresh threads"
-			title="Reload the newest page from the local database"
-			onclick={() => app.refreshSelected()}
-			disabled={!app.backendAvailable || app.loading.messages}
-		>
-			<Icon name="refresh" size={20} />
-		</button>
+		<div class="screen-actions">
+			<button
+				class="icon-btn"
+				type="button"
+				aria-label="Refresh threads"
+				title="Reload the newest page from the local database"
+				onclick={() => app.refreshSelected()}
+				disabled={!app.backendAvailable || app.loading.messages}
+			>
+				<Icon name="refresh" size={20} />
+			</button>
+			<a
+				class="icon-btn compose-open"
+				href="/compose"
+				aria-label="New message"
+				title="Write to a number"
+			>
+				<Icon name="compose" size={20} />
+			</a>
+		</div>
 	</header>
 
 	{#if app.devices.length > 1}
