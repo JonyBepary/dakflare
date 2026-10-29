@@ -9,14 +9,17 @@
 
 import type {
 	Alert,
+	AuditResult,
 	CommandInfo,
 	Device,
 	DeviceCommand,
 	DeviceStatus,
 	Health,
 	HealthResult,
+	MeInfo,
 	MessagesResult,
 	PairingCode,
+	RedeemInfo,
 	Rule,
 	RuleInput,
 	RuleTestResult,
@@ -28,6 +31,9 @@ import type {
 } from './types';
 
 const SESSION_PATH = '/admin/session';
+
+/** Better Auth's mount. Same origin, cookies only — no second client library. */
+const AUTH_BASE = '/api/auth';
 
 export class ApiError extends Error {
 	readonly status: number;
@@ -57,8 +63,15 @@ const CODE_MESSAGES: Record<string, string> = {
 	storage_unavailable: 'Storage is temporarily unavailable. Try again shortly.',
 	payload_too_large: 'The request was too large.',
 	revoke_failed: 'The device could not be revoked. It may still be able to authenticate.',
-	internal_error: 'The gateway hit an internal error.'
+	internal_error: 'The gateway hit an internal error.',
+	// Account paths (AUTH_PLAN §4). Each one names the next action, not the wire.
+	invite_invalid: 'That invite was already used or has expired. Ask the owner for a new one.',
+	already_registered: 'That address already has an account. Sign in instead.',
+	session_failed: 'The invite worked, but no session was issued. Open the link again.',
+	auth_unavailable: 'This deployment has no auth secret yet.',
+	owner_exists: 'This deployment already has an owner. Sign in instead.'
 };
+
 
 interface RequestOptions extends RequestInit {
 	/** Statuses whose JSON body is still meaningful (health answers 503 when degraded). */
@@ -168,11 +181,120 @@ export function deleteSession(): Promise<{ ok: boolean }> {
 	return get<{ ok: boolean }>(SESSION_PATH, { method: 'DELETE', silentAuth: true });
 }
 
+/* --------------------------------------------------------------- accounts */
+
+/**
+ * `GET /v1/auth/me` — the Better Auth session, when this deployment is on
+ * `AUTH_MODE=new`. A 401 here is not an error the layout shows: it means the
+ * legacy cookie is the one to ask about.
+ */
+export function getMe(): Promise<MeInfo> {
+	return get<MeInfo>('/v1/auth/me', { silentAuth: true });
+}
+
+/** `POST /v1/auth/redeem` — spends the invite and answers with the session cookie. */
+export function redeemInvite(token: string): Promise<RedeemInfo> {
+	return get<RedeemInfo>('/v1/auth/redeem', {
+		method: 'POST',
+		body: JSON.stringify({ token }),
+		silentAuth: true
+	});
+}
+
+/**
+ * One request to the Better Auth mount.
+ *
+ * The library owns its routes, cookies and error envelope, so this is a thin
+ * JSON fetch rather than an admin call: no `X-Admin-Session`, no `/v1` prefix,
+ * and no global 401 handling — these run before a console session exists.
+ */
+export async function authRequest<T>(
+	path: string,
+	init: { method?: string; body?: unknown } = {}
+): Promise<{ data: T; status: number }> {
+	const headers = new Headers({ Accept: 'application/json' });
+	if (init.body !== undefined) headers.set('Content-Type', 'application/json');
+
+	let response: Response;
+	try {
+		response = await fetch(`${AUTH_BASE}${path}`, {
+			method: init.method ?? 'GET',
+			headers,
+			...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+			credentials: 'same-origin',
+			signal: AbortSignal.timeout(20_000)
+		});
+	} catch (error) {
+		if (error instanceof DOMException && error.name === 'TimeoutError') {
+			throw new ApiError('The gateway did not answer in time. Try again.', 0);
+		}
+		throw new ApiError('Could not reach the gateway. Check the connection and try again.', 0);
+	}
+
+	const text = await response.text();
+	let payload: unknown = null;
+	if (text) {
+		try {
+			payload = JSON.parse(text);
+		} catch {
+			payload = null;
+		}
+	}
+
+	if (!response.ok) {
+		const code = extractCode(payload) ?? extractField(payload, 'code');
+		const fallback = `Request failed (${response.status}).`;
+		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code);
+	}
+
+	return { data: payload as T, status: response.status };
+}
+
+/** The current Better Auth session, or `null`. Throws 503 when `/api/auth` is off. */
+export async function getAuthSession(): Promise<unknown> {
+	const { data } = await authRequest<unknown>('/get-session');
+	return data ?? null;
+}
+
+export async function signOutAccount(): Promise<void> {
+	try {
+		await authRequest<unknown>('/sign-out', { method: 'POST' });
+	} catch {
+		// Leaving the screen matters more than the cookie clearing itself.
+	}
+}
+
+/* ------------------------------------------------------------------- audit */
+
+export interface AuditQuery {
+	limit?: number;
+	/** Keyset cursor: the `at` of the oldest row already shown. */
+	before?: number;
+	actor?: string;
+	action?: string;
+}
+
+export function getAudit(query: AuditQuery = {}): Promise<AuditResult> {
+	const params = new URLSearchParams({ limit: String(query.limit ?? 100) });
+	if (query.before !== undefined) params.set('before', String(query.before));
+	if (query.actor) params.set('actor', query.actor);
+	if (query.action) params.set('action', query.action);
+	return get<AuditResult>(`/v1/admin/audit?${params.toString()}`);
+}
+
+function extractField(payload: unknown, field: string): string | null {
+	if (!payload || typeof payload !== 'object') return null;
+	const value = (payload as Record<string, unknown>)[field];
+	return typeof value === 'string' ? value : null;
+}
+
+
 /* -------------------------------------------------------------------- reads */
 
-export async function getHealth(): Promise<HealthResult> {
+export async function getHealth(silentAuth = false): Promise<HealthResult> {
 	const { data, status } = await request<Health>('/v1/admin/health', {
-		allowStatuses: [503]
+		allowStatuses: [503],
+		silentAuth
 	});
 	return { health: data, httpStatus: status };
 }

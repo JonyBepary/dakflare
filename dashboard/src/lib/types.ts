@@ -8,6 +8,9 @@ export interface HealthCounts {
 	open_alerts: number;
 }
 
+/** Which gate answers the admin routes. `AUTH_MODE` in the Worker. */
+export type AuthMode = 'legacy' | 'new';
+
 export interface Health {
 	ok: boolean;
 	version: string;
@@ -21,6 +24,8 @@ export interface Health {
 	last_message_at: number | null;
 	db_error?: string | null;
 	checked_at?: number;
+	auth_mode?: AuthMode;
+	auth_configured?: boolean;
 }
 
 export interface HealthResult {
@@ -303,4 +308,59 @@ export interface PairingCode {
 export interface SessionInfo {
 	ok: boolean;
 	expires_at: number;
+}
+
+/* ---------------------------------------------------------------- accounts */
+
+export type Role = 'owner' | 'admin' | 'member';
+
+/** `GET /v1/auth/me` — who the Better Auth session is (AUTH_MODE=new). */
+export interface AuthUser {
+	id: string;
+	email: string;
+	name: string;
+	role: Role;
+	twoFactorEnabled: boolean;
+}
+
+export interface MeInfo {
+	ok: boolean;
+	user: AuthUser;
+	expires_at: number;
+	/** The mode the Worker is in right now; the console trusts this over health. */
+	auth_mode: AuthMode;
+}
+
+/** `POST /v1/auth/redeem` — a single-use invite became an account and a session. */
+export interface RedeemInfo {
+	ok: boolean;
+	user: { id: string; email: string; name: string; role: Role };
+	expires_at: number;
+}
+
+/** A `/api/auth/passkey/*` answer before it is decoded. */
+export interface PasskeySummary {
+	id: string;
+	name: string | null;
+	createdAt: string;
+}
+
+/* ------------------------------------------------------------------- audit */
+
+/** One `audit_log` row, exactly as stored. `detail` is the parsed `detail_json`. */
+export interface AuditEvent {
+	id: string;
+	at: number;
+	actor_user: string | null;
+	actor_label: string | null;
+	action: string;
+	subject: string | null;
+	ip: string | null;
+	user_agent: string | null;
+	detail: unknown;
+}
+
+export interface AuditResult {
+	events: AuditEvent[];
+	limit: number;
 }
