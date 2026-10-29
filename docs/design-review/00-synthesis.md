@@ -129,3 +129,19 @@ green, tokens and the font in `simulator/build/`.
 Two deliberate deltas from the old console, both sanctioned by `03` §2.3: the 32px
 graph-paper grid and the radial glow behind `body` are gone (cream paper replaces them),
 and the primary button's white text now resolves through `--df-text-on-accent`.
+
+## 6. Phase 3 verified on hardware (Mi A3, 2026-10-29)
+
+The four frames run against the real database, not a stub. Threads group by peer and
+open a conversation; paging is keyset 50 at a time; Device reads `+8801731382829`,
+`SIM 2`, `Grameenphone`, all three permissions granted, battery not optimised, and
+`no default SMS app` (a reported fact, not a missing one).
+
+Three defects surfaced only on the phone and are fixed: the state had no stored
+evidence (`updated_at` is now touched on every answered signed request, and the
+pairing time is kept as `paired:<id>` and backfilled on the first poll after an
+upgrade), and `sim_slot` was written 0-based while the rest of the product calls the
+second tray SIM 2.
+
+Dark mode measures clean against the tokens: body 16.07:1, the five state chips
+7.41–8.66:1, the lowest pair in the phone palette 4.61:1.
