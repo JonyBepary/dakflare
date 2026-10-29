@@ -5,7 +5,7 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "bin": {
-    "dakflare": "cli/dakflare.mjs"
+    "dakflare": "cli/bin/dakflare.js"
   },
   "engines": {
     "node": ">=20"

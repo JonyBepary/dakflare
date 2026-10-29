@@ -1,0 +1,1669 @@
+#!/usr/bin/env node
+/**
+ * dakflare — operate a self-hosted DakFlare deployment.
+ *
+ * Zero dependencies, Node 22+ (global `fetch`, `node:crypto`, `node:fs`).
+ *
+ * The CLI talks to exactly one Worker, the one in
+ * ~/.config/dakflare/config.json. It never contacts Cloudflare's API, never
+ * deploys, and never prints the admin token. `init --local` is the one command
+ * that writes a secret file, and it generates fresh values rather than reading
+ * an existing secret.
+ *
+ * Exit codes: 0 ok, 1 a check or request failed, 2 usage / missing config /
+ * missing local tool.
+ */
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import readline from 'node:readline';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import { createQr, renderQr } from '../lib/qr.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CLI_VERSION = '0.1.0';
+
+const HOME = os.homedir();
+const CONFIG_DIR = path.join(HOME, '.config', 'dakflare');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+const KEYSTORE_FILE = path.join(CONFIG_DIR, 'dakflare-release.jks');
+const KEYSTORE_PROPS = path.join(CONFIG_DIR, 'release-keystore.txt');
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_PAIR_TTL_S = 600;
+const DEFAULT_PHONE_MAX_AGE_MIN = 60;
+const MAX_LABEL_CHARS = 64;
+const MAX_BODY_CHARS = 4096;
+
+const REQUIRED_BINDINGS = [
+  'DB',
+  'KV',
+  'DEVICE',
+  'PAIR_LIMITER',
+  'PAIR_GLOBAL_LIMITER',
+  'ADMIN_LIMITER',
+  'DEVICE_LIMITER',
+  'AUTH_FAIL_LIMITER',
+];
+
+/* ───────────────────────────── output ───────────────────────────── */
+
+const color = process.stdout.isTTY && !process.env.NO_COLOR;
+const paint = (code, text) => (color ? `\x1b[${code}m${text}\x1b[0m` : text);
+const green = (text) => paint(32, text);
+const red = (text) => paint(31, text);
+const yellow = (text) => paint(33, text);
+const dim = (text) => paint(2, text);
+
+const out = (text = '') => process.stdout.write(`${text}\n`);
+const err = (text = '') => process.stderr.write(`${text}\n`);
+
+// A pipe that closes early (`dakflare pair --qr | head`) is normal, not an
+// unhandled socket error.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (error) => {
+    if (error?.code === 'EPIPE') process.exit(0);
+    throw error;
+  });
+}
+
+class CliError extends Error {
+  constructor(message, code = 1, payload = {}) {
+    super(message);
+    this.name = 'CliError';
+    this.code = code;
+    this.payload = payload;
+  }
+}
+
+const usage = (message) => new CliError(message, 2, { error: 'usage' });
+
+/* ───────────────────────────── flags ───────────────────────────── */
+
+const VALUE_FLAGS = new Set([
+  'url',
+  'token',
+  'token-file',
+  'label',
+  'device',
+  'to',
+  'body',
+  'actor',
+  'limit',
+  'ttl',
+  'max-age',
+  'serial',
+  'keystore',
+  'alias',
+  'tail',
+]);
+
+function parseArgv(argv) {
+  const flags = Object.create(null);
+  const rest = [];
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--') {
+      rest.push(...argv.slice(i + 1));
+      break;
+    }
+    if (arg === '-h') {
+      flags.help = true;
+      continue;
+    }
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=');
+      if (eq !== -1) {
+        flags[arg.slice(2, eq)] = arg.slice(eq + 1);
+        continue;
+      }
+      const key = arg.slice(2);
+      const next = argv[i + 1];
+      if (VALUE_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
+        flags[key] = next;
+        i += 1;
+      } else {
+        flags[key] = true;
+      }
+      continue;
+    }
+    rest.push(arg);
+  }
+
+  return { flags, rest };
+}
+
+function assertFlags(flags, allowed) {
+  const known = new Set(['json', 'help', ...allowed]);
+  for (const key of Object.keys(flags)) {
+    if (!known.has(key)) throw usage(`unknown option --${key}`);
+  }
+}
+
+function stringFlag(flags, name, { required = false } = {}) {
+  const value = flags[name];
+  if (value === undefined) {
+    if (required) throw usage(`--${name} is required`);
+    return undefined;
+  }
+  if (value === true || value === '') throw usage(`--${name} needs a value`);
+  return String(value);
+}
+
+/* ───────────────────────────── config ───────────────────────────── */
+
+function readConfig() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { cfg: null, reason: 'missing', detail: CONFIG_FILE };
+    return { cfg: null, reason: 'unreadable', detail: String(error?.message ?? error) };
+  }
+  try {
+    const cfg = JSON.parse(raw);
+    if (!cfg || typeof cfg !== 'object') throw new Error('not an object');
+    return { cfg, reason: null, detail: CONFIG_FILE };
+  } catch (error) {
+    return { cfg: null, reason: 'invalid', detail: String(error?.message ?? error) };
+  }
+}
+
+function configMode() {
+  try {
+    return fs.statSync(CONFIG_FILE).mode & 0o777;
+  } catch {
+    return null;
+  }
+}
+
+function modeString(mode) {
+  return mode === null ? 'unknown' : mode.toString(8).padStart(3, '0');
+}
+
+function saveConfig(cfg) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(CONFIG_DIR, 0o700);
+  } catch {
+    /* best effort on filesystems without POSIX modes */
+  }
+
+  const temporary = `${CONFIG_FILE}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(temporary, 0o600);
+  } catch {
+    /* best effort */
+  }
+  fs.renameSync(temporary, CONFIG_FILE);
+  try {
+    fs.chmodSync(CONFIG_FILE, 0o600);
+  } catch {
+    /* best effort */
+  }
+}
+
+function requireConfig() {
+  const { cfg, reason } = readConfig();
+  if (!cfg) {
+    const why =
+      reason === 'invalid'
+        ? `the config at ${CONFIG_FILE} is not valid JSON`
+        : `no deployment is configured (${CONFIG_FILE} is missing)`;
+    throw new CliError(`${why} — run \`dakflare init\` first.`, 2, { error: 'no_config' });
+  }
+  if (typeof cfg.url !== 'string' || cfg.url === '' || typeof cfg.token !== 'string' || cfg.token === '') {
+    throw new CliError(
+      `the config at ${CONFIG_FILE} needs both "url" and "token" — run \`dakflare init\` again.`,
+      2,
+      { error: 'no_config' }
+    );
+  }
+  return { ...cfg, url: cfg.url.replace(/\/+$/, '') };
+}
+
+/* ───────────────────────────── HTTP ───────────────────────────── */
+
+async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS } = {}) {
+  const base = cfg.url.replace(/\/+$/, '');
+  const target = `${base}${pathname}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  let response;
+  try {
+    response = await fetch(target, {
+      method,
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: 'application/json',
+        'X-Dakflare-Client': 'cli',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    const reason =
+      error?.name === 'AbortError'
+        ? `request timed out after ${Math.round(timeout / 1000)}s`
+        : String(error?.message ?? error);
+    throw new CliError(
+      `cannot reach ${base} — ${reason}. Check the Worker URL and your connection.`,
+      1,
+      { error: 'network', url: base }
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await response.text();
+  let data = null;
+  if (text !== '') {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  return { status: response.status, data, text, headers: response.headers };
+}
+
+function apiErrorBody(data, status) {
+  if (data && typeof data === 'object' && typeof data.error === 'string') return data.error;
+  return `HTTP ${status}`;
+}
+
+/** Convert a response into a useful message without ever including the token. */
+function requestFailure(what, result) {
+  const detail = apiErrorBody(result.data, result.status);
+  return new CliError(`${what} failed: ${detail} (HTTP ${result.status})`, 1, {
+    error: detail,
+    status: result.status,
+  });
+}
+
+async function fetchHealth(cfg) {
+  const started = Date.now();
+  const result = await api(cfg, 'GET', '/v1/admin/health');
+  return { ...result, elapsedMs: Date.now() - started };
+}
+
+async function listDevices(cfg) {
+  const result = await api(cfg, 'GET', '/v1/devices');
+  if (result.status === 401) {
+    throw new CliError('the deployment rejected the admin token (HTTP 401).', 1, {
+      error: 'unauthorized',
+      status: 401,
+    });
+  }
+  if (result.status !== 200) throw requestFailure('listing devices', result);
+  const devices = Array.isArray(result.data?.devices) ? result.data.devices : [];
+  return devices;
+}
+
+function publicDevice(device) {
+  return {
+    device_id: device.device_id,
+    label: device.label ?? null,
+    sim_slot: device.sim_slot ?? null,
+    paired_at: device.paired_at ?? null,
+    last_seen: device.last_seen ?? null,
+    fcm: Boolean(device.fcm_token),
+  };
+}
+
+/* ───────────────────────────── formatting ───────────────────────────── */
+
+function iso(value) {
+  if (value === null || value === undefined) return 'never';
+  const date = new Date(Number(value));
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+}
+
+function ageSeconds(value) {
+  if (value === null || value === undefined) return null;
+  const delta = Date.now() - Number(value);
+  return Number.isFinite(delta) ? Math.max(0, Math.round(delta / 1000)) : null;
+}
+
+function humanAge(seconds) {
+  if (seconds === null) return 'never';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function pad(text, width) {
+  const value = String(text ?? '');
+  return value.length >= width ? value : value + ' '.repeat(width - value.length);
+}
+
+function plural(count, one, many = `${one}s`) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/* ───────────────────────────── prompts ───────────────────────────── */
+
+async function ask(question) {
+  if (!process.stdin.isTTY) throw usage(`${question.replace(/: $/, '')} needs a value (pass the flag)`);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return String(await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function askHidden(question) {
+  if (!process.stdin.isTTY) throw usage(`${question.replace(/: $/, '')} needs a value (pass --token)`);
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    process.stderr.write(question);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+
+    let value = '';
+    const cleanup = () => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeListener('data', onData);
+    };
+    const onData = (chunk) => {
+      for (const character of chunk) {
+        if (character === '\r' || character === '\n') {
+          cleanup();
+          process.stderr.write('\n');
+          resolve(value);
+          return;
+        }
+        if (character === '\u0003') {
+          cleanup();
+          process.stderr.write('\n');
+          reject(new CliError('cancelled', 130, { error: 'cancelled' }));
+          return;
+        }
+        if (character === '\u007f' || character === '\b') {
+          value = value.slice(0, -1);
+          continue;
+        }
+        if (character >= ' ') value += character;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+async function confirm(question) {
+  if (!process.stdin.isTTY) {
+    throw new CliError('refusing to continue without confirmation; pass --yes for a non-interactive run.', 2, {
+      error: 'confirmation_required',
+    });
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = String(await rl.question(question)).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/* ───────────────────────────── init ───────────────────────────── */
+
+function findWorkerDir() {
+  const candidates = [
+    path.join(process.cwd(), 'worker'),
+    process.cwd(),
+    path.resolve(__dirname, '..', '..', 'worker'),
+  ];
+  for (const directory of candidates) {
+    if (fs.existsSync(path.join(directory, 'wrangler.toml'))) return directory;
+  }
+  return null;
+}
+
+function findingsFromHealth(health) {
+  const bindings = health.bindings ?? {};
+  const missingRequired = REQUIRED_BINDINGS.filter((name) => !bindings[name]);
+  const fcm = Boolean(bindings.FCM_SERVICE_ACCOUNT);
+  const plan = health.plan ?? health.plan_type ?? health.cloudflare_plan ?? null;
+  return {
+    version: health.version ?? 'unknown',
+    schema_ready: health.schema_ready === true,
+    migrations: Array.isArray(health.migrations) ? health.migrations : [],
+    missing_required: missingRequired,
+    fcm,
+    plan,
+    retention_days: health.retention_days ?? null,
+    counts: health.counts ?? null,
+  };
+}
+
+function printFindings(findings) {
+  out(`  version       ${findings.version}`);
+  out(`  schema        ${findings.schema_ready ? 'ready' : 'NOT READY'}`);
+  out(`  migrations    ${findings.migrations.length ? `${plural(findings.migrations.length, 'migration')} applied` : 'none applied'}`);
+  out(
+    `  bindings      ${
+      findings.missing_required.length === 0
+        ? 'all required present'
+        : `missing ${findings.missing_required.join(', ')}`
+    }${findings.fcm ? '; FCM present' : '; FCM absent (optional)'}`
+  );
+  out(
+    `  plan          ${
+      findings.plan === null
+        ? 'not reported by /v1/admin/health (Cloudflare plan is not exposed)'
+        : String(findings.plan)
+    }`
+  );
+  if (findings.retention_days !== null) out(`  retention     ${findings.retention_days} days`);
+  if (findings.counts) {
+    out(
+      `  counts        devices ${findings.counts.devices ?? '?'} · messages ${findings.counts.messages ?? '?'} · rules ${findings.counts.rules ?? '?'}`
+    );
+  }
+}
+
+async function initLocal(flags, json) {
+  const workerDir = findWorkerDir();
+  const directory = workerDir ?? process.cwd();
+  const file = path.join(directory, '.dev.vars');
+
+  if (fs.existsSync(file) && !flags.force) {
+    throw new CliError(
+      `${file} already exists; pass --force to replace the generated values (this rotates local secrets).`,
+      2,
+      { error: 'exists', file }
+    );
+  }
+
+  const generated = {
+    ADMIN_TOKEN: `dk_adm_${crypto.randomBytes(32).toString('base64url')}`,
+    AUTH_PEPPER: `v1:${crypto.randomBytes(32).toString('base64')}`,
+    BETTER_AUTH_SECRET: crypto.randomBytes(32).toString('base64'),
+  };
+
+  let existing = '';
+  if (fs.existsSync(file)) {
+    existing = fs.readFileSync(file, 'utf8');
+  }
+  const managed = new Set(Object.keys(generated));
+  const kept = existing
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '')
+    .filter((line) => {
+      const match = line.match(/^\s*([A-Z0-9_]+)\s*=/);
+      return !(match && managed.has(match[1]));
+    });
+  const content = [...kept, ...Object.entries(generated).map(([key, value]) => `${key}=${value}`)].join('\n');
+
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${content}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    /* best effort */
+  }
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: true,
+          local: true,
+          file,
+          mode: '600',
+          generated: Object.keys(generated),
+          widths: Object.fromEntries(Object.entries(generated).map(([key, value]) => [key, value.length])),
+        },
+        null,
+        2
+      )
+    );
+    return 0;
+  }
+
+  out('DakFlare local secrets');
+  out(`  file          ${file} (mode 600)`);
+  for (const key of Object.keys(generated)) out(`  ${pad(key, 21)} generated (${generated[key].length} chars)`);
+  out('');
+  out('  Values are not printed. Start local development with:');
+  out(`    cd ${path.relative(process.cwd(), directory) || '.'} && npx wrangler dev --local`);
+  return 0;
+}
+
+async function commandInit(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('init');
+  assertFlags(flags, ['url', 'token', 'token-file', 'local', 'force']);
+  const json = Boolean(flags.json);
+
+  if (flags.local) return initLocal(flags, json);
+
+  let url = stringFlag(flags, 'url');
+  let token = stringFlag(flags, 'token');
+
+  if (flags['token-file'] !== undefined) {
+    const file = stringFlag(flags, 'token-file');
+    try {
+      token = fs.readFileSync(file, 'utf8').trim();
+    } catch (error) {
+      throw new CliError(`could not read --token-file ${file}: ${String(error?.message ?? error)}`, 2, {
+        error: 'token_file',
+      });
+    }
+    if (token === '') throw usage(`--token-file ${file} is empty`);
+  }
+
+  if (!json) {
+    if (!url) url = await ask('Worker URL (https://…workers.dev): ');
+    if (!token) token = await askHidden('Admin token (input hidden): ');
+  }
+
+  if (!url) throw usage('--url is required when not running interactively');
+  if (!token) throw usage('--token or --token-file is required when not running interactively');
+
+  if (!/^https?:\/\//i.test(url)) throw usage('the Worker URL must start with http:// or https://');
+  url = url.replace(/\/+$/, '');
+
+  const candidate = { url, token, installedAt: new Date().toISOString() };
+  const result = await fetchHealth(candidate);
+
+  if (result.status === 401 || result.status === 403) {
+    throw new CliError(
+      `the deployment rejected that admin token (HTTP ${result.status}). Check ADMIN_TOKEN for ${url}.`,
+      1,
+      { error: 'unauthorized', status: result.status }
+    );
+  }
+  if (result.status !== 200 && result.status !== 503) {
+    throw requestFailure('health check', result);
+  }
+  if (!result.data || typeof result.data !== 'object') {
+    throw new CliError(`${url}/v1/admin/health did not return JSON; is that a DakFlare Worker?`, 1, {
+      error: 'bad_health',
+      status: result.status,
+    });
+  }
+
+  saveConfig(candidate);
+  const findings = findingsFromHealth(result.data);
+  const healthy = result.data.ok === true;
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: healthy,
+          url,
+          config: { path: CONFIG_FILE, mode: modeString(configMode()) },
+          health: {
+            status: result.status,
+            version: findings.version,
+            schema_ready: findings.schema_ready,
+            migrations: findings.migrations,
+            missing_bindings: result.data.missing_bindings ?? findings.missing_required,
+            plan: findings.plan,
+          },
+        },
+        null,
+        2
+      )
+    );
+    return healthy ? 0 : 1;
+  }
+
+  out(`DakFlare init — ${url}`);
+  printFindings(findings);
+  out(`  config        ${CONFIG_FILE} (mode ${modeString(configMode())})`);
+  out('  token         stored; never printed');
+  out('');
+  if (healthy) {
+    out(green('  configured.') + ' Next: `dakflare doctor`, then `dakflare pair`.');
+  } else {
+    out(
+      yellow('  saved, but the deployment is not healthy.') +
+        (result.data.db_error ? ` D1 said: ${result.data.db_error}` : '') +
+        ' Run `dakflare doctor`.'
+    );
+  }
+  return healthy ? 0 : 1;
+}
+
+/* ───────────────────────────── doctor ───────────────────────────── */
+
+function expectedMigrations() {
+  const candidates = [
+    path.resolve(__dirname, '..', '..', 'worker', 'migrations'),
+    path.join(process.cwd(), 'worker', 'migrations'),
+    path.join(process.cwd(), 'migrations'),
+  ];
+  for (const directory of candidates) {
+    try {
+      const names = fs
+        .readdirSync(directory)
+        .filter((name) => name.endsWith('.sql'))
+        .sort();
+      if (names.length > 0) return { directory, names };
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
+function adbBinary() {
+  return process.env.ADB || 'adb';
+}
+
+function runAdb(args, timeout = 8000) {
+  return spawnSync(adbBinary(), args, { encoding: 'utf8', timeout });
+}
+
+function adbPresence() {
+  const result = runAdb(['version'], 5000);
+  if (result.error?.code === 'ENOENT') return { available: false, reason: 'adb is not installed' };
+  if (result.error?.code === 'ETIMEDOUT') return { available: false, reason: 'adb did not answer' };
+  if (result.status !== 0) {
+    const detail = String(result.stderr || '')
+      .trim()
+      .split('\n')
+      .slice(-1)[0];
+    return { available: false, reason: `adb is not usable${detail ? `: ${detail}` : ''}` };
+  }
+  return { available: true };
+}
+
+function attachedDevice(preferredSerial) {
+  const result = runAdb(['devices'], 8000);
+  if (result.error || result.status !== 0) return null;
+  const lines = String(result.stdout || '')
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const devices = lines
+    .map((line) => line.split(/\s+/))
+    .filter((parts) => parts.length >= 2)
+    .map(([serial, state]) => ({ serial, state }));
+
+  if (preferredSerial) return devices.find((device) => device.serial === preferredSerial) ?? null;
+  if (process.env.ANDROID_SERIAL) {
+    return devices.find((device) => device.serial === process.env.ANDROID_SERIAL) ?? null;
+  }
+  return devices.find((device) => device.state === 'device') ?? devices[0] ?? null;
+}
+
+function adbShell(serial, command, timeout = 8000) {
+  return runAdb(['-s', serial, 'shell', ...command], timeout);
+}
+
+function classifyBuild(dump) {
+  const flags = dump.match(/^\s*flags=\[([^\]]*)\]/m);
+  const debuggable = flags ? /\bDEBUGGABLE\b/.test(flags[1]) : false;
+  const versionName = dump.match(/versionName=(\S+)/)?.[1] ?? 'unknown';
+  const versionCode = dump.match(/versionCode=(\d+)/)?.[1] ?? 'unknown';
+  return { debuggable, versionName, versionCode };
+}
+
+function probePhone(checks, serialFlag, json) {
+  const presence = adbPresence();
+  if (!presence.available) {
+    checks.push({ name: 'phone-role', status: 'skip', detail: presence.reason });
+    checks.push({ name: 'phone-build', status: 'skip', detail: presence.reason });
+    return;
+  }
+
+  const device = attachedDevice(serialFlag);
+  if (!device) {
+    checks.push({ name: 'phone-role', status: 'skip', detail: 'no adb device attached' });
+    checks.push({ name: 'phone-build', status: 'skip', detail: 'no adb device attached' });
+    return;
+  }
+  if (device.state !== 'device') {
+    checks.push({ name: 'phone-role', status: 'skip', detail: `${device.serial} is ${device.state}, not ready` });
+    checks.push({ name: 'phone-build', status: 'skip', detail: `${device.serial} is ${device.state}, not ready` });
+    return;
+  }
+
+  const packagesResult = adbShell(device.serial, ['pm', 'list', 'packages'], 8000);
+  const packages = String(packagesResult.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^package:/, ''))
+    .filter((name) => /dakflare/i.test(name));
+
+  if (packages.length === 0) {
+    checks.push({
+      name: 'phone-role',
+      status: 'fail',
+      detail: `${device.serial}: no DakFlare package installed`,
+    });
+    checks.push({ name: 'phone-build', status: 'skip', detail: 'no DakFlare package installed' });
+    return;
+  }
+
+  const roleResult = adbShell(device.serial, ['cmd', 'role', 'get-role-holders', 'android.app.role.SMS'], 8000);
+  const roleText = String(roleResult.stdout || '');
+  const holders = roleText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const rolePackage = packages.find((name) => holders.includes(name)) ?? packages[0];
+  if (roleResult.status !== 0 || roleText.trim() === '') {
+    checks.push({
+      name: 'phone-role',
+      status: 'skip',
+      detail: `${device.serial}: cmd role is unavailable on this Android build`,
+    });
+  } else if (holders.includes(rolePackage)) {
+    checks.push({
+      name: 'phone-role',
+      status: 'pass',
+      detail: `${device.serial}: android.app.role.SMS -> ${holders.join(', ')}`,
+    });
+  } else {
+    checks.push({
+      name: 'phone-role',
+      status: 'fail',
+      detail: `${device.serial}: android.app.role.SMS -> ${holders.join(', ') || '<none>'}; expected ${rolePackage}`,
+    });
+  }
+
+  const dumpResult = adbShell(device.serial, ['dumpsys', 'package', rolePackage], 10_000);
+  const dump = String(dumpResult.stdout || '');
+  if (dumpResult.status !== 0 || dump.trim() === '') {
+    checks.push({ name: 'phone-build', status: 'skip', detail: `could not read ${rolePackage} package info` });
+    return;
+  }
+  const build = classifyBuild(dump);
+  checks.push({
+    name: 'phone-build',
+    status: 'pass',
+    detail: `${rolePackage}: ${build.debuggable ? 'debug (debuggable)' : 'release (not debuggable)'} v${build.versionName} (${build.versionCode})`,
+  });
+}
+
+async function commandDoctor(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('doctor');
+  assertFlags(flags, ['max-age', 'serial']);
+  const json = Boolean(flags.json);
+  const serialFlag = stringFlag(flags, 'serial');
+  const maxAgeFlag = stringFlag(flags, 'max-age');
+  const maxAgeMinutes = maxAgeFlag === undefined ? DEFAULT_PHONE_MAX_AGE_MIN : Number(maxAgeFlag);
+  if (!Number.isFinite(maxAgeMinutes) || maxAgeMinutes <= 0) {
+    throw usage('--max-age must be a positive number of minutes');
+  }
+
+  const checks = [];
+  const add = (name, status, detail) => checks.push({ name, status, detail });
+
+  const { cfg, reason } = readConfig();
+  const mode = configMode();
+
+  if (!cfg) {
+    add(
+      'config',
+      'fail',
+      reason === 'invalid'
+        ? `${CONFIG_FILE} is not valid JSON — run \`dakflare init\``
+        : `${CONFIG_FILE} is missing — run \`dakflare init\``
+    );
+    return finishDoctor(checks, json, null);
+  }
+
+  if (typeof cfg.url !== 'string' || cfg.url === '' || typeof cfg.token !== 'string' || cfg.token === '') {
+    add('config', 'fail', `${CONFIG_FILE} needs both "url" and "token" — run \`dakflare init\``);
+    return finishDoctor(checks, json, null);
+  }
+
+  const url = cfg.url.replace(/\/+$/, '');
+  if (process.platform !== 'win32' && mode !== null && (mode & 0o077) !== 0) {
+    add('config', 'fail', `${CONFIG_FILE} mode ${modeString(mode)}; expected 600 — run \`chmod 600 ${CONFIG_FILE}\``);
+  } else {
+    add('config', 'pass', `${url} (${CONFIG_FILE}, mode ${modeString(mode)})`);
+  }
+
+  const normalized = { ...cfg, url };
+  let health;
+  try {
+    health = await fetchHealth(normalized);
+  } catch (error) {
+    add('health', 'fail', error.message);
+    addSkippedDependents(add, 'health is unreachable');
+    return finishDoctor(checks, json, url);
+  }
+
+  if (health.status === 401 || health.status === 403) {
+    add('health', 'fail', `HTTP ${health.status} — admin token rejected`);
+    add('admin-token', 'fail', 'rejected by /v1/admin/health (HTTP 401/403)');
+    addSkippedDependents(add, 'the admin token was rejected');
+    return finishDoctor(checks, json, url);
+  }
+
+  if (health.status !== 200 && health.status !== 503) {
+    add('health', 'fail', `HTTP ${health.status} (${
+      health.data && typeof health.data === 'object' && health.data.error ? health.data.error : 'unexpected response'
+    })`);
+    addSkippedDependents(add, `health returned HTTP ${health.status}`);
+    return finishDoctor(checks, json, url);
+  }
+
+  add(
+    'health',
+    'pass',
+    `HTTP ${health.status} in ${health.elapsedMs}ms${health.status === 503 ? ' (the Worker reports itself unhealthy)' : ''}`
+  );
+
+  const data = health.data;
+  if (!data || typeof data !== 'object') {
+    add('admin-token', 'fail', 'the health response was not JSON');
+    addSkippedDependents(add, 'the health response was not JSON');
+    return finishDoctor(checks, json, url);
+  }
+
+  add('admin-token', 'pass', `accepted (HTTP ${health.status})`);
+
+  add(
+    'schema',
+    data.schema_ready === true ? 'pass' : 'fail',
+    data.schema_ready === true ? 'ready (d1_migrations present and counts readable)' : 'not ready — apply D1 migrations'
+  );
+
+  const expected = expectedMigrations();
+  const applied = Array.isArray(data.migrations) ? data.migrations : [];
+  if (!expected) {
+    add(
+      'migrations',
+      'skip',
+      applied.length > 0
+        ? `${plural(applied.length, 'migration')} reported applied; local worker/migrations not found, so completeness is unverified`
+        : 'local worker/migrations not found and the Worker reports none applied'
+    );
+  } else {
+    const missing = expected.names.filter((name) => !applied.includes(name));
+    if (missing.length === 0) {
+      add('migrations', 'pass', `${applied.length}/${expected.names.length} applied`);
+    } else {
+      add(
+        'migrations',
+        'fail',
+        `missing ${missing.length === 1 ? missing[0] : `${missing.length}: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? '…' : ''}`}`
+      );
+    }
+  }
+
+  const bindings = data.bindings ?? {};
+  const missingRequired = REQUIRED_BINDINGS.filter((name) => !bindings[name]);
+  add(
+    'bindings',
+    missingRequired.length === 0 ? 'pass' : 'fail',
+    missingRequired.length === 0
+      ? 'DB, KV, DEVICE and all rate limiters present'
+      : `missing ${missingRequired.join(', ')}`
+  );
+  add(
+    'fcm-binding',
+    bindings.FCM_SERVICE_ACCOUNT ? 'pass' : 'skip',
+    bindings.FCM_SERVICE_ACCOUNT
+      ? 'FCM service account present'
+      : 'not configured (optional; devices are reachable only while their socket is open)'
+  );
+
+  const authMode = data.auth_mode ?? data.authMode ?? null;
+  if (authMode === null) {
+    add('auth-mode', 'skip', 'not reported by this deployment (the tiered auth modes are phase 2)');
+  } else if (['legacy', 'new', 'off', 'client-derived', 'server-kdf'].includes(String(authMode))) {
+    add('auth-mode', 'pass', String(authMode));
+  } else {
+    add('auth-mode', 'fail', `unknown AUTH_MODE "${String(authMode)}"`);
+  }
+
+  add(
+    'd1',
+    data.db_error === null && data.counts ? 'pass' : 'fail',
+    data.db_error === null && data.counts
+      ? `reachable — devices ${data.counts.devices ?? '?'} · messages ${data.counts.messages ?? '?'} · rules ${data.counts.rules ?? '?'}`
+      : `unreachable${data.db_error ? `: ${String(data.db_error).slice(0, 180)}` : ''}`
+  );
+
+  let devices = [];
+  try {
+    devices = await listDevices(normalized);
+  } catch (error) {
+    add('phone', 'fail', error.message);
+    devices = null;
+  }
+
+  if (devices) {
+    if (devices.length === 0) {
+      add('phone', 'skip', 'no paired devices — run `dakflare pair`');
+    } else {
+      const freshest = devices
+        .map((device) => ({ device, seconds: ageSeconds(device.last_seen) }))
+        .filter((entry) => entry.seconds !== null)
+        .sort((a, b) => a.seconds - b.seconds)[0];
+
+      if (!freshest) {
+        add('phone', 'fail', `${plural(devices.length, 'device')} paired, but none has ever contacted the Worker`);
+      } else {
+        const label = freshest.device.label ? ` (${freshest.device.label})` : '';
+        const detail = `${freshest.device.device_id}${label}: last contact ${humanAge(freshest.seconds)}`;
+        if (freshest.seconds <= maxAgeMinutes * 60) add('phone', 'pass', detail);
+        else add('phone', 'fail', `${detail}; older than ${maxAgeMinutes}m — is the gateway running?`);
+      }
+    }
+  }
+
+  probePhone(checks, serialFlag, json);
+  return finishDoctor(checks, json, url, data.version);
+}
+
+function addSkippedDependents(add, why) {
+  add('schema', 'skip', `not evaluated: ${why}`);
+  add('migrations', 'skip', `not evaluated: ${why}`);
+  add('bindings', 'skip', `not evaluated: ${why}`);
+  add('fcm-binding', 'skip', `not evaluated: ${why}`);
+  add('auth-mode', 'skip', `not evaluated: ${why}`);
+  add('d1', 'skip', `not evaluated: ${why}`);
+  add('phone', 'skip', `not evaluated: ${why}`);
+  add('phone-role', 'skip', `not evaluated: ${why}`);
+  add('phone-build', 'skip', `not evaluated: ${why}`);
+}
+
+function finishDoctor(checks, json, url, version) {
+  const summary = {
+    pass: checks.filter((check) => check.status === 'pass').length,
+    fail: checks.filter((check) => check.status === 'fail').length,
+    skip: checks.filter((check) => check.status === 'skip').length,
+  };
+  const healthy = summary.fail === 0;
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: healthy,
+          url: url ?? null,
+          version: version ?? null,
+          checked_at: new Date().toISOString(),
+          checks,
+          summary,
+        },
+        null,
+        2
+      )
+    );
+    if (!healthy) process.exitCode = 1;
+    return;
+  }
+
+  out(`DakFlare doctor${url ? ` — ${url}` : ''}`);
+  for (const check of checks) {
+    const tag =
+      check.status === 'pass'
+        ? green('[PASS]')
+        : check.status === 'fail'
+          ? red('[FAIL]')
+          : yellow('[SKIP]');
+    out(`${tag} ${pad(check.name, 14)} ${check.detail}`);
+  }
+  out('');
+  out(
+    `doctor: ${summary.pass} pass, ${summary.fail} fail, ${summary.skip} skip` +
+      (healthy ? '' : ` — ${red('not healthy')}`)
+  );
+  if (!healthy) process.exitCode = 1;
+}
+
+/* ───────────────────────────── pair ───────────────────────────── */
+
+function qrText(text) {
+  // Prefer the system encoder: it handles every payload length and is what an
+  // operator's terminal expects. Fall back to the built-in encoder.
+  const result = spawnSync('qrencode', ['-t', 'UTF8', '-m', '2', '-l', 'L', '-o', '-'], {
+    input: text,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (!result.error && result.status === 0 && String(result.stdout || '').trim() !== '') {
+    return String(result.stdout).replace(/\s+$/, '');
+  }
+  return renderQr(createQr(text));
+}
+
+async function commandPair(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('pair');
+  assertFlags(flags, ['label', 'qr', 'ttl']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+  const label = stringFlag(flags, 'label');
+  if (label !== undefined) {
+    if (/[\u0000-\u001f\u007f]/.test(label)) throw usage('--label must not contain control characters');
+    if (label.length > MAX_LABEL_CHARS) throw usage(`--label is limited to ${MAX_LABEL_CHARS} characters`);
+  }
+  const ttlFlag = stringFlag(flags, 'ttl');
+  const ttl = ttlFlag === undefined ? DEFAULT_PAIR_TTL_S : Number(ttlFlag);
+  if (!Number.isFinite(ttl) || ttl < 1 || ttl > 86_400) throw usage('--ttl must be between 1 and 86400 seconds');
+
+  const result = await api(cfg, 'POST', '/v1/admin/pairing-code', {
+    ttl_ms: Math.round(ttl * 1000),
+    ...(label === undefined ? {} : { label }),
+  });
+  if (result.status !== 200) throw requestFailure('minting a pairing code', result);
+
+  const code = result.data?.pairing_code;
+  if (typeof code !== 'string' || code === '') {
+    throw new CliError('the Worker did not return a pairing_code', 1, { error: 'bad_response' });
+  }
+  const expiresAt = result.data?.expires_at ?? Date.now() + ttl * 1000;
+  const deepLink = `dakflare://pair?u=${encodeURIComponent(cfg.url)}&c=${encodeURIComponent(code)}`;
+  const qr = flags.qr ? qrText(deepLink) : null;
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: true,
+          pairing_code: code,
+          expires_at: expiresAt,
+          expires_at_iso: iso(expiresAt),
+          ttl_seconds: ttl,
+          deep_link: deepLink,
+          label: label ?? null,
+          ...(qr ? { qr } : {}),
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  out('Pair a device');
+  out(`  code          ${code}`);
+  out(`  expires       ${iso(expiresAt)} (${plural(ttl, 'second')})`);
+  out(`  link          ${deepLink}`);
+  if (label !== undefined) {
+    out(`  label         ${label}`);
+    out('  note          this Worker revision does not persist pairing labels; the phone reports its own on pair.');
+  }
+  if (qr) {
+    out('');
+    out(qr);
+  }
+  out('');
+  out('  Open the link on the phone, or enter the URL and code in the app.');
+}
+
+/* ───────────────────────────── devices ───────────────────────────── */
+
+async function commandDevices(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('devices');
+  assertFlags(flags, []);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+
+  const devices = (await listDevices(cfg)).map(publicDevice);
+  if (json) {
+    out(JSON.stringify({ ok: true, devices }, null, 2));
+    return;
+  }
+
+  out(`Devices (${devices.length})`);
+  if (devices.length === 0) {
+    out('  no paired devices — run `dakflare pair`');
+    return;
+  }
+
+  const idWidth = Math.max(9, ...devices.map((device) => String(device.device_id).length));
+  const labelWidth = Math.max(5, ...devices.map((device) => String(device.label ?? '—').length));
+  out(
+    `  ${pad('ID', idWidth)}  ${pad('LABEL', labelWidth)}  SIM  LAST SEEN`
+  );
+  for (const device of devices) {
+    const seconds = ageSeconds(device.last_seen);
+    out(
+      `  ${pad(device.device_id, idWidth)}  ${pad(device.label ?? '—', labelWidth)}  ${pad(
+        device.sim_slot ?? '—',
+        3
+      )}  ${iso(device.last_seen)} (${humanAge(seconds)})`
+    );
+  }
+}
+
+/* ───────────────────────────── revoke ───────────────────────────── */
+
+async function commandRevoke(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('revoke');
+  assertFlags(flags, ['yes']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+
+  const deviceId = rest[0];
+  if (!deviceId) throw usage('usage: dakflare revoke <device-id> [--yes]');
+  if (rest.length > 1) throw usage('revoke takes exactly one device id');
+
+  const devices = (await listDevices(cfg)).map(publicDevice);
+  const target = devices.find((device) => device.device_id === deviceId);
+  if (!target) {
+    throw new CliError(
+      `no paired device with id "${deviceId}" — run \`dakflare devices\` to list them.`,
+      1,
+      { error: 'device_unknown' }
+    );
+  }
+
+  const seconds = ageSeconds(target.last_seen);
+  if (!flags.yes) {
+    const confirmed = await confirm(
+      `Revoke ${target.device_id}${target.label ? ` (${target.label})` : ''}, last seen ${humanAge(seconds)}?\n` +
+        'This deletes its D1 row and wipes its Durable Object (queued commands, keys, nonces). [y/N] '
+    );
+    if (!confirmed) {
+      out('not revoked.');
+      return;
+    }
+  }
+
+  const result = await api(cfg, 'DELETE', `/v1/admin/devices/${encodeURIComponent(deviceId)}`);
+  if (result.status !== 200) {
+    if (result.status === 502) {
+      throw new CliError(
+        'revoke_failed (HTTP 502): the Durable Object refused the revocation, so the device may still authenticate. Nothing was deleted in D1.',
+        1,
+        { error: 'revoke_failed', status: 502 }
+      );
+    }
+    throw requestFailure('revoking the device', result);
+  }
+
+  const d1Deleted = Number(result.data?.d1_deleted ?? 0);
+  if (json) {
+    out(JSON.stringify({ ok: true, device_id: deviceId, d1_deleted: d1Deleted }, null, 2));
+    return;
+  }
+  out(`revoked ${deviceId} (D1 rows deleted: ${d1Deleted})`);
+}
+
+/* ───────────────────────────── send ───────────────────────────── */
+
+function looksLikeE164(value) {
+  return /^\+[1-9]\d{6,14}$/.test(value);
+}
+
+async function commandSend(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('send');
+  assertFlags(flags, ['to', 'body', 'device']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+
+  const to = stringFlag(flags, 'to', { required: true });
+  const body = stringFlag(flags, 'body', { required: true });
+  if (!looksLikeE164(to)) throw usage('--to must be an E.164 number, for example +8801540196080');
+  if (body.length === 0) throw usage('--body must not be empty');
+  if (body.length > MAX_BODY_CHARS) throw usage(`--body is limited to ${MAX_BODY_CHARS} characters`);
+
+  let deviceId = stringFlag(flags, 'device');
+  let deviceNote = null;
+  if (!deviceId) {
+    const devices = (await listDevices(cfg)).map(publicDevice);
+    if (devices.length === 0) {
+      throw new CliError('no paired device to send through — run `dakflare pair` first.', 1, {
+        error: 'no_device',
+      });
+    }
+    if (devices.length === 1) {
+      deviceId = devices[0].device_id;
+    } else {
+      // The command has to work without --device. Pick the phone that spoke to
+      // the Worker most recently and say so; never pick silently among equals.
+      const ranked = devices
+        .map((device) => ({ device, seen: Number(device.last_seen ?? 0) }))
+        .sort((a, b) => b.seen - a.seen);
+      if (!ranked[0].seen) {
+        throw usage(
+          `multiple devices are paired and none has a last-seen time; pass --device <id> (${devices
+            .map((device) => device.device_id)
+            .join(', ')})`
+        );
+      }
+      deviceId = ranked[0].device.device_id;
+      deviceNote = `freshest of ${devices.length} paired devices`;
+    }
+  }
+
+  const result = await api(cfg, 'POST', '/v1/sms/send', { device_id: deviceId, to, body });
+  if (result.status === 404 && result.data?.error === 'device_unknown') {
+    throw new CliError(
+      `device_unknown — "${deviceId}" is not in the D1 registry. Run \`dakflare devices\`.`,
+      1,
+      { error: 'device_unknown' }
+    );
+  }
+  if (result.status !== 200) throw requestFailure('queueing the message', result);
+
+  const commandId = result.data?.command_id;
+  if (typeof commandId !== 'string' || commandId === '') {
+    throw new CliError('the Worker did not return a command_id', 1, { error: 'bad_response' });
+  }
+
+  let command = null;
+  let state = 'unknown';
+  try {
+    const statusResult = await api(
+      cfg,
+      'GET',
+      `/v1/sms/commands/${encodeURIComponent(commandId)}?device_id=${encodeURIComponent(deviceId)}`
+    );
+    if (statusResult.status === 200) {
+      command = statusResult.data?.command ?? null;
+      if (command && typeof command.state === 'string') state = command.state;
+    }
+  } catch {
+    /* The command is queued; a status read failure must not turn it into a send failure. */
+  }
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: true,
+          device_id: deviceId,
+          device_selection: deviceNote,
+          to,
+          command_id: commandId,
+          state,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  out('Queued outbound message');
+  out(`  command       ${commandId}`);
+  out(`  device        ${deviceId}${deviceNote ? ` (${deviceNote})` : ''}`);
+  out(`  to            ${to}`);
+  out(`  state         ${state}`);
+}
+
+/* ───────────────────────────── audit ───────────────────────────── */
+
+async function commandAudit(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('audit');
+  assertFlags(flags, ['tail', 'actor', 'limit']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+
+  const actor = stringFlag(flags, 'actor');
+  const limitFlag = stringFlag(flags, 'limit');
+  let limit = limitFlag === undefined ? 50 : Number(limitFlag);
+  if (typeof flags.tail === 'string') {
+    if (limitFlag !== undefined) throw usage('use either --tail <n> or --limit <n>, not both');
+    limit = Number(flags.tail);
+  }
+  if (!Number.isFinite(limit) || limit < 1 || limit > 1000) throw usage('--limit must be between 1 and 1000');
+
+  const query = new URLSearchParams();
+  query.set('limit', String(Math.round(limit)));
+  if (actor !== undefined) query.set('actor', actor);
+  if (flags.tail) query.set('tail', '1');
+
+  const result = await api(cfg, 'GET', `/v1/admin/audit?${query.toString()}`);
+
+  if (result.status === 404) {
+    const message = 'not available on this deployment';
+    if (json) {
+      out(JSON.stringify({ ok: true, available: false, reason: 'not_available_on_this_deployment' }, null, 2));
+    } else {
+      out(message);
+    }
+    return;
+  }
+  if (result.status === 401) {
+    throw new CliError('the deployment rejected the admin token (HTTP 401).', 1, {
+      error: 'unauthorized',
+      status: 401,
+    });
+  }
+  if (result.status !== 200) throw requestFailure('reading the audit log', result);
+
+  const entries =
+    (Array.isArray(result.data) && result.data) ||
+    (Array.isArray(result.data?.entries) && result.data.entries) ||
+    (Array.isArray(result.data?.events) && result.data.events) ||
+    (Array.isArray(result.data?.audit) && result.data.audit) ||
+    (Array.isArray(result.data?.log) && result.data.log) ||
+    null;
+
+  if (json) {
+    out(JSON.stringify({ ok: true, available: true, entries: entries ?? result.data }, null, 2));
+    return;
+  }
+
+  if (!entries) {
+    out(JSON.stringify(result.data, null, 2));
+    return;
+  }
+  if (entries.length === 0) {
+    out('audit log is empty');
+    return;
+  }
+
+  out(`Audit (${entries.length})`);
+  for (const entry of entries) {
+    const at = entry.at ?? entry.created_at ?? entry.timestamp;
+    out(
+      `  ${pad(iso(at), 24)}  ${pad(entry.actor_label ?? entry.actor_user ?? '—', 20)}  ${pad(
+        entry.action ?? '—',
+        18
+      )}  ${entry.subject ?? ''}`
+    );
+  }
+}
+
+/* ───────────────────────────── key fingerprint ───────────────────────────── */
+
+function expandHome(value) {
+  if (value.startsWith('~/')) return path.join(HOME, value.slice(2));
+  return value;
+}
+
+function readProperties(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return {};
+  }
+  const values = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.*)$/);
+    if (match) values[match[1]] = match[2];
+  }
+  return values;
+}
+
+function keytoolBinary() {
+  if (process.env.KEYTOOL) return process.env.KEYTOOL;
+  if (process.env.JAVA_HOME) {
+    const candidate = path.join(process.env.JAVA_HOME, 'bin', 'keytool');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'keytool';
+}
+
+async function commandKey(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help || rest.length === 0) return printHelp('key');
+  const action = rest[0];
+  if (action !== 'fingerprint') throw usage(`unknown key command "${action}"; try \`dakflare key fingerprint\``);
+  assertFlags(flags, ['keystore', 'alias']);
+  const json = Boolean(flags.json);
+
+  const props = readProperties(KEYSTORE_PROPS);
+  const keystore = expandHome(
+    stringFlag(flags, 'keystore') ?? process.env.DAKFLARE_KEYSTORE ?? props.keystore ?? KEYSTORE_FILE
+  );
+  const alias = stringFlag(flags, 'alias') ?? process.env.DAKFLARE_KEY_ALIAS ?? props.alias ?? 'dakflare';
+
+  if (!fs.existsSync(keystore)) {
+    throw new CliError(
+      `release keystore not found: ${keystore}\nCreate it once; losing it means no in-place Android upgrades. See docs/PHONE_RELEASE.md.`,
+      2,
+      { error: 'keystore_missing', keystore }
+    );
+  }
+
+  const password = process.env.DAKFLARE_KEYSTORE_PASSWORD ?? props.storePassword ?? '';
+  if (!password) {
+    throw new CliError(
+      `no keystore password. Set DAKFLARE_KEYSTORE_PASSWORD or add storePassword= to ${KEYSTORE_PROPS}.`,
+      2,
+      { error: 'keystore_password_missing' }
+    );
+  }
+
+  const keytool = keytoolBinary();
+  const result = spawnSync(
+    keytool,
+    ['-list', '-v', '-keystore', keystore, '-storepass', password, '-alias', alias],
+    { encoding: 'utf8', timeout: 15_000 }
+  );
+
+  if (result.error?.code === 'ENOENT') {
+    throw new CliError(
+      'keytool is not installed; install a JDK or set JAVA_HOME/KEYTOOL to read the signing certificate.',
+      2,
+      { error: 'keytool_missing' }
+    );
+  }
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || '')
+      .trim()
+      .split('\n')
+      .slice(-2)
+      .join(' ')
+      .slice(0, 300);
+    throw new CliError(
+      `keytool could not read ${keystore} (alias ${alias})${detail ? `: ${detail}` : ''}.`,
+      1,
+      { error: 'keytool_failed' }
+    );
+  }
+
+  const output = `${result.stdout || ''}${result.stderr || ''}`;
+  const match = output.match(/SHA256:\s*([0-9A-Fa-f:]{64,95})/);
+  if (!match) {
+    throw new CliError(`keytool did not report a SHA256 fingerprint for alias ${alias}.`, 1, {
+      error: 'fingerprint_missing',
+    });
+  }
+  const fingerprint = match[1].toUpperCase();
+
+  if (json) {
+    out(JSON.stringify({ ok: true, keystore, alias, sha256: fingerprint }, null, 2));
+    return;
+  }
+  out('Release signing certificate');
+  out(`  keystore      ${keystore}`);
+  out(`  alias         ${alias}`);
+  out(`  SHA-256       ${fingerprint}`);
+}
+
+/* ───────────────────────────── help ───────────────────────────── */
+
+const HELP = {
+  root: `dakflare — operate a self-hosted DakFlare deployment
+
+Usage: dakflare <command> [options]
+
+  init        verify a Worker and save its admin token; --local writes .dev.vars
+  doctor      checklist: config, health, schema, migrations, bindings, phone
+  pair        mint a pairing code; --qr renders a terminal QR
+  devices     list paired devices
+  revoke      revoke one device (asks first; --yes to skip)
+  send        queue an outbound SMS through a paired phone
+  audit       tail the audit log (phase 2; says so when the endpoint is absent)
+  key         signing-key helpers: \`key fingerprint\`
+
+Every command accepts --json. Each has its own --help.
+
+Config: ${CONFIG_FILE} (mode 600), written by \`dakflare init\`.
+Exit:   0 ok · 1 failed check/request · 2 usage, missing config or missing tool`,
+
+  init: `Usage: dakflare init [--url <url>] [--token <token> | --token-file <path>]
+                     [--local [--force]] [--json]
+
+Verifies GET /v1/admin/health with the admin token, then writes
+${CONFIG_FILE} (mode 600). The token is never printed.
+
+  --url <url>          Worker base URL; prompted when omitted and a TTY is present
+  --token <token>      admin token (visible in shell history; prefer --token-file)
+  --token-file <path>  read the admin token from a file
+  --local              do not contact a Worker; write worker/.dev.vars with fresh
+                       ADMIN_TOKEN, AUTH_PEPPER and BETTER_AUTH_SECRET values
+  --force              with --local, replace an existing .dev.vars
+  --json               machine-readable output`,
+
+  doctor: `Usage: dakflare doctor [--max-age <minutes>] [--serial <adb-serial>] [--json]
+
+Checks, one line each, pass/fail/skip:
+  config       present, and mode 600 on POSIX
+  health       /v1/admin/health reachable
+  admin-token  accepted by the Worker
+  schema       D1 schema ready
+  migrations   every local worker/migrations file applied
+  bindings     DB, KV, DEVICE and all rate limiters present (FCM is optional)
+  auth-mode    reported AUTH_MODE, when the deployment has one (phase 2)
+  d1           counts readable, no db_error
+  phone        the freshest device's last contact is within --max-age
+  phone-role   android.app.role.SMS holder, when adb sees a device
+  phone-build  release or debug build installed, when adb sees a device
+
+Exit 1 if any check fails. --max-age defaults to ${DEFAULT_PHONE_MAX_AGE_MIN} minutes.
+--serial or ANDROID_SERIAL selects a device; ADB overrides the adb binary.`,
+
+  pair: `Usage: dakflare pair [--label <text>] [--qr] [--ttl <seconds>] [--json]
+
+Mints a single-use pairing code and prints the code, the
+dakflare://pair?u=…&c=… link, and with --qr a terminal QR code.
+
+  --label <text>   display label (this Worker revision does not store it; the
+                   phone reports its own label when it pairs)
+  --qr             render the link as a QR code (qrencode if present, otherwise
+                   the built-in encoder)
+  --ttl <seconds>  lifetime, 1–86400 (default ${DEFAULT_PAIR_TTL_S})`,
+
+  devices: `Usage: dakflare devices [--json]
+
+Lists paired devices with label, SIM slot, pairing time and last contact.
+The FCM token itself is never printed; only whether one is present.`,
+
+  revoke: `Usage: dakflare revoke <device-id> [--yes] [--json]
+
+Revokes a device in D1 and in its Durable Object. Asks for confirmation;
+--yes skips it for automation. This is irreversible: the phone must pair again.`,
+
+  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--json]
+
+Queues one outbound SMS and prints the command id and its current state.
+
+  --to <e164>     recipient, for example +8801540196080
+  --body <text>   message text (max ${MAX_BODY_CHARS} characters)
+  --device <id>   send through this device; omitted when exactly one is paired
+
+  For a body that begins with "-", use --body="…".`,
+
+  audit: `Usage: dakflare audit --tail [n] [--actor <label>] [--limit <n>] [--json]
+
+Reads /v1/admin/audit. When the deployment has no audit endpoint (the phase 2
+work), it prints "not available on this deployment" and exits 0.
+
+  --tail [n]       tail mode; the optional n is the row count
+  --actor <label>  filter by actor label
+  --limit <n>      rows, 1–1000 (default 50)`,
+
+  key: `Usage: dakflare key fingerprint [--keystore <path>] [--alias <name>] [--json]
+
+Prints the release signing certificate's SHA-256 fingerprint from
+${KEYSTORE_FILE} (or --keystore / DAKFLARE_KEYSTORE).
+
+The password comes from DAKFLARE_KEYSTORE_PASSWORD or storePassword= in
+${KEYSTORE_PROPS}; it is never printed.
+  --alias <name>   key alias (default: dakflare)
+
+Requires keytool (JDK). This only reads the key; it never changes it.`,
+};
+
+function printHelp(topic = 'root') {
+  out(HELP[topic] ?? HELP.root);
+  return 0;
+}
+
+/* ───────────────────────────── main ───────────────────────────── */
+
+const COMMANDS = {
+  init: commandInit,
+  doctor: commandDoctor,
+  pair: commandPair,
+  devices: commandDevices,
+  revoke: commandRevoke,
+  send: commandSend,
+  audit: commandAudit,
+  key: commandKey,
+};
+
+async function main() {
+  const [command, ...rest] = process.argv.slice(2);
+
+  if (!command || command === '--help' || command === '-h' || command === 'help') {
+    if (command === 'help') {
+      const topic = rest[0] ?? 'root';
+      return printHelp(topic);
+    }
+    return printHelp('root');
+  }
+
+  const run = COMMANDS[command];
+  if (!run) {
+    err(`dakflare: unknown command "${command}"`);
+    err('try `dakflare --help`');
+    process.exitCode = 2;
+    return;
+  }
+
+  const code = await run(rest);
+  if (typeof code === 'number') process.exitCode = code;
+}
+
+try {
+  await main();
+} catch (error) {
+  const json = process.argv.includes('--json');
+  if (error instanceof CliError) {
+    if (json) {
+      out(
+        JSON.stringify(
+          {
+            ok: false,
+            error: error.payload?.error ?? 'error',
+            message: error.message,
+            ...(error.payload ?? {}),
+          },
+          null,
+          2
+        )
+      );
+    } else {
+      err(`dakflare: ${error.message}`);
+      if (error.code === 2) err('try `dakflare <command> --help`');
+    }
+    process.exitCode = error.code;
+  } else {
+    const detail = process.env.DAKFLARE_DEBUG ? String(error?.stack ?? error) : String(error?.message ?? error);
+    if (json) out(JSON.stringify({ ok: false, error: 'internal', message: detail }, null, 2));
+    else err(`dakflare: ${detail}`);
+    process.exitCode = 1;
+  }
+}
