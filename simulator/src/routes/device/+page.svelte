@@ -120,7 +120,7 @@
 	</header>
 
 	{#if app.devices.length > 1}
-		<DeviceSelect id="device-page-select" label="Selected" compact />
+		<DeviceSelect id="device-page-select" label="Phone" compact />
 	{/if}
 
 	{#if app.loading.boot}

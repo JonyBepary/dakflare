@@ -18,19 +18,55 @@
 #   simulator/scripts/inject-sms.sh '+8801700000000' 'DAKFLARE-GATE-1 hello'
 #   simulator/scripts/inject-sms.sh bKash 'Your OTP is 1234'        # mask
 #   simulator/scripts/inject-sms.sh 16222 'balance'                 # shortcode
+#   simulator/scripts/inject-sms.sh '+8801700000000' 'long body' --parts 3 --ucs2
 #
 # Exit codes: 0 delivered, 2 bad usage, 3 toolchain missing, 4 injector failed.
 set -euo pipefail
 
-SENDER="${1:-}"
-BODY="${2:-}"
-SUB_ID="${3:-1}"
 SERIAL="${ANDROID_SERIAL:-100.110.66.88:5555}"
+PARTS=1
+FORCE_UCS2=0
+ARGS=()
 
-if [ -z "$SENDER" ] || [ -z "$BODY" ]; then
-  sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --parts)
+      [ "$#" -ge 2 ] || { echo "--parts needs a value" >&2; exit 2; }
+      PARTS="$2"
+      shift 2
+      ;;
+    --ucs2)
+      FORCE_UCS2=1
+      shift
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do ARGS+=("$1"); shift; done
+      ;;
+    --*)
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "${#ARGS[@]}" -lt 2 ]; then
+  sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
+
+SENDER="${ARGS[0]}"
+BODY="${ARGS[1]}"
+SUB_ID="${ARGS[2]:-1}"
+
+case "$PARTS" in
+  ''|*[!0-9]*) echo "--parts must be a positive number" >&2; exit 2 ;;
+esac
+[ "$PARTS" -ge 1 ] || { echo "--parts must be at least 1" >&2; exit 2; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 JAR_HOST="${TMPDIR:-/tmp}/dakflare-smsinject.jar"
@@ -44,7 +80,11 @@ for tool in "$ANDROID_JAR" "$D8" "$JAVA_HOME/bin/javac"; do
   [ -e "$tool" ] || { echo "missing $tool" >&2; exit 3; }
 done
 
-PDU="$(python3 "$HERE/sms-pdu.py" "$SENDER" "$BODY")"
+PDU_ARGS=("$SENDER" "$BODY" --parts "$PARTS")
+if [ "$FORCE_UCS2" -eq 1 ]; then
+  PDU_ARGS+=(--ucs2)
+fi
+PDU="$(python3 "$HERE/sms-pdu.py" "${PDU_ARGS[@]}")"
 
 build_jar() {
   local work
@@ -65,9 +105,9 @@ fi
 
 adb -s "$SERIAL" push "$JAR_HOST" "$JAR_DEVICE" >/dev/null
 if ! adb -s "$SERIAL" shell su -c \
-  "CLASSPATH=$JAR_DEVICE app_process /system/bin SmsInject $PDU $SUB_ID" 2>&1 | grep -q 'sent pdus=1'; then
+  "CLASSPATH=$JAR_DEVICE app_process /system/bin SmsInject $PDU $SUB_ID" 2>&1 | grep -q "sent pdus=$PARTS"; then
   echo "injector did not confirm the broadcast (is the device rooted?)" >&2
   exit 4
 fi
 
-echo "delivered pdu -> $SENDER (sub $SUB_ID)"
+echo "delivered pdus=$PARTS -> $SENDER (sub $SUB_ID)"

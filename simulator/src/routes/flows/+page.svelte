@@ -184,8 +184,8 @@
 
 		<div class="switch-row">
 			<div>
-				<span class="label">Offline mode</span>
-				<p class="switch-copy">
+				<span class="label" id="offline-mode-label">Offline mode</span>
+				<p class="switch-copy" id="offline-mode-copy">
 					{app.offline
 						? 'Offline — injects are stored locally only.'
 						: 'Online — injects upload over the signed endpoint.'}
@@ -194,7 +194,8 @@
 			<Switch.Root
 				checked={app.offline}
 				onCheckedChange={(value: boolean) => void app.setOffline(value)}
-				aria-label="Simulate offline carrier"
+				aria-labelledby="offline-mode-label"
+				aria-describedby="offline-mode-copy"
 				disabled={!app.selectedId || app.busy.offline}
 			>
 				<Switch.Thumb />

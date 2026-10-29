@@ -3,12 +3,18 @@ export function sendStateWord(state: string): string {
 	switch (state) {
 		case 'queued':
 			return 'Queued';
+		case 'sending':
+			return 'Sending';
 		case 'sent':
 			return 'Sent';
+		case 'delivered':
+			return 'Delivered';
 		case 'failed':
 			return 'Failed';
 		default:
-			return state;
+			// An unknown state is a word the phone does not know; show it rather
+			// than invent one, but never an empty chip.
+			return state.replaceAll('_', ' ');
 	}
 }
 

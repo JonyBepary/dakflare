@@ -625,8 +625,11 @@ if check_attached; then
   check_key
   check_receive
   check_provider
-  check_send
+  # The notification check must run before the send check opens the app: a
+  # visible thread suppresses its own notification by design, and the send check
+  # leaves exactly that thread on screen.
   check_notification
+  check_send
   check_service
   if [ "$DO_REBOOT" -eq 1 ]; then
     check_reboot

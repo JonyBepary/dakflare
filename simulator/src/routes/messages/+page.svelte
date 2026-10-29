@@ -358,20 +358,24 @@
 	   card and the search reads as a tool over it. */
 	.search-field {
 		display: grid;
-		grid-template-columns: 20px minmax(0, 1fr) 32px;
+		grid-template-columns: 20px minmax(0, 1fr) 48px;
 		align-items: center;
 		gap: 8px;
 		margin-top: 12px;
-		padding: 0 6px 0 12px;
-		min-height: 44px;
-		border: 1px solid var(--line);
+		padding: 0 2px 0 12px;
+		min-height: 52px;
+		border: 1px solid var(--df-border-input);
 		border-radius: 12px;
 		background: var(--surface);
 		transition: border-color 140ms ease-out;
 	}
 
+	/* The input has no ring of its own inside this pill, so the pill carries it;
+	   a 1px border tint alone was the only cue before. */
 	.search-field:focus-within {
 		border-color: var(--df-border-focus);
+		outline: 2px solid var(--df-border-focus);
+		outline-offset: 2px;
 	}
 
 	.search-icon {
@@ -381,7 +385,7 @@
 	}
 
 	.search-field input {
-		min-height: 42px;
+		min-height: 50px;
 		padding: 0;
 		border: 0;
 		border-radius: 0;
@@ -401,12 +405,12 @@
 	.search-clear {
 		display: grid;
 		place-items: center;
-		width: 32px;
-		height: 32px;
+		width: 48px;
+		height: 48px;
 		padding: 0;
 		border: 0;
 		border-radius: 999px;
-		background: var(--df-surface-well);
+		background: transparent;
 		color: var(--ink-2);
 		cursor: pointer;
 	}
@@ -518,17 +522,5 @@
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
 		color: var(--ink-3);
-	}
-
-	.sr-only {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		margin: -1px;
-		padding: 0;
-		overflow: hidden;
-		clip: rect(0 0 0 0);
-		white-space: nowrap;
-		border: 0;
 	}
 </style>

@@ -170,6 +170,7 @@ class SendStatusReceiver : BroadcastReceiver() {
         }
         val wrote = SmsProvider.writeSent(
             context = context,
+            localId = localId,
             address = row.peer,
             body = row.body,
             dateMs = row.createdAt,

@@ -100,14 +100,16 @@
 		{#if blocked}
 			<!-- A disabled field looks like a field with nothing in it. The bar
 			     says the reason once, in the place the text would go. -->
-			<p class="composer-blocked" id="composer-status">
+			<p class="composer-blocked" id="composer-status" aria-live="polite">
 				{#if blocked.code === 'permission' || blocked.code === 'carrier-off'}
 					<span class="composer-mark" aria-hidden="true"><Icon name="alert" size={16} /></span>
 				{/if}
 				{blocked.reason}
 			</p>
 		{:else}
-			<div class="composer-field">
+			<!-- A label, not a div: the pill's 12px of bottom padding is then part
+			     of the field, so a tap anywhere in the 48dp box puts the caret in. -->
+			<label class="composer-field">
 				<textarea
 					bind:this={field}
 					class="composer-input"
@@ -123,7 +125,7 @@
 					oninput={autosize}
 					onkeydown={onKeydown}
 				></textarea>
-			</div>
+			</label>
 		{/if}
 
 		<button

@@ -409,7 +409,9 @@
 			<ol class="chat" aria-label={`Messages with ${peer}, oldest first`}>
 				{#each rows as row (row.kind === 'day' ? row.key : row.message.id)}
 					{#if row.kind === 'day'}
-						<li class="day-divider">{row.label}</li>
+						<!-- A date is a heading over the list, not an item in it: as an
+						     <li> a reader heard "Yesterday" counted as a message. -->
+						<li class="day-divider" role="presentation">{row.label}</li>
 					{:else}
 						<li
 							class="bubble-row"
@@ -419,7 +421,11 @@
 							data-hit={hitId === row.message.id ? 'true' : undefined}
 						>
 							<div class="bubble">
-								<p class="bubble-body">{row.message.body}</p>
+								<p class="bubble-body">
+									<span class="sr-only">
+										{row.message.direction === 'out' ? 'Sent by this phone: ' : 'Received: '}
+									</span>{row.message.body}
+								</p>
 								<p class="bubble-meta mono">
 									{#if row.message.direction === 'out'}
 										<span

@@ -299,6 +299,11 @@
 					/>
 					<span class="keep-name">{option.name}</span>
 					<span class="keep-detail">{option.detail}</span>
+					{#if policy === option.policy}
+						<!-- A tick as well as the tint: the chosen rule must not be
+						     something only the colour says. -->
+						<span class="keep-tick" aria-hidden="true"><Icon name="check" size={12} /></span>
+					{/if}
 				</label>
 			{/each}
 		</fieldset>
@@ -507,7 +512,7 @@
 		gap: 2px;
 		min-height: 54px;
 		padding: 9px 11px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--df-border-input);
 		border-radius: 12px;
 		background: var(--df-surface-well);
 		cursor: pointer;
@@ -516,9 +521,21 @@
 			background-color 140ms ease-out;
 	}
 
+	/* 2px plus the tick: the selection is a shape and a mark before it is a
+	   tint, which is what a reader who cannot see coral still gets. */
 	.keep-option[data-selected='true'] {
-		border-color: var(--accent);
+		border: 2px solid var(--accent);
+		padding: 8px 10px;
 		background: var(--accent-soft);
+	}
+
+	.keep-tick {
+		position: absolute;
+		top: 7px;
+		right: 7px;
+		display: grid;
+		place-items: center;
+		color: var(--accent);
 	}
 
 	.keep-option:has(input:focus-visible) {

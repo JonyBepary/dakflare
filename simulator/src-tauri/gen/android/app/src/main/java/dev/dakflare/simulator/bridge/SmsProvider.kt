@@ -37,6 +37,7 @@ object SmsProvider {
 
     private const val PROVIDER_PREFS = "dakflare_provider"
     private const val KEY_WRITTEN_INBOX = "written_inbox"
+    private const val KEY_WRITTEN_SENT = "written_sent"
     private const val MAX_WRITTEN = 100
 
     /** What the inbox write did, so the receiver can decide about a notification. */
@@ -164,9 +165,16 @@ object SmsProvider {
      * never left the phone and must not appear in the system Sent list. The row
      * state was already written before this runs, so a provider failure cannot
      * change it.
+     *
+     * A multipart send repeats the same `local_id` receipt for every part, so
+     * one message can produce several `RESULT_OK` broadcasts. The `local_id`
+     * dedupe is what keeps that to exactly one provider row; without it the
+     * system Sent list would show the message once per part.
      */
+    @Synchronized
     fun writeSent(
         context: Context,
+        localId: String,
         address: String,
         body: String,
         dateMs: Long,
@@ -176,13 +184,22 @@ object SmsProvider {
             Log.i(TAG, "sent provider write skipped: no role")
             return false
         }
+        if (alreadyWrittenSent(context, localId)) {
+            Log.i(TAG, "sent provider write skipped: already written")
+            return true
+        }
         return try {
             val values = baseValues(address, body, dateMs, subscriptionId).apply {
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
             }
-            context.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
-            Log.i(TAG, "sent provider wrote address=${mask(address)}")
-            true
+            if (context.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, values) == null) {
+                Log.w(TAG, "sent provider write returned no row")
+                false
+            } else {
+                markWrittenSent(context, localId)
+                Log.i(TAG, "sent provider wrote address=${mask(address)}")
+                true
+            }
         } catch (error: SecurityException) {
             Log.e(TAG, "sent provider refused: SecurityException")
             false
@@ -234,6 +251,25 @@ object SmsProvider {
             written.add(key)
         }
         prefs.edit().putStringSet(KEY_WRITTEN_INBOX, written).apply()
+    }
+
+    /** The provider-side half of the sent-row dedupe, keyed by `local_id`. */
+    private fun alreadyWrittenSent(context: Context, localId: String): Boolean {
+        val prefs = context.getSharedPreferences(PROVIDER_PREFS, Context.MODE_PRIVATE)
+        return prefs.getStringSet(KEY_WRITTEN_SENT, emptySet())?.contains(localId) == true
+    }
+
+    /** Remember one sent row this app wrote, bounded like the inbox set. */
+    private fun markWrittenSent(context: Context, localId: String) {
+        val prefs = context.getSharedPreferences(PROVIDER_PREFS, Context.MODE_PRIVATE)
+        val written = prefs.getStringSet(KEY_WRITTEN_SENT, emptySet())?.toMutableSet()
+            ?: mutableSetOf()
+        written.add(localId)
+        if (written.size > MAX_WRITTEN) {
+            written.clear()
+            written.add(localId)
+        }
+        prefs.edit().putStringSet(KEY_WRITTEN_SENT, written).apply()
     }
 
     /** Keep at most the last four characters of a number; never log it whole. */

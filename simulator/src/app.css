@@ -27,6 +27,12 @@
 	--mono: var(--df-p-font-mono);
 	--sans: var(--df-p-font-sans);
 	--display: var(--df-font-display);
+	/* A field boundary is a UI component, so 1.4.11 asks 3:1 for it. The shared
+	   --df-border-control measures 1.68:1 on cream and 1.9:1 on night, so the
+	   phone carries its own value for the controls that need a boundary: 3.38 /
+	   3.19 on card and page here, 3.11 / 3.63 on night card and field. Fixing it
+	   here keeps the console's own border where it is. */
+	--df-border-input: #94897a;
 	/* MainActivity pads android.R.id.content by systemBars() | displayCutout().
 	   The dock adds no inset of its own; env(safe-area-inset-bottom) would
 	   double-count by the navigation-bar height on Android. */
@@ -46,6 +52,7 @@
 		--df-border-hairline: var(--df-p-night-500);
 		--df-border-control: #4d4136;
 		--df-border-focus: var(--df-p-coral-300);
+		--df-border-input: #786b5c;
 
 		--df-text-primary: var(--df-p-mist-50);
 		--df-text-secondary: var(--df-p-mist-300);
@@ -266,6 +273,20 @@ p {
 	color: var(--ink-3);
 }
 
+/* Read by a screen reader, invisible on screen: the words a colour or an
+   alignment would otherwise carry alone. */
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
+
 /* ---------------------------------------------------------------- dock */
 
 .dock {
@@ -380,7 +401,7 @@ p {
 }
 
 .btn.small {
-	min-height: 44px;
+	min-height: 48px;
 	padding: 0 10px;
 	font-size: 12px;
 }
@@ -402,11 +423,27 @@ p {
 	background: transparent;
 }
 
+/* A disabled control is still read: 0.5 opacity put a 13px label at 3.1:1 on
+   cream and a coral fill at 1.47:1. The muted pair below measures 5.31:1 light
+   and 5.54:1 dark, and still reads as "not now" because the fill loses coral. */
 .btn:disabled,
 .icon-btn:disabled,
 button:disabled {
-	opacity: 0.5;
+	opacity: 1;
 	cursor: not-allowed;
+	color: var(--ink-3);
+}
+
+.btn:disabled,
+.icon-btn:disabled {
+	background: var(--df-surface-well);
+	border-color: var(--line);
+}
+
+.btn.primary:disabled {
+	background: var(--df-c-composer-send-disabled-bg);
+	border-color: transparent;
+	color: var(--df-c-composer-send-disabled-ink);
 }
 
 .icon-btn {
@@ -441,9 +478,9 @@ input,
 select,
 textarea {
 	width: 100%;
-	min-height: 44px;
+	min-height: 48px;
 	padding: 0 12px;
-	border: 1px solid var(--line-strong);
+	border: 1px solid var(--df-border-input);
 	border-radius: 10px;
 	background: var(--df-surface-field);
 	color: var(--ink);
@@ -703,6 +740,10 @@ input::placeholder {
 	font-weight: 600;
 	text-decoration: underline;
 	text-underline-offset: 2px;
+	/* A link inside a sentence is exempt from the 48dp rule (2.5.8 inline
+	   exception), but a 12px line box is still a poor target: the padding
+	   grows the hit area to 24px without moving the text. */
+	padding-block: 6px;
 }
 
 /* ---------------------------------------------------------------- threads */
@@ -910,9 +951,10 @@ input::placeholder {
 	   boundary sits above it, so no half line can paint into it. */
 	padding: 0 0 var(--df-p-space-3);
 	overflow: hidden;
-	border: 1px solid var(--df-border-control);
+	border: 1px solid var(--df-border-input);
 	border-radius: var(--df-c-composer-field-radius);
 	background: var(--df-c-composer-field-bg);
+	cursor: text;
 }
 
 .composer-field:focus-within {
@@ -1643,26 +1685,44 @@ input::placeholder {
 }
 
 [data-switch-root] {
+	position: relative;
 	display: flex;
 	align-items: center;
 	flex: none;
 	width: 52px;
-	height: 32px;
-	padding: 3px;
-	border: 1px solid var(--line-strong);
+	min-height: 48px;
+	padding: 0 4px;
+	border: 0;
 	border-radius: 999px;
-	background: var(--df-surface-press);
+	background: transparent;
 	cursor: pointer;
-	transition: background-color 120ms ease-out;
 }
 
-[data-switch-root][data-state='checked'] {
+/* The target is 48dp; the track it draws stays 32px. The off track is the
+   measured field border rather than a pastel, so "off" is 3.38:1 against the
+   thumb and 3.38:1 against the card instead of 1.24:1, and it is not read by
+   colour alone: the thumb moves. */
+[data-switch-root]::before {
+	content: '';
+	position: absolute;
+	inset: 8px 0;
+	border: 1px solid var(--df-border-input);
+	border-radius: 999px;
+	background: var(--df-border-input);
+	transition:
+		background-color 120ms ease-out,
+		border-color 120ms ease-out;
+}
+
+[data-switch-root][data-state='checked']::before {
 	background: var(--df-accent-fill);
 	border-color: var(--df-accent-fill);
 }
 
 [data-switch-thumb] {
+	position: relative;
 	display: block;
+	flex: none;
 	width: 24px;
 	height: 24px;
 	border-radius: 999px;
@@ -1684,8 +1744,11 @@ input::placeholder {
 }
 
 .advanced summary {
+	/* list-item keeps the native disclosure triangle that flex would drop;
+	   the padding is what makes the row a 48dp target. */
+	display: list-item;
+	padding-block: 15px;
 	cursor: pointer;
-	min-height: 32px;
 	color: var(--ink-3);
 	font-size: 12px;
 }
@@ -1815,7 +1878,7 @@ input::placeholder {
 }
 
 .dialog .row button {
-	min-height: 44px;
+	min-height: 48px;
 	padding: 0 12px;
 	border: 1px solid var(--line);
 	border-radius: 10px;

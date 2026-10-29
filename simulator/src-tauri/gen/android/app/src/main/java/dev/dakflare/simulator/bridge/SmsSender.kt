@@ -159,6 +159,10 @@ object SmsSender {
         manager: SmsManager,
     ): Int {
         val parts = manager.divideMessage(body)
+        // The radio is handed exactly these parts. Log their sizes, never their
+        // text: a 2-part GSM body shows 153,47 and a Bangla body 67,33, which is
+        // the only proof available when the receiving handset cannot be read.
+        Log.i(TAG, "radio parts=${parts.size} lengths=${partLengths(parts)}")
         val sent = SendReceipt.pendingIntent(context, deviceId, localId)
         val delivered = SendReceipt.deliveryIntent(context, deviceId, localId)
         if (parts.size > 1) {
@@ -206,6 +210,14 @@ object SmsSender {
                 SmsManager.getDefault().createForSubscriptionId(subscriptionId)
             else -> SmsManager.getSmsManagerForSubscriptionId(subscriptionId)
         }
+
+    /**
+     * The length in UTF-16 code units of every part the radio was given. For
+     * GSM-7 this is the septet count the carrier sees; for UCS-2 it is the
+     * number of two-byte characters. Never the text itself.
+     */
+    private fun partLengths(parts: List<String>): String =
+        parts.joinToString(",") { it.length.toString() }
 
     private fun markFailed(appDir: String, deviceId: String, localId: String) {
         if (!NativeBridge.markOutboundSafely(appDir, deviceId, localId, "failed")) {
