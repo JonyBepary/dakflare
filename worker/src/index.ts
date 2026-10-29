@@ -34,9 +34,16 @@ import {
   handleRulesListAdmin,
 } from "./routes/admin";
 import { handleAlertAck, handleAlertsList } from "./routes/alerts";
+import { requireRole, type AuthUser } from "./auth";
+import { handleAuthRequest } from "./auth";
+import { requestMeta, writeAudit, type AdminActor } from "./audit";
+import { handleRedeemInvite, handleAuthMe } from "./routes/auth";
+import { handleBootstrap } from "./routes/bootstrap";
+import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
+import { handleAuditList } from "./routes/audit";
 import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
-import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
+import { authMode, MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
 export { DeviceGateway };
 
@@ -57,6 +64,21 @@ export interface Env {
   ADMIN_TOKEN?: string;
   /** FCM HTTP v1 service-account JSON. Absent is a normal local-dev state. */
   FCM_SERVICE_ACCOUNT_JSON?: string;
+  /**
+   * Which auth backs the admin routes (lib/config.ts `authMode`).
+   * `legacy` (the default) keeps ADMIN_TOKEN; `new` moves them to
+   * `requireRole()` with ADMIN_TOKEN demoted to the CLI path. Read per request
+   * from `env`, so flipping it is a `[vars]` change plus a deploy.
+   */
+  AUTH_MODE?: string;
+  /** Public origin of this Worker, e.g. https://…workers.dev. Used for rpId/cookies. */
+  AUTH_BASE_URL?: string;
+  /** Comma-separated extra origins allowed by Better Auth's CSRF check. */
+  AUTH_TRUSTED_ORIGINS?: string;
+  /** WebAuthn rpId. Defaults to AUTH_BASE_URL's hostname, then the pinned workers.dev value. */
+  AUTH_RP_ID?: string;
+  /** 32-byte base64. Signs sessions and encrypts TOTP secrets. Absent disables /api/auth. */
+  BETTER_AUTH_SECRET?: string;
   /** Redirectable so the harness can point FCM at a local stub. */
   FCM_BASE_URL: string;
   GOOGLE_TOKEN_URL: string;
@@ -165,6 +187,75 @@ async function withAdmin(
 }
 
 /**
+ * Admin gate, aware of `AUTH_MODE`.
+ *
+ *   legacy (default)  ADMIN_TOKEN exactly as before — nothing changes for an
+ *                     existing deployment, and a half-finished rollout cannot
+ *                     lock the owner out.
+ *   new               Better Auth session with role owner/admin. ADMIN_TOKEN is
+ *                     still accepted as a MACHINE credential, but only with
+ *                     `X-Dakflare-Client: cli` (AUTH_PLAN §8), which is strictly
+ *                     narrower than the legacy path it replaces.
+ *
+ * Every admin route resolves an actor here so the audited ones can log who acted
+ * without re-reading the credential anywhere else.
+ */
+async function withAdminAccess(
+  req: Request,
+  env: Env,
+  handler: (actor: AdminActor) => Promise<Response>
+): Promise<Response> {
+  if (authMode(env) === "new") {
+    if (req.headers.get("X-Dakflare-Client") === "cli") {
+      return withAdmin(req, env, () => handler(machineActor()));
+    }
+    const guard = await requireRole(req, env, ["owner", "admin"]);
+    if (!guard.ok) return guard.response;
+    return handler(actorFromUser(guard.user));
+  }
+  return withAdmin(req, env, () => handler(machineActor()));
+}
+
+/**
+ * `withAdminToken` — the bootstrap path: Bearer ADMIN_TOKEN only, never a
+ * session cookie, because it has to work before any user exists (AUTH_PLAN §4).
+ */
+async function withAdminToken(
+  req: Request,
+  env: Env,
+  handler: () => Promise<Response>
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  if (!expected) return unauthorized();
+
+  const authHeader = req.headers.get("Authorization");
+  if (authHeader === null) return unauthorized();
+
+  const providedDigest = await sha256(authHeader);
+  const expectedDigest = await sha256(`Bearer ${expected}`);
+  if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: "admin" });
+    if (!success) return err("rate_limited", 429);
+  }
+  return handler();
+}
+
+function machineActor(): AdminActor {
+  return { userId: null, label: "admin-token", role: "machine", canGrantOwner: true };
+}
+
+function actorFromUser(user: AuthUser): AdminActor {
+  return {
+    userId: user.id,
+    label: user.email,
+    role: user.role,
+    canGrantOwner: user.role === "owner",
+  };
+}
+
+/**
  * Advance `devices.last_seen` after an authenticated device request.
  *
  * §11.12: this is authenticated contact, not pairing time. It is deliberately
@@ -261,90 +352,126 @@ export default {
       return handleDevicePair(req, env);
     }
 
+    /* ---- Better Auth: /api/auth/* ------------------------------------- */
+    // Delegated whole: passkey registration/sign-in, TOTP. Better Auth owns the
+    // routes, cookies and error envelopes under this prefix.
+    if (pathname === "/api/auth" || pathname.startsWith("/api/auth/")) {
+      return handleAuthRequest(req, env);
+    }
+
+    // Our account-creation policy (AUTH_PLAN §4). Not under /api/auth: these are
+    // ours, not the library's.
+    if (method === "POST" && pathname === "/v1/auth/redeem") {
+      return handleRedeemInvite(req, env);
+    }
+    if (method === "GET" && pathname === "/v1/auth/me") {
+      return handleAuthMe(req, env);
+    }
+
     /* ---- admin -------------------------------------------------------- */
+    // First owner, for `dakflare init`. ADMIN_TOKEN only and never a cookie.
+    if (method === "POST" && pathname === "/v1/admin/bootstrap") {
+      return withAdminToken(req, env, () => handleBootstrap(req, env));
+    }
+
+    if (method === "POST" && pathname === "/v1/admin/invites") {
+      return withAdminAccess(req, env, (actor) => handleCreateInvite(req, env, actor));
+    }
+    if (method === "GET" && pathname === "/v1/admin/invites") {
+      return withAdminAccess(req, env, (_actor) => handleListInvites(env));
+    }
+    const inviteDeleteMatch = pathname.match(/^\/v1\/admin\/invites\/([^/]+)$/);
+    if (method === "DELETE" && inviteDeleteMatch) {
+      return withAdminAccess(req, env, (actor) =>
+        handleDeleteInvite(env, decodeURIComponent(inviteDeleteMatch[1]), actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/audit") {
+      return withAdminAccess(req, env, (_actor) => handleAuditList(env, url));
+    }
     if (method === "POST" && pathname === "/v1/admin/pairing-code") {
-      return withAdmin(req, env, () => handleAdminPairingCode(req, env));
+      return withAdminAccess(req, env, (_actor) => handleAdminPairingCode(req, env));
     }
 
     if (method === "GET" && pathname === "/v1/admin/health") {
-      return withAdmin(req, env, () => handleHealth(env));
+      return withAdminAccess(req, env, (_actor) => handleHealth(env));
     }
 
     // S10: revocation must reach the Durable Object, not just D1.
     const revokeMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/);
     if (method === "DELETE" && revokeMatch) {
       const target = decodeURIComponent(revokeMatch[1]);
-      return withAdmin(req, env, () => handleDeviceRevoke(env, target));
+      return withAdminAccess(req, env, (actor) => handleDeviceRevoke(env, target, actor));
     }
 
     const deviceCommandsMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/commands$/);
     if (method === "GET" && deviceCommandsMatch) {
       // Decoding happens INSIDE `withAdmin`, so a malformed escape is an
       // authenticated caller's error, not an unauthenticated throw.
-      return withAdmin(req, env, () =>
+      return withAdminAccess(req, env, (_actor) =>
         handleDeviceCommands(env, decodeURIComponent(deviceCommandsMatch[1]), url)
       );
     }
 
     if (method === "GET" && pathname === "/v1/admin/alerts") {
-      return withAdmin(req, env, () => handleAlertsList(env, url));
+      return withAdminAccess(req, env, (_actor) => handleAlertsList(env, url));
     }
     const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
     if (method === "POST" && alertAckMatch) {
-      return withAdmin(req, env, () => handleAlertAck(env, decodeURIComponent(alertAckMatch[1])));
+      return withAdminAccess(req, env, (_actor) => handleAlertAck(env, decodeURIComponent(alertAckMatch[1])));
     }
 
     if (method === "GET" && pathname === "/v1/admin/rules") {
-      return withAdmin(req, env, () => handleRulesListAdmin(env));
+      return withAdminAccess(req, env, (_actor) => handleRulesListAdmin(env));
     }
     if (method === "POST" && pathname === "/v1/admin/rules/test") {
-      return withAdmin(req, env, () => handleRulesTest(req, env));
+      return withAdminAccess(req, env, (_actor) => handleRulesTest(req, env));
     }
     const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
     if (method === "DELETE" && ruleDeleteMatch) {
       const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
-      return withAdmin(req, env, () => handleRuleDelete(env, ruleId));
+      return withAdminAccess(req, env, (_actor) => handleRuleDelete(env, ruleId));
     }
 
     // Workflow graphs. The id segment is passed to the handler RAW and decoded
     // there, after `withAdmin`, so a malformed escape cannot throw on an
     // unauthenticated path. The list route has no segment and is matched first.
     if (method === "GET" && pathname === "/v1/admin/workflows") {
-      return withAdmin(req, env, () => handleWorkflowsList(env));
+      return withAdminAccess(req, env, (_actor) => handleWorkflowsList(env));
     }
     const workflowMatch = pathname.match(/^\/v1\/admin\/workflows\/([^/]+)$/);
     if (method === "GET" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowGet(env, workflowMatch[1]));
+      return withAdminAccess(req, env, (_actor) => handleWorkflowGet(env, workflowMatch[1]));
     }
     if (method === "PUT" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowPut(req, env, workflowMatch[1]));
+      return withAdminAccess(req, env, (_actor) => handleWorkflowPut(req, env, workflowMatch[1]));
     }
     if (method === "DELETE" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowDelete(env, workflowMatch[1]));
+      return withAdminAccess(req, env, (_actor) => handleWorkflowDelete(env, workflowMatch[1]));
     }
     if (method === "GET" && pathname === "/v1/devices") {
-      return withAdmin(req, env, () => handleDevicesList(env));
+      return withAdminAccess(req, env, (_actor) => handleDevicesList(env));
     }
     if (method === "GET" && pathname === "/v1/messages") {
-      return withAdmin(req, env, () => handleMessagesList(env, url));
+      return withAdminAccess(req, env, (_actor) => handleMessagesList(env, url));
     }
     if (method === "DELETE" && pathname === "/v1/messages") {
-      return withAdmin(req, env, () => handleMessagesPurge(env, url));
+      return withAdminAccess(req, env, (_actor) => handleMessagesPurge(env, url));
     }
     if (method === "POST" && pathname === "/v1/rules") {
-      return withAdmin(req, env, () => handleRulesPost(req, env));
+      return withAdminAccess(req, env, (actor) => handleRulesPost(req, env, actor));
     }
     if (method === "POST" && pathname === "/v1/sms/send") {
-      return withAdmin(req, env, () => handleSend(req, env));
+      return withAdminAccess(req, env, (actor) => handleSend(req, env, actor));
     }
     if (method === "POST" && pathname === "/v1/sms/send/batch") {
-      return withAdmin(req, env, () => handleSendBatch(req, env));
+      return withAdminAccess(req, env, (actor) => handleSendBatch(req, env, actor));
     }
 
     const commandMatch = pathname.match(/^\/v1\/sms\/commands\/([^/]+)$/);
     if (method === "GET" && commandMatch) {
       const commandId = decodeURIComponent(commandMatch[1]);
-      return withAdmin(req, env, () =>
+      return withAdminAccess(req, env, (_actor) =>
         handleCommandStatus(env, url.searchParams.get("device_id") ?? "", commandId)
       );
     }
@@ -352,7 +479,7 @@ export default {
     const deviceStatusMatch = pathname.match(/^\/v1\/device\/([^/]+)\/status$/);
     if (method === "GET" && deviceStatusMatch) {
       const target = deviceStatusMatch[1];
-      return withAdmin(req, env, async () => {
+      return withAdminAccess(req, env, async (_actor) => {
         const stub = env.DEVICE.get(env.DEVICE.idFromName(target));
         return stub.fetch("https://do/__device_status", { method: "GET" });
       });
@@ -590,6 +717,16 @@ async function handleSessionCreate(req: Request, env: Env): Promise<Response> {
   const providedDigest = await sha256(token);
   const expectedDigest = await sha256(expected);
   if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+
+  // The only place ADMIN_TOKEN becomes a session. Rotation itself happens via
+  // `wrangler secret put` (a Worker cannot set its own secret), so this is the
+  // auditable event: the machine credential was used (AUTH_PLAN §5, §8).
+  await writeAudit(env, {
+    action: "token.used",
+    actor: { userId: null, label: "admin-token" },
+    detail: { route: "/admin/session" },
+    ...requestMeta(req),
+  });
 
   const { value, exp } = await mintSession(expected);
   const secure = new URL(req.url).protocol === "https:";

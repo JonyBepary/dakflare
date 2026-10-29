@@ -36,6 +36,8 @@ export default defineConfig({
 	worker: {
 		name: "dakflare-worker",
 		compatibilityDate: "2026-04-07",
+		// better-auth imports node:crypto in its password utilities.
+		compatibilityFlags: ["nodejs_compat"],
 		entrypoint: "src/index.ts",
 		previewUrls: false,
 
@@ -60,6 +62,9 @@ export default defineConfig({
 
 		env: {
 			// ── inline configuration ────────────────────────────────────────────
+			// Admin auth gate: `legacy` keeps ADMIN_TOKEN; `new` uses Better Auth
+			// sessions via requireRole() (see worker/src/lib/config.ts authMode).
+			AUTH_MODE: bindings.text("legacy"),
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),

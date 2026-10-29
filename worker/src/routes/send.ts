@@ -15,6 +15,8 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import {
@@ -36,7 +38,11 @@ interface CommandPayload {
 }
 
 /** `POST /v1/sms/send` (admin) — enqueue exactly one outbound SMS. */
-export async function handleSend(req: Request, env: Env): Promise<Response> {
+export async function handleSend(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -71,11 +77,23 @@ export async function handleSend(req: Request, env: Env): Promise<Response> {
   });
   if (!queued) return internalError();
 
+  // Metadata only: the recipient and the message body stay out of audit_log.
+  await writeAudit(env, {
+    action: "message.sent",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { command_id: commandId, count: 1 },
+  });
+
   return Response.json({ command_id: commandId });
 }
 
 /** `POST /v1/sms/send/batch` (admin) — enqueue many outbound SMS in one DO call. */
-export async function handleSendBatch(req: Request, env: Env): Promise<Response> {
+export async function handleSendBatch(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -137,6 +155,13 @@ export async function handleSendBatch(req: Request, env: Env): Promise<Response>
       ).bind(command.command_id, deviceId, command.command_id, command.to, command.body, now)
     )
   );
+
+  await writeAudit(env, {
+    action: "message.sent",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { command_ids: prepared.map((c) => c.command_id), count: prepared.length },
+  });
 
   return Response.json({ command_ids: prepared.map((c) => c.command_id) });
 }

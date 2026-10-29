@@ -145,3 +145,20 @@ export const MAX_REPLY_TEMPLATE_CHARS = 1_000;
 export const MAX_WORKFLOW_NODES = 50;
 export const MAX_WORKFLOW_EDGES = 100;
 export const MAX_WORKFLOW_GRAPH_BYTES = 65_536;
+
+/**
+ * Which authentication backs the admin routes.
+ *
+ * `AUTH_MODE` is read from `env` on every request, never cached at module scope:
+ * a deployment flips it by changing a `[vars]` entry and redeploying, and the
+ * default is `legacy` so a half-finished rollout cannot lock the owner out. Only
+ * the exact value `new` (trimmed, case-insensitive) enables Better Auth; every
+ * other value, including a typo, stays on ADMIN_TOKEN.
+ */
+export type AuthMode = "legacy" | "new";
+
+export function authMode(env: { AUTH_MODE?: string }): AuthMode {
+  const raw = env.AUTH_MODE;
+  if (typeof raw !== "string") return "legacy";
+  return raw.trim().toLowerCase() === "new" ? "new" : "legacy";
+}

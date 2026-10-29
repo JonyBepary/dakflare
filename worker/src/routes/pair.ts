@@ -51,6 +51,7 @@
  */
 
 import type { Env } from "../index";
+import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
@@ -306,6 +307,16 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
   )
     .bind(deviceId, publicKeySpki, fcmToken, now, now, label, simSlot)
     .run();
+
+  // A pair is a security-relevant event: a device gained (or rotated) a key.
+  // No key material and no FCM token in the detail — the ids are enough.
+  await writeAudit(env, {
+    action: "device.paired",
+    actor: { userId: null, label: "pairing-code" },
+    subject: deviceId,
+    detail: { rotate: rotating, sim_slot: simSlot },
+    ...requestMeta(req),
+  });
 
   return Response.json({ ok: true });
 }

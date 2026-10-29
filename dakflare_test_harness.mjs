@@ -12,6 +12,10 @@
  *   verify-vectors  assert only the §4.2 canonical vectors byte-for-byte.
  *   pair            mint a code, pair a fresh device, persist identity.
  *   suite           the full conformance battery.
+ *   auth            auth cases: invite-only sign-up, single use, requireRole
+ *                   401/403/200, source-mode token path, audit rows. AUTH_MODE
+ *                   selects the assertions (legacy|new); point WORKER_URL at a
+ *                   Worker started with the matching mode.
  *   proxy           start the :8788 signing proxy for Hoppscotch.
  *   ws              connect a virtual device and hold a session open.
  *   stub            run the FCM/OAuth2 stub.
@@ -218,7 +222,13 @@ export function signWith(identity, method, pathname, bodyStr, { ts, nonce } = {}
 export async function admin(method, pathname, body) {
   const res = await fetch(WORKER_URL + pathname, {
     method,
-    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${ADMIN_TOKEN}`,
+      // Machine-credential marker (AUTH_PLAN §8). Harmless in legacy mode; in
+      // AUTH_MODE=new it is what separates the CLI path from a human session.
+      'X-Dakflare-Client': 'cli',
+      'Content-Type': 'application/json',
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: res.status, data: await res.json().catch(() => null) };
@@ -1445,6 +1455,125 @@ async function cmdSuite() {
   process.exit(allOk ? 0 : 1);
 }
 
+
+/* ───────────────────────────── auth command ──────────────────────────────── */
+
+/**
+ * Auth cases (AUTH_PLAN §3–§5). Run against a Worker started with the mode you
+ * want to prove:
+ *
+ *   WORKER_URL=http://127.0.0.1:8787 AUTH_MODE=legacy node dakflare_test_harness.mjs auth
+ *   WORKER_URL=http://127.0.0.1:8789 AUTH_MODE=new    node dakflare_test_harness.mjs auth
+ *
+ * The invite/redeem/audit cases are mode-independent; the admin-gate cases
+ * differ by mode (403 vs 401 for a member session) and are asserted accordingly.
+ */
+async function cmdAuth() {
+  const mode = process.env.AUTH_MODE === 'new' ? 'new' : 'legacy';
+  console.log(`== auth (mode=${mode}) ==\nworker: ${WORKER_URL}\n`);
+  const rep = new Report('auth');
+
+  const raw = async (method, pathname, { body, cookie } = {}) => {
+    const res = await fetch(WORKER_URL + pathname, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: 'manual',
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies };
+  };
+
+  const email = `auth-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+
+  // 1. No public registration: Better Auth's email sign-up is disabled.
+  const signup = await raw('POST', '/api/auth/sign-up/email', {
+    body: { email, password: 'not-a-real-password', name: 'probe' },
+  });
+  rep.check('public email sign-up is refused', signup.status >= 400, true);
+
+  // 2. Redeem without a live invite is refused.
+  const unknown = await raw('POST', '/v1/auth/redeem', {
+    body: { token: 'dki_' + 'A'.repeat(43) },
+  });
+  rep.check('redeem without a valid invite -> 403', unknown.status, 403);
+
+  // 3. Invite creation (admin/machine gate).
+  const created = await admin('POST', '/v1/admin/invites', {
+    email,
+    role: 'member',
+    expires_in_s: 300,
+  });
+  rep.check('invite created -> 200', created.status, 200);
+  rep.check('invite answer carries a one-time token', typeof created.data?.token, 'string');
+  const inviteId = created.data?.id;
+  const inviteToken = created.data?.token;
+
+  // 4. Redeem it: creates the account and a session cookie.
+  const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: inviteToken } });
+  rep.check('redeem with a live invite -> 200', redeemed.status, 200);
+  rep.check('redeemed account has the invited role', redeemed.data?.user?.role, 'member');
+  const sessionCookie = redeemed.cookies
+    .map((c) => c.split(';')[0])
+    .find((c) => c.includes('session_token')) ?? null;
+  rep.check('redeem sets a session cookie', typeof sessionCookie, 'string');
+
+  // 5. Single use: the same token cannot create a second account.
+  const again = await raw('POST', '/v1/auth/redeem', { body: { token: inviteToken } });
+  rep.check('invite is single use -> 403 on the second redeem', again.status, 403);
+
+  // 6. requireRole: 401 without a session, 200 with one.
+  const anonMe = await raw('GET', '/v1/auth/me');
+  rep.check('requireRole without a session -> 401', anonMe.status, 401);
+  const me = await raw('GET', '/v1/auth/me', { cookie: sessionCookie });
+  rep.check('requireRole with a session -> 200', me.status, 200);
+  rep.check('session resolves the member role', me.data?.user?.role, 'member');
+
+  // 7. Admin gate differs by mode, and the legacy token path must stay intact.
+  const memberOnAdmin = await raw('GET', '/v1/admin/health', { cookie: sessionCookie });
+  if (mode === 'new') {
+    rep.check('member session on an admin route -> 403 (AUTH_MODE=new)', memberOnAdmin.status, 403);
+    const adminNoCred = await fetch(`${WORKER_URL}/v1/admin/health`);
+    rep.check('no credential on an admin route -> 401', adminNoCred.status, 401);
+    const cli = await admin('GET', '/v1/admin/health');
+    rep.check('ADMIN_TOKEN + X-Dakflare-Client: cli still works', cli.status, 200);
+  } else {
+    rep.check('member cookie alone is not an admin credential -> 401 (legacy)', memberOnAdmin.status, 401);
+    const token = await admin('GET', '/v1/admin/health');
+    rep.check('ADMIN_TOKEN bearer path intact (AUTH_MODE=legacy)', token.status, 200);
+    rep.check('health reports auth_mode=legacy', token.data?.auth_mode, 'legacy');
+  }
+
+  // 8. Audit rows: invite created/redeemed and a sign-in.
+  const auditInvite = await admin('GET', '/v1/admin/audit?limit=200&action=invite.created');
+  rep.check(
+    'audit_log has invite.created for this invite',
+    (auditInvite.data?.events ?? []).some((e) => e.subject === inviteId),
+    true
+  );
+  const auditRedeem = await admin('GET', '/v1/admin/audit?limit=200&action=invite.redeemed');
+  rep.check(
+    'audit_log has invite.redeemed for this invite',
+    (auditRedeem.data?.events ?? []).some((e) => e.subject === inviteId),
+    true
+  );
+  const auditSignIn = await admin('GET', '/v1/admin/audit?limit=200&action=sign_in.success');
+  rep.check(
+    'audit_log has sign_in.success for this account',
+    (auditSignIn.data?.events ?? []).some((e) => e.actor_user === redeemed.data?.user?.id),
+    true
+  );
+
+  // 9. Cleanup: the synthetic invite is spent; the account is left in place so
+  //    repeated runs show real history rather than a wiped table.
+  const allOk = rep.print();
+  console.log(allOk ? 'AUTH CASES PASSED' : 'AUTH CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ─────────────────────────── multi-device command ─────────────────────────── */
 
 /** Pair a fresh device and return a usable signing identity. */
@@ -1850,6 +1979,7 @@ const COMMANDS = {
   suite: cmdSuite,
   hardening: cmdHardening,
   multidevice: cmdMultiDevice,
+  auth: cmdAuth,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,

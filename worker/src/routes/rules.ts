@@ -13,6 +13,8 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, MAX_BODY_CHARS, MAX_PEER_CHARS } from "../lib/config";
@@ -51,7 +53,11 @@ export async function handleRulesGet(_req: Request, env: Env, deviceId: string):
 }
 
 /** `POST /v1/rules` (admin) — create or replace a rule. */
-export async function handleRulesPost(req: Request, env: Env): Promise<Response> {
+export async function handleRulesPost(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -155,6 +161,14 @@ export async function handleRulesPost(req: Request, env: Env): Promise<Response>
       Date.now()
     )
     .run();
+
+  await writeAudit(env, {
+    action: "rule.saved",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: id,
+    // No matcher value, body or template: those can contain phone numbers.
+    detail: { device_id: deviceId, enabled: input.enabled === undefined ? true : Boolean(input.enabled) },
+  });
 
   return Response.json({ ok: true, id });
 }

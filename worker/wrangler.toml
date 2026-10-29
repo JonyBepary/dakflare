@@ -20,6 +20,10 @@ name = "dakflare-worker"
 # keeps running until you delete it explicitly.
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
+# Required by better-auth (its password utilities import `node:crypto`). The flag
+# is inert for code that does not use node: builtins, so it does not change the
+# device protocol paths.
+compatibility_flags = ["nodejs_compat"]
 
 # Preview URLs are public by default and are not part of any route the device
 # uses. Keep them off.
@@ -106,6 +110,11 @@ namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
 [vars]
+# Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
+# what a deployment that has not migrated yet must keep). `new` = Better Auth
+# session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
+# (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
+AUTH_MODE = "legacy"
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"

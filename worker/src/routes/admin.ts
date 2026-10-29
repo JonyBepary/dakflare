@@ -16,11 +16,17 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { internalError } from "./pair";
 
 /** `DELETE /v1/admin/devices/:device_id` — revoke a device in D1 and in its DO. */
-export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Response> {
+export async function handleDeviceRevoke(
+  env: Env,
+  deviceId: string,
+  actor?: AdminActor
+): Promise<Response> {
   if (!deviceId) return err("bad_request", 400);
 
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
@@ -41,6 +47,13 @@ export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Re
   const d1 = await env.DB.prepare(`DELETE FROM devices WHERE device_id = ?`)
     .bind(deviceId)
     .run();
+
+  await writeAudit(env, {
+    action: "device.revoked",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { d1_deleted: Number(d1.meta?.changes ?? 0) },
+  });
 
   return Response.json({ ok: true, d1_deleted: Number(d1.meta?.changes ?? 0) });
 }

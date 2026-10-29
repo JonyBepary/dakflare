@@ -16,7 +16,7 @@
  */
 
 import type { Env } from "../index";
-import { timingConfig } from "../lib/config";
+import { authMode, timingConfig } from "../lib/config";
 import { VERSION } from "../lib/version";
 
 interface HealthCounts {
@@ -96,6 +96,10 @@ export async function handleHealth(env: Env): Promise<Response> {
       bindings,
       missing_bindings: missing,
       retention_days: timingConfig(env as unknown as Record<string, unknown>).retentionDays,
+      // Which gate answers the admin routes, and whether /api/auth can run at
+      // all. Migration 0008 is visible in `migrations` above like every other.
+      auth_mode: authMode(env),
+      auth_configured: Boolean(env.BETTER_AUTH_SECRET),
       counts,
       // Also surfaced at the top level: the open-alert banner should not have to
       // dig through `counts` to answer "is the fleet reachable?".

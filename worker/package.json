@@ -24,5 +24,9 @@
     "cf": "^1.0.0-beta.19",
     "typescript": "^5.9.3",
     "wrangler": "^4.112.0"
+  },
+  "dependencies": {
+    "@better-auth/passkey": "1.7.14",
+    "better-auth": "1.7.14"
   }
 }
