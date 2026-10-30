@@ -361,6 +361,8 @@ someone gets there. If only one ships, ship 2.
    `up` we write.)
 2. Does `cf workers secrets update --text` take effect without a follow-up deploy, or is
    `--secrets-file` the only correct path? (Determines whether `up` is one deploy or two.)
-3. Should `dakflare send` require `--wait` in `--agent` mode? An agent that gets
-   `PENDING` and exits has not learned anything, but forcing a wait makes every CI call
-   slow. Leaning: default `--wait 10s` in agent mode, explicit `--no-wait` to opt out.
+3. ~~Should `dakflare send` require `--wait` in `--agent` mode?~~ **Decided:**
+   `--agent` defaults to `--wait 10s`, with `--no-wait` to opt out. A caller that gets
+   `PENDING` and exits has learned nothing, but the full 5-minute budget would make every
+   CI call slow. Ten seconds catches the common case (the phone polls every 60 s), and
+   `--until sent` remains available when "the radio took it" is enough.

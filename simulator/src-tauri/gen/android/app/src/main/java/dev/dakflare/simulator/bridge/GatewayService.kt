@@ -151,9 +151,14 @@ class GatewayService : Service() {
                     // The flow set is the expensive fetch and changes rarely, so
                     // it keeps the slow cadence. A failed sync keeps the cached
                     // set, so the receive path is unaffected.
-                    var flowsOk = false
+                    //
+                    // Three outcomes, not two: a boolean defaulting to false made
+                    // every tick that skipped the fetch read as a failure, and
+                    // "flows ok=false" was reported as a regression for two
+                    // commits because of it.
+                    var flows = "skipped"
                     if (tick % SLOW_EVERY == 0) {
-                        flowsOk = NativeBridge.syncFlowsSafely(appDir, deviceId)
+                        flows = if (NativeBridge.syncFlowsSafely(appDir, deviceId)) "ok" else "refused"
                     }
                     tick += 1
 
@@ -163,7 +168,7 @@ class GatewayService : Service() {
                     Log.i(
                         TAG,
                         "gateway captured=${captured.size} handed=$handed retried=$retried " +
-                            "flush ok=$ok flows ok=$flowsOk",
+                            "flush ok=$ok flows=$flows",
                     )
 
                     synchronized(sleeper) {
