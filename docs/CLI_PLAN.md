@@ -27,17 +27,30 @@ feature to reach for it.
 
 ### Why `cf` and not the SDK
 
-1. **It already covers the whole provisioning sequence.** Verified against the installed
+1. **It covers every Cloudflare operation DakFlare has.** Not "most" — the product's
+   entire Cloudflare surface is Workers, D1, KV, Durable Objects, secrets, cron and
+   logs, and all but one of those is a `cf` command. Verified against the installed
    `cf 1.0.0-beta.25`:
 
-   | Step | Command |
+   | Operation | Command |
    |---|---|
-   | Create the database | `cf d1 create sms_gateway` |
-   | Create the namespace | `cf kv namespaces create KV` |
-   | Apply migrations | `cf d1 migrations apply <id> --remote` |
-   | Set a secret | `cf workers secrets update ADMIN_TOKEN --text … --worker dakflare-worker` |
-   | Deploy with secrets | `cf deploy --secrets-file .dev.vars` |
+   | Deploy the Worker and its assets | `cf deploy` |
    | Plan only | `cf deploy --dry-run` |
+   | Create the database | `cf d1 create sms_gateway` |
+   | Apply migrations | `cf d1 migrations apply <id> --remote` |
+   | Seed or inspect rows | `cf d1 execute` |
+   | Create the namespace | `cf kv namespaces create KV` |
+   | Seed the namespace | `cf kv bulk put` |
+   | Set one secret | `cf workers secrets update <NAME> --text … --worker …` |
+   | Set several at once | `cf workers secrets bulk` |
+   | Check the token before starting | `cf accounts tokens verify` |
+   | Read logs after the fact | `cf logs query` |
+   | Stream logs live | **none** — `wrangler tail` |
+
+   Durable Objects, cron triggers and rate-limit bindings are not resources to create:
+   they are declarations in `cloudflare.config.ts`, and `cf deploy` applies them. So the
+   only hole in the whole list is a live log stream, and that is a TTY feature, not
+   something an agent asks for.
 
 2. **`--dry-run` is the `plan` half of plan/apply for free.** We do not write a planner
    or a diff engine; we run the deploy twice.
@@ -50,20 +63,30 @@ feature to reach for it.
    search` returns compact JSON, `cf schema` returns the request contract. A wrapper
    inherits all of that instead of re-deriving it.
 
-5. **The SDK is a dependency tree for six calls.** The CLI installs with `npm i -g` and
-   nothing else. That is why it runs on a stripped CI runner, and it is worth more than
-   the convenience of an in-process client.
+5. **A subprocess costs nothing at this scale.** Measured: `cf` cold-starts in 161–259 ms
+   on this machine, and `up` makes about eight calls, so the whole provision pays under
+   two seconds of overhead. The case where spawning per call would hurt — bulk writes —
+   is already a single command (`cf kv bulk put`).
 
-6. **Wrangler is not the answer either.** It is being sunset, its `--json` is per-command,
+6. **The SDK is a dependency tree for zero calls.** The CLI installs with `npm i -g` and
+   nothing else, which is why it runs on a stripped CI runner. Adding `cloudflare` to
+   `package.json` buys no operation we cannot already reach, and it buys one thing we do
+   not want: the temptation to fold provisioning into the process that sends SMS.
+
+7. **Wrangler is not the answer either.** It is being sunset, its `--json` is per-command,
    and we would be writing a parser per command to paper over it.
 
 ### Where the SDK (or raw REST) would still be right
 
-Not now. The one candidate is a `dakflare up --check` that validates token scopes before
-creating anything, which is a single `GET`, and `cf accounts tokens verify` already does
-it. If a future command needs hundreds of calls in a loop (bulk DNS, fleet-wide KV
-seeding), that command gets a direct `fetch`, not the SDK: `fetch` is already built into
-Node 22 and costs no dependency.
+Nowhere today, and the rule for tomorrow: **if a command needs something `cf` cannot do,
+it gets a `fetch` call for that one thing, not the SDK.** Node 22 has `fetch` built in,
+so that costs no dependency and no abstraction to learn. The SDK earns its place only
+when a caller needs typed models of dozens of endpoints and retry semantics we do not
+want to write — which is a different product from this one.
+
+The one thing to watch is that `cf` is a beta. The mitigation is not an SDK; it is a
+version gate and a `--print` fallback, so an operator with an unexpected `cf` can still
+see the exact commands and run them by hand.
 
 ### The one correction this forces
 
