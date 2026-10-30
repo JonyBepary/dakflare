@@ -109,6 +109,22 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
+# Failed-auth lockout (AUTH_PLAN §3). These are the cross-instance backstop for
+# `lib/auth-limits.ts`, not the whole counter: the Rate Limiting API only accepts
+# a 10- or 60-second period and returns no count, so the 15-minute sliding window
+# and the fixed lockout expiry live in isolate memory. Counted on FAILURES only,
+# and only after the memory window has not already tripped, so a refused request
+# costs no row and no limiter call.
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "1006"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "1007"
+simple = { limit = 20, period = 60 }
+
 [vars]
 # Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
@@ -128,6 +144,11 @@ AUTH_MODE = "legacy"
 # The KDF runs in the browser: a server-side PBKDF2 measured ~27 ms against the
 # free tier's 10 ms budget. Set to "server-kdf" only on Workers Paid.
 AUTH_PASSWORD_MODE = "client-derived"
+# Failed-auth lockout window, in seconds (AUTH_PLAN §3). 900 = 15 minutes. The
+# in-memory window in `lib/auth-limits.ts` is clamped to [1, 3600]; lower it only
+# for the conformance harness, which waits out the window it starts the Worker
+# with. The Rate Limiting bindings cannot express this window (10/60 s only).
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 # AUTH_PEPPER is a Worker secret, never a var here:
 #   wrangler secret put AUTH_PEPPER     # v2:<b64-32>,v1:<b64-32>
 # Redirectable so the harness can point FCM at a local stub instead of Google.

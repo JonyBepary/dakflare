@@ -49,6 +49,14 @@ import {
 import { createOTP } from "@better-auth/utils/otp";
 import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
+import {
+  auditLockout,
+  checkAuthLockout,
+  clearAuthFailures,
+  clientIp,
+  lockoutResponse,
+  recordAuthFailure,
+} from "../lib/auth-limits";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES } from "../lib/config";
@@ -256,9 +264,10 @@ export async function handleTotpEnable(req: Request, env: Env): Promise<Response
  * Verify a current code through the plugin; `false` for anything it rejects.
  *
  * With a live session the plugin owns decryption and the 30-second window. Its
- * per-challenge attempt budget is sign-in-scoped, so these routes rely on the
- * session plus the code itself; a dedicated limiter would be the next hardening
- * step (the existing `handlePasswordRemove` has the same shape).
+ * per-challenge attempt budget is sign-in-scoped, so these routes count a
+ * failure in `lib/auth-limits.ts` themselves; the lockout is checked before the
+ * code and cleared on a successful proof. `handlePasswordRemove` has the same
+ * shape and uses the same counter.
  */
 async function verifyCurrentCode(
   auth: NonNullable<ReturnType<typeof getAuth>>,
@@ -293,10 +302,21 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
   if (withPassword !== null) return withPassword;
 
   const meta = requestMeta(req);
+  const ip = clientIp(req);
 
   if (!guard.user.twoFactorEnabled) return json({ error: "totp_not_enabled" }, 409);
 
+  // Refuse before checking the code: a correct code during the lockout is still
+  // 429 (that is the point), and a refused request costs no HMAC and no row.
+  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  if (before.locked) return lockoutResponse(before);
+
   if (!(await verifyCurrentCode(auth, req, parsed.value.code))) {
+    const after = await recordAuthFailure(env, { email: guard.user.email, ip });
+    if (after.locked) {
+      await auditLockout(env, req, { email: guard.user.email, factor: "totp", lockout: after });
+      return lockoutResponse(after);
+    }
     await writeAudit(env, {
       action: "totp.disable_refused",
       actor: { userId: guard.user.id, label: guard.user.email },
@@ -306,6 +326,9 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
     });
     return json({ error: "invalid_code" }, 401);
   }
+
+  // A successful proof clears the account's failure window, not the IP's.
+  clearAuthFailures(guard.user.email);
 
   const ctx = await auth.$context;
   await ctx.internalAdapter.updateUser(guard.user.id, { twoFactorEnabled: false });
@@ -354,10 +377,19 @@ export async function handleTotpRegenerate(req: Request, env: Env): Promise<Resp
   if (withPassword !== null) return withPassword;
 
   const meta = requestMeta(req);
+  const ip = clientIp(req);
 
   if (!guard.user.twoFactorEnabled) return json({ error: "totp_not_enabled" }, 409);
 
+  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  if (before.locked) return lockoutResponse(before);
+
   if (!(await verifyCurrentCode(auth, req, parsed.value.code))) {
+    const after = await recordAuthFailure(env, { email: guard.user.email, ip });
+    if (after.locked) {
+      await auditLockout(env, req, { email: guard.user.email, factor: "totp", lockout: after });
+      return lockoutResponse(after);
+    }
     await writeAudit(env, {
       action: "totp.regenerate_refused",
       actor: { userId: guard.user.id, label: guard.user.email },
@@ -367,6 +399,8 @@ export async function handleTotpRegenerate(req: Request, env: Env): Promise<Resp
     });
     return json({ error: "invalid_code" }, 401);
   }
+
+  clearAuthFailures(guard.user.email);
 
   const ctx = await auth.$context;
   const row = await findRow(ctx, guard.user.id);

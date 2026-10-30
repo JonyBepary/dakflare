@@ -71,12 +71,24 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
+# Failed-auth lockout backstop (see lib/auth-limits.ts and wrangler.toml).
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "1006"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "1007"
+simple = { limit = 20, period = 60 }
+
 [vars]
 # Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
 # (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
 AUTH_MODE = "legacy"
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"

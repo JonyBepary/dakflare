@@ -65,6 +65,7 @@ export default defineConfig({
 			// Admin auth gate: `legacy` keeps ADMIN_TOKEN; `new` uses Better Auth
 			// sessions via requireRole() (see worker/src/lib/config.ts authMode).
 			AUTH_MODE: bindings.text("legacy"),
+			AUTH_LOCKOUT_WINDOW_SECONDS: bindings.text("900"),
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
@@ -107,6 +108,15 @@ export default defineConfig({
 			PAIR_GLOBAL_LIMITER: bindings.rateLimit({
 				namespace: "1005",
 				simple: { limit: 300, period: 60 },
+			}),
+			// Failed-auth lockout backstop (see lib/auth-limits.ts).
+			AUTH_ACCOUNT_LIMITER: bindings.rateLimit({
+				namespace: "1006",
+				simple: { limit: 5, period: 60 },
+			}),
+			AUTH_IP_LIMITER: bindings.rateLimit({
+				namespace: "1007",
+				simple: { limit: 20, period: 60 },
 			}),
 		},
 	},

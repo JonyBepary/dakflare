@@ -353,18 +353,19 @@ async function assertPasskey(passkey) {
 
 
 /** A tiny JSON-over-fetch helper scoped to an arbitrary base URL. */
-async function api(base, method, pathname, { body, cookie } = {}) {
+async function api(base, method, pathname, { body, cookie, headers } = {}) {
   const res = await fetch(base + pathname, {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(cookie ? { Cookie: cookie } : {}),
+      ...(headers ?? {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'manual',
   });
   const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-  return { status: res.status, data: await res.json().catch(() => null), cookies };
+  return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
 }
 
 /* ────────────────────────────── contract §4 vectors ───────────────────────── */
@@ -2304,18 +2305,19 @@ async function cmdPassword() {
   const raw = (method, pathname, opts) => api(WORKER_URL, method, pathname, opts);
   // Better Auth's CSRF check wants an Origin on state-changing POSTs. `api()`
   // does not set one, so wrap the calls that reach /api/auth/* explicitly.
-  const betterAuth = async (pathname, body, cookie) => {
+  const betterAuth = async (pathname, body, cookie, headers = {}) => {
     const res = await fetch(WORKER_URL + pathname, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Origin: WORKER_URL,
         ...(cookie ? { Cookie: cookie } : {}),
+        ...headers,
       },
       body: JSON.stringify(body),
     });
     const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-    return { status: res.status, data: await res.json().catch(() => null), cookies };
+    return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
   };
 
   // ---------------------------------------------------------------- salt shape
@@ -2627,6 +2629,228 @@ async function cmdPassword() {
     body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
   });
   rep.check('after delete the old secret no longer signs in -> 401', afterSignIn.status, 401);
+
+  // ------------------------------------------------------- lockout (AUTH_PLAN §3)
+  // The account above has no password and no TOTP by now, so use a fresh one.
+  // The Worker is expected to be started with a short
+  // AUTH_LOCKOUT_WINDOW_SECONDS for this command; the wait below is taken from
+  // the 429's own `retry_after`, so the assertion still describes the Worker
+  // under test rather than a harness constant.
+  const lockEmail = `lock-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+  const lockPassword = 'correct horse battery staple';
+  // TEST-NET addresses, unique per run: the IP window lives in the Worker
+  // isolate, so a fixed address would inherit a previous run's failures.
+  const lockIpTag = crypto.randomBytes(2);
+  const lockIpPassword = `198.51.100.${(lockIpTag[0] % 200) + 10}`;
+  const lockIpTotp = `203.0.113.${(lockIpTag[1] % 200) + 10}`;
+  const lockIpUnknown = `192.0.2.${((lockIpTag[0] + lockIpTag[1]) % 200) + 10}`;
+  const lockInvite = await admin('POST', '/v1/admin/invites', {
+    email: lockEmail,
+    role: 'member',
+    expires_in_s: 300,
+  });
+  rep.check('lockout: invite created', lockInvite.status, 200);
+  const lockRedeemed = await raw('POST', '/v1/auth/redeem', { body: { token: lockInvite.data?.token } });
+  rep.check('lockout: invite redeemed', lockRedeemed.status, 200);
+  const lockSession = sessionCookieOf(lockRedeemed.cookies);
+  const lockSaltRes = await raw('POST', '/v1/auth/salt', { body: { email: lockEmail } });
+  const lockSalt = Buffer.from(lockSaltRes.data?.salt ?? '', 'base64');
+  const lockIterations = lockSaltRes.data?.iterations ?? PW_ITERATIONS;
+  const lockMaterial = pwMaterial(lockPassword, lockSalt, lockIterations);
+  const lockSet = await raw('POST', '/v1/auth/password', {
+    cookie: lockSession,
+    body: { material: b64Of(lockMaterial), salt: b64Of(lockSalt), iterations: lockIterations },
+  });
+  rep.check('lockout: password set', lockSet.status, 200);
+
+  const wrongLockMaterial = crypto.randomBytes(32);
+  const lockSignIn = (material, ip) =>
+    raw('POST', '/v1/auth/sign-in/password', {
+      body: { email: lockEmail, material: b64Of(material) },
+      headers: { 'CF-Connecting-IP': ip },
+    });
+
+  const knownStatuses = [];
+  let knownFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await lockSignIn(wrongLockMaterial, lockIpPassword);
+    knownStatuses.push(r.status);
+    if (i === 4) knownFifth = r;
+  }
+  rep.check('lockout: four wrong passwords -> 401', knownStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong password -> 429', knownFifth?.status, 429);
+  rep.check(
+    'lockout: 429 Retry-After header matches retry_after',
+    Number(knownFifth?.headers?.get?.('retry-after')),
+    knownFifth?.data?.retry_after
+  );
+  rep.check('lockout: 429 carries a console sentence', typeof knownFifth?.data?.message, 'string');
+  const lockWindow = Number(knownFifth?.data?.retry_after ?? 1);
+  rep.check('lockout: retry_after is a positive whole number of seconds', Number.isInteger(lockWindow) && lockWindow > 0, true);
+
+  const knownCorrectDuring = await lockSignIn(lockMaterial, lockIpPassword);
+  rep.check('lockout: correct password during the lockout is still 429', knownCorrectDuring.status, 429);
+
+  const knownSpray = [];
+  for (let i = 0; i < 3; i += 1) knownSpray.push(await lockSignIn(wrongLockMaterial, lockIpPassword));
+  rep.check('lockout: spraying while locked stays 429', knownSpray.map((r) => r.status), [429, 429, 429]);
+  rep.check(
+    'lockout: spraying does not extend the password lockout',
+    knownSpray[knownSpray.length - 1].data?.retry_after <= lockWindow,
+    true
+  );
+
+  await sleep((lockWindow + 1) * 1000);
+  const knownAfter = await lockSignIn(lockMaterial, lockIpPassword);
+  rep.check('lockout: correct password after the window -> 200', knownAfter.status, 200);
+  const knownCleared = await lockSignIn(wrongLockMaterial, lockIpPassword);
+  rep.check('lockout: the success cleared the account counter (next wrong is 401)', knownCleared.status, 401);
+
+  // An unknown address must produce the same sequence. The account counter is
+  // keyed by the normalized email, so it costs the same as a real account and
+  // the 429 body does not say whether the address exists.
+  const unknownLockEmail = `nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+  const unknownStatuses = [];
+  let unknownFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email: unknownLockEmail, material: b64Of(wrongLockMaterial) },
+      headers: { 'CF-Connecting-IP': lockIpUnknown },
+    });
+    unknownStatuses.push(r.status);
+    if (i === 4) unknownFifth = r;
+  }
+  rep.check('lockout: an unknown address has the same status sequence as a known one', unknownStatuses, knownStatuses);
+  rep.check(
+    'lockout: the unknown-address 429 has the same shape',
+    [unknownFifth?.status, typeof unknownFifth?.data?.retry_after],
+    [429, 'number']
+  );
+
+  // Enrol TOTP on the lockout account, then count wrong codes on the sign-in
+  // challenge and on the live-session regenerate route.
+  const lockPasskey = await createPasskey(lockSession);
+  rep.check('lockout: passkey enrolled for the step-up', lockPasskey.status, 200);
+  const lockStepUp = await assertPasskey(lockPasskey);
+  rep.check('lockout: passkey assertion -> 200', lockStepUp.status, 200);
+  const lockEnable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(lockStepUp.jar) });
+  rep.check('lockout: TOTP enabled', lockEnable.status, 200);
+  const lockSecret = lockEnable.data?.totpURI
+    ? new URL(lockEnable.data.totpURI).searchParams.get('secret')
+    : null;
+  rep.check('lockout: enable returns a TOTP secret', typeof lockSecret, 'string');
+  const lockVerified = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    jarString(lockStepUp.jar)
+  );
+  rep.check('lockout: the first TOTP code verifies', lockVerified.status, 200);
+  const lockTotpCookie = sessionCookieOf(lockVerified.cookies) ?? jarString(lockStepUp.jar);
+
+  const lockChallenge = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email: lockEmail, material: b64Of(lockMaterial) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check(
+    'lockout: password sign-in for the TOTP account returns the challenge',
+    [lockChallenge.status, lockChallenge.data?.twoFactorRedirect],
+    [200, true]
+  );
+  const challengeJar = new Map();
+  absorbCookies(challengeJar, lockChallenge.cookies);
+  const challengeCookie = jarString(challengeJar);
+  // A fixed code that is not the current one and stays wrong across the wait
+  // (a `current + 1` code can become current when the 30-second step rolls).
+  const wrongLockCode = totpNow(lockSecret) === '000000' ? '000001' : '000000';
+
+  const codeStatuses = [];
+  let codeFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await betterAuth(
+      '/api/auth/two-factor/verify-totp',
+      { code: wrongLockCode },
+      challengeCookie,
+      { 'CF-Connecting-IP': lockIpTotp }
+    );
+    codeStatuses.push(r.status);
+    if (i === 4) codeFifth = r;
+  }
+  rep.check('lockout: four wrong sign-in codes -> 401', codeStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong sign-in code -> 429', codeFifth?.status, 429);
+  rep.check(
+    'lockout: sign-in 429 carries Retry-After',
+    Number(codeFifth?.headers?.get?.('retry-after')),
+    codeFifth?.data?.retry_after
+  );
+
+  const codeCorrectDuring = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    challengeCookie,
+    { 'CF-Connecting-IP': lockIpTotp }
+  );
+  rep.check('lockout: correct code during the lockout is still 429', codeCorrectDuring.status, 429);
+
+  const codeSpray = [];
+  for (let i = 0; i < 3; i += 1) {
+    codeSpray.push(
+      await betterAuth(
+        '/api/auth/two-factor/verify-totp',
+        { code: wrongLockCode },
+        challengeCookie,
+        { 'CF-Connecting-IP': lockIpTotp }
+      )
+    );
+  }
+  rep.check('lockout: spraying codes while locked stays 429', codeSpray.map((r) => r.status), [429, 429, 429]);
+  rep.check(
+    'lockout: spraying does not extend the code lockout',
+    codeSpray[codeSpray.length - 1].data?.retry_after <= Number(codeFifth?.data?.retry_after ?? 0),
+    true
+  );
+
+  const codeWindow = Number(codeFifth?.data?.retry_after ?? 1);
+  await sleep((codeWindow + 1) * 1000);
+  const codeAfter = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    challengeCookie,
+    { 'CF-Connecting-IP': lockIpTotp }
+  );
+  rep.check('lockout: correct code after the window -> 200', codeAfter.status, 200);
+  const codeSession = sessionCookieOf(codeAfter.cookies);
+  rep.check('lockout: ...and it mints a session', typeof codeSession, 'string');
+
+  const liveCookie = codeSession ?? lockTotpCookie;
+  const regenStatuses = [];
+  let regenFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await raw('POST', '/v1/auth/totp/regenerate', {
+      cookie: liveCookie,
+      body: { code: wrongLockCode },
+      headers: { 'CF-Connecting-IP': lockIpTotp },
+    });
+    regenStatuses.push(r.status);
+    if (i === 4) regenFifth = r;
+  }
+  rep.check('lockout: four wrong regenerate codes -> 401', regenStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong regenerate code -> 429', regenFifth?.status, 429);
+
+  const regenCorrectDuring = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: liveCookie,
+    body: { code: totpNow(lockSecret) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check('lockout: correct regenerate during the lockout is still 429', regenCorrectDuring.status, 429);
+
+  const regenWindow = Number(regenFifth?.data?.retry_after ?? 1);
+  await sleep((regenWindow + 1) * 1000);
+  const regenAfter = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: liveCookie,
+    body: { code: totpNow(lockSecret) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check('lockout: correct regenerate after the window -> 200', regenAfter.status, 200);
 
   const allOk = rep.print();
   console.log(allOk ? 'PASSWORD CASES PASSED' : 'PASSWORD CASES FAILED');

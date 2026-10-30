@@ -22,6 +22,15 @@
 
 import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
+import {
+  auditLockout,
+  checkAuthLockout,
+  clearAuthFailures,
+  clientIp,
+  lockoutResponse,
+  rateLimitedResponse,
+  recordAuthFailure,
+} from "../lib/auth-limits";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, passwordMode } from "../lib/config";
@@ -140,7 +149,9 @@ export async function handlePasswordSalt(req: Request, env: Env): Promise<Respon
   if (email === null) return err("bad_request", 400);
 
   const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-  if (await overLimit(env, [`pw-salt:${ip}`])) return err("rate_limited", 429);
+  if (await overLimit(env, [`pw-salt:${ip}`])) {
+    return rateLimitedResponse(60, "Too many salt requests from this network. Try again in 60 seconds.");
+  }
 
   const loaded = loadPepperRing(env);
   if (!loaded.ok) return loaded.response;
@@ -199,15 +210,15 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
   const email = normalizeEmail(parsed.value.email);
   if (email === null) return err("bad_request", 400);
 
-  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-  // Two dimensions: one IP cannot spray, and one address cannot be sprayed from
-  // a botnet. Both share the existing limiter binding rather than a new one.
-  if (await overLimit(env, [`pw-ip:${ip}`, `pw-email:${email}`])) {
-    return err("rate_limited", 429);
-  }
-
   const mode = passwordMode(env);
   if (mode === "off") return passwordDisabled();
+
+  const ip = clientIp(req);
+  // One account window (5/15 min) and one IP window (20/15 min). The account
+  // window is shared with the TOTP paths, so a password guess and a code guess
+  // spend the same budget. Checked before the KDF/HMAC work and before D1.
+  const before = checkAuthLockout(env, { email, ip });
+  if (before.locked) return lockoutResponse(before);
 
   const loaded = loadPepperRing(env);
   if (!loaded.ok) return loaded.response;
@@ -264,6 +275,15 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
   }
 
   if (verified === null || user === null || material === null) {
+    // Record first: the fifth failure is answered with 429, not 401, so the
+    // lockout starts at the threshold. Unknown addresses are counted exactly
+    // like known ones (same key, same response), so the lockout is not an
+    // enumeration oracle.
+    const after = await recordAuthFailure(env, { email, ip });
+    if (after.locked) {
+      await auditLockout(env, req, { email, factor: "password", lockout: after });
+      return lockoutResponse(after);
+    }
     await writeAudit(env, {
       action: "sign_in.failure",
       actor: { userId: null, label: "password" },
@@ -321,6 +341,12 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
   if (!issued.ok) {
     return Response.json({ error: issued.error }, { status: issued.status });
   }
+
+  // Full authentication (no second factor): clear the account window. A TOTP
+  // account does NOT clear here — its first factor is not the end of the
+  // sign-in, and clearing would let a password holder reset the code lockout by
+  // starting a new challenge.
+  clearAuthFailures(email);
 
   await writeAudit(env, {
     action: "sign_in.success",
@@ -473,6 +499,10 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
   }
 
   const meta = requestMeta(req);
+  const ip = clientIp(req);
+
+  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  if (before.locked) return lockoutResponse(before);
 
   if (guard.user.twoFactorEnabled) {
     const code = parsed.value.code;
@@ -483,6 +513,11 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
       // Live session, so this verifies without creating another one.
       await auth.api.verifyTOTP({ body: { code }, headers: req.headers });
     } catch {
+      const after = await recordAuthFailure(env, { email: guard.user.email, ip });
+      if (after.locked) {
+        await auditLockout(env, req, { email: guard.user.email, factor: "totp", lockout: after });
+        return lockoutResponse(after);
+      }
       await writeAudit(env, {
         action: "password.remove_failed",
         actor: { userId: guard.user.id, label: guard.user.email },
@@ -521,6 +556,11 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
 
     const result = await verifyMaterial(row, material, ring);
     if (!result.ok) {
+      const after = await recordAuthFailure(env, { email: guard.user.email, ip });
+      if (after.locked) {
+        await auditLockout(env, req, { email: guard.user.email, factor: "password", lockout: after });
+        return lockoutResponse(after);
+      }
       await writeAudit(env, {
         action: "password.remove_failed",
         actor: { userId: guard.user.id, label: guard.user.email },
@@ -531,6 +571,8 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
   }
+
+  clearAuthFailures(guard.user.email);
 
   const deleted = await env.DB.prepare(
     `DELETE FROM account WHERE "userId" = ? AND "providerId" = 'credential'`
