@@ -22,6 +22,9 @@ export const ROUTES = {
 	// link; `/enrol` forces the first passkey before Overview is reachable.
 	invite: resolve('/invite'),
 	enrol: resolve('/enrol'),
+	// Where a magic link lands. It never spends the token on load: the button on
+	// the page is the only POST (mail scanners prefetch every link).
+	magic: resolve('/magic'),
 	// Owner/admin only (AUTH_PLAN §5); the nav hides it for members.
 	audit: resolve('/audit'),
 	// Owner/admin only as well: the account's factors are managed next to the

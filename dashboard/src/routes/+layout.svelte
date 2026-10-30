@@ -78,14 +78,18 @@
 		page.url.pathname === ROUTES.login || page.url.pathname === `${ROUTES.login}/`
 	);
 
-	// The three account screens stand outside the shell: they are reached before
-	// there is a session to prove (login, invite, first passkey).
+	// The account screens stand outside the shell: they are reached before there
+	// is a session to prove (login, invite, first passkey, a magic link).
 	const isPreauth = $derived(
 		isLogin ||
 			page.url.pathname === ROUTES.invite ||
 			page.url.pathname === `${ROUTES.invite}/` ||
 			page.url.pathname === ROUTES.enrol ||
-			page.url.pathname === `${ROUTES.enrol}/`
+			page.url.pathname === `${ROUTES.enrol}/` ||
+			// A magic link opens before anyone is signed in, and the page must not
+			// spend the token on load — so it cannot run the session boot either.
+			page.url.pathname === ROUTES.magic ||
+			page.url.pathname === `${ROUTES.magic}/`
 	);
 
 	function isActive(item: NavItem): boolean {

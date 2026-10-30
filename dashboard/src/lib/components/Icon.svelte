@@ -31,7 +31,8 @@
 		| 'stop'
 		| 'grip'
 		| 'fingerprint'
-		| 'history';
+		| 'history'
+		| 'mail';
 </script>
 
 <script lang="ts">
@@ -157,5 +158,8 @@
 		<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
 		<path d="M4 4v5h5" />
 		<path d="M12 8v4.5l3 1.8" />
+	{:else if name === 'mail'}
+		<rect x="3" y="5" width="18" height="14" rx="2.5" />
+		<path d="m4.5 7.5 6.6 4.9a1.5 1.5 0 0 0 1.8 0l6.6-4.9" />
 	{/if}
 </svg>

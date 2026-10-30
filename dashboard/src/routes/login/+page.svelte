@@ -12,40 +12,52 @@
 		getSession,
 		signOutAccount
 	} from '$lib/api';
-	import { passkeySupport, signInWithPasskey, verifyAuthenticatorCode, verifyRecoveryCode } from '$lib/passkey';
+	import { getAuthMode, type AuthModeInfo } from '$lib/auth-mode';
+	import { MAGIC_LINK_MINUTES, MagicFailure, requestMagicLink } from '$lib/magic';
 	import {
-		PasswordFailure,
-		probePasswordSignIn,
-		readMode,
-		signInWithPassword,
-		type PasswordMode
-	} from '$lib/password';
+		passkeySupport,
+		signInWithPasskey,
+		verifyAuthenticatorCode,
+		verifyRecoveryCode
+	} from '$lib/passkey';
+	import { PasswordFailure, probePasswordSignIn, signInWithPassword } from '$lib/password';
 	import { isWellFormedCode } from '$lib/totp';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import Brand from '$lib/components/Brand.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	/*
-	 * Which door this deployment opens is answered by `GET /v1/admin/health`
-	 * (`auth_mode`, `auth_configured`). That route sits behind the admin gate, so
-	 * before sign-in it usually answers 401 — the flag is simply not readable
-	 * from here yet. The `unknown` state below is that honest case: the admin
-	 * token form stays first because it is the only thing that works in
-	 * `legacy`, and the passkey path is offered only when `/api/auth` is live.
-	 * See the report for why this cannot be resolved in the dashboard alone.
+	 * How this deployment signs people in, asked first (`GET /v1/auth/mode`).
+	 *
+	 * That answer decides the screen. In `new` the page renders exactly the doors
+	 * the deployment can finish — a passkey only when an auth secret exists, an
+	 * email link only when a mailer is configured, a password only when the mode
+	 * is not `off` and the pepper is present — plus the invite field, which is the
+	 * only way the first account is ever made. Nothing that cannot work is drawn:
+	 * no password field on an `off` deployment, no passkey button without a
+	 * secret, no link form without a sender.
+	 *
+	 * `legacy` keeps the admin token form exactly as it was. If the mode cannot
+	 * be read at all (an older Worker has no such route, a proxy refuses it), the
+	 * page falls back to that same token form and says so in one quiet line —
+	 * guessing a mode is how a console locks its operator out.
 	 */
+	type Door = 'passkey' | 'magic' | 'password';
+
 	type Gate =
 		| { kind: 'checking' }
 		| { kind: 'legacy' }
-		| { kind: 'new' }
-		| { kind: 'new-unconfigured' }
-		| { kind: 'unknown'; authLive: boolean }
+		| { kind: 'new'; doors: Door[] }
+		/** The mode could not be read: today's behaviour, token form first. */
+		| { kind: 'fallback'; authLive: boolean }
 		| { kind: 'unreachable'; message: string }
 		| { kind: 'failed'; message: string };
+
+	type Step = 'doors' | 'magic' | 'password' | 'second-factor';
 
 	// Deliberately no token state: the field is uncontrolled and its value is read
 	// once, immediately before the request, then cleared. Only emptiness is tracked.
@@ -55,15 +67,18 @@
 	let error = $state<string | null>(null);
 	let input = $state<HTMLInputElement | null>(null);
 	let gate = $state<Gate>({ kind: 'checking' });
+	let step = $state<Step>('doors');
+	let mode = $state<AuthModeInfo | null>(null);
+	/** The passkey endpoint answered 503: this deployment has no auth secret yet. */
+	let secretMissing = $state(false);
 
 	/** Passkey path: which step of it is on screen. */
-	let step = $state<'passkey' | 'password' | 'second-factor'>('passkey');
 	let useRecovery = $state(false);
 	let codeInput = $state<HTMLInputElement | null>(null);
 	let passkeyBusy = $state(false);
 	let passkeyError = $state<string | null>(null);
 	/** Which first factor this sign-in came through, so the code step names it. */
-	let firstFactor = $state<'passkey' | 'password'>('passkey');
+	let firstFactor = $state<'passkey' | 'password' | 'magic-link'>('passkey');
 	/**
 	 * True once the server has burned the challenge: too many wrong codes, or the
 	 * ten-minute window closed. The only way forward is a new first factor, so
@@ -71,15 +86,18 @@
 	 */
 	let challengeSpent = $state(false);
 
+	/* ------------------------------------------------------------- the doors */
+
+	const doors = $derived.by<Door[]>(() => (gate.kind === 'new' ? gate.doors : []));
+
 	/**
 	 * The password door.
 	 *
-	 * `password_mode` lives on `/v1/admin/health`, which is admin-gated: before
-	 * sign-in it usually answers 401, so the mode is often `unknown` here. The
-	 * door is then offered, and opening it asks the sign-in route itself whether
-	 * passwords are on — that route is the authority, and it answers
-	 * `password_disabled` (403) when the mode is `off`. A deployment known to be
-	 * off never offers the door, and no password field is ever shown for one.
+	 * In `new` the mode endpoint answers whether passwords exist, so this is a
+	 * fact rather than a guess. In the fallback it is `unknown` and the sign-in
+	 * route itself is asked once, when the door is opened — it is the authority,
+	 * and it answers `password_disabled` (403) when the mode is `off`. A
+	 * deployment known to be off never offers the door.
 	 */
 	let passwordAvailable = $state<'on' | 'off' | 'unknown'>('unknown');
 	let passwordCheck = $state<'idle' | 'checking'>('idle');
@@ -92,6 +110,23 @@
 	let pwEmailField = $state<HTMLInputElement | null>(null);
 	let pwPasswordField = $state<HTMLInputElement | null>(null);
 
+	/* ---------------------------------------------------------- magic link */
+
+	let mlEmail = $state('');
+	let mlField = $state<HTMLInputElement | null>(null);
+	let mlBusy = $state(false);
+	/** A refusal worth naming: rate limit, or no answer at all. */
+	let mlError = $state<string | null>(null);
+	/** The address the request was made for; non-null means "check your email". */
+	let mlSentTo = $state<string | null>(null);
+	/** Coming back from a spent link: say why this form is on screen again. */
+	let mlRestart = $state(false);
+
+	/* --------------------------------------------------------------- invite */
+
+	let inviteCode = $state('');
+	let inviteField = $state<HTMLInputElement | null>(null);
+
 	const nextTarget = $derived.by(() => {
 		const requested = page.url.searchParams.get('next');
 		if (
@@ -99,7 +134,8 @@
 			requested.startsWith(`${BASE}/`) &&
 			requested !== ROUTES.login &&
 			requested !== ROUTES.invite &&
-			requested !== ROUTES.enrol
+			requested !== ROUTES.enrol &&
+			requested !== ROUTES.magic
 		) {
 			return requested;
 		}
@@ -116,78 +152,199 @@
 		}
 	}
 
+	/**
+	 * Ask the deployment what it can do, and build the door list from the answer.
+	 *
+	 * A 404 (a Worker from before this route) and a 401/403 (a proxy in front of
+	 * it) both mean "this build will not tell us": that is the fallback, which is
+	 * exactly the screen this page had before. A 5xx or no answer at all is a
+	 * broken deployment, and gets the sentence it always got.
+	 */
 	async function resolveGate(): Promise<void> {
 		gate = { kind: 'checking' };
-		let raw: (Record<string, unknown> & { auth_mode?: string; auth_configured?: boolean }) | null =
-			null;
+		secretMissing = false;
 		try {
-			const { health } = await getHealth(true);
-			raw = health as unknown as Record<string, unknown>;
+			const info = await getAuthMode();
+			mode = info;
+			if (info.auth_mode === 'legacy') {
+				gate = { kind: 'legacy' };
+			} else if (!info.auth_configured) {
+				// No `BETTER_AUTH_SECRET`: the Worker cannot sign a session, so no
+				// account door can finish. An invite would fail at redemption too.
+				passwordAvailable = 'off';
+				gate = { kind: 'new', doors: [] };
+			} else {
+				const available: Door[] = [];
+				if (info.auth_configured) available.push('passkey');
+				if (info.magic_link) available.push('magic');
+				if (info.password_mode !== 'off' && info.password_configured) {
+					available.push('password');
+				}
+				passwordAvailable = available.includes('password') ? 'on' : 'off';
+				gate = { kind: 'new', doors: available };
+			}
 		} catch (failure) {
 			// Status 0 is the console's own "no answer" (timeout or transport).
-			if (!(failure instanceof ApiError) || failure.status === 0) {
+			if (failure instanceof ApiError && failure.status === 0) {
 				gate = { kind: 'unreachable', message: describeError(failure) };
 				return;
 			}
-			if (failure.status >= 500) {
+			if (failure instanceof ApiError && failure.status >= 500) {
 				gate = { kind: 'failed', message: describeError(failure) };
 				return;
 			}
-			// 401/403: the gate answered before we could read the flag.
-			gate = { kind: 'unknown', authLive: await authIsLive() };
-			await focusArrival();
-			return;
-		}
-
-		if (raw.auth_mode === 'new') {
-			gate =
-				raw.auth_configured === true
-					? { kind: 'new' }
-					: { kind: 'new-unconfigured' };
-			readPasswordAvailability(raw);
-		} else if (raw.auth_mode === 'legacy') {
-			gate = { kind: 'legacy' };
-		} else if (String(raw.error ?? '') === 'auth_unavailable') {
-			// Only `new` reports a missing secret here: in `legacy` the token gate
-			// would have answered 401 instead of reaching the auth guard.
-			gate = { kind: 'new-unconfigured' };
-		} else {
-			gate = { kind: 'unknown', authLive: await authIsLive() };
+			// No usable answer about the mode: keep today's behaviour, quietly.
+			gate = { kind: 'fallback', authLive: await authIsLive() };
 		}
 		await focusArrival();
 	}
 
 	async function focusArrival(): Promise<void> {
 		await tick();
-		if (gate.kind === 'new' && step === 'passkey') {
-			document.getElementById('passkey-start')?.focus();
+		if (gate.kind === 'new') {
+			if (step === 'magic') {
+				mlField?.focus();
+				return;
+			}
+			if (step === 'password') {
+				if (pwEmail.trim() === '') pwEmailField?.focus();
+				else pwPasswordField?.focus();
+				return;
+			}
+			if (step === 'second-factor') {
+				codeInput?.focus();
+				return;
+			}
+			document.getElementById('door-first')?.focus();
 			return;
 		}
-		if (gate.kind === 'new-unconfigured' || gate.kind === 'unreachable' || gate.kind === 'failed')
-			return;
+		if (gate.kind === 'unreachable' || gate.kind === 'failed') return;
 		input?.focus();
 	}
 
-	/**
-	 * The one pre-sign-in read of the password mode, when health answers at all.
-	 * `password_configured: false` means `AUTH_PEPPER` is missing: a password
-	 * could be stored in neither mode, so the door stays shut.
-	 */
-	function readPasswordAvailability(health: Record<string, unknown>): void {
-		const mode: PasswordMode = readMode(health.password_mode);
-		const configured = health.password_configured === true;
-		passwordAvailable = mode !== 'off' && configured ? 'on' : 'off';
+	/* ------------------------------------------------------------- door copy */
+
+	function doorTitle(door: Door): string {
+		if (door === 'passkey') return 'Passkey';
+		if (door === 'magic') return 'Email link';
+		return 'Password';
 	}
+
+	function doorSubtitle(door: Door): string {
+		if (door === 'passkey') return 'The key on this device. Nothing to type.';
+		if (door === 'magic') {
+			return `A one-use link. Expires in ${MAGIC_LINK_MINUTES} minutes.`;
+		}
+		return mode?.password_mode === 'server-kdf'
+			? 'Checked by the gateway against this account.'
+			: 'Derived in this browser before it is sent.';
+	}
+
+	function doorIcon(door: Door): IconName {
+		if (door === 'passkey') return 'fingerprint';
+		if (door === 'magic') return 'mail';
+		return 'key';
+	}
+
+	async function openDoor(door: Door): Promise<void> {
+		passkeyError = null;
+		passwordRefused = null;
+		error = null;
+		if (door === 'passkey') {
+			await passkeySignIn();
+			return;
+		}
+		if (door === 'magic') {
+			await openMagicStep();
+			return;
+		}
+		await openPasswordDoor();
+	}
+
+	/* ------------------------------------------------------------ magic link */
+
+	async function openMagicStep(restart = false): Promise<void> {
+		step = 'magic';
+		mlError = null;
+		mlSentTo = null;
+		mlRestart = restart;
+		passkeyError = null;
+		passwordRefused = null;
+		await tick();
+		mlField?.focus();
+	}
+
+	async function backToDoors(): Promise<void> {
+		step = 'doors';
+		pwError = null;
+		pwPassword = '';
+		pwShow = false;
+		mlError = null;
+		mlSentTo = null;
+		mlRestart = false;
+		await tick();
+		document.getElementById('door-first')?.focus();
+	}
+
+	/** A shape check, not a policy: the gateway is the one that decides. */
+	function looksLikeEmail(value: string): boolean {
+		return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+	}
+
+	/**
+	 * Ask for a link.
+	 *
+	 * Every answer that says nothing about the address — a 202, a 400, a 404, a
+	 * 403 — lands on the same confirmation sentence. Only two refusals change the
+	 * screen, because neither one is about the account: too many requests (429),
+	 * and no answer at all. That is the whole point of the factor.
+	 */
+	async function submitMagic(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (mlBusy) return;
+		const email = mlEmail.trim();
+		if (!looksLikeEmail(email)) {
+			mlError = 'Enter the email address this account uses.';
+			mlField?.focus();
+			return;
+		}
+
+		mlBusy = true;
+		mlError = null;
+		mlRestart = false;
+		try {
+			await requestMagicLink(email);
+			mlSentTo = email;
+		} catch (failure) {
+			if (failure instanceof MagicFailure) {
+				mlError = failure.message;
+			} else {
+				mlError = describeError(failure);
+			}
+			await tick();
+			mlField?.focus();
+		} finally {
+			mlBusy = false;
+		}
+	}
+
+	async function useAnotherAddress(): Promise<void> {
+		mlSentTo = null;
+		mlError = null;
+		await tick();
+		mlField?.focus();
+	}
+
+	/* -------------------------------------------------------------- password */
 
 	/**
 	 * Open the password door.
 	 *
-	 * When the mode was readable this is immediate. When it was not — the usual
-	 * case, because health is admin-gated — the sign-in route is asked once,
-	 * with a reserved `.example` address and all-zero material, so the check can
-	 * never touch a real account. A deployment that says `password_disabled`
-	 * gets a sentence instead of a form, which is the rule: no password field is
-	 * ever shown for a deployment whose mode is off.
+	 * When the mode was readable this is immediate. When it was not — the fallback
+	 * path — the sign-in route is asked once, with a reserved `.example` address
+	 * and all-zero material, so the check can never touch a real account. A
+	 * deployment that says `password_disabled` gets a sentence instead of a form,
+	 * which is the rule: no password field is ever shown for an `off` deployment.
 	 */
 	async function openPasswordDoor(): Promise<void> {
 		if (passwordCheck === 'checking' || passkeyBusy) return;
@@ -203,9 +360,9 @@
 			if (answer === 'off') {
 				passwordAvailable = 'off';
 				passwordRefused =
-					'Passwords are switched off on this deployment. Sign in with the passkey.';
+					'Passwords are switched off on this deployment. Sign in another way.';
 				await tick();
-				document.getElementById('passkey-start')?.focus();
+				document.getElementById('door-first')?.focus();
 				return;
 			}
 			passwordAvailable = answer;
@@ -224,20 +381,6 @@
 		await tick();
 		if (pwEmail.trim() === '') pwEmailField?.focus();
 		else pwPasswordField?.focus();
-	}
-
-	async function backToPasskey(): Promise<void> {
-		step = 'passkey';
-		pwError = null;
-		pwPassword = '';
-		pwShow = false;
-		await tick();
-		document.getElementById('passkey-start')?.focus();
-	}
-
-	/** A shape check, not a policy: the gateway is the one that decides. */
-	function looksLikeEmail(value: string): boolean {
-		return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 	}
 
 	async function passwordSignIn(event: SubmitEvent): Promise<void> {
@@ -280,9 +423,9 @@
 				if (error.kind === 'disabled') {
 					passwordAvailable = 'off';
 					passwordRefused = error.message;
-					step = 'passkey';
+					step = 'doors';
 					await tick();
-					document.getElementById('passkey-start')?.focus();
+					document.getElementById('door-first')?.focus();
 					return;
 				}
 				pwError = error.message;
@@ -296,6 +439,8 @@
 			pwBusy = false;
 		}
 	}
+
+	/* --------------------------------------------------------------- session */
 
 	onMount(() => {
 		void (async () => {
@@ -318,8 +463,27 @@
 				// Not an account session either: offer the doors below.
 			}
 			await resolveGate();
+			await honourStepRequest();
 		})();
 	});
+
+	/**
+	 * A link can hand this page a step: `/magic` sends `?step=code` once a token
+	 * is spent and the account still owes an authenticator code, and the
+	 * "ask for a new link" action sends `?door=magic`.
+	 */
+	async function honourStepRequest(): Promise<void> {
+		if (gate.kind !== 'new') return;
+		const wanted = page.url.searchParams.get('step') ?? page.url.searchParams.get('door');
+		if (wanted === 'code') {
+			firstFactor = 'magic-link';
+			await beginSecondFactorStep();
+			return;
+		}
+		if (wanted === 'magic' && doors.includes('magic')) {
+			await openMagicStep(page.url.searchParams.get('restart') === '1');
+		}
+	}
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -368,7 +532,7 @@
 				await signOutAccount();
 				gate = { kind: 'legacy' };
 				error = `This deployment still signs in with the admin token. The ${
-					firstFactor === 'password' ? 'password' : 'passkey'
+					firstFactor === 'password' ? 'password' : firstFactor === 'magic-link' ? 'link' : 'passkey'
 				} worked, but the console does not accept it yet; use the token below.`;
 				await focusArrival();
 				return false;
@@ -383,26 +547,31 @@
 		passkeyBusy = true;
 		passkeyError = null;
 		error = null;
+		firstFactor = 'passkey';
 		try {
 			const result = await signInWithPasskey();
 			// The Worker withholds the session when the account has an
 			// authenticator; ask anyway, so an older Worker that does not is also
 			// handled the same way.
 			if (result.twoFactorRedirect) {
+				firstFactor = 'passkey';
 				await beginSecondFactorStep();
 				return;
 			}
 			const current = await getAuthSession();
 			if (current === null) {
+				firstFactor = 'passkey';
 				await beginSecondFactorStep();
 				return;
 			}
 			await landAccountSession();
 		} catch (failure) {
-			passkeyError = failure instanceof ApiError ? describeError(failure) : errorCopy(failure);
-			if (failure instanceof ApiError && failure.status === 503) {
-				gate = { kind: 'new-unconfigured' };
+			if (failure instanceof ApiError && failure.status === 404) {
+				passkeyError = 'Passkey sign-in is not available on this deployment yet. Use another door.';
+			} else {
+				passkeyError = failure instanceof ApiError ? describeError(failure) : errorCopy(failure);
 			}
+			if (failure instanceof ApiError && failure.status === 503) secretMissing = true;
 		} finally {
 			passkeyBusy = false;
 		}
@@ -421,13 +590,15 @@
 		useRecovery = false;
 		challengeSpent = false;
 		passkeyError = null;
+		if (firstFactor === 'magic-link') {
+			await openMagicStep(true);
+			return;
+		}
 		if (firstFactor === 'password') {
 			await showPasswordStep();
 			return;
 		}
-		step = 'passkey';
-		await tick();
-		document.getElementById('passkey-start')?.focus();
+		await backToDoors();
 	}
 
 	function errorCopy(failure: unknown): string {
@@ -499,6 +670,18 @@
 		if (!spent) void tick().then(() => codeInput?.focus());
 	}
 
+	/* --------------------------------------------------------------- invite */
+
+	async function openInvite(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		const value = inviteCode.trim();
+		if (value === '') {
+			inviteField?.focus();
+			return;
+		}
+		await goto(`${ROUTES.invite}?code=${encodeURIComponent(value)}`);
+	}
+
 	function availableSupport(): string | null {
 		const support = passkeySupport();
 		if (support === 'yes') return null;
@@ -508,6 +691,8 @@
 	}
 
 	const supportNote = $derived(availableSupport());
+	/** The passkey door is only drawn when this browser can actually run it. */
+	const shownDoors = $derived(doors.filter((door) => door !== 'passkey' || supportNote === null));
 </script>
 
 <svelte:head>
@@ -528,35 +713,6 @@
 					<div class="login-wait" aria-busy="true" aria-live="polite">
 						<Spinner /> <span class="mono">reading the deployment</span>
 					</div>
-				{:else if gate.kind === 'new-unconfigured'}
-					<p class="eyebrow">Operator access</p>
-					<h1>This deployment has no auth secret yet</h1>
-					<p class="login-lede">
-						Account sign-in cannot start until the Worker has a secret to sign sessions with.
-						Set it, then reload this page.
-					</p>
-					<div class="command">
-						<code>wrangler secret put BETTER_AUTH_SECRET</code>
-						<CopyButton value="wrangler secret put BETTER_AUTH_SECRET" iconOnly label="Copy command" />
-					</div>
-					<p class="hint">
-						<code>dakflare</code> will set this for you in a later release. Until then the command
-						above is the only way; a value of 32 random bytes is enough.
-					</p>
-					<button
-						type="button"
-						class="btn btn-primary btn-wide login-submit"
-						onclick={() => void resolveGate()}
-					>
-						<Icon name="refresh" size={14} /> Check again
-					</button>
-					<p class="login-note">
-						<span class="note-icon"><Icon name="key" size={13} /></span>
-						<span>
-							The admin token still works on this deployment until it switches. Sign in with
-							<code>ADMIN_TOKEN</code> if you need the console now.
-						</span>
-					</p>
 				{:else if gate.kind === 'unreachable' || gate.kind === 'failed'}
 					<p class="eyebrow">Operator access</p>
 					<h1>{gate.kind === 'unreachable' ? 'The gateway is not answering' : 'Sign-in could not be checked'}</h1>
@@ -581,20 +737,30 @@
 						<h1>Enter your {useRecovery ? 'recovery code' : 'authenticator code'}</h1>
 						<p class="login-lede">
 							{#if challengeSpent}
-								This sign-in challenge was used up. Start again with
-								{firstFactor === 'password' ? 'the password' : 'the passkey'} to get a fresh one.
+								This sign-in challenge was used up.
+								{firstFactor === 'magic-link'
+									? 'Ask for a new link to start again.'
+									: `Start again with ${firstFactor === 'password' ? 'the password' : 'the passkey'} to get a fresh one.`}
 							{:else if useRecovery}
 								One of the single-use codes saved when the authenticator was set up. Each one works
 								once and cannot be reused.
 							{:else}
-								{firstFactor === 'password' ? 'The password was accepted.' : 'The passkey was accepted.'}
+								{firstFactor === 'password'
+									? 'The password was accepted.'
+									: firstFactor === 'magic-link'
+										? 'The link was accepted.'
+										: 'The passkey was accepted.'}
 								One code from the authenticator app on this account finishes the sign-in.
 							{/if}
 						</p>
 
 						<p class="step-done">
 							<span class="step-tick" aria-hidden="true"><Icon name="check" size={12} /></span>
-							{firstFactor === 'password' ? 'Password accepted' : 'Passkey accepted'}
+							{firstFactor === 'password'
+								? 'Password accepted'
+								: firstFactor === 'magic-link'
+									? 'Link accepted'
+									: 'Passkey accepted'}
 						</p>
 
 						{#if challengeSpent}
@@ -608,6 +774,8 @@
 							>
 								{#if firstFactor === 'password'}
 									<Icon name="key" size={15} /> Start again with the password
+								{:else if firstFactor === 'magic-link'}
+									<Icon name="mail" size={15} /> Ask for a new link
 								{:else}
 									<Icon name="fingerprint" size={15} /> Start again with the passkey
 								{/if}
@@ -681,11 +849,13 @@
 							</p>
 						{/if}
 					{:else if step === 'password'}
-						<p class="eyebrow">Operator access</p>
+						<p class="eyebrow">Password</p>
 						<h1>Sign in with a password</h1>
 						<p class="login-lede">
-							The address and password on this account. This browser runs the key derivation
-							first; the password itself is not sent.
+							The address and password on this account.
+							{mode?.password_mode === 'server-kdf'
+								? 'The gateway runs the key derivation.'
+								: 'This browser runs the key derivation first; the password itself is not sent.'}
 						</p>
 
 						<form onsubmit={passwordSignIn} novalidate>
@@ -759,10 +929,12 @@
 							<button
 								type="button"
 								class="link-btn login-alternate"
-								onclick={() => void backToPasskey()}
+								onclick={() => void backToDoors()}
 								disabled={pwBusy}
 							>
-								Use a passkey instead
+								{doors.includes('passkey') && supportNote === null
+									? 'Use a passkey instead'
+									: 'Back to sign-in'}
 							</button>
 						</form>
 
@@ -773,86 +945,275 @@
 								Only an HttpOnly, SameSite=Strict session cookie is kept.
 							</span>
 						</p>
+					{:else if step === 'magic'}
+						<p class="eyebrow">Email link</p>
+						{#if mlSentTo}
+							<h1>Check your email</h1>
+							<p class="login-lede">
+								If that address has an account, a link is on its way.
+							</p>
+							<p class="sent-to">
+								<span class="mono">{mlSentTo}</span>
+							</p>
+							<p class="hint sent-hint">
+								It works once and expires in {MAGIC_LINK_MINUTES} minutes. Opening it does not
+								sign you in — the button in the email does, so a link checker cannot spend it.
+							</p>
+
+							{#if mlError}
+								<div class="login-error"><Notice tone="danger">{mlError}</Notice></div>
+							{/if}
+
+							<button
+								type="button"
+								class="btn btn-wide login-submit"
+								onclick={() => void useAnotherAddress()}
+							>
+								<Icon name="refresh" size={14} /> Use a different address
+							</button>
+							{#if doors.includes('passkey') && supportNote === null}
+								<button
+									type="button"
+									class="link-btn login-alternate"
+									onclick={() => void passkeySignIn()}
+									disabled={passkeyBusy}
+								>
+									{passkeyBusy ? 'Waiting for the passkey' : 'Use a passkey instead'}
+								</button>
+							{/if}
+							{#if passkeyError}
+								<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
+							{/if}
+						{:else}
+							<h1>Email me a sign-in link</h1>
+							<p class="login-lede">
+								A one-use link to the address on the account. It expires in {MAGIC_LINK_MINUTES}
+								minutes.
+							</p>
+
+							{#if mlRestart}
+								<Notice tone="info" title="That link was already used">
+									Ask for a new one and it will arrive in a moment.
+								</Notice>
+							{/if}
+
+							<form onsubmit={submitMagic} novalidate>
+								<div class="field">
+									<label class="label" for="ml-email">Email</label>
+									<input
+										bind:this={mlField}
+										bind:value={mlEmail}
+										id="ml-email"
+										name="email"
+										class="input"
+										type="email"
+										autocomplete="email"
+										autocapitalize="none"
+										autocorrect="off"
+										spellcheck="false"
+										placeholder="you@example.com"
+										disabled={mlBusy}
+										aria-invalid={mlError ? 'true' : undefined}
+										aria-describedby="ml-email-hint"
+									/>
+									<p id="ml-email-hint" class="hint">The address this account was invited with.</p>
+								</div>
+
+								{#if mlError}
+									<div class="login-error"><Notice tone="danger">{mlError}</Notice></div>
+								{/if}
+
+								<button
+									type="submit"
+									class="btn btn-primary btn-wide login-submit"
+									disabled={mlBusy}
+									aria-busy={mlBusy}
+								>
+									{#if mlBusy}<Spinner />{:else}<Icon name="mail" size={15} />{/if}
+									{mlBusy ? 'Sending' : 'Send the link'}
+								</button>
+							</form>
+
+							{#if doors.includes('passkey') && supportNote === null}
+								<button
+									type="button"
+									class="link-btn login-alternate"
+									onclick={() => void passkeySignIn()}
+									disabled={passkeyBusy}
+								>
+									{passkeyBusy ? 'Waiting for the passkey' : 'Use a passkey instead'}
+								</button>
+							{:else}
+								<button
+									type="button"
+									class="link-btn login-alternate"
+									onclick={() => void backToDoors()}
+								>
+									Back to sign-in
+								</button>
+							{/if}
+
+							{#if passkeyError}
+								<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
+							{/if}
+
+							<p class="login-note">
+								<span class="note-icon"><Icon name="shield" size={13} /></span>
+								<span>
+									The answer is the same whether or not the address has an account, and only an
+									HttpOnly, SameSite=Strict session cookie is kept.
+								</span>
+							</p>
+						{/if}
+					{:else if mode !== null && !mode.auth_configured}
+						<p class="eyebrow">Operator access</p>
+						<h1>This deployment has no auth secret yet</h1>
+						<p class="login-lede">
+							Account sign-in cannot start until the Worker has a secret to sign sessions with.
+							Set it, then reload this page.
+						</p>
+						<div class="command">
+							<code>wrangler secret put BETTER_AUTH_SECRET</code>
+							<CopyButton
+								value="wrangler secret put BETTER_AUTH_SECRET"
+								iconOnly
+								label="Copy command"
+							/>
+						</div>
+						<p class="hint">
+							<code>dakflare</code> will set this for you in a later release. Until then the command
+							above is the only way; a value of 32 random bytes is enough.
+						</p>
+						<button
+							type="button"
+							class="btn btn-primary btn-wide login-submit"
+							onclick={() => void resolveGate()}
+						>
+							<Icon name="refresh" size={14} /> Check again
+						</button>
+						<p class="login-note">
+							<span class="note-icon"><Icon name="key" size={13} /></span>
+							<span>
+								An invite is still how the first account is made, and it needs that secret
+								first.
+							</span>
+						</p>
 					{:else}
 						<p class="eyebrow">Operator access</p>
 						<h1>Sign in to the console</h1>
 						<p class="login-lede">
-							This deployment signs in with a passkey. The key stays on this device.
+							{#if shownDoors.length > 0}
+								This deployment signs people in with an account. Use whatever you have.
+							{:else}
+								This deployment signs people in with a passkey, and this browser cannot use one.
+								An invite is the way in.
+							{/if}
 						</p>
 
-						{#if supportNote}
-							<Notice tone="warn" title="This browser cannot use passkeys">{supportNote}</Notice>
-							<a class="btn btn-primary btn-wide login-submit" href={ROUTES.invite}>
-								<Icon name="key" size={14} /> Use an invite
-							</a>
-						{:else}
-							<button
-								id="passkey-start"
-								type="button"
-								class="btn btn-primary btn-wide login-submit"
-								onclick={() => void passkeySignIn()}
-								disabled={passkeyBusy}
-								aria-busy={passkeyBusy}
-							>
-								{#if passkeyBusy}<Spinner />{:else}<Icon name="fingerprint" size={16} />{/if}
-								{passkeyBusy ? 'Waiting for the passkey' : 'Sign in with a passkey'}
-							</button>
+						{#if secretMissing}
+							<div class="doors-note">
+								<Notice tone="warn" title="No auth secret on this deployment">
+									The Worker cannot sign a session until <code>BETTER_AUTH_SECRET</code> is set.
+								</Notice>
+							</div>
+						{/if}
+
+						{#if supportNote && doors.includes('passkey')}
+							<div class="doors-note">
+								<Notice tone="warn" title="This browser cannot use passkeys">{supportNote}</Notice>
+							</div>
+						{/if}
+
+						{#if shownDoors.length > 0}
+							<div class="doors">
+								{#each shownDoors as door, index (door)}
+									<button
+										type="button"
+										id={index === 0 ? 'door-first' : undefined}
+										class="door"
+										onclick={() => void openDoor(door)}
+										disabled={passkeyBusy || passwordCheck === 'checking'}
+										aria-busy={door === 'passkey' ? passkeyBusy : passwordCheck === 'checking'}
+									>
+										<span class="door-tile" aria-hidden="true">
+											{#if door === 'passkey' && passkeyBusy}
+												<Spinner />
+											{:else if door === 'password' && passwordCheck === 'checking'}
+												<Spinner />
+											{:else}
+												<Icon name={doorIcon(door)} size={17} />
+											{/if}
+										</span>
+										<span class="door-copy">
+											<span class="door-title">
+												{doorTitle(door)}
+												{#if door === 'passkey'}<span class="door-tag">Recommended</span>{/if}
+											</span>
+											<span class="door-sub">
+												{#if door === 'passkey' && passkeyBusy}
+													Waiting for the passkey
+												{:else if door === 'password' && passwordCheck === 'checking'}
+													Checking this deployment
+												{:else}
+													{doorSubtitle(door)}
+												{/if}
+											</span>
+										</span>
+										<span class="door-go" aria-hidden="true"><Icon name="arrow-up-right" size={14} /></span>
+									</button>
+								{/each}
+							</div>
 						{/if}
 
 						{#if passkeyError}
 							<div class="login-error"><Notice tone="danger">{passkeyError}</Notice></div>
 						{/if}
-
-						<!--
-							The password factor, offered under the passkey rather than beside it:
-							the passkey is the first factor, and this is the fallback for an
-							account that has one. A deployment whose mode is `off` (or whose
-							pepper is missing) never renders this.
-						-->
-						{#if passwordAvailable !== 'off'}
-							<div class="login-alt">
-								<span class="login-alt-rule" aria-hidden="true"></span>
-								<button
-									type="button"
-									class="btn btn-wide"
-									onclick={() => void openPasswordDoor()}
-									disabled={passwordCheck === 'checking' || passkeyBusy}
-									aria-busy={passwordCheck === 'checking'}
-								>
-									{#if passwordCheck === 'checking'}
-										<Spinner />
-									{:else}
-										<Icon name="key" size={15} />
-									{/if}
-									{passwordCheck === 'checking'
-										? 'Checking this deployment'
-										: 'Use a password instead'}
-								</button>
-							</div>
-						{/if}
-
 						{#if passwordRefused}
 							<div class="login-error"><Notice tone="info">{passwordRefused}</Notice></div>
 						{/if}
 
-						<p class="login-note">
-							<span class="note-icon"><Icon name="shield" size={13} /></span>
-							<span>
-								The passkey never leaves the device. Only an HttpOnly, SameSite=Strict session
-								cookie is kept.
-							</span>
-						</p>
+						<form class="invite" onsubmit={openInvite} novalidate>
+							<label class="label" for="invite-code">Have an invite?</label>
+							<div class="input-row">
+								<input
+									bind:this={inviteField}
+									bind:value={inviteCode}
+									id="invite-code"
+									class="input input-mono"
+									autocomplete="off"
+									autocapitalize="none"
+									autocorrect="off"
+									spellcheck="false"
+									placeholder="dki_… or the link"
+									aria-describedby="invite-code-hint"
+								/>
+								<button
+									type="submit"
+									class="btn btn-sm invite-go"
+									disabled={inviteCode.trim() === ''}
+								>
+									Open
+								</button>
+							</div>
+							<p id="invite-code-hint" class="hint">
+								The code, or the whole link the owner sent. An invite is the only way a new
+								account is made.
+							</p>
+						</form>
 
 						<details class="login-more">
 							<summary>Trouble signing in?</summary>
 							<div class="login-more-body">
 								<p>
-									{#if passwordAvailable === 'off'}
+									{#if !doors.includes('magic') && !doors.includes('password')}
 										A passkey is the only way into an account on this deployment. If the device
 										holding it is gone, an owner has to help: there is no password to reset.
+									{:else if !doors.includes('password')}
+										No password is set up on this deployment, so a lost device is recovered with
+										an email link, or with an owner's help.
 									{:else}
-										A passkey is the first way in. If the device holding it is gone, an account with
-										a password can use that instead; one without it needs an owner to help.
+										Any of these doors reaches the same account. A lost device is recovered with an
+										email link or a password, whichever this account has.
 									{/if}
 								</p>
 								<p>
@@ -860,14 +1221,19 @@
 									authenticator code, and a saved recovery code is accepted there instead.
 								</p>
 								<p>
-									Invited but never signed in? Open the invite link the owner sent. It becomes an
-									account and asks for a passkey in the same step.
+									Invited but never signed in? Paste the invite code above, or open the link the
+									owner sent. It becomes an account and asks for a passkey in the same step.
 								</p>
-								<a class="btn btn-sm" href={ROUTES.invite}>
-									<Icon name="key" size={13} /> Open an invite
-								</a>
 							</div>
 						</details>
+
+						<p class="login-note">
+							<span class="note-icon"><Icon name="shield" size={13} /></span>
+							<span>
+								Only an HttpOnly, SameSite=Strict session cookie is kept. Nothing about the account
+								is shown until you are through a door.
+							</span>
+						</p>
 					{/if}
 				{:else}
 					<p class="eyebrow">Operator access</p>
@@ -938,36 +1304,38 @@
 						</span>
 					</p>
 
-					{#if gate.kind === 'unknown'}
+					{#if gate.kind === 'fallback'}
 						<p class="login-switch">
-							Account sign-in arrives when this deployment switches. Until then the admin token
-							is the way in.
+							This deployment did not say how it signs people in, so the admin token is shown
+							first.
 						</p>
-						{#if gate.authLive && !supportNote}
+						{#if gate.authLive}
 							<div class="login-alt">
 								<span class="login-alt-rule" aria-hidden="true"></span>
 								<button
 									type="button"
 									class="btn btn-wide"
 									onclick={() => {
-										gate = { kind: 'new' };
-										void tick().then(() => document.getElementById('passkey-start')?.focus());
+										gate = {
+											kind: 'new',
+											doors: passwordAvailable === 'off' ? ['passkey'] : ['passkey', 'password']
+										};
+										void tick().then(() => document.getElementById('door-first')?.focus());
 									}}
 								>
 									<Icon name="fingerprint" size={15} /> Sign in with a passkey
 								</button>
 								<!--
 									The same door as on the passkey screen. This is the screen a real
-									deployment lands on — health is admin-gated, so the mode is usually
-									unreadable before sign-in — and an account whose only way in is a
-									password must not have to press "passkey" to find it.
+									deployment lands on when the mode probe fails, and an account whose
+									only way in is a password must not have to press "passkey" to find it.
 								-->
 								{#if passwordAvailable !== 'off'}
 									<button
 										type="button"
 										class="btn btn-wide"
 										onclick={() => {
-											gate = { kind: 'new' };
+											gate = { kind: 'new', doors: ['passkey', 'password'] };
 											void tick().then(() => openPasswordDoor());
 										}}
 									>
@@ -979,7 +1347,7 @@
 								</p>
 							</div>
 						{/if}
-					{:else if gate.kind === 'legacy'}
+					{:else}
 						<p class="login-switch">
 							Account sign-in arrives when this deployment switches. Until then the admin token
 							is the way in.
@@ -1166,10 +1534,6 @@
 		margin-top: var(--s-4);
 	}
 
-	.login-submit + .login-error {
-		margin-top: var(--s-3);
-	}
-
 	.login-alternate {
 		display: block;
 		margin: var(--s-3) auto 0;
@@ -1206,6 +1570,152 @@
 		font-size: var(--text-md);
 	}
 
+	/* ------------------------------------------------------------------ doors */
+
+	/* Each door is one row: a tile that names the factor, a title and one line of
+	   what it costs the person. Rows, not a grid of tiles — three doors of unequal
+	   weight should read top to bottom, and the invite sits under all of them. */
+	.doors {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.door {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		min-height: 58px;
+		padding: 10px 12px;
+		background: var(--surface);
+		border: 1px solid var(--line);
+		border-radius: var(--r);
+		color: var(--ink);
+		text-align: left;
+		transition:
+			background-color 140ms ease,
+			border-color 140ms ease,
+			transform var(--df-p-dur-press) ease-out;
+	}
+
+	.door:hover {
+		background: var(--surface-2);
+		border-color: var(--line-strong);
+	}
+
+	.door:active {
+		transform: scale(0.985);
+	}
+
+	.door:disabled {
+		cursor: progress;
+		opacity: 0.7;
+	}
+
+	.door-tile {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: none;
+		width: 34px;
+		height: 34px;
+		border-radius: var(--r-sm);
+		background: var(--accent-soft);
+		color: var(--accent);
+	}
+
+	.door-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.door-title {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: var(--text-base);
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		line-height: 1.3;
+	}
+
+	.door-tag {
+		padding: 1px 4px;
+		border: 1px solid var(--line);
+		border-radius: 3px;
+		color: var(--ink-3);
+		font-family: var(--font-mono);
+		font-size: 9px;
+		font-weight: 500;
+		letter-spacing: 0.09em;
+		text-transform: uppercase;
+	}
+
+	.door-sub {
+		color: var(--ink-3);
+		font-size: 11.5px;
+		line-height: 1.4;
+	}
+
+	.door-go {
+		flex: none;
+		color: var(--ink-3);
+		opacity: 0;
+		transform: translateX(-2px);
+		transition:
+			opacity 140ms ease,
+			transform 140ms ease;
+	}
+
+	.door:hover .door-go,
+	.door:focus-visible .door-go {
+		opacity: 1;
+		transform: translateX(0);
+	}
+
+	.doors-note {
+		margin-bottom: var(--s-4);
+	}
+
+	/* The invite is a field, not a fourth button: a code is something to paste,
+	   and the redeem page already owns the conversation that follows. */
+	.invite {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-top: var(--s-5);
+		padding-top: var(--s-4);
+		border-top: 1px solid var(--line);
+	}
+
+	.invite .input-row .btn {
+		flex: none;
+		min-height: 34px;
+		align-self: stretch;
+	}
+
+	/* ------------------------------------------------------------------ magic */
+
+	.sent-to {
+		margin-top: calc(var(--s-3) * -1);
+		margin-bottom: var(--s-3);
+		padding: 8px 10px;
+		background: var(--df-surface-well);
+		border: 1px solid var(--line);
+		border-radius: var(--r-sm);
+		font-size: 12.5px;
+		color: var(--ink);
+		overflow-wrap: anywhere;
+	}
+
+	.sent-hint {
+		margin-bottom: var(--s-2);
+	}
+
 	@media (max-width: 720px) {
 		/* A code is typed with a thumb and the submit finishes the whole
 		   sign-in: both get the 48dp target on a phone. The password fields and
@@ -1215,6 +1725,14 @@
 		.login-body form .input,
 		.login-alt .btn,
 		.login-alternate {
+			min-height: 48px;
+		}
+
+		.door {
+			min-height: 64px;
+		}
+
+		.invite .input-row .btn {
 			min-height: 48px;
 		}
 	}
@@ -1261,10 +1779,6 @@
 		line-height: 1.55;
 	}
 
-	.login-more-body .btn {
-		margin-top: 2px;
-	}
-
 	@media (max-width: 720px) {
 		.login-more summary {
 			min-height: 44px;
@@ -1276,6 +1790,21 @@
 		.command code {
 			white-space: normal;
 			overflow-wrap: anywhere;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.door,
+		.door-go {
+			transition: none;
+		}
+
+		.door:active {
+			transform: none;
+		}
+
+		.door-go {
+			transform: none;
 		}
 	}
 </style>
