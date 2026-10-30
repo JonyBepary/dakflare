@@ -17,6 +17,10 @@ base64 = "0.22"
 thiserror = "2"
 dakflare-flow = { path = "../flow" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The device socket. Blocking on purpose: the gateway parks one thread in
+# `awaitCommand`, so an async runtime would only add a second scheduler to
+# reason about. Reuses the rustls+ring pair reqwest already builds for Android.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 sha2 = "0.10"
 
 [dev-dependencies]

@@ -374,14 +374,17 @@ pub async fn inject_inbound(
     })
 }
 
-/// Record each command as an outbound message, then acknowledge it so the
-/// Worker stops redelivering it.
-async fn capture_commands(
+/// Record each command as an outbound message and return the ids to acknowledge.
+///
+/// Split from the acknowledgement so both transports can share one recording
+/// rule: the HTTP poll acks with a second `poll`, and the device socket acks
+/// with its own `{"op":"ack"}` frame. Neither path is allowed to claim the row
+/// was sent.
+pub(crate) async fn record_commands(
     store: &Store,
-    client: &DeviceClient,
     device_id: &str,
     commands: &serde_json::Value,
-) -> Result<Vec<Message>, CarrierError> {
+) -> Result<(Vec<Message>, Vec<String>), CarrierError> {
     let entries = commands.as_array().cloned().unwrap_or_default();
     let mut captured = Vec::new();
     let mut ack_ids: Vec<String> = Vec::new();
@@ -418,6 +421,19 @@ async fn capture_commands(
         ack_ids.push(command_id);
         captured.push(message);
     }
+
+    Ok((captured, ack_ids))
+}
+
+/// Record each command as an outbound message, then acknowledge it so the
+/// Worker stops redelivering it.
+async fn capture_commands(
+    store: &Store,
+    client: &DeviceClient,
+    device_id: &str,
+    commands: &serde_json::Value,
+) -> Result<Vec<Message>, CarrierError> {
+    let (captured, ack_ids) = record_commands(store, device_id, commands).await?;
 
     if !ack_ids.is_empty() {
         client.poll(&ack_ids).await?;
