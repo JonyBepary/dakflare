@@ -23,3 +23,9 @@ export {
   handlePasswordSignIn,
   handleRotatePepper,
 } from "./password-routes";
+export {
+  handleTotpDisable,
+  handleTotpEnable,
+  handleTotpRegenerate,
+  handleTotpStatus,
+} from "./totp-routes";

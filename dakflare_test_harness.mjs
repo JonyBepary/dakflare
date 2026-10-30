@@ -124,6 +124,234 @@ function totpNow(secretBase32) {
   return String(binary % 1_000_000).padStart(6, '0');
 }
 
+/* ────────────── a software WebAuthn authenticator (passkey step-up) ─────────
+ *
+ * The TOTP enable route re-authenticates with a passkey assertion, and this
+ * harness has no browser. It therefore plays the authenticator: ES256, "none"
+ * attestation, a counter, and a 50-line CBOR encoder for the two structures
+ * WebAuthn needs. Everything that decides whether the assertion is valid — the
+ * challenge, rpId, origin, public key, counter — comes from the Worker; this is
+ * a real ceremony, not a bypass.
+ */
+
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest();
+
+function cborHead(major, n) {
+  if (n < 24) return Buffer.from([(major << 5) | n]);
+  if (n < 0x100) return Buffer.from([(major << 5) | 24, n]);
+  if (n < 0x10000) return Buffer.from([(major << 5) | 25, n >> 8, n & 0xff]);
+  return Buffer.from([
+    (major << 5) | 26,
+    (n >>> 24) & 0xff,
+    (n >>> 16) & 0xff,
+    (n >>> 8) & 0xff,
+    n & 0xff,
+  ]);
+}
+
+/** Definite-length CBOR: ints, text, bytes, arrays, Maps and plain objects. */
+function cbor(value) {
+  if (typeof value === 'number') {
+    return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
+  }
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([cborHead(3, bytes.length), bytes]);
+  }
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    const bytes = Buffer.from(value);
+    return Buffer.concat([cborHead(2, bytes.length), bytes]);
+  }
+  if (Array.isArray(value)) {
+    return Buffer.concat([cborHead(4, value.length), ...value.map(cbor)]);
+  }
+  if (value instanceof Map) {
+    const parts = [cborHead(5, value.size)];
+    for (const [key, entry] of value) parts.push(cbor(key), cbor(entry));
+    return Buffer.concat(parts);
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value);
+    const parts = [cborHead(5, entries.length)];
+    for (const [key, entry] of entries) parts.push(cbor(key), cbor(entry));
+    return Buffer.concat(parts);
+  }
+  throw new Error(`cbor: unsupported value ${String(value)}`);
+}
+
+function cookieJar(cookie) {
+  const jar = new Map();
+  for (const part of String(cookie ?? '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) jar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+  }
+  return jar;
+}
+
+function jarString(jar) {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function absorbCookies(jar, setCookies) {
+  for (const raw of setCookies ?? []) {
+    const pair = raw.split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq);
+    const value = pair.slice(eq + 1);
+    if (value === '') jar.delete(name);
+    else jar.set(name, value);
+  }
+}
+
+/** One call to Better Auth's mount, carrying and absorbing the cookie jar. */
+async function authCall(method, pathname, body, jar) {
+  const headers = { Accept: 'application/json', Origin: WORKER_URL };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (jar && jar.size > 0) headers.Cookie = jarString(jar);
+  const res = await fetch(WORKER_URL + pathname, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  return { status: res.status, data: await res.json().catch(() => null), cookies };
+}
+
+/** Enrol a real ES256 passkey for `sessionCookie` (one registration ceremony). */
+async function createPasskey(sessionCookie) {
+  const jar = cookieJar(sessionCookie);
+  const options = await authCall('GET', '/api/auth/passkey/generate-register-options', undefined, jar);
+  absorbCookies(jar, options.cookies);
+  if (options.status !== 200) return { status: options.status, data: options.data, jar };
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const credentialId = crypto.randomBytes(16);
+  const clientDataJSON = Buffer.from(
+    JSON.stringify({
+      type: 'webauthn.create',
+      challenge: options.data.challenge,
+      origin: WORKER_URL,
+      crossOrigin: false,
+    }),
+    'utf8'
+  );
+  const coseKey = new Map([
+    [1, 2],
+    [3, -7],
+    [-1, 1],
+    [-2, Buffer.from(jwk.x, 'base64url')],
+    [-3, Buffer.from(jwk.y, 'base64url')],
+  ]);
+  const authData = Buffer.concat([
+    sha256(Buffer.from(options.data.rp.id, 'utf8')),
+    Buffer.from([0x41]), // user present + attested credential data
+    Buffer.from([0, 0, 0, 0]), // sign counter
+    Buffer.alloc(16), // aaguid
+    Buffer.from([(credentialId.length >> 8) & 0xff, credentialId.length & 0xff]),
+    credentialId,
+    cbor(coseKey),
+  ]);
+  const attestationObject = cbor(
+    new Map([
+      ['fmt', 'none'],
+      ['attStmt', new Map()],
+      ['authData', authData],
+    ])
+  );
+
+  const verified = await authCall(
+    'POST',
+    '/api/auth/passkey/verify-registration',
+    {
+      response: {
+        id: credentialId.toString('base64url'),
+        rawId: credentialId.toString('base64url'),
+        type: 'public-key',
+        response: {
+          clientDataJSON: clientDataJSON.toString('base64url'),
+          attestationObject: attestationObject.toString('base64url'),
+        },
+        clientExtensionResults: {},
+      },
+      name: 'harness step-up',
+    },
+    jar
+  );
+  absorbCookies(jar, verified.cookies);
+  return {
+    status: verified.status,
+    data: verified.data,
+    jar,
+    privateKey,
+    credentialId,
+    rpId: options.data.rp.id,
+    counter: 0,
+  };
+}
+
+/**
+ * Assert `passkey` and return the cookie jar of the session it created. The
+ * Worker mints the step-up grant on this response; both cookies travel together
+ * to `/v1/auth/totp/enable`.
+ */
+async function assertPasskey(passkey) {
+  const jar = new Map(passkey.jar);
+  const options = await authCall('GET', '/api/auth/passkey/generate-authenticate-options', undefined, jar);
+  absorbCookies(jar, options.cookies);
+  if (options.status !== 200) return { status: options.status, data: options.data, jar };
+
+  const clientDataJSON = Buffer.from(
+    JSON.stringify({
+      type: 'webauthn.get',
+      challenge: options.data.challenge,
+      origin: WORKER_URL,
+      crossOrigin: false,
+    }),
+    'utf8'
+  );
+  passkey.counter += 1;
+  const counter = passkey.counter;
+  const authData = Buffer.concat([
+    sha256(Buffer.from(options.data.rpId ?? passkey.rpId, 'utf8')),
+    Buffer.from([0x01]), // user present
+    Buffer.from([
+      (counter >>> 24) & 0xff,
+      (counter >>> 16) & 0xff,
+      (counter >>> 8) & 0xff,
+      counter & 0xff,
+    ]),
+  ]);
+  // WebAuthn EC2 signatures are ASN.1 DER; the verifier unwraps r/s itself.
+  const signature = crypto.sign('sha256', Buffer.concat([authData, sha256(clientDataJSON)]), {
+    key: passkey.privateKey,
+  });
+
+  const verified = await authCall(
+    'POST',
+    '/api/auth/passkey/verify-authentication',
+    {
+      response: {
+        id: passkey.credentialId.toString('base64url'),
+        rawId: passkey.credentialId.toString('base64url'),
+        type: 'public-key',
+        response: {
+          clientDataJSON: clientDataJSON.toString('base64url'),
+          authenticatorData: authData.toString('base64url'),
+          signature: signature.toString('base64url'),
+          userHandle: null,
+        },
+        clientExtensionResults: {},
+      },
+    },
+    jar
+  );
+  absorbCookies(jar, verified.cookies);
+  return { status: verified.status, data: verified.data, jar, cookies: verified.cookies };
+}
+
+
 /** A tiny JSON-over-fetch helper scoped to an arbitrary base URL. */
 async function api(base, method, pathname, { body, cookie } = {}) {
   const res = await fetch(base + pathname, {
@@ -2203,9 +2431,11 @@ async function cmdPassword() {
     rep.check('client-derived refuses a plaintext sign-in -> 403', [plaintext.status, plaintext.data?.error], [403, 'password_mode_mismatch']);
   }
 
+  const signInStarted = performance.now();
   const signedIn = await raw('POST', '/v1/auth/sign-in/password', {
     body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
   });
+  const signInMs = performance.now() - signInStarted;
   rep.check('sign-in -> 200', signedIn.status, 200);
   rep.check('sign-in returns the same account', signedIn.data?.user?.email, email);
   const signedCookie = sessionCookieOf(signedIn.cookies);
@@ -2236,21 +2466,66 @@ async function cmdPassword() {
     rep.check('…and with {material} too', withMaterial.status, 200);
   }
 
-  // ---------------------------------------------- TOTP turns sign-in into a challenge
-  // Enrol TOTP through Better Auth's own endpoints (which now see a credential
-  // row and therefore ask for the password), then prove that password sign-in
-  // returns the challenge and NOT a session — the passkey behaviour.
-  const enable = await betterAuth('/api/auth/two-factor/enable', { password }, session);
-  rep.check('TOTP enrolment with the password -> 200', enable.status, 200);
+  // ---------------------------------------------- TOTP changes need re-authentication
+  // This account has a password in BOTH modes — the case the plugin's own
+  // enable/disable/generate-backup-codes endpoints answer with INVALID_PASSWORD.
+  // First prove a password is NOT a proof, then enrol with a passkey assertion.
+  const passkey = await createPasskey(session);
+  rep.check('a passkey is enrolled for the step-up', passkey.status, 200);
+
+  const passwordProof = await raw('POST', '/v1/auth/totp/enable', { cookie: session, body: { password } });
+  rep.check(
+    'enable with a password instead of a passkey -> 400 password_not_accepted',
+    [passwordProof.status, passwordProof.data?.error],
+    [400, 'password_not_accepted']
+  );
+  const noGrant = await raw('POST', '/v1/auth/totp/enable', { cookie: session });
+  rep.check(
+    'enable without a passkey assertion -> 403 reauth_required',
+    [noGrant.status, noGrant.data?.error],
+    [403, 'reauth_required']
+  );
+
+  const stepUp = await assertPasskey(passkey);
+  rep.check('passkey assertion for the step-up -> 200', stepUp.status, 200);
+  const enableStarted = performance.now();
+  const enable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp.jar) });
+  const enableMs = performance.now() - enableStarted;
+  rep.check('enable with a passkey assertion -> 200', enable.status, 200);
+  console.log(
+    `  timing: TOTP enable ${enableMs.toFixed(1)} ms; ` +
+      `password sign-in (${mode}) ${signInMs.toFixed(1)} ms`
+  );
   const totpURI = enable.data?.totpURI;
   const totpSecret = totpURI ? new URL(totpURI).searchParams.get('secret') : null;
   rep.check('enable returns an otpauth URI with a secret', typeof totpSecret, 'string');
-  const verified = await betterAuth('/api/auth/two-factor/verify-totp', { code: totpNow(totpSecret) }, session);
+  rep.check(
+    'enable returns ten recovery codes',
+    Array.isArray(enable.data?.backupCodes) ? enable.data.backupCodes.length : -1,
+    10
+  );
+  const verified = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(totpSecret) },
+    jarString(stepUp.jar)
+  );
   rep.check('the first TOTP code verifies -> 200', verified.status, 200);
   // The plugin rotates the session when it flips twoFactorEnabled on.
-  const totpSession = sessionCookieOf(verified.cookies) ?? session;
-  const currentCode = totpNow(totpSecret);
-  const wrongCode = String((Number(currentCode) + 1) % 1_000_000).padStart(6, '0');
+  let totpCookie = sessionCookieOf(verified.cookies) ?? jarString(stepUp.jar);
+
+  // The recovery-code row must be the plugin's own format, not just a plausible
+  // array: the plugin's verifier reads and consumes one of them here.
+  const backupCode = Array.isArray(enable.data?.backupCodes) ? enable.data.backupCodes[0] : null;
+  const backupVerified = await betterAuth(
+    '/api/auth/two-factor/verify-backup-code',
+    { code: backupCode },
+    totpCookie
+  );
+  rep.check(
+    'a recovery code from the Worker-generated set verifies through the plugin -> 200',
+    backupVerified.status,
+    200
+  );
 
   const challenged = await raw('POST', '/v1/auth/sign-in/password', {
     body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
@@ -2277,11 +2552,72 @@ async function cmdPassword() {
     true
   );
 
-  const delNoCode = await raw('DELETE', '/v1/auth/password', { cookie: totpSession, body: { code: wrongCode } });
+  const wrongCode = String((Number(totpNow(totpSecret)) + 1) % 1_000_000).padStart(6, '0');
+  const disableNoCode = await raw('POST', '/v1/auth/totp/disable', { cookie: totpCookie, body: {} });
+  rep.check('disable without a code -> 401', disableNoCode.status, 401);
+  if (mode === 'client-derived') {
+    const disableWithPassword = await raw('POST', '/v1/auth/totp/disable', {
+      cookie: totpCookie,
+      body: { password },
+    });
+    rep.check(
+      'client-derived: a password does not authorise disable -> 400 password_not_accepted',
+      [disableWithPassword.status, disableWithPassword.data?.error],
+      [400, 'password_not_accepted']
+    );
+  }
+  const disableWrong = await raw('POST', '/v1/auth/totp/disable', {
+    cookie: totpCookie,
+    body: { code: wrongCode },
+  });
+  rep.check('disable with a wrong code -> 401', disableWrong.status, 401);
+  const disable = await raw('POST', '/v1/auth/totp/disable', {
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret) },
+  });
+  rep.check('disable with a current code -> 200', disable.status, 200);
+  const statusOff = await raw('GET', '/v1/auth/totp', { cookie: totpCookie });
+  rep.check(
+    'status after disable says off',
+    [statusOff.data?.enabled, statusOff.data?.verified],
+    [false, false]
+  );
+
+  // Re-enrol so regenerate (and the password-delete code path below) has a live
+  // factor. A second assertion is required: the grant is single-use.
+  const stepUp2 = await assertPasskey(passkey);
+  rep.check('a second passkey assertion -> 200', stepUp2.status, 200);
+  const enable2 = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp2.jar) });
+  rep.check('re-enable with a passkey assertion -> 200', enable2.status, 200);
+  const totpSecret2 = enable2.data?.totpURI
+    ? new URL(enable2.data.totpURI).searchParams.get('secret')
+    : null;
+  const verified2 = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(totpSecret2) },
+    jarString(stepUp2.jar)
+  );
+  rep.check('the re-enrolment code verifies -> 200', verified2.status, 200);
+  totpCookie = sessionCookieOf(verified2.cookies) ?? jarString(stepUp2.jar);
+
+  const regenNoCode = await raw('POST', '/v1/auth/totp/regenerate', { cookie: totpCookie, body: {} });
+  rep.check('regenerate without a code -> 401', regenNoCode.status, 401);
+  const regen = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret2) },
+  });
+  rep.check('regenerate with a current code -> 200', regen.status, 200);
+  rep.check(
+    'regenerate returns ten codes',
+    Array.isArray(regen.data?.backupCodes) ? regen.data.backupCodes.length : -1,
+    10
+  );
+
+  const delNoCode = await raw('DELETE', '/v1/auth/password', { cookie: totpCookie, body: { code: wrongCode } });
   rep.check('delete with a wrong TOTP code -> 401', delNoCode.status, 401);
   const del = await raw('DELETE', '/v1/auth/password', {
-    cookie: totpSession,
-    body: { code: totpNow(totpSecret) },
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret2) },
   });
   rep.check('delete with a fresh TOTP code -> 200', del.status, 200);
 

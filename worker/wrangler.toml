@@ -125,7 +125,9 @@ AUTH_MODE = "legacy"
 # shapes so an account created on free keeps working after an upgrade.
 # Changing this never rewrites stored rows: each row's m= records whether the
 # browser or the Worker derived the material.
-AUTH_PASSWORD_MODE = "off"
+# The KDF runs in the browser: a server-side PBKDF2 measured ~27 ms against the
+# free tier's 10 ms budget. Set to "server-kdf" only on Workers Paid.
+AUTH_PASSWORD_MODE = "client-derived"
 # AUTH_PEPPER is a Worker secret, never a var here:
 #   wrangler secret put AUTH_PEPPER     # v2:<b64-32>,v1:<b64-32>
 # Redirectable so the harness can point FCM at a local stub instead of Google.

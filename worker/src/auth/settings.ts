@@ -29,6 +29,20 @@ import {
 /** Five minutes, per AUTH_PLAN §3: a short signed cookie cache over D1. */
 const COOKIE_CACHE_SECONDS = 5 * 60;
 
+/**
+ * The TOTP parameters, in one place.
+ *
+ * `@better-auth/two-factor` 1.7.14 generates the `otpauth://` URI from these
+ * (`totp/index.mjs`, `createOTP(secret, { digits, period }).url(issuer, email)`)
+ * and verifies codes against them. `totp-routes.ts` performs the enrolment half
+ * of the same work behind a passkey re-assertion, so it must read the SAME
+ * numbers rather than carry its own copy — otherwise the console would show a
+ * URI whose codes the plugin then rejects.
+ */
+export const TOTP_ISSUER = "DakFlare";
+export const TOTP_DIGITS = 6;
+export const TOTP_PERIOD = 30;
+
 /** Seven days. Sensitive actions use `requireRole({ fresh: true })` and hit D1. */
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 
@@ -175,13 +189,19 @@ function buildAuth(env: Env) {
         rpName: "DakFlare",
       }),
       twoFactor({
-        issuer: "DakFlare",
-        // TOTP is optional for every account (AUTH_PLAN §10), so the plugin must
-        // not demand a password to enrol it. `allowPasswordless` does exactly
-        // that: with no credential row the check is satisfied, and when a
-        // password row exists the plugin asks for it before enable/disable —
-        // which is correct once a password is a real factor.
+        issuer: TOTP_ISSUER,
+        // `allowPasswordless` only relaxes the *schema* (password becomes
+        // optional). It does NOT bypass the check: `shouldRequirePassword`
+        // (`better-auth/dist/utils/password.mjs`) still returns true whenever a
+        // credential row exists, and enable/disable/generate-backup-codes then
+        // answer INVALID_PASSWORD without one. That is why the console never
+        // calls those three endpoints for an account with a password: it uses
+        // `totp-routes.ts`, which re-authenticates with a passkey assertion or a
+        // current TOTP code and performs the same writes with the plugin's own
+        // primitives. The plugin stays authoritative for the secret format, the
+        // URI, the verification window, and the `verify-totp` endpoint.
         allowPasswordless: true,
+        totpOptions: { digits: TOTP_DIGITS, period: TOTP_PERIOD },
       }),
     ],
 

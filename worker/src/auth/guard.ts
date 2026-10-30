@@ -25,6 +25,12 @@ export interface AuthUser {
   name: string;
   role: Role;
   twoFactorEnabled: boolean;
+  /**
+   * The Better Auth session row this request resolved. Sensitive routes bind a
+   * re-authentication grant to it (`auth/step-up.ts`), so a grant minted for one
+   * session cannot be spent from another.
+   */
+  sessionId: string;
 }
 
 export type GuardResult =
@@ -101,6 +107,7 @@ export async function requireRole(
       name: String(raw.name ?? ""),
       role,
       twoFactorEnabled: raw.twoFactorEnabled === true || raw.twoFactorEnabled === 1,
+      sessionId: String(session.session?.id ?? ""),
     },
     expiresAt,
   };

@@ -42,6 +42,10 @@ import {
   handlePasswordSet,
   handlePasswordSignIn,
   handleRotatePepper,
+  handleTotpDisable,
+  handleTotpEnable,
+  handleTotpRegenerate,
+  handleTotpStatus,
 } from "./auth";
 import { requestMeta, writeAudit, type AdminActor } from "./audit";
 import { handleRedeemInvite, handleAuthMe } from "./routes/auth";
@@ -400,6 +404,23 @@ export default {
     }
     if (method === "DELETE" && pathname === "/v1/auth/password") {
       return handlePasswordRemove(req, env);
+    }
+
+    // TOTP management that does not need the account password. The plugin's own
+    // enable/disable/generate-backup-codes endpoints are password-gated once a
+    // credential row exists (see `auth/totp-routes.ts`); these do the same work
+    // behind a passkey re-assertion or a current code.
+    if (method === "GET" && pathname === "/v1/auth/totp") {
+      return handleTotpStatus(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/enable") {
+      return handleTotpEnable(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/disable") {
+      return handleTotpDisable(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/regenerate") {
+      return handleTotpRegenerate(req, env);
     }
 
     /* ---- admin -------------------------------------------------------- */

@@ -3,7 +3,7 @@
  *
  * Everything under this prefix is Better Auth's: passkey registration and
  * sign-in, TOTP enrolment, and the error envelopes it defines. We add exactly
- * three things around it:
+ * four things around it:
  *
  *   1. A clear 503 when BETTER_AUTH_SECRET is absent, instead of a library
  *      exception with no operator-facing explanation.
@@ -17,12 +17,17 @@
  *      session without consulting `twoFactorEnabled`. Without this step a
  *      passkey would hand out a session and the account's authenticator would
  *      never be asked — the factor would exist but never be enforced.
+ *   4. A short-lived "passkey asserted in this session" grant on the same
+ *      successful assertion, for accounts that did NOT get a challenge (TOTP is
+ *      off). `totp-routes.ts` spends it to enable an authenticator without a
+ *      password; see `auth/step-up.ts`.
  */
 
 import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
 import { getAuth } from "./settings";
 import { signedCookieHeader } from "./session";
+import { mintStepUpCookie } from "./step-up";
 
 /** `better-auth.two_factor`, from the plugin's TWO_FACTOR_COOKIE_NAME. */
 const TWO_FACTOR_COOKIE = "two_factor";
@@ -154,6 +159,46 @@ async function beginSecondFactor(
   });
 }
 
+/**
+ * Record "a passkey was asserted in this session" for the sensitive TOTP routes.
+ *
+ * The assertion has already created a fresh session by the time we see the
+ * response; the grant names that session, so it authorises an enable only from
+ * the browser that just performed the ceremony. A 2FA-on account never reaches
+ * here (the challenge path above replaces the response), which is correct: it
+ * has a current TOTP code and does not need this grant.
+ */
+async function withStepUpGrant(auth: Auth, env: Env, res: Response): Promise<Response> {
+  interface PasskeySignInBody {
+    user?: { id?: unknown };
+    session?: { id?: unknown };
+  }
+  let payload: PasskeySignInBody | null = null;
+  try {
+    payload = (await res.clone().json()) as PasskeySignInBody;
+  } catch {
+    return res;
+  }
+
+  const userId = payload?.user?.id;
+  const sessionId = payload?.session?.id;
+  if (typeof userId !== "string" || typeof sessionId !== "string") return res;
+
+  const ctx = await auth.$context;
+  const cookie = await mintStepUpCookie(
+    env,
+    { path: "/", secure: ctx.authCookies.sessionToken.attributes.secure === true, httpOnly: true, sameSite: "strict" },
+    userId,
+    sessionId
+  );
+  if (cookie === null) return res;
+
+  const headers = new Headers(res.headers);
+  headers.append("Set-Cookie", cookie);
+  headers.set("Cache-Control", "no-store");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 export async function handleAuthRequest(req: Request, env: Env): Promise<Response> {
   const auth = getAuth(env);
   if (auth === null) {
@@ -168,6 +213,7 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
   if (relative === "/passkey/verify-authentication" && res.ok) {
     const challenged = await beginSecondFactor(auth, env, req, res);
     if (challenged !== null) return challenged;
+    return await withStepUpGrant(auth, env, res);
   }
 
   if (relative.startsWith("/sign-in/")) {

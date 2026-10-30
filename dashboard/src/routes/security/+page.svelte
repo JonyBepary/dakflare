@@ -83,6 +83,7 @@
 	let regenerating = $state(false);
 	let confirmRegenerate = $state(false);
 	let regenerateError = $state<string | null>(null);
+	let regenerateCode = $state('');
 
 	let passkeys = $state<PasskeySummary[] | null>(null);
 	let codeField = $state<HTMLInputElement | null>(null);
@@ -133,7 +134,7 @@
 	const pwOnlyFactor = $derived(passkeys !== null && passkeys.length === 0);
 
 	const unsupported: Record<
-		'missing' | 'no-secret' | 'disabled' | 'password',
+		'missing' | 'no-secret' | 'disabled',
 		{ title: string; body: string; fix: string | null }
 	> = {
 		missing: {
@@ -150,11 +151,6 @@
 			title: 'Authenticator codes are disabled here',
 			body: 'The two-factor plugin is mounted but TOTP is switched off in its options, so the endpoint refused the request.',
 			fix: null
-		},
-		password: {
-			title: 'The gateway asked for the account password',
-			body: 'Changing the authenticator needs the account’s password, and one is set on this account. The authenticator controls on this page do not collect it yet, so they are refused.',
-			fix: 'Remove the password in factor 04, change the authenticator, then set the password again.'
 		}
 	};
 
@@ -458,12 +454,18 @@
 	}
 
 	async function replaceCodes(): Promise<void> {
+		const code = cleanCode(regenerateCode);
+		if (!isWellFormedCode(code, false)) {
+			regenerateError = 'Enter the six digits the authenticator is showing right now.';
+			return;
+		}
 		regenerating = true;
 		regenerateError = null;
 		try {
-			freshCodes = await regenerateRecoveryCodes();
+			freshCodes = await regenerateRecoveryCodes(code);
 			codesHeading = 'Your new recovery codes';
 			confirmRegenerate = false;
+			regenerateCode = '';
 			ended = null;
 			await tick();
 			const reveal = document.getElementById('recovery-codes-title');
@@ -475,6 +477,7 @@
 			});
 		} catch (error) {
 			regenerateError = describeError(error);
+			regenerateCode = '';
 		} finally {
 			regenerating = false;
 		}
@@ -838,7 +841,8 @@
 					</div>
 					<p class="hint">
 						The secret is made by the gateway, shown once, and kept encrypted with the Worker's auth
-						secret.
+						secret. Setting it up asks for your passkey first — a factor change is confirmed by the
+						factor that is already on this account, never by a password.
 					</p>
 				</div>
 			{/if}
@@ -885,6 +889,7 @@
 								class="btn btn-sm"
 								onclick={() => {
 									regenerateError = null;
+									regenerateCode = '';
 									confirmRegenerate = true;
 								}}
 								disabled={regenerating || disabling}
@@ -1217,9 +1222,39 @@
 	oncancel={() => {
 		confirmRegenerate = false;
 		regenerateError = null;
+		regenerateCode = '';
 	}}
 >
-	<p>
+	<div class="field regenerate-proof">
+		<label class="label" for="regenerate-code">Confirm with a current code</label>
+		<input
+			bind:value={regenerateCode}
+			id="regenerate-code"
+			class="input input-mono code-input"
+			inputmode="numeric"
+			autocomplete="one-time-code"
+			pattern="[0-9]*"
+			maxlength="6"
+			placeholder="000000"
+			spellcheck="false"
+			disabled={regenerating}
+			aria-invalid={regenerateError ? 'true' : undefined}
+			oninput={(event) => {
+				regenerateCode = event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6);
+			}}
+			onkeydown={(event) => {
+				if (event.key === 'Enter') {
+					event.preventDefault();
+					void replaceCodes();
+				}
+			}}
+		/>
+		<p class="hint">
+			A current code proves the change, so the password is never asked for while the authenticator is
+			on.
+		</p>
+	</div>
+	<p style="margin-top: 12px">
 		The ten codes you have now stop working the moment the new set is made. The new set is shown
 		once, here, and cannot be read later.
 	</p>
@@ -1419,6 +1454,16 @@
 
 	.field-error-note {
 		margin-top: var(--s-3);
+	}
+
+	/* The proof field inside the regenerate dialog: one short column, not the
+	   dialog's full width. */
+	.regenerate-proof {
+		max-width: 260px;
+	}
+
+	.regenerate-proof .hint {
+		margin-top: 6px;
 	}
 
 	.command {
