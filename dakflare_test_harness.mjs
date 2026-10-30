@@ -1804,6 +1804,31 @@ async function cmdAuth() {
 
   const email = `auth-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
 
+  // 0. Pre-auth mode probe: public, exact keys, configuration only.
+  const modeProbe = await raw('GET', '/v1/auth/mode');
+  rep.check('GET /v1/auth/mode is unauthenticated -> 200', modeProbe.status, 200);
+  rep.check(
+    'mode payload has exactly the documented keys',
+    Object.keys(modeProbe.data ?? {}).sort(),
+    ['auth_configured', 'auth_mode', 'magic_link', 'password_configured', 'password_mode']
+  );
+  rep.check('mode reports the deployed AUTH_MODE', modeProbe.data?.auth_mode, mode);
+  rep.check('auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
+  rep.check('password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
+  rep.check('magic_link is a boolean', typeof modeProbe.data?.magic_link, 'boolean');
+  rep.check(
+    'password_mode is one of the three documented values',
+    ['off', 'client-derived', 'server-kdf'].includes(modeProbe.data?.password_mode),
+    true
+  );
+  if (process.env.AUTH_PASSWORD_MODE) {
+    rep.check(
+      'mode reports the deployed AUTH_PASSWORD_MODE',
+      modeProbe.data?.password_mode,
+      process.env.AUTH_PASSWORD_MODE
+    );
+  }
+
   // 1. No public registration: Better Auth's email sign-up is disabled.
   const signup = await raw('POST', '/api/auth/sign-up/email', {
     body: { email, password: 'not-a-real-password', name: 'probe' },
@@ -1847,14 +1872,105 @@ async function cmdAuth() {
   rep.check('requireRole with a session -> 200', me.status, 200);
   rep.check('session resolves the member role', me.data?.user?.role, 'member');
 
-  // 7. Admin gate differs by mode, and the legacy token path must stay intact.
+  // 7. Role permissions differ by mode. In `new`, a member reads every
+  //    operational surface and is refused every mutation with a sentence; an
+  //    admin does both. The legacy token path must stay intact.
   const memberOnAdmin = await raw('GET', '/v1/admin/health', { cookie: sessionCookie });
   if (mode === 'new') {
-    rep.check('member session on an admin route -> 403 (AUTH_MODE=new)', memberOnAdmin.status, 403);
+    rep.check('member session reads health -> 200 (AUTH_MODE=new)', memberOnAdmin.status, 200);
     const adminNoCred = await fetch(`${WORKER_URL}/v1/admin/health`);
     rep.check('no credential on an admin route -> 401', adminNoCred.status, 401);
     const cli = await admin('GET', '/v1/admin/health');
     rep.check('ADMIN_TOKEN + X-Dakflare-Client: cli still works', cli.status, 200);
+
+    // Reads: everything operational, including the audit log.
+    for (const pathname of [
+      '/v1/devices',
+      '/v1/messages?device_id=dev-none',
+      '/v1/admin/rules',
+      '/v1/admin/audit',
+    ]) {
+      const read = await raw('GET', pathname, { cookie: sessionCookie });
+      rep.check(`member reads ${pathname} -> 200`, read.status, 200);
+    }
+
+    // Writes: refused, with a sentence that names the action.
+    const memberSend = await raw('POST', '/v1/sms/send', {
+      cookie: sessionCookie,
+      body: { device_id: 'dev-none', to: '+15555550100', body: 'hi' },
+    });
+    rep.check('member send SMS -> 403', memberSend.status, 403);
+    rep.check(
+      'member send 403 names the refused action',
+      typeof memberSend.data?.message === 'string' && memberSend.data.message.includes('send SMS'),
+      true
+    );
+
+    const memberRevoke = await raw('DELETE', '/v1/admin/devices/dev-none', { cookie: sessionCookie });
+    rep.check('member revoke device -> 403', memberRevoke.status, 403);
+    rep.check(
+      'member revoke 403 is a sentence naming the action',
+      /cannot revoke devices/.test(memberRevoke.data?.message ?? ''),
+      true
+    );
+
+    const memberInvite = await raw('POST', '/v1/admin/invites', {
+      cookie: sessionCookie,
+      body: { email: `member-cannot-${Date.now()}@example.test`, role: 'member', expires_in_s: 300 },
+    });
+    rep.check('member create invite -> 403', memberInvite.status, 403);
+    rep.check(
+      'member invite 403 is a sentence naming the action',
+      /cannot create invites/.test(memberInvite.data?.message ?? ''),
+      true
+    );
+
+    const memberRule = await raw('POST', '/v1/rules', {
+      cookie: sessionCookie,
+      body: { name: 'member-rule', match: 'contains', value: 'x', reply: 'y' },
+    });
+    rep.check('member save rule -> 403', memberRule.status, 403);
+    rep.check(
+      'member rule 403 is a sentence naming the action',
+      /cannot save rules/.test(memberRule.data?.message ?? ''),
+      true
+    );
+
+    // A member manages their own factors: AUTH_PLAN §6 says the second factor is
+    // optional for every role, which is only true if every role can enrol it.
+    // `self` covers exactly /v1/auth/password and /v1/auth/totp/*.
+    const memberFactor = await raw('POST', '/v1/auth/totp/enable', { cookie: sessionCookie });
+    rep.check(
+      'member may manage their own factor (reauth, not role refusal)',
+      memberFactor.status !== 403 || !/cannot change authentication factors/.test(memberFactor.data?.message ?? ''),
+      true
+    );
+    const memberInviteWrite = await raw('POST', '/v1/admin/invites', {
+      cookie: sessionCookie,
+      body: { email: 'x@example.test', role: 'member', expires_in_s: 600 },
+    });
+    rep.check('member cannot create invites', memberInviteWrite.status, 403);
+
+    // An admin does both.
+    const adminEmail = `auth-admin-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const adminInvite = await admin('POST', '/v1/admin/invites', {
+      email: adminEmail,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    rep.check('admin invite created for the role test', adminInvite.status, 200);
+    const adminRedeem = await raw('POST', '/v1/auth/redeem', { body: { token: adminInvite.data?.token } });
+    rep.check('admin account redeemed', adminRedeem.status, 200);
+    const adminCookie = sessionCookieOf(adminRedeem.cookies);
+    rep.check('admin session cookie present', typeof adminCookie, 'string');
+    const adminRead = await raw('GET', '/v1/admin/health', { cookie: adminCookie });
+    rep.check('admin session reads health -> 200', adminRead.status, 200);
+    const adminWrite = await raw('POST', '/v1/admin/invites', {
+      cookie: adminCookie,
+      body: { email: `admin-wrote-${Date.now()}@example.test`, role: 'member', expires_in_s: 300 },
+    });
+    rep.check('admin session creates an invite -> 200', adminWrite.status, 200);
+    if (adminWrite.data?.id) await admin('DELETE', `/v1/admin/invites/${adminWrite.data.id}`);
   } else {
     rep.check('member cookie alone is not an admin credential -> 401 (legacy)', memberOnAdmin.status, 401);
     const token = await admin('GET', '/v1/admin/health');
@@ -2299,6 +2415,19 @@ async function cmdPassword() {
   console.log(`== password (AUTH_PASSWORD_MODE=${mode}) ==\nworker: ${WORKER_URL}\n`);
   const rep = new Report('password');
 
+  // The pre-auth probe the login page uses must be public and agree with health.
+  const modeProbe = await api(WORKER_URL, 'GET', '/v1/auth/mode');
+  rep.check('GET /v1/auth/mode is unauthenticated -> 200', modeProbe.status, 200);
+  rep.check(
+    'mode payload has exactly the documented keys',
+    Object.keys(modeProbe.data ?? {}).sort(),
+    ['auth_configured', 'auth_mode', 'magic_link', 'password_configured', 'password_mode']
+  );
+  rep.check('mode agrees with health on password_mode', modeProbe.data?.password_mode, mode);
+  rep.check('mode password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
+  rep.check('mode auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
+  rep.check('mode magic_link is a boolean', typeof modeProbe.data?.magic_link, 'boolean');
+
   const email = `pw-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
   const unknown = `pw-nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
   const password = 'correct horse battery staple';
@@ -2358,7 +2487,7 @@ async function cmdPassword() {
   }
 
   // ---------------------------------------------------------------- an account
-  const created = await admin('POST', '/v1/admin/invites', { email, role: 'member', expires_in_s: 300 });
+  const created = await admin('POST', '/v1/admin/invites', { email, role: 'admin', expires_in_s: 300 });
   rep.check('invite created', created.status, 200);
   const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: created.data?.token } });
   rep.check('invite redeemed -> 200', redeemed.status, 200);
@@ -2646,7 +2775,7 @@ async function cmdPassword() {
   const lockIpUnknown = `192.0.2.${((lockIpTag[0] + lockIpTag[1]) % 200) + 10}`;
   const lockInvite = await admin('POST', '/v1/admin/invites', {
     email: lockEmail,
-    role: 'member',
+    role: 'admin',
     expires_in_s: 300,
   });
   rep.check('lockout: invite created', lockInvite.status, 200);
@@ -2961,7 +3090,7 @@ async function cmdPasswordRotate() {
         Authorization: `Bearer ${ADMIN_TOKEN}`,
         'X-Dakflare-Client': 'cli',
       },
-      body: JSON.stringify({ email, role: 'member', expires_in_s: 300 }),
+      body: JSON.stringify({ email, role: 'admin', expires_in_s: 300 }),
     });
     const invite = await inviteRes.json().catch(() => null);
     rep.check('invite created on the v1 ring', inviteRes.status, 200);

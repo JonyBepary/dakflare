@@ -12,8 +12,14 @@
  * the route table in `index.ts` should only mount them.
  */
 
-export { requireRole, forbidden, unauthorized, ROLES } from "./guard";
-export type { AuthUser, GuardResult, RequireRoleOptions, Role } from "./guard";
+export { requireRole, forbidden, forbiddenFor, unauthorized, ROLES } from "./guard";
+export type {
+  AuthUser,
+  GuardResult,
+  Permission,
+  RequireRoleOptions,
+  Role,
+} from "./guard";
 export { handleAuthRequest, startSecondFactorChallenge } from "./handler";
 export { createSessionForUser, issueSessionCookie, sessionCookieHeader } from "./session";
 export {

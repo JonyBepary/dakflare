@@ -144,7 +144,7 @@ function rejectPassword(body: Record<string, unknown>): Response | null {
  * behind a fresh session.
  */
 export async function handleTotpStatus(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "read", { fresh: true });
   if (!guard.ok) return guard.response;
 
   const auth = getAuth(env);
@@ -174,7 +174,10 @@ export async function handleTotpStatus(req: Request, env: Env): Promise<Response
  * abandoned enrolment never turns the factor on.
  */
 export async function handleTotpEnable(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "self", {
+    fresh: true,
+    action: "change authentication factors",
+  });
   if (!guard.ok) return guard.response;
 
   const auth = getAuth(env);
@@ -290,7 +293,10 @@ async function verifyCurrentCode(
  * is enough for the next read to see the new state.
  */
 export async function handleTotpDisable(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "self", {
+    fresh: true,
+    action: "change authentication factors",
+  });
   if (!guard.ok) return guard.response;
 
   const auth = getAuth(env);
@@ -365,7 +371,10 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
  * behaviour the page describes.
  */
 export async function handleTotpRegenerate(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "self", {
+    fresh: true,
+    action: "change authentication factors",
+  });
   if (!guard.ok) return guard.response;
 
   const auth = getAuth(env);

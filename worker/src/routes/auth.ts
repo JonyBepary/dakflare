@@ -17,7 +17,7 @@ import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
-import { authMode, MAX_BODY_BYTES } from "../lib/config";
+import { authMode, MAX_BODY_BYTES, passwordMode } from "../lib/config";
 import { consumeInvite, hashInviteToken } from "../lib/invites";
 
 export async function handleRedeemInvite(req: Request, env: Env): Promise<Response> {
@@ -107,12 +107,46 @@ export async function handleRedeemInvite(req: Request, env: Env): Promise<Respon
 
 /** `GET /v1/auth/me` — who this session is, and which auth mode is live. */
 export async function handleAuthMe(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "read", { fresh: true });
   if (!guard.ok) return guard.response;
   return Response.json({
     ok: true,
     user: guard.user,
     expires_at: guard.expiresAt,
     auth_mode: authMode(env),
+  });
+}
+
+/**
+ * `GET /v1/auth/mode` — the pre-auth probe the login page needs.
+ *
+ * The console cannot read `/v1/admin/health` before it has a session, so it used
+ * to render the token form first and only discover the deployment's auth mode
+ * afterwards. This endpoint answers that question with configuration only:
+ * enums and booleans, never a count, a secret, a device id or anything derived
+ * from an email. It accepts no body and reads no query parameter, so it cannot
+ * be turned into an account oracle.
+ *
+ * Rate-limited with the existing ADMIN_LIMITER, keyed per IP: the response is
+ * cheap and identical for everyone, but an unauthenticated endpoint should still
+ * have a budget rather than invite scripted polling.
+ */
+export async function handleAuthMode(req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `auth-mode:${ip}` });
+    if (!success) return err("rate_limited", 429);
+  }
+
+  return Response.json({
+    auth_mode: authMode(env),
+    auth_configured: Boolean(env.BETTER_AUTH_SECRET),
+    password_mode: passwordMode(env),
+    password_configured:
+      typeof env.AUTH_PEPPER === "string" && env.AUTH_PEPPER.trim() !== "",
+    // Magic links are not mounted in this phase: there is no mail provider
+    // binding, so advertising the factor would send the login page to a route
+    // that cannot deliver a link.
+    magic_link: false,
   });
 }

@@ -34,7 +34,7 @@ import {
   handleRulesListAdmin,
 } from "./routes/admin";
 import { handleAlertAck, handleAlertsList } from "./routes/alerts";
-import { requireRole, type AuthUser } from "./auth";
+import { requireRole, type AuthUser, type Permission } from "./auth";
 import {
   handleAuthRequest,
   handlePasswordRemove,
@@ -48,7 +48,7 @@ import {
   handleTotpStatus,
 } from "./auth";
 import { requestMeta, writeAudit, type AdminActor } from "./audit";
-import { handleRedeemInvite, handleAuthMe } from "./routes/auth";
+import { handleRedeemInvite, handleAuthMe, handleAuthMode } from "./routes/auth";
 import { handleBootstrap } from "./routes/bootstrap";
 import { handleResetUser } from "./routes/reset-user";
 import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
@@ -226,13 +226,15 @@ async function withAdmin(
 async function withAdminAccess(
   req: Request,
   env: Env,
+  permission: Permission,
+  action: string,
   handler: (actor: AdminActor) => Promise<Response>
 ): Promise<Response> {
   if (authMode(env) === "new") {
     if (req.headers.get("X-Dakflare-Client") === "cli") {
       return withAdmin(req, env, () => handler(machineActor()));
     }
-    const guard = await requireRole(req, env, ["owner", "admin"]);
+    const guard = await requireRole(req, env, permission, { action });
     if (!guard.ok) return guard.response;
     return handler(actorFromUser(guard.user));
   }
@@ -390,6 +392,11 @@ export default {
     if (method === "GET" && pathname === "/v1/auth/me") {
       return handleAuthMe(req, env);
     }
+    // Pre-auth configuration probe. Deliberately before any session check: the
+    // login page must be able to choose a factor before it has one.
+    if (method === "GET" && pathname === "/v1/auth/mode") {
+      return handleAuthMode(req, env);
+    }
 
     // Password factor (AUTH_PLAN §2). These are ours, not Better Auth's:
     // `/api/auth/sign-in/email` stays disabled so AUTH_PASSWORD_MODE cannot be
@@ -441,103 +448,146 @@ export default {
     }
 
     if (method === "POST" && pathname === "/v1/admin/invites") {
-      return withAdminAccess(req, env, (actor) => handleCreateInvite(req, env, actor));
+      return withAdminAccess(req, env, "write", "create invites", (actor) =>
+        handleCreateInvite(req, env, actor)
+      );
     }
     if (method === "GET" && pathname === "/v1/admin/invites") {
-      return withAdminAccess(req, env, (_actor) => handleListInvites(env));
+      return withAdminAccess(req, env, "read", "list invites", (_actor) =>
+        handleListInvites(env)
+      );
     }
     const inviteDeleteMatch = pathname.match(/^\/v1\/admin\/invites\/([^/]+)$/);
     if (method === "DELETE" && inviteDeleteMatch) {
-      return withAdminAccess(req, env, (actor) =>
+      return withAdminAccess(req, env, "write", "revoke invites", (actor) =>
         handleDeleteInvite(env, decodeURIComponent(inviteDeleteMatch[1]), actor)
       );
     }
     if (method === "GET" && pathname === "/v1/admin/audit") {
-      return withAdminAccess(req, env, (_actor) => handleAuditList(env, url));
+      // A read: a member may see who did what, including their own actions.
+      return withAdminAccess(req, env, "read", "read the audit log", (_actor) =>
+        handleAuditList(env, url)
+      );
     }
     if (method === "POST" && pathname === "/v1/admin/pairing-code") {
-      return withAdminAccess(req, env, (_actor) => handleAdminPairingCode(req, env));
+      return withAdminAccess(req, env, "write", "pair devices", (_actor) =>
+        handleAdminPairingCode(req, env)
+      );
     }
 
     if (method === "GET" && pathname === "/v1/admin/health") {
-      return withAdminAccess(req, env, (_actor) => handleHealth(env));
+      return withAdminAccess(req, env, "read", "read health", (_actor) => handleHealth(env));
     }
 
     // S10: revocation must reach the Durable Object, not just D1.
     const revokeMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/);
     if (method === "DELETE" && revokeMatch) {
       const target = decodeURIComponent(revokeMatch[1]);
-      return withAdminAccess(req, env, (actor) => handleDeviceRevoke(env, target, actor));
+      return withAdminAccess(req, env, "write", "revoke devices", (actor) =>
+        handleDeviceRevoke(env, target, actor)
+      );
     }
 
     const deviceCommandsMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/commands$/);
     if (method === "GET" && deviceCommandsMatch) {
       // Decoding happens INSIDE `withAdmin`, so a malformed escape is an
       // authenticated caller's error, not an unauthenticated throw.
-      return withAdminAccess(req, env, (_actor) =>
+      return withAdminAccess(req, env, "read", "read device commands", (_actor) =>
         handleDeviceCommands(env, decodeURIComponent(deviceCommandsMatch[1]), url)
       );
     }
 
     if (method === "GET" && pathname === "/v1/admin/alerts") {
-      return withAdminAccess(req, env, (_actor) => handleAlertsList(env, url));
+      return withAdminAccess(req, env, "read", "read alerts", (_actor) =>
+        handleAlertsList(env, url)
+      );
     }
     const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
     if (method === "POST" && alertAckMatch) {
-      return withAdminAccess(req, env, (_actor) => handleAlertAck(env, decodeURIComponent(alertAckMatch[1])));
+      return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
+        handleAlertAck(env, decodeURIComponent(alertAckMatch[1]))
+      );
     }
 
     if (method === "GET" && pathname === "/v1/admin/rules") {
-      return withAdminAccess(req, env, (_actor) => handleRulesListAdmin(env));
+      return withAdminAccess(req, env, "read", "read rules", (_actor) =>
+        handleRulesListAdmin(env)
+      );
     }
     if (method === "POST" && pathname === "/v1/admin/rules/test") {
-      return withAdminAccess(req, env, (_actor) => handleRulesTest(req, env));
+      // Ambiguous: evaluating a rule against a sample has no side effects, but
+      // it is a POST that can run arbitrary stored regexes, so it stays a write.
+      return withAdminAccess(req, env, "write", "test rules", (_actor) =>
+        handleRulesTest(req, env)
+      );
     }
     const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
     if (method === "DELETE" && ruleDeleteMatch) {
       const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
-      return withAdminAccess(req, env, (_actor) => handleRuleDelete(env, ruleId));
+      return withAdminAccess(req, env, "write", "delete rules", (_actor) =>
+        handleRuleDelete(env, ruleId)
+      );
     }
 
     // Workflow graphs. The id segment is passed to the handler RAW and decoded
     // there, after `withAdmin`, so a malformed escape cannot throw on an
     // unauthenticated path. The list route has no segment and is matched first.
     if (method === "GET" && pathname === "/v1/admin/workflows") {
-      return withAdminAccess(req, env, (_actor) => handleWorkflowsList(env));
+      return withAdminAccess(req, env, "read", "read workflows", (_actor) =>
+        handleWorkflowsList(env)
+      );
     }
     const workflowMatch = pathname.match(/^\/v1\/admin\/workflows\/([^/]+)$/);
     if (method === "GET" && workflowMatch) {
-      return withAdminAccess(req, env, (_actor) => handleWorkflowGet(env, workflowMatch[1]));
+      return withAdminAccess(req, env, "read", "read workflows", (_actor) =>
+        handleWorkflowGet(env, workflowMatch[1])
+      );
     }
     if (method === "PUT" && workflowMatch) {
-      return withAdminAccess(req, env, (_actor) => handleWorkflowPut(req, env, workflowMatch[1]));
+      return withAdminAccess(req, env, "write", "save workflows", (_actor) =>
+        handleWorkflowPut(req, env, workflowMatch[1])
+      );
     }
     if (method === "DELETE" && workflowMatch) {
-      return withAdminAccess(req, env, (_actor) => handleWorkflowDelete(env, workflowMatch[1]));
+      return withAdminAccess(req, env, "write", "delete workflows", (_actor) =>
+        handleWorkflowDelete(env, workflowMatch[1])
+      );
     }
     if (method === "GET" && pathname === "/v1/devices") {
-      return withAdminAccess(req, env, (_actor) => handleDevicesList(env));
+      return withAdminAccess(req, env, "read", "list devices", (_actor) =>
+        handleDevicesList(env)
+      );
     }
     if (method === "GET" && pathname === "/v1/messages") {
-      return withAdminAccess(req, env, (_actor) => handleMessagesList(env, url));
+      return withAdminAccess(req, env, "read", "read messages", (_actor) =>
+        handleMessagesList(env, url)
+      );
     }
     if (method === "DELETE" && pathname === "/v1/messages") {
-      return withAdminAccess(req, env, (_actor) => handleMessagesPurge(env, url));
+      return withAdminAccess(req, env, "write", "purge messages", (_actor) =>
+        handleMessagesPurge(env, url)
+      );
     }
     if (method === "POST" && pathname === "/v1/rules") {
-      return withAdminAccess(req, env, (actor) => handleRulesPost(req, env, actor));
+      return withAdminAccess(req, env, "write", "save rules", (actor) =>
+        handleRulesPost(req, env, actor)
+      );
     }
     if (method === "POST" && pathname === "/v1/sms/send") {
-      return withAdminAccess(req, env, (actor) => handleSend(req, env, actor));
+      return withAdminAccess(req, env, "write", "send SMS", (actor) =>
+        handleSend(req, env, actor)
+      );
     }
     if (method === "POST" && pathname === "/v1/sms/send/batch") {
-      return withAdminAccess(req, env, (actor) => handleSendBatch(req, env, actor));
+      return withAdminAccess(req, env, "write", "send SMS", (actor) =>
+        handleSendBatch(req, env, actor)
+      );
     }
 
     const commandMatch = pathname.match(/^\/v1\/sms\/commands\/([^/]+)$/);
     if (method === "GET" && commandMatch) {
       const commandId = decodeURIComponent(commandMatch[1]);
-      return withAdminAccess(req, env, (_actor) =>
+      return withAdminAccess(req, env, "read", "read command status", (_actor) =>
         handleCommandStatus(env, url.searchParams.get("device_id") ?? "", commandId)
       );
     }
@@ -545,7 +595,7 @@ export default {
     const deviceStatusMatch = pathname.match(/^\/v1\/device\/([^/]+)\/status$/);
     if (method === "GET" && deviceStatusMatch) {
       const target = deviceStatusMatch[1];
-      return withAdminAccess(req, env, async (_actor) => {
+      return withAdminAccess(req, env, "read", "read device status", async (_actor) => {
         const stub = env.DEVICE.get(env.DEVICE.idFromName(target));
         return stub.fetch("https://do/__device_status", { method: "GET" });
       });

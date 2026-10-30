@@ -385,7 +385,10 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
  * `findCredentialAccount` (and therefore the TOTP plugin) sees it.
  */
 export async function handlePasswordSet(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "self", {
+    fresh: true,
+    action: "change authentication factors",
+  });
   if (!guard.ok) return guard.response;
 
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
@@ -487,7 +490,10 @@ export async function handlePasswordSet(req: Request, env: Env): Promise<Respons
  * only removes the password row.
  */
 export async function handlePasswordRemove(req: Request, env: Env): Promise<Response> {
-  const guard = await requireRole(req, env, ["owner", "admin", "member"], { fresh: true });
+  const guard = await requireRole(req, env, "self", {
+    fresh: true,
+    action: "change authentication factors",
+  });
   if (!guard.ok) return guard.response;
 
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
