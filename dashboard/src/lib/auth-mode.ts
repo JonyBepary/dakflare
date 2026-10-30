@@ -32,6 +32,7 @@ export interface AuthModeInfo {
 	password_configured: boolean;
 	/** Whether the deployment can send a sign-in link (a mailer key is present). */
 	magic_link: boolean;
+	magic_link_ttl_s: number;
 }
 
 /** Turn the wire body into the five facts the login screen renders from. */
@@ -46,7 +47,11 @@ export function readAuthMode(payload: unknown): AuthModeInfo {
 		auth_configured: body.auth_configured === true,
 		password_mode: readMode(body.password_mode),
 		password_configured: body.password_configured === true,
-		magic_link: body.magic_link === true
+		magic_link: body.magic_link === true,
+		magic_link_ttl_s:
+			typeof body.magic_link_ttl_s === 'number' && body.magic_link_ttl_s > 0
+				? body.magic_link_ttl_s
+				: 900
 	};
 }
 

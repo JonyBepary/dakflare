@@ -13,7 +13,7 @@
 		signOutAccount
 	} from '$lib/api';
 	import { getAuthMode, type AuthModeInfo } from '$lib/auth-mode';
-	import { MAGIC_LINK_MINUTES, MagicFailure, requestMagicLink } from '$lib/magic';
+	import { MagicFailure, requestMagicLink } from '$lib/magic';
 	import {
 		passkeySupport,
 		signInWithPasskey,
@@ -127,6 +127,10 @@
 	let inviteCode = $state('');
 	let inviteField = $state<HTMLInputElement | null>(null);
 
+	// The Worker owns the window; the copy must not contradict it.
+	const magicLinkMinutes = $derived(
+		Math.max(1, Math.round((mode?.magic_link_ttl_s ?? 900) / 60))
+	);
 	const nextTarget = $derived.by(() => {
 		const requested = page.url.searchParams.get('next');
 		if (
@@ -233,7 +237,7 @@
 	function doorSubtitle(door: Door): string {
 		if (door === 'passkey') return 'The key on this device. Nothing to type.';
 		if (door === 'magic') {
-			return `A one-use link. Expires in ${MAGIC_LINK_MINUTES} minutes.`;
+			return `A one-use link. Expires in ${magicLinkMinutes} minutes.`;
 		}
 		return mode?.password_mode === 'server-kdf'
 			? 'Checked by the gateway against this account.'
@@ -313,7 +317,7 @@
 		mlError = null;
 		mlRestart = false;
 		try {
-			await requestMagicLink(email);
+			await requestMagicLink(email, nextTarget.startsWith('/admin') ? nextTarget : undefined);
 			mlSentTo = email;
 		} catch (failure) {
 			if (failure instanceof MagicFailure) {
@@ -956,7 +960,7 @@
 								<span class="mono">{mlSentTo}</span>
 							</p>
 							<p class="hint sent-hint">
-								It works once and expires in {MAGIC_LINK_MINUTES} minutes. Opening it does not
+								It works once and expires in {magicLinkMinutes} minutes. Opening it does not
 								sign you in — the button in the email does, so a link checker cannot spend it.
 							</p>
 
@@ -987,7 +991,7 @@
 						{:else}
 							<h1>Email me a sign-in link</h1>
 							<p class="login-lede">
-								A one-use link to the address on the account. It expires in {MAGIC_LINK_MINUTES}
+								A one-use link to the address on the account. It expires in {magicLinkMinutes}
 								minutes.
 							</p>
 

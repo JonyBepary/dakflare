@@ -134,7 +134,7 @@ function waitSentence(retryAfter: number | null): string {
  *   - 429 → `rate-limited` (with the server's own wait, when it gave one)
  *   - 5xx / no answer → `unavailable` (a link may not have been sent)
  */
-export async function requestMagicLink(email: string): Promise<void> {
+export async function requestMagicLink(email: string, next?: string): Promise<void> {
 	try {
 		await authJson<{ ok?: boolean }>('/v1/auth/magic-link', {
 			method: 'POST',
