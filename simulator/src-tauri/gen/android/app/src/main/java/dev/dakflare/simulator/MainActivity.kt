@@ -146,6 +146,11 @@ class MainActivity : TauriActivity() {
     super.onResume()
     AppVisibility.foreground = true
     writeDefaultSmsFact()
+    // The phone number is not always readable at first launch: the modem may not
+    // have published the subscription yet, and a missing `self_number` quietly
+    // weakens the self-number guard. Rewriting the facts on every resume is cheap
+    // and heals an install that started too early.
+    writeDeviceFacts()
 
     // `delete_device` / `revoke_device` are Rust commands with no Kotlin call
     // site, so returning to the UI is the earliest point the shell can notice
