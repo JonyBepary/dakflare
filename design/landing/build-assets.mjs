@@ -31,8 +31,15 @@ const mat = (name, svg) => `<g class="ac-${name}">${svg}</g>`;
 // ---------------------------------------------------------------------------
 // shared base: oak plinth on rubber feet, dark case, cream deck plate
 // ---------------------------------------------------------------------------
-function base({ plinth, plinthH, kase, caseZ, caseH, deckInset, deckH, P }) {
+function base({ plinth, plinthH, kase, caseZ, caseH, deckInset, deckH, P, floating = false }) {
   const at = (p) => k.iso(p, P);
+  if (floating) {
+    // a floating platform instead of a plinth: the same language as the hero figure
+    const out = [`<path class="iso-halo" d="${k.haloOf(k.insetPlan(plinth, -3), -6, 7, P)}"/>`];
+    out.push(S(k.slabOf(plinth, -6, 6, P, 12, 1.6), { tone: "hi", crease: "none" }));
+    out.push(L(k.planOutline(k.insetPlan(plinth, 5), 0, P, 12), { tone: "faint" }));
+    return { out, deck: plinth, top: 0 };
+  }
   const out = [`<path class="iso-halo" d="${k.haloOf(k.insetPlan(plinth, -4), -7, 6, P)}"/>`];
   for (const [x, y] of k.corners(plinth, 22)) {
     out.push(mat("ink", S(k.cylinder(x, y, 7, -7, 1.6, P, 26), { tone: "lo" })));
@@ -134,7 +141,7 @@ function mailSorter() {
   );
   const at = (p) => k.iso(p, P);
   const { out, top } = base({
-    plinth: PLINTH, plinthH: 12, kase: KASE, caseZ: 12, caseH: 18, deckInset: 8, deckH: 2.2, P,
+    plinth: { x: -170, y: -104, w: 340, d: 208, r: 12 }, plinthH: 0, kase: KASE, caseZ: 0, caseH: 0, deckInset: 8, deckH: 0, P, floating: true,
   });
 
   // the tray: an oak carcass with two rows of four slots
