@@ -32,7 +32,9 @@
 		| 'grip'
 		| 'fingerprint'
 		| 'history'
-		| 'mail';
+		| 'mail'
+		| 'archive'
+		| 'unarchive';
 </script>
 
 <script lang="ts">
@@ -161,5 +163,15 @@
 	{:else if name === 'mail'}
 		<rect x="3" y="5" width="18" height="14" rx="2.5" />
 		<path d="m4.5 7.5 6.6 4.9a1.5 1.5 0 0 0 1.8 0l6.6-4.9" />
+	{:else if name === 'archive'}
+		<rect x="3" y="3.5" width="18" height="5" rx="1.2" />
+		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />
+		<path d="M12 11.5v4.5" />
+		<path d="m9.75 13.75 2.25 2.25 2.25-2.25" />
+	{:else if name === 'unarchive'}
+		<rect x="3" y="3.5" width="18" height="5" rx="1.2" />
+		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />
+		<path d="M12 16v-4.5" />
+		<path d="m9.75 13.75 2.25-2.25 2.25 2.25" />
 	{/if}
 </svg>

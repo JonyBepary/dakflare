@@ -1,7 +1,15 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { describeError, getDevices, getDeviceStatus, mintPairingCode, revokeDevice } from '$lib/api';
+	import {
+		archiveDevice,
+		describeError,
+		getDevices,
+		getDeviceStatus,
+		mintPairingCode,
+		revokeDevice,
+		unarchiveDevice
+	} from '$lib/api';
 	import type { Device, DeviceStatus, PairingCode } from '$lib/types';
 	import {
 		deviceLabel,
@@ -10,7 +18,14 @@
 		devicePrimary,
 		wakeMode
 	} from '$lib/presence';
-	import { formatAbsolute, formatClock, formatDate, formatDuration } from '$lib/format';
+	import { isArchived } from '$lib/device-archive';
+	import {
+		formatAbsolute,
+		formatClock,
+		formatDate,
+		formatDuration,
+		RELATIVE_MAX_MS
+	} from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -43,7 +58,8 @@
 	let error = $state<string | null>(null);
 	let refreshError = $state<string | null>(null);
 	let lastRefreshedAt = $state<number | null>(null);
-	let refreshInFlight = false;
+	/** The fleet read in flight, so a toggle flip can wait for it instead of racing it. */
+	let fleetInFlight: Promise<void> | null = null;
 	let fleetAttempted = false;
 
 	const REFRESH_MS = 30_000;
@@ -85,6 +101,17 @@
 	let revokeError = $state<string | null>(null);
 	let revokedNotice = $state<string | null>(null);
 
+	/* Archive is the reversible half of revoke: the row leaves the list, nothing
+	   is destroyed, and the gateway brings it back when the phone polls again. */
+	let showArchived = $state(false);
+	/** How many archived devices exist while the toggle is off (the list omits them). */
+	let archivedCount = $state(0);
+	let archivedProbed = false;
+	let archiveTarget = $state<Device | null>(null);
+	let archiving = $state(false);
+	let archiveError = $state<string | null>(null);
+	let archiveNotice = $state<{ tone: 'ok' | 'danger'; title: string; text: string } | null>(null);
+
 	let detailOpen = $state(false);
 	let detailId = $state('');
 
@@ -98,9 +125,43 @@
 			devicePresence(device, statuses[device.device_id]?.ws_connected === true)
 		)
 	);
+
+	/**
+	 * The rows as they are drawn: active devices first, archived ones after them
+	 * when the toggle is on. Archiving is not a state of the phone, it is a state
+	 * of the list, so the two groups never interleave.
+	 */
+	const fleet = $derived.by(() => {
+		const rows = devices.map((device, index) => ({
+			device,
+			archived: isArchived(device),
+			presence: fleetStates[index]
+		}));
+		if (!showArchived) return rows;
+		return [...rows.filter((row) => !row.archived), ...rows.filter((row) => row.archived)];
+	});
+
+	const activeCount = $derived(fleet.filter((row) => !row.archived).length);
 	const answering = $derived(
-		fleetStates.filter((state) => state === 'live' || state === 'synced').length
+		fleet.filter(
+			(row) => !row.archived && (row.presence === 'live' || row.presence === 'synced')
+		).length
 	);
+	const archivedTotal = $derived(
+		showArchived ? fleet.filter((row) => row.archived).length : archivedCount
+	);
+	/** A toggle with nothing behind it is noise; it appears with the first archive. */
+	const archiveToggleVisible = $derived(archivedTotal > 0 || showArchived);
+
+	/** Labels for the drawer, so "copied from" can name a device that is still listed. */
+	const deviceLabels = $derived.by(() => {
+		const labels: Record<string, string> = {};
+		for (const device of devices) {
+			const label = deviceLabel(device);
+			if (label) labels[device.device_id] = label;
+		}
+		return labels;
+	});
 
 	const scopeError = $derived.by(() => {
 		if (purpose === 'rotate' && !scope) return 'Choose the device whose key will be rotated.';
@@ -129,6 +190,20 @@
 		return `${minutes}:${String(seconds).padStart(2, '0')}`;
 	}
 
+	/**
+	 * The last-seen cell. Recent contact is a live relative label with the exact
+	 * stamp underneath; past a week the relative label *is* the exact stamp, which
+	 * is wider than the column and would repeat itself on the line below — so an
+	 * old contact reads as a date over a clock, the same shape as "Paired".
+	 */
+	function seenParts(value: number | null): { main: string | null; sub: string | null } {
+		if (!value) return { main: null, sub: null };
+		if (Date.now() - value > RELATIVE_MAX_MS) {
+			return { main: formatDate(value), sub: formatClock(value) };
+		}
+		return { main: null, sub: formatAbsolute(value) };
+	}
+
 	// The rotate picker borrows the shared scope error, and gains a hint only when
 	// there is nothing to pick. Build the reference list so neither goes dangling.
 	const scopeSelectDescribedBy = $derived(
@@ -137,15 +212,31 @@
 			.join(' ') || undefined
 	);
 
-	async function load(background = false) {
-		if (refreshInFlight) return;
-		refreshInFlight = true;
+	/**
+	 * One fleet read. The mode is captured before the request so a toggle flip
+	 * mid-flight cannot land the other mode's rows on screen.
+	 */
+	function load(background = false): Promise<void> {
+		if (fleetInFlight) return fleetInFlight;
+		const run = readFleet(background).finally(() => {
+			fleetInFlight = null;
+		});
+		fleetInFlight = run;
+		return run;
+	}
+
+	async function readFleet(background: boolean): Promise<void> {
+		const includeArchived = showArchived;
 		if (!fleetAttempted) loading = true;
 		else if (!background) refreshing = true;
 		try {
-			const list = await getDevices();
+			const list = await getDevices(includeArchived);
+			// The operator flipped the toggle while this read was in flight; that
+			// flip owns the next answer, and this one describes the other list.
+			if (includeArchived !== showArchived) return;
 			devices = list;
-			await loadStatuses(list, background);
+			if (showArchived) archivedCount = list.filter(isArchived).length;
+			await loadStatuses(list.filter((device) => !isArchived(device)), background);
 			lastRefreshedAt = Date.now();
 			refreshError = null;
 			error = null;
@@ -159,9 +250,37 @@
 		} finally {
 			loading = false;
 			refreshing = false;
-			refreshInFlight = false;
 			fleetAttempted = true;
 		}
+	}
+
+	/**
+	 * The archived count while the toggle is off. The list endpoint omits those
+	 * rows unless asked, so the count costs one extra read — once per page load,
+	 * not once per refresh. A failure only hides the count; it never blocks the
+	 * fleet.
+	 */
+	async function probeArchivedCount(): Promise<void> {
+		if (archivedProbed) return;
+		archivedProbed = true;
+		try {
+			const all = await getDevices(true);
+			archivedCount = all.filter(isArchived).length;
+		} catch {
+			archivedCount = 0;
+		}
+	}
+
+	/** The toggle is a request, not a filter: it changes what the gateway is asked. */
+	async function setShowArchived(next: boolean): Promise<void> {
+		if (showArchived === next) return;
+		// Turning the archived rows off, the count they carried is the only place
+		// it still exists: the next read omits them.
+		if (!next) archivedCount = devices.filter(isArchived).length;
+		showArchived = next;
+		// A read already in flight answers for the old mode; let it finish first.
+		if (fleetInFlight) await fleetInFlight;
+		await load();
 	}
 
 	async function loadStatuses(list: Device[], quiet = false) {
@@ -268,7 +387,7 @@
 		polling = true;
 		lastPoll = Date.now();
 		try {
-			const list = await getDevices();
+			const list = await getDevices(showArchived);
 			if (generation !== watchGeneration) return;
 			const expected = context.code.device_id;
 			const match = expected
@@ -281,7 +400,8 @@
 				: list.find((device) => !context.snapshot.has(device.device_id));
 			if (!match) return;
 			devices = list;
-			void loadStatuses(list);
+			if (showArchived) archivedCount = list.filter(isArchived).length;
+			void loadStatuses(list.filter((device) => !isArchived(device)));
 			paired = match;
 			waitState = 'paired';
 			stopWatching();
@@ -384,12 +504,97 @@
 		}
 	}
 
+	function archiveCopy(device: Device): string {
+		const alsoId = deviceLabel(device) ? ` (${device.device_id})` : '';
+		return `${devicePrimary(device)}${alsoId}`;
+	}
+
+	/**
+	 * The drawer archived the device it was showing. With the toggle off the row
+	 * leaves the list, so the drawer has nothing left to describe and closes.
+	 */
+	function handleArchived(id: string): void {
+		const target = devices.find((device) => device.device_id === id) ?? null;
+		applyArchived(id, Date.now());
+		archiveNotice = {
+			tone: 'ok',
+			title: 'Device archived',
+			text: target
+				? `Archived ${archiveCopy(target)}. It left the fleet list; its message history stays.`
+				: `Archived ${id}. It left the fleet list; its message history stays.`
+		};
+		detailOpen = false;
+		syncDetailUrl(null);
+	}
+
+	function handleUnarchived(id: string): void {
+		const target = devices.find((device) => device.device_id === id) ?? null;
+		applyArchived(id, null);
+		archiveNotice = {
+			tone: 'ok',
+			title: 'Device unarchived',
+			text: target
+				? `Unarchived ${archiveCopy(target)}. It is back in the fleet list.`
+				: `Unarchived ${id}. It is back in the fleet list.`
+		};
+	}
+
+	/** Keep the row's archive stamp in step with the gateway, without a re-read. */
+	function applyArchived(id: string, at: number | null): void {
+		if (showArchived) {
+			devices = devices.map((device) =>
+				device.device_id === id ? { ...device, archived_at: at } : device
+			);
+			archivedCount = devices.filter(isArchived).length;
+			return;
+		}
+		// Archived rows are not in this list; an archived device leaves it.
+		if (at !== null) {
+			devices = devices.filter((device) => device.device_id !== id);
+			statuses = Object.fromEntries(
+				Object.entries(statuses).filter(([key]) => key !== id)
+			);
+			archivedCount += 1;
+		}
+	}
+
+	async function confirmArchive() {
+		if (!archiveTarget || archiving) return;
+		archiving = true;
+		archiveError = null;
+		const target = archiveTarget;
+		try {
+			await archiveDevice(target.device_id);
+			archiveTarget = null;
+			handleArchived(target.device_id);
+		} catch (failure) {
+			archiveError = describeError(failure);
+		} finally {
+			archiving = false;
+		}
+	}
+
+	async function unarchiveFromRow(device: Device): Promise<void> {
+		try {
+			await unarchiveDevice(device.device_id);
+			handleUnarchived(device.device_id);
+		} catch (failure) {
+			archiveNotice = {
+				tone: 'danger',
+				title: 'Could not unarchive',
+				text: describeError(failure)
+			};
+		}
+	}
+
 	onMount(() => {
 		origin = window.location.origin;
 		const requestedPurpose = page.url.searchParams.get('mint');
 		const requestedDevice = page.url.searchParams.get('device') ?? '';
 		void (async () => {
 			await load();
+			// The archived count is not in the fleet answer; one extra read names it.
+			void probeArchivedCount();
 			if (requestedPurpose === 'rotate' || requestedPurpose === 'enroll') {
 				await openMint(requestedPurpose, requestedDevice, false);
 			} else if (
@@ -453,6 +658,14 @@
 		{#if revokedNotice}
 			<div aria-live="polite">
 				<Notice tone="ok" title="Device revoked">{revokedNotice}</Notice>
+			</div>
+		{/if}
+
+		{#if archiveNotice}
+			<div aria-live="polite">
+				<Notice tone={archiveNotice.tone} title={archiveNotice.title}>
+					{archiveNotice.text}
+				</Notice>
 			</div>
 		{/if}
 
@@ -760,7 +973,7 @@
 					{/each}
 				</div>
 			</section>
-		{:else if devices.length === 0}
+		{:else if devices.length === 0 && archivedTotal === 0}
 			<section class="card">
 				<EmptyState
 					icon="smartphone"
@@ -777,114 +990,218 @@
 				<div class="fleet-card-head">
 					<h2 id="fleet-heading" class="card-title">Fleet</h2>
 					<span class="fleet-count mono">
-						{devices.length} paired · {answering} answering
+						{activeCount} paired · {answering} answering{#if showArchived && archivedTotal > 0}{' · '}{archivedTotal} archived{/if}
 					</span>
 					{#if statusesLoading}
 						<span class="fleet-checking"><Spinner /> checking links</span>
 					{/if}
+					{#if archiveToggleVisible}
+						<label
+							class="archived-toggle"
+							title={showArchived
+								? 'Hide archived devices from this list'
+								: 'Include archived devices in this list'}
+						>
+							<input
+								type="checkbox"
+								role="switch"
+								checked={showArchived}
+								onchange={(event) => void setShowArchived(event.currentTarget.checked)}
+							/>
+							<span class="toggle-track" aria-hidden="true">
+								<span class="toggle-thumb"></span>
+							</span>
+							<span class="toggle-text">Show archived</span>
+							{#if archivedTotal > 0}
+								<span class="toggle-count mono">{archivedTotal}</span>
+							{/if}
+						</label>
+					{/if}
 				</div>
 
-				<!-- One list, two layouts: a dense table-like grid above 860px, a stacked
-				     row below it. The fleet is never rendered twice. -->
-				<div class="fleet">
-					<div class="fleet-head" aria-hidden="true">
-						<span>Device</span>
-						<span>State</span>
-						<span>Last seen</span>
-						<span>Paired</span>
-						<span>Wake</span>
-						<span></span>
-					</div>
-					<ul class="fleet-rows">
-						{#each devices as device, index (device.device_id)}
-							{@const status = statuses[device.device_id]}
-							{@const presence = fleetStates[index]}
-							<li class="fleet-row">
-								<div class="cell-device">
-									<span class="sr-only">Device</span>
-									<button
-										type="button"
-										class="device-open"
-										onclick={() => openDetail(device.device_id)}
-										aria-label={`Open details for ${devicePrimary(device)}`}
-										title="Open device details"
-									>
-										<span class="device-label">
-											{#if deviceLabel(device)}
-												<span class="device-name">{deviceLabel(device)}</span>
-											{/if}
-											<span class="mono device-id">
-												{device.device_id}<span class="device-go" aria-hidden="true">›</span>
+				{#if devices.length === 0}
+					<p class="fleet-none">
+						No active devices. <span class="mono">{archivedTotal}</span>
+						{archivedTotal === 1 ? 'archived device is' : 'archived devices are'} hidden — turn on
+						<strong>Show archived</strong> to see {archivedTotal === 1 ? 'it' : 'them'}.
+					</p>
+				{:else}
+					<!-- One list, two layouts: a dense table-like grid above 860px, a stacked
+					     row below it. The fleet is never rendered twice. -->
+					<div class="fleet">
+						<div class="fleet-head" aria-hidden="true">
+							<span>Device</span>
+							<span>State</span>
+							<span>Last seen</span>
+							<span>Paired</span>
+							<span>Wake</span>
+							<span></span>
+						</div>
+						<ul class="fleet-rows">
+							{#each fleet as row (row.device.device_id)}
+								{@const device = row.device}
+								{@const archived = row.archived}
+								{@const status = statuses[device.device_id]}
+								{@const presence = row.presence}
+								{@const seen = seenParts(device.last_seen)}
+								<li class="fleet-row" class:is-archived={archived}>
+									<div class="cell-device">
+										<span class="sr-only">Device</span>
+										<button
+											type="button"
+											class="device-open"
+											onclick={() => openDetail(device.device_id)}
+											aria-label={`Open details for ${devicePrimary(device)}`}
+											title="Open device details"
+										>
+											<span class="device-label">
+												{#if deviceLabel(device)}
+													<span class="device-name">{deviceLabel(device)}</span>
+												{/if}
+												<span class="mono device-id">
+													{device.device_id}<span class="device-go" aria-hidden="true">›</span>
+												</span>
 											</span>
-										</span>
-									</button>
-									<CopyButton value={device.device_id} label="Copy device id" iconOnly />
-								</div>
+										</button>
+										<CopyButton value={device.device_id} label="Copy device id" iconOnly />
+									</div>
 
-								<div class="cell-state">
-									<span class="sr-only">State </span>
-									<PresenceChip {presence} queue={status?.queue_depth ?? null} />
-									{#if status === null && !statusesLoading}
-										<span class="cell-note">socket state unavailable</span>
-									{/if}
-								</div>
+									<div class="cell-state">
+										<span class="sr-only">State </span>
+										{#if archived}
+											<span
+												class="archived-mark"
+												title={`Archived ${formatAbsolute(device.archived_at)}`}
+											>
+												<Badge tone="muted">
+													archived <RelativeTime
+														value={device.archived_at}
+														className="mono"
+														fallback="recently"
+													/>
+												</Badge>
+											</span>
+										{:else}
+											<PresenceChip {presence} queue={status?.queue_depth ?? null} />
+											{#if status === null && !statusesLoading}
+												<span class="cell-note">socket state unavailable</span>
+											{/if}
+										{/if}
+									</div>
 
-								<div class="cell-seen">
-									<span class="cell-key">last seen</span>
-									<span class="cell-main mono">
-										<RelativeTime value={device.last_seen} fallback="never" />
-									</span>
-									<span class="cell-sub">{formatAbsolute(device.last_seen)}</span>
-								</div>
+									<div class="cell-seen">
+										<span class="cell-key">last seen</span>
+										{#if seen.main === null}
+											<span class="cell-main mono">
+												<RelativeTime value={device.last_seen} fallback="never" />
+											</span>
+										{:else}
+											<span class="cell-main">{seen.main}</span>
+										{/if}
+										{#if seen.sub}
+											<span class="cell-sub">{seen.sub}</span>
+										{/if}
+									</div>
 
-								<div class="cell-paired">
-									<span class="cell-key">paired</span>
-									<span class="cell-main">{formatDate(device.paired_at)}</span>
-									<span class="cell-sub">{formatClock(device.paired_at)}</span>
-								</div>
+									<div class="cell-paired">
+										<span class="cell-key">paired</span>
+										<span class="cell-main">{formatDate(device.paired_at)}</span>
+										<span class="cell-sub">{formatClock(device.paired_at)}</span>
+									</div>
 
-								<div class="cell-wake">
-									<span class="sr-only">Wake </span>
-									<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
-								</div>
+									<div class="cell-wake">
+										<span class="sr-only">Wake </span>
+										<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
+									</div>
 
-								<div class="cell-actions">
-									<button
-										type="button"
-										class="btn btn-ghost btn-sm"
-										onclick={() => void startRotate(device)}
-										aria-label={`Rotate key for ${devicePrimary(device)}`}
-									>
-										<Icon name="key" size={12} /> Rotate
-									</button>
-									<button
-										type="button"
-										class="btn btn-danger btn-sm"
-										onclick={() => {
-											revokeError = null;
-											revokeTarget = device;
-										}}
-										aria-label={`Revoke ${devicePrimary(device)}`}
-									>
-										<Icon name="trash" size={12} /> Revoke
-									</button>
-								</div>
-							</li>
-						{/each}
-					</ul>
-				</div>
+									<div class="cell-actions">
+										<button
+											type="button"
+											class="btn btn-ghost btn-sm"
+											onclick={() => void startRotate(device)}
+											aria-label={`Rotate key for ${devicePrimary(device)}`}
+										>
+											<Icon name="key" size={12} /> Rotate
+										</button>
+										{#if archived}
+											<button
+												type="button"
+												class="btn btn-sm"
+												onclick={() => void unarchiveFromRow(device)}
+												aria-label={`Unarchive ${devicePrimary(device)}`}
+											>
+												<Icon name="unarchive" size={12} /> Unarchive
+											</button>
+										{:else}
+											<button
+												type="button"
+												class="btn btn-ghost btn-sm"
+												onclick={() => {
+													archiveError = null;
+													archiveTarget = device;
+												}}
+												aria-label={`Archive ${devicePrimary(device)}`}
+											>
+												<Icon name="archive" size={12} /> Archive
+											</button>
+										{/if}
+										<button
+											type="button"
+											class="btn btn-danger btn-sm"
+											onclick={() => {
+												revokeError = null;
+												revokeTarget = device;
+											}}
+											aria-label={`Revoke ${devicePrimary(device)}`}
+										>
+											<Icon name="trash" size={12} /> Revoke
+										</button>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					</div>
 
-				<p class="fleet-note">
-					<strong>live</strong> — connected now · <strong>synced</strong> — in contact within 15
-					minutes · <strong>stale</strong> — within 24 hours · <strong>offline</strong> — over 24
-					hours · <strong>unknown</strong> — no contact recorded. Wake is
-					<span class="mono">push</span> when the phone holds a push token, otherwise
-					<span class="mono">poll-only</span>.
-				</p>
+					<p class="fleet-note">
+						<strong>live</strong> — connected now · <strong>synced</strong> — in contact within 15
+						minutes · <strong>stale</strong> — within 24 hours · <strong>offline</strong> — over 24
+						hours · <strong>unknown</strong> — no contact recorded. Wake is
+						<span class="mono">push</span> when the phone holds a push token, otherwise
+						<span class="mono">poll-only</span>.
+					</p>
+				{/if}
 			</section>
 		{/if}
 	</div>
 </div>
+
+<ConfirmDialog
+	open={archiveTarget !== null}
+	title="Archive this device?"
+	confirmLabel="Archive device"
+	tone="primary"
+	pending={archiving}
+	error={archiveError}
+	onconfirm={() => void confirmArchive()}
+	oncancel={() => {
+		if (!archiving) {
+			archiveTarget = null;
+			archiveError = null;
+		}
+	}}
+>
+	{#if archiveTarget}
+		<p>
+			<strong>{devicePrimary(archiveTarget)}</strong>
+			{#if deviceLabel(archiveTarget)}(<span class="mono">{archiveTarget.device_id}</span>){/if}
+			leaves the fleet list. Its message history stays on the gateway, and it comes back by
+			itself if the phone polls again.
+		</p>
+		<p class="hint" style="margin-top: 10px">
+			Archiving keeps the key. Use Revoke when the phone should stop authenticating.
+		</p>
+	{/if}
+</ConfirmDialog>
 
 <ConfirmDialog
 	open={revokeTarget !== null}
@@ -918,8 +1235,11 @@
 	open={detailOpen}
 	deviceId={detailId}
 	device={detailDevice}
+	deviceLabels={deviceLabels}
 	onclose={closeDetail}
 	onrevoked={handleRevoked}
+	onarchived={handleArchived}
+	onunarchived={handleUnarchived}
 	onmint={(id) => void mintForDevice(id)}
 />
 
@@ -1142,6 +1462,116 @@
 		color: var(--df-text-meta);
 	}
 
+	/* ---------- show archived ---------- */
+
+	/* A view switch, not a filter chip: it changes what the gateway is asked for.
+	   The 1px input stays in the tab order; the label is the target. */
+	.archived-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		margin-left: auto;
+		min-height: 32px;
+		padding: 0 var(--df-p-space-1);
+		border-radius: var(--df-p-radius-sm);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-sm);
+		line-height: 1;
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.archived-toggle input {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: 0;
+		padding: 0;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.archived-toggle:has(input:focus-visible) {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	.toggle-track {
+		position: relative;
+		display: inline-block;
+		width: 34px;
+		height: 20px;
+		flex: none;
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-well);
+		transition:
+			background-color var(--df-p-dur-lift) ease,
+			border-color var(--df-p-dur-lift) ease;
+	}
+
+	.toggle-thumb {
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: var(--df-text-meta);
+		transition:
+			transform var(--df-p-dur-lift) ease,
+			background-color var(--df-p-dur-lift) ease;
+	}
+
+	.archived-toggle:hover .toggle-track {
+		border-color: var(--df-text-meta);
+	}
+
+	.archived-toggle input:checked + .toggle-track {
+		background: var(--df-accent-fill);
+		border-color: transparent;
+	}
+
+	.archived-toggle input:checked + .toggle-track .toggle-thumb {
+		background: var(--df-text-on-accent);
+		transform: translateX(14px);
+	}
+
+	.archived-toggle input:checked ~ .toggle-text {
+		color: var(--df-text-primary);
+	}
+
+	.toggle-text {
+		white-space: nowrap;
+	}
+
+	.toggle-count {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 18px;
+		height: 18px;
+		padding: 0 5px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-well);
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-2xs);
+		line-height: 1;
+	}
+
+	.fleet-none {
+		padding: var(--df-p-space-5);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.6;
+		color: var(--df-text-secondary);
+	}
+
+	.fleet-none strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
 	.fleet {
 		--fleet-cols:
 			minmax(0, 2.2fr) minmax(118px, 0.9fr) minmax(116px, 1fr) minmax(104px, 0.8fr)
@@ -1191,6 +1621,22 @@
 
 	.fleet-row:hover {
 		background: var(--df-surface-hover);
+	}
+
+	/* Quieter, not disabled: the row still opens, still rotates, still revokes.
+	   Only the name loses its ink, and the chip says why. */
+	.fleet-row.is-archived {
+		background: color-mix(in srgb, var(--df-surface-well) 50%, transparent);
+	}
+
+	.fleet-row.is-archived .device-name {
+		color: var(--df-text-secondary);
+		font-weight: 500;
+	}
+
+	.archived-mark {
+		display: inline-flex;
+		min-width: 0;
 	}
 
 	.cell-device {
@@ -1434,6 +1880,25 @@
 		.fleet-card-head {
 			padding-block: var(--df-p-space-3);
 		}
+
+		/* The switch takes its own line under the title rather than squeezing it. */
+		.archived-toggle {
+			flex-basis: 100%;
+			margin-left: 0;
+		}
+	}
+
+	/* 48dp of target on a touch screen; the desktop row keeps its 32px density. */
+	@media (pointer: coarse), (max-width: 720px) {
+		.archived-toggle {
+			min-height: 48px;
+		}
+
+		/* Every row action grows together, so one 48px button cannot sit beside a
+		   36px one and read as the odd one out. */
+		.cell-actions .btn {
+			min-height: 48px;
+		}
 	}
 
 	@media (max-width: 760px) {
@@ -1460,6 +1925,11 @@
 
 		.device-open:hover .device-go {
 			transform: none;
+		}
+
+		.toggle-track,
+		.toggle-thumb {
+			transition: none;
 		}
 	}
 </style>

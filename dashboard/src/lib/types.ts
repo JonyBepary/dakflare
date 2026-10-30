@@ -62,6 +62,12 @@ export interface Device {
 	label?: string | null;
 	/** Optional; 0–2 or null when the phone did not report a slot. */
 	sim_slot?: number | null;
+	/**
+	 * Set when the operator archived the device; `null` (or absent) while it is
+	 * in the fleet. An archived row keeps its key and its message history, and
+	 * the gateway clears this again by itself the next time the phone polls.
+	 */
+	archived_at?: number | null;
 }
 
 export interface DeviceStatus {

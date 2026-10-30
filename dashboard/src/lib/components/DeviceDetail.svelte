@@ -1,15 +1,20 @@
 <script lang="ts">
 	import { onDestroy, tick } from 'svelte';
 	import {
+		archiveDevice,
 		describeError,
+		getAudit,
 		getDeviceCommands,
 		getDeviceStatus,
 		getMessages,
 		purgeMessages,
 		revokeDevice,
-		sendSms
+		sendSms,
+		unarchiveDevice
 	} from '$lib/api';
 	import type { Device, DeviceCommand, DeviceStatus, Message } from '$lib/types';
+	import { COPIED_WORKFLOWS_ACTION, copiedFlowsFor, type CopiedFlows } from '$lib/copied-flows';
+	import { archivedAt, isArchived } from '$lib/device-archive';
 	import {
 		commandStateLabel,
 		commandStateNote,
@@ -42,15 +47,22 @@
 		open = false,
 		deviceId,
 		device = null,
+		deviceLabels = {},
 		onclose,
 		onrevoked,
+		onarchived,
+		onunarchived,
 		onmint
 	}: {
 		open?: boolean;
 		deviceId: string;
 		device?: Device | null;
+		/** id → label, so "copied from" can name a device that is still in the fleet. */
+		deviceLabels?: Record<string, string>;
 		onclose: () => void;
 		onrevoked?: (deviceId: string) => void;
+		onarchived?: (deviceId: string) => void;
+		onunarchived?: (deviceId: string) => void;
 		onmint?: (deviceId: string) => void;
 	} = $props();
 
@@ -86,6 +98,14 @@
 	let revoking = $state(false);
 	let revokeError = $state<string | null>(null);
 
+	let archiveOpen = $state(false);
+	let archiving = $state(false);
+	let archiveError = $state<string | null>(null);
+	let unarchiveError = $state<string | null>(null);
+
+	/** The pairing that inherited flows, read from the audit log. */
+	let copied = $state<CopiedFlows | null>(null);
+
 	let purgeOpen = $state(false);
 	let purging = $state(false);
 	let purgeError = $state<string | null>(null);
@@ -94,6 +114,16 @@
 	const presence = $derived(
 		device ? devicePresence(device, status?.ws_connected === true) : 'unknown'
 	);
+	const archived = $derived(device ? isArchived(device) : false);
+	const archivedStamp = $derived(device ? archivedAt(device) : null);
+	/** "copied from" as it should read: a label when one exists, otherwise the id in mono. */
+	const copiedFrom = $derived.by(() => {
+		if (!copied) return null;
+		if (copied.fromLabel) return { text: copied.fromLabel, mono: false };
+		if (!copied.fromId) return null;
+		const known = deviceLabels[copied.fromId];
+		return known ? { text: known, mono: false } : { text: copied.fromId, mono: true };
+	});
 	const stateSentence = $derived.by(() => {
 		const meaning = PRESENCE_META[presence].meaning;
 		return `${meaning.charAt(0).toUpperCase()}${meaning.slice(1)}.`;
@@ -167,6 +197,10 @@
 		purgeOpen = false;
 		revokeError = null;
 		purgeError = null;
+		archiveOpen = false;
+		archiveError = null;
+		unarchiveError = null;
+		copied = null;
 		status = null;
 		messages = [];
 		commands = [];
@@ -205,9 +239,11 @@
 			statusError = null;
 			messagesError = null;
 		}
-		const [statusResult, messagesResult] = await Promise.allSettled([
+		const [statusResult, messagesResult, copiedResult] = await Promise.allSettled([
 			getDeviceStatus(id),
-			getMessages(id, MESSAGE_LIMIT)
+			getMessages(id, MESSAGE_LIMIT),
+			// Owner/admin only. A refusal here hides one sentence, nothing else.
+			getAudit({ action: COPIED_WORKFLOWS_ACTION, limit: 100 })
 		]);
 		// The operator can switch devices while a slow read is in flight; the
 		// late answer belongs to the device that is no longer on screen.
@@ -221,6 +257,9 @@
 			messages = [];
 			messagesError = describeError(messagesResult.reason);
 		}
+		copied = copiedResult.status === 'fulfilled'
+			? copiedFlowsFor(copiedResult.value.events, id)
+			: null;
 		loading = false;
 		void loadCommands(id, initial);
 	}
@@ -277,6 +316,37 @@
 		}
 	}
 
+	async function confirmArchive(): Promise<void> {
+		if (archiving) return;
+		archiving = true;
+		archiveError = null;
+		try {
+			await archiveDevice(deviceId);
+			archiving = false;
+			archiveOpen = false;
+			onarchived?.(deviceId);
+			onclose();
+		} catch (failure) {
+			archiveError = describeError(failure);
+			archiving = false;
+		}
+	}
+
+	/** Unarchiving is reversible and needs no confirmation; a refusal is shown inline. */
+	async function unarchiveNow(): Promise<void> {
+		if (archiving) return;
+		archiving = true;
+		unarchiveError = null;
+		try {
+			await unarchiveDevice(deviceId);
+			onunarchived?.(deviceId);
+		} catch (failure) {
+			unarchiveError = describeError(failure);
+		} finally {
+			archiving = false;
+		}
+	}
+
 	async function confirmPurge(): Promise<void> {
 		if (purging) return;
 		purging = true;
@@ -298,7 +368,7 @@
 	}
 
 	function requestClose(): void {
-		if (revoking || purging) return;
+		if (revoking || purging || archiving) return;
 		onclose();
 	}
 </script>
@@ -318,7 +388,12 @@
 	<div class="drawer-shell">
 		<header class="drawer-head">
 			<div class="drawer-title">
-				<p class="eyebrow">Device</p>
+				<div class="head-eyebrow">
+					<p class="eyebrow">Device</p>
+					{#if archived}
+						<Badge tone="muted">Archived</Badge>
+					{/if}
+				</div>
 				<h2 id={titleId}>{label}</h2>
 				<div class="id-line">
 					<span class="mono">{deviceId}</span>
@@ -409,6 +484,17 @@
 						</dd>
 					</div>
 
+					{#if archivedStamp}
+						<div class="fact-row">
+							<dt>Archived</dt>
+							<dd>
+								<span title={formatAbsolute(archivedStamp)}>
+									{formatDate(archivedStamp)} · {formatClock(archivedStamp)}
+								</span>
+							</dd>
+						</div>
+					{/if}
+
 					<div class="fact-row">
 						<dt>SIM slot</dt>
 						<dd>
@@ -437,6 +523,25 @@
 						</dd>
 					</div>
 				</dl>
+
+				{#if copied}
+					<p class="copied-note">
+						<span class="copied-mark" aria-hidden="true"><Icon name="workflow" size={13} /></span>
+						<span>
+							<span class="mono">{copied.count}</span>
+							{copied.count === 1 ? 'workflow' : 'workflows'} copied
+							{#if copiedFrom}
+								from
+								{#if copiedFrom.mono}
+									<span class="mono">{copiedFrom.text}</span>
+								{:else}
+									<strong>{copiedFrom.text}</strong>
+								{/if}
+							{/if}
+							when this phone was paired.
+						</span>
+					</p>
+				{/if}
 			</section>
 
 			<div class="action-row">
@@ -460,6 +565,29 @@
 					<Icon name="send" size={13} /> Send SMS
 				</button>
 				<span class="spacer"></span>
+				{#if archived}
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => void unarchiveNow()}
+						disabled={archiving}
+						aria-busy={archiving}
+					>
+						{#if archiving}<Spinner />{:else}<Icon name="unarchive" size={13} />{/if}
+						Unarchive
+					</button>
+				{:else}
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => {
+							archiveError = null;
+							archiveOpen = true;
+						}}
+					>
+						<Icon name="archive" size={13} /> Archive
+					</button>
+				{/if}
 				<button
 					type="button"
 					class="btn btn-danger btn-sm"
@@ -471,6 +599,10 @@
 					<Icon name="trash" size={13} /> Revoke
 				</button>
 			</div>
+
+			{#if unarchiveError}
+				<Notice tone="danger" title="Could not unarchive this device">{unarchiveError}</Notice>
+			{/if}
 
 			{#if sendOpen}
 				<section class="section send-section" id={`send-panel-${uid}`} aria-labelledby={`send-${uid}`}>
@@ -680,6 +812,32 @@
 </ConfirmDialog>
 
 <ConfirmDialog
+	open={archiveOpen}
+	title="Archive this device?"
+	confirmLabel="Archive device"
+	tone="primary"
+	pending={archiving}
+	error={archiveError}
+	onconfirm={() => void confirmArchive()}
+	oncancel={() => {
+		if (!archiving) {
+			archiveOpen = false;
+			archiveError = null;
+		}
+	}}
+>
+	<p>
+		<strong>{device ? devicePrimary(device) : deviceId}</strong>
+		{#if device && deviceLabel(device)}(<span class="mono">{deviceId}</span>){/if}
+		leaves the fleet list. Its message history stays on the gateway, and it comes back by
+		itself if the phone polls again.
+	</p>
+	<p class="hint" style="margin-top: 10px">
+		Archiving keeps the key. Use Revoke when the phone should stop authenticating.
+	</p>
+</ConfirmDialog>
+
+<ConfirmDialog
 	open={purgeOpen}
 	title="Delete this device's messages?"
 	confirmLabel="Delete messages"
@@ -769,6 +927,13 @@
 		font-weight: 700;
 		letter-spacing: -0.02em;
 		overflow-wrap: anywhere;
+	}
+
+	.head-eyebrow {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		min-height: 22px;
 	}
 
 	.id-line {
@@ -973,6 +1138,33 @@
 		font-size: var(--df-p-text-base);
 		color: var(--df-text-primary);
 		overflow-wrap: anywhere;
+	}
+
+	/* The one sentence about a pairing that inherited flows. Quiet: it is a fact
+	   from the audit log, not a state and not an alert. */
+	.copied-note {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.copied-mark {
+		display: inline-flex;
+		flex: none;
+		margin-top: 1px;
+		color: var(--df-text-meta);
+	}
+
+	.copied-note strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
 	}
 
 	.action-row {
@@ -1197,6 +1389,13 @@
 
 		.dlog-row {
 			transition: none;
+		}
+	}
+
+	/* Every drawer action meets 48dp on a touch screen; a mouse keeps the compact row. */
+	@media (pointer: coarse), (max-width: 620px) {
+		.action-row .btn-sm {
+			min-height: 48px;
 		}
 	}
 </style>

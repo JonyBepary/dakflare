@@ -413,8 +413,15 @@ export async function getHealth(silentAuth = false): Promise<HealthResult> {
 	return { health: data, httpStatus: status };
 }
 
-export async function getDevices(): Promise<Device[]> {
-	const data = await get<{ devices: Device[] }>('/v1/devices');
+/**
+ * `GET /v1/devices` — the fleet, active devices only unless asked otherwise.
+ *
+ * `include_archived` is the whole toggle: the default read is the fleet the
+ * operator works with, and archived rows are a separate, explicit request.
+ */
+export async function getDevices(includeArchived = false): Promise<Device[]> {
+	const query = includeArchived ? '?include_archived=1' : '';
+	const data = await get<{ devices: Device[] }>(`/v1/devices${query}`);
 	return data.devices ?? [];
 }
 
@@ -549,6 +556,25 @@ export async function revokeDevice(
 	deviceId: string
 ): Promise<{ ok: boolean; d1_deleted: number }> {
 	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+}
+
+/**
+ * `POST /v1/admin/devices/:id/archive` — takes the device out of the fleet list.
+ *
+ * Nothing is destroyed: the key, the message history and the queue stay, and the
+ * gateway unarchives the row by itself the next time the phone polls.
+ */
+export async function archiveDevice(deviceId: string): Promise<{ ok: boolean }> {
+	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}/archive`, {
+		method: 'POST'
+	});
+}
+
+/** `POST /v1/admin/devices/:id/unarchive` — puts the device back in the fleet list. */
+export async function unarchiveDevice(deviceId: string): Promise<{ ok: boolean }> {
+	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}/unarchive`, {
+		method: 'POST'
+	});
 }
 
 export async function mintPairingCode(input: {
