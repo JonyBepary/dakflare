@@ -788,6 +788,49 @@ mod tests {
         assert!(lines[4].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
+    /// The published vectors, read from the file the Worker and the JS harness
+    /// also read, so the phone cannot drift from either on the one string every
+    /// signed request depends on.
+    #[test]
+    fn shared_protocol_vectors_are_reproduced() {
+        let raw = include_str!("../../../test-support/protocol-vectors.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).expect("protocol vectors parse");
+
+        assert_eq!(
+            body_digest(b""),
+            doc["empty_body_sha256"].as_str().expect("empty_body_sha256"),
+            "the §2.3 empty-body digest"
+        );
+
+        let vectors = doc["canonical"].as_array().expect("canonical array");
+        assert!(!vectors.is_empty(), "the shared file carries no vectors");
+        for vector in vectors {
+            let id = vector["id"].as_str().expect("id");
+            let body = vector["body"].as_str().expect("body").as_bytes();
+            assert_eq!(
+                body.len() as u64,
+                vector["body_bytes"].as_u64().expect("body_bytes"),
+                "{id}: body_bytes is the UTF-8 length, not the character count"
+            );
+            assert_eq!(
+                body_digest(body),
+                vector["body_sha256"].as_str().expect("body_sha256"),
+                "{id}: body digest"
+            );
+            assert_eq!(
+                canonical_string(
+                    vector["method"].as_str().expect("method"),
+                    vector["pathname"].as_str().expect("pathname"),
+                    vector["timestamp"].as_str().expect("timestamp"),
+                    vector["nonce"].as_str().expect("nonce"),
+                    body,
+                ),
+                vector["canonical"].as_str().expect("canonical"),
+                "{id}: canonical string"
+            );
+        }
+    }
+
     #[test]
     fn empty_body_digest_matches_the_contract_vector() {
         // SHA-256("") — the §2.3 empty-body digest.

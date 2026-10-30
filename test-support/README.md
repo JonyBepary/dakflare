@@ -5,6 +5,25 @@ The harness is `dakflare_test_harness.mjs` at the repository root: a zero-depend
 contract text alone. It was deliberately **not** derived from `worker/src` — its only value is that it
 can disagree with the server.
 
+## One published copy of the contract vectors
+
+`protocol-vectors.json` holds the §4.2 canonical-string vectors and the RFC 6238 TOTP
+vectors. It is the only place those values are written down, and three consumers read it:
+
+| Consumer | How |
+|---|---|
+| `dakflare_test_harness.mjs` | `verify-vectors` / `selftest` read the file at startup |
+| `simulator/core` (the phone's Rust core) | `shared_protocol_vectors_are_reproduced` in `protocol.rs`, via `include_str!` |
+| `independent-canonical-check.py` | keeps its **own** transcription and asserts it against the file |
+
+The Python checker deliberately does not derive anything from the JSON. Its value is
+that it is a third, independently written reading of the frozen contract; comparing that
+reading to the shared file catches the case where one implementation is updated and the
+others are not. Deriving from the file would turn the third opinion into a second copy.
+
+Changing a vector means changing the contract first, then this file, then letting the
+three consumers disagree until they agree again.
+
 ## Prerequisites
 
 - Node 24+

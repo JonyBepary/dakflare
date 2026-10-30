@@ -121,9 +121,14 @@ function base32Decode(value) {
   return Buffer.from(out);
 }
 
-/** One 6-digit TOTP code, RFC 6238 (HMAC-SHA1, 30 s). */
-function totpNow(secretBase32) {
-  const counter = Math.floor(Date.now() / 30_000);
+/**
+ * One TOTP code, RFC 6238 (HMAC-SHA1, 30 s), at a given instant.
+ *
+ * The instant is a parameter so the published RFC vectors can be asserted
+ * against it; `totpNow` is the only caller that wants "now".
+ */
+function totpAt(secretBase32, nowMs, digits = 6) {
+  const counter = Math.floor(nowMs / 30_000);
   const message = Buffer.alloc(8);
   message.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
   message.writeUInt32BE(counter >>> 0, 4);
@@ -131,7 +136,11 @@ function totpNow(secretBase32) {
   const offset = mac[mac.length - 1] & 0x0f;
   const binary =
     ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3];
-  return String(binary % 1_000_000).padStart(6, '0');
+  return String(binary % 10 ** digits).padStart(digits, '0');
+}
+
+function totpNow(secretBase32) {
+  return totpAt(secretBase32, Date.now());
 }
 
 /* ────────────── a software WebAuthn authenticator (passkey step-up) ─────────
@@ -383,30 +392,27 @@ async function api(base, method, pathname, { body, cookie, headers } = {}) {
 
 /* ────────────────────────────── contract §4 vectors ───────────────────────── */
 
-const VECTORS = [
-  {
-    id: 'A', method: 'POST', pathname: '/v1/sms/outgoing/poll',
-    timestamp: '1776470400000', nonce: 'a3f1c0d29b7e4f8a1c6d5e2b9f0a7c34',
-    body: '{"ack_command_ids":[],"fcm_token":"fcm-test-token-0001"}',
-    len: 56,
-    sha: 'f8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9',
-    canonical: 'POST\n/v1/sms/outgoing/poll\n1776470400000\na3f1c0d29b7e4f8a1c6d5e2b9f0a7c34\nf8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9',
-  },
-  {
-    id: 'B', method: 'GET', pathname: '/v1/device/ws',
-    timestamp: '1776470400000', nonce: '0f1e2d3c4b5a69788796a5b4c3d2e1f0',
-    body: '', len: 0, sha: EMPTY_SHA256,
-    canonical: `GET\n/v1/device/ws\n1776470400000\n0f1e2d3c4b5a69788796a5b4c3d2e1f0\n${EMPTY_SHA256}`,
-  },
-  {
-    id: 'C', method: 'POST', pathname: '/v1/sms/incoming/batch',
-    timestamp: '1776470400000', nonce: 'deadbeefcafebabe0123456789abcdef',
-    body: '{"messages":[{"local_id":"m_0001","sender":"+8801712345678","body":"\u0986\u09b8\u09b8\u09be\u09b2\u09be\u09ae\u09c1 \u0986\u09b2\u09be\u0987\u0995\u09c1\u09ae","received_at":"2026-04-18T09:15:00.000Z"}]}',
-    len: 159,
-    sha: '1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6',
-    canonical: 'POST\n/v1/sms/incoming/batch\n1776470400000\ndeadbeefcafebabe0123456789abcdef\n1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6',
-  },
-];
+/**
+ * §4.2 vectors live in one file, `test-support/protocol-vectors.json`, so the
+ * Worker, the phone (Rust) and this harness cannot drift apart. The Python
+ * checker in `test-support/` keeps its own transcription on purpose and asserts
+ * it against the same file; that is what makes it a third opinion rather than a
+ * second copy.
+ */
+const VECTORS_FILE = path.join(HERE, 'test-support', 'protocol-vectors.json');
+const CONTRACT = JSON.parse(fs.readFileSync(VECTORS_FILE, 'utf8'));
+
+const VECTORS = CONTRACT.canonical.map((vector) => ({
+  id: vector.id,
+  method: vector.method,
+  pathname: vector.pathname,
+  timestamp: vector.timestamp,
+  nonce: vector.nonce,
+  body: vector.body,
+  len: vector.body_bytes,
+  sha: vector.body_sha256,
+  canonical: vector.canonical,
+}));
 
 /* ─────────────────────────────── contract §1/§2 ───────────────────────────── */
 
@@ -814,6 +820,15 @@ function cmdVerifyVectors() {
   rep.check('method is uppercased', buildCanonicalString({
     method: 'post', pathname: '/x', timestampHeader: '1'.repeat(13), nonce: '0'.repeat(32), bodyBytes: Buffer.alloc(0),
   }).split('\n')[0], 'POST');
+
+  // RFC 6238 Appendix B. A TOTP that is wrong by a digit is indistinguishable
+  // from a wrong code at sign-in, so the published vectors are asserted here
+  // instead of only being exercised end to end against a live Worker.
+  for (const vector of CONTRACT.totp.vectors) {
+    const at = vector.time * 1000;
+    rep.check(`TOTP t=${vector.time} 8-digit`, totpAt(CONTRACT.totp.secret_base32, at, 8), vector.digits8);
+    rep.check(`TOTP t=${vector.time} 6-digit`, totpAt(CONTRACT.totp.secret_base32, at, 6), vector.digits6);
+  }
   return rep;
 }
 
