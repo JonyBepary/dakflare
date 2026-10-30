@@ -351,6 +351,42 @@ export interface RedeemInfo {
 	expires_at: number;
 }
 
+/**
+ * `GET /v1/admin/invites` — every invite row, newest first. `role` is typed as
+ * a plain string because the column is one: a row written by an older build (or
+ * by hand) is shown exactly as stored rather than snapped to a known value.
+ */
+export interface Invite {
+	id: string;
+	email: string;
+	role: string;
+	expires_at: number;
+	used_at: number | null;
+	created_by: string | null;
+	created_at: number;
+}
+
+export interface InviteList {
+	invites: Invite[];
+	/** The gateway's clock at the moment it answered, for the state column. */
+	now: number;
+}
+
+/**
+ * `POST /v1/admin/invites` — the only response that ever carries `token`. The
+ * gateway keeps its hash and nothing else, so the console must not hold it
+ * past the panel that shows it.
+ */
+export interface MintedInvite {
+	id: string;
+	email: string;
+	role: string;
+	expires_at: number;
+	token: string;
+}
+
+export type InviteRole = 'owner' | 'admin' | 'member';
+
 /** A `/api/auth/passkey/*` answer before it is decoded. */
 export interface PasskeySummary {
 	id: string;

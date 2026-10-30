@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { describeError, getHealth } from '$lib/api';
-	import { formatDate } from '$lib/format';
+	import { ApiError, describeError, getHealth, getInvites, revokeInvite } from '$lib/api';
+	import { formatDate, formatRelative } from '$lib/format';
+	import { currentTime, subscribeClock } from '$lib/live-clock.svelte';
 	import { listPasskeys } from '$lib/passkey';
 	import {
 		checkPasswordLength,
@@ -30,10 +31,11 @@
 		type TotpEnrolment,
 		type TotpProbe
 	} from '$lib/totp';
-	import type { PasskeySummary } from '$lib/types';
+	import type { Invite, PasskeySummary } from '$lib/types';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import InviteMint from '$lib/components/InviteMint.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import QrCode from '$lib/components/QrCode.svelte';
@@ -121,6 +123,40 @@
 
 	let pwNotice = $state<string | null>(null);
 
+	/*
+	 * Factor 05 — invites.
+	 *
+	 * An invite is the only door into this deployment (AUTH_PLAN §4), so the
+	 * panel keeps the rules visible instead of relying on the operator to know
+	 * them: single use, one address, and owner only from an owner. The token
+	 * itself never enters this file — `InviteMint` owns it and drops it when its
+	 * result panel closes.
+	 */
+	let invites = $state<Invite[] | null>(null);
+	let invitesLoading = $state(true);
+	let invitesError = $state<string | null>(null);
+	let invitesNotice = $state<string | null>(null);
+	/** A successful change reads as done; "already gone" is only information. */
+	let invitesNoticeTone = $state<'ok' | 'info'>('ok');
+	let mintOpen = $state(false);
+
+	/** The gateway's clock, carried forward locally between answers. */
+	let serverNow = $state(0);
+	let fetchedAt = $state(0);
+
+	let revokeTarget = $state<Invite | null>(null);
+	let revoking = $state(false);
+	let revokeError = $state<string | null>(null);
+
+	const clock = $derived(currentTime());
+	const inviteNow = $derived(serverNow === 0 ? clock : clock + (serverNow - fetchedAt));
+	const openInvites = $derived(
+		invites === null ? 0 : invites.filter((invite) => inviteState(invite, inviteNow) === 'open').length
+	);
+	const revokeExpired = $derived(
+		revokeTarget !== null && inviteState(revokeTarget, inviteNow) !== 'open'
+	);
+
 	const pwStrength = $derived(passwordStrength(pwValue));
 	const pwLengthError = $derived(pwValue === '' ? null : checkPasswordLength(pwValue));
 	/** Under `off` the section is absent, not disabled. An unknown mode shows. */
@@ -162,22 +198,28 @@
 
 	onMount(() => {
 		void load();
+		// One shared 30-second tick: an invite can expire while the page is open,
+		// and its row should say so without a reload.
+		return subscribeClock();
 	});
 
 	async function load(): Promise<void> {
 		if (!allowed) {
 			checking = false;
 			passwordLoading = false;
+			invitesLoading = false;
 			return;
 		}
 		checking = true;
 		failure = null;
 		ended = null;
 		pwNotice = null;
+		invitesNotice = null;
 		resetPasswordForms();
 		probe = await probeTotp();
 		if (probe.kind === 'error') failure = probe.message;
 		await loadPassword();
+		await loadInvites();
 		checking = false;
 		try {
 			passkeys = await listPasskeys();
@@ -225,6 +267,90 @@
 		pwRemoveValue = '';
 		pwRemoveCode = '';
 		pwRemoveError = null;
+	}
+
+	/* ------------------------------------------------------------- invites */
+
+	/**
+	 * Open, used or expired — in that order of precedence.
+	 *
+	 * `used_at` wins over the expiry because a redeemed invite is spent even if
+	 * its window has not closed; the row is a record, not an offer.
+	 */
+	function inviteState(invite: Invite, now: number): 'open' | 'used' | 'expired' {
+		if (invite.used_at !== null) return 'used';
+		return invite.expires_at > now ? 'open' : 'expired';
+	}
+
+	/**
+	 * A relative age is useful while it is short; past a week the absolute date
+	 * beside it is the better answer, so the second line is dropped rather than
+	 * repeating the same day in two formats.
+	 */
+	function recentAge(at: number, now: number): string {
+		return Math.abs(now - at) < 7 * 86_400_000 ? formatRelative(at, now) : '';
+	}
+
+	async function loadInvites(): Promise<void> {
+		invitesLoading = true;
+		invitesError = null;
+		try {
+			const data = await getInvites();
+			invites = data.invites;
+			// The gateway's clock decides "expired"; the local tick only carries it
+			// forward, so a skewed browser clock cannot mark a live invite spent.
+			serverNow = data.now;
+			fetchedAt = Date.now();
+		} catch (error) {
+			// A member (or a demoted account) gets a 403 from the route; say which
+			// rule refused it rather than "request failed".
+			invitesError =
+				error instanceof ApiError && error.status === 403
+					? 'The invite list is for owners and admins, and the gateway refused it for this account. Ask an owner if an invite is needed.'
+					: describeError(error);
+			invites = null;
+		} finally {
+			invitesLoading = false;
+		}
+	}
+
+	async function confirmRevoke(): Promise<void> {
+		const target = revokeTarget;
+		if (target === null || revoking) return;
+		const wasOpen = inviteState(target, inviteNow) === 'open';
+		revoking = true;
+		revokeError = null;
+		invitesNotice = null;
+		try {
+			await revokeInvite(target.id);
+			revokeTarget = null;
+			invitesNoticeTone = 'ok';
+			invitesNotice = wasOpen
+				? `The invite for ${target.email} was revoked. The link stops working now.`
+				: `The row for ${target.email} was removed. The link had already expired.`;
+			await loadInvites();
+		} catch (error) {
+			if (error instanceof ApiError && error.status === 404) {
+				// Already deleted, possibly by the CLI: the list is the truth, so
+				// close the dialog and ask it again rather than reporting a failure.
+				revokeTarget = null;
+				invitesNoticeTone = 'info';
+				invitesNotice = 'That invite was already gone. The list has been refreshed.';
+				await loadInvites();
+			} else if (error instanceof ApiError && error.status === 403) {
+				revokeError =
+					'The gateway refused the revoke: this account may no longer be an owner or admin.';
+			} else {
+				revokeError = describeError(error);
+			}
+		} finally {
+			revoking = false;
+		}
+	}
+
+	function openMint(): void {
+		invitesNotice = null;
+		mintOpen = true;
 	}
 
 	async function openPasswordForm(): Promise<void> {
@@ -903,8 +1029,7 @@
 		{/if}
 
 		{#if pwVisible}
-			<section class="card factor-card" id="password-card" aria-labelledby="password-title">
-				<header class="factor-head">
+			<section class="card factor-card" id="password-card" aria-labelledby="password-title">				<header class="factor-head">
 					<div class="factor-title">
 						<span class="step-mark mono" aria-hidden="true">04</span>
 						<div>
@@ -1208,6 +1333,207 @@
 				{/if}
 			</section>
 		{/if}
+
+		<section class="card factor-card" id="invites-card" aria-labelledby="invites-title">
+			<header class="factor-head">
+				<div class="factor-title">
+					<span class="step-mark mono" aria-hidden="true">05</span>
+					<div>
+						<h2 id="invites-title">Invites</h2>
+						<p class="factor-lede">
+							The only way an account is made here: one address, one role, one use, and an
+							expiry.
+						</p>
+					</div>
+				</div>
+				{#if invitesLoading && invites === null}
+					<span class="chip" data-tone="muted"><Spinner /> reading</span>
+				{:else if invites === null}
+					<span class="chip" data-tone="muted">unknown</span>
+				{:else if openInvites === 0}
+					<span class="chip" data-tone="muted">none open</span>
+				{:else}
+					<span class="chip" data-tone="ok">{openInvites} open</span>
+				{/if}
+			</header>
+
+			<div class="factor-body">
+				<ul class="invite-facts">
+					<li>
+						<span class="fact-label mono">Single use</span>
+						<span class="fact-body">
+							The link stops working the moment it is redeemed. The row stays here, as used.
+						</span>
+					</li>
+					<li>
+						<span class="fact-label mono">One address</span>
+						<span class="fact-body">
+							An invite for an address that already has an account is refused, and nothing is
+							minted.
+						</span>
+					</li>
+					<li>
+						<span class="fact-label mono">Owner, by an owner</span>
+						<span class="fact-body">
+							Only an owner may mint another owner. An admin can invite admins and members.
+						</span>
+					</li>
+				</ul>
+
+				<div class="invite-bar">
+					{#if !mintOpen}
+						<button
+							type="button"
+							class="btn btn-primary btn-sm"
+							onclick={openMint}
+							disabled={invitesLoading}
+						>
+							<Icon name="plus" size={13} /> Mint an invite
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => void loadInvites()}
+						disabled={invitesLoading}
+						aria-busy={invitesLoading}
+					>
+						{#if invitesLoading}<Spinner />{:else}<Icon name="refresh" size={13} />{/if}
+						{invitesLoading ? 'Reading' : 'Refresh'}
+					</button>
+				</div>
+
+				{#if mintOpen}
+					<InviteMint
+						bind:open={mintOpen}
+						actorRole={session.role}
+						oncreated={() => void loadInvites()}
+					/>
+				{/if}
+
+				{#if invitesNotice}
+					<div class="invite-note">
+						<Notice tone={invitesNoticeTone}>{invitesNotice}</Notice>
+					</div>
+				{/if}
+
+				{#if invitesLoading && invites === null}
+					<div class="invite-loading" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Reading the invite list</span>
+						{#each ['a', 'b', 'c'] as key (key)}
+							<div class="skeleton" style="height: 38px"></div>
+						{/each}
+					</div>
+				{:else if invitesError}
+					<div class="invite-message">
+						<Notice tone="danger" title="The invite list did not load">
+							{invitesError}
+						</Notice>
+						<button
+							type="button"
+							class="btn btn-sm"
+							style="margin-top: 12px"
+							onclick={() => void loadInvites()}
+						>
+							<Icon name="refresh" size={13} /> Try again
+						</button>
+					</div>
+				{:else if invites !== null && invites.length === 0}
+					<EmptyState
+						icon="key"
+						title="No invites yet"
+						description="An invite is what lets one address make an account: a role, an expiry and a single use. There is no public sign-up, so an account cannot exist without one."
+					/>
+				{:else if invites !== null}
+					<div class="table-wrap">
+						<table class="table invite-table">
+							<thead>
+								<tr>
+									<th scope="col">Email</th>
+									<th scope="col" class="col-role">Role</th>
+									<th scope="col" class="col-state">State</th>
+									<th scope="col" class="col-created">Created</th>
+									<th scope="col" class="col-actions">
+										<span class="sr-only">Actions</span>
+									</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each invites as invite (invite.id)}
+									{@const state = inviteState(invite, inviteNow)}
+									<tr>
+										<td class="cell-email">
+											<span class="invite-email">{invite.email}</span>
+										</td>
+										<td class="cell-role">
+											<span class="mono role-value">{invite.role}</span>
+										</td>
+										<td class="cell-state">
+											{#if state === 'open'}
+												<span class="chip" data-tone="ok">open</span>
+												<span class="cell-sub mono">
+													expires {formatRelative(invite.expires_at, inviteNow)}
+												</span>
+											{:else if state === 'used'}
+												<span class="chip" data-tone="muted">used</span>
+												<span class="cell-sub mono">
+													{formatDate(invite.used_at)}
+												</span>
+											{:else}
+												<span class="chip" data-tone="warn">expired</span>
+												<span class="cell-sub mono">
+													{formatDate(invite.expires_at)}
+												</span>
+											{/if}
+										</td>
+										<td class="cell-created">
+											<span class="mono">{formatDate(invite.created_at)}</span>
+											{#if recentAge(invite.created_at, inviteNow)}
+												<span class="cell-sub mono">
+													{recentAge(invite.created_at, inviteNow)}
+												</span>
+											{/if}
+										</td>
+										<td class="cell-actions">
+											{#if state === 'open'}
+												<button
+													type="button"
+													class="btn btn-danger btn-sm"
+													onclick={() => {
+														revokeError = null;
+														revokeTarget = invite;
+													}}
+													aria-label={`Revoke the invite for ${invite.email}`}
+												>
+													<Icon name="trash" size={13} /> Revoke
+												</button>
+											{:else if state === 'expired'}
+												<button
+													type="button"
+													class="btn btn-ghost btn-sm"
+													onclick={() => {
+														revokeError = null;
+														revokeTarget = invite;
+													}}
+													aria-label={`Remove the expired invite for ${invite.email}`}
+												>
+													Remove
+												</button>
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+					<p class="hint invite-foot">
+						Rows are kept after use so the list says what happened. The gateway writes
+						<span class="mono">invite.created</span> and <span class="mono">invite.revoked</span> to
+						the audit log.
+					</p>
+				{/if}
+			</div>
+		</section>
 	{/if}
 </div>
 
@@ -1261,6 +1587,38 @@
 	<p style="margin-top: 8px">
 		Do this only if the old codes were lost or may have been seen by someone else.
 	</p>
+</ConfirmDialog>
+
+<ConfirmDialog
+	open={revokeTarget !== null}
+	title={revokeExpired ? 'Remove this expired invite?' : 'Revoke this invite?'}
+	confirmLabel={revokeExpired ? 'Remove the row' : 'Revoke invite'}
+	tone="danger"
+	pending={revoking}
+	error={revokeError}
+	onconfirm={() => void confirmRevoke()}
+	oncancel={() => {
+		revokeTarget = null;
+		revokeError = null;
+	}}
+>
+	{#if revokeTarget !== null}
+		{#if revokeExpired}
+			<p>
+				The link for <strong>{revokeTarget.email}</strong> expired on
+				<span class="mono">{formatDate(revokeTarget.expires_at)}</span> and cannot be redeemed.
+				Removing the row deletes the record; nothing else changes.
+			</p>
+		{:else}
+			<p>
+				The link minted for <strong>{revokeTarget.email}</strong> stops working now, and the row
+				leaves this list. If it was already redeemed, the account it made stays.
+			</p>
+			<p class="hint" style="margin-top: 8px">
+				This cannot be undone. Mint a new invite if the address still needs one.
+			</p>
+		{/if}
+	{/if}
 </ConfirmDialog>
 
 <style>
@@ -1606,6 +1964,124 @@
 		max-width: 62ch;
 	}
 
+	/* ---------------------------------------------------------------- invites */
+
+	/* The three rules the panel will not let an operator learn by failing: each
+	   is a fact about the mechanism, not a tip. */
+	.invite-facts {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 1px;
+		padding: 1px;
+		list-style: none;
+		border: 1px solid var(--line);
+		border-radius: var(--r-sm);
+		background: var(--line);
+		overflow: hidden;
+	}
+
+	.invite-facts li {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 10px 12px;
+		background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+	}
+
+	.fact-label {
+		font-size: 9.5px;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--ink-3);
+	}
+
+	.fact-body {
+		max-width: 34ch;
+		color: var(--ink-2);
+		font-size: 12px;
+		line-height: 1.5;
+	}
+
+	.invite-bar {
+		display: flex;
+		align-items: center;
+		gap: var(--s-2);
+		flex-wrap: wrap;
+		margin-top: var(--s-3);
+	}
+
+	.invite-note,
+	.invite-message {
+		margin-top: var(--s-3);
+	}
+
+	.invite-loading {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s-2);
+		margin-top: var(--s-3);
+	}
+
+	.table-wrap {
+		margin-top: var(--s-3);
+		overflow-x: auto;
+	}
+
+	.invite-table {
+		min-width: 620px;
+	}
+
+	/* Not sticky: the wrapper is a horizontal scroller, so `top` would stick the
+	   header inside that box, not under the page header. */
+	.invite-table th {
+		position: static;
+	}
+
+	.invite-table td {
+		vertical-align: top;
+	}
+
+	.invite-email {
+		display: block;
+		font-weight: 500;
+		color: var(--ink);
+		overflow-wrap: anywhere;
+	}
+
+	.role-value {
+		font-size: 12px;
+		color: var(--ink-2);
+	}
+
+	.col-role {
+		width: 88px;
+	}
+
+	.col-state {
+		width: 132px;
+	}
+
+	.col-created {
+		width: 126px;
+	}
+
+	.col-actions {
+		width: 116px;
+	}
+
+	.cell-actions {
+		text-align: right;
+	}
+
+	.cell-actions .btn {
+		white-space: nowrap;
+	}
+
+	.invite-foot {
+		max-width: 82ch;
+		margin-top: var(--s-3);
+	}
+
 	@media (max-width: 720px) {
 		.factor-card {
 			padding: var(--s-4);
@@ -1662,6 +2138,129 @@
 		.pw-form {
 			max-width: none;
 		}
+
+		/* The facts become a stack: three columns at 390px would be three words
+		   per line. */
+		.invite-facts {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.fact-body {
+			max-width: none;
+		}
+
+		.invite-bar .btn,
+		.cell-actions .btn,
+		.invite-message .btn {
+			min-height: 48px;
+		}
+
+		/* The revoke dialog is shared, but its two buttons are tapped here. */
+		:global(dialog.dialog .dialog-foot .btn) {
+			min-height: 48px;
+		}
+
+		/* A five-column table at 390px is a horizontal scroll with a revoke
+		   button off-screen. Each row becomes its own card instead, with the
+		   header row still in the accessibility tree. */
+		.table-wrap {
+			overflow-x: visible;
+		}
+
+		.invite-table {
+			min-width: 0;
+		}
+
+		.invite-table thead {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+
+		.invite-table,
+		.invite-table tbody,
+		.invite-table tr,
+		.invite-table td {
+			display: block;
+		}
+
+		.invite-table tbody {
+			display: grid;
+			gap: var(--s-2);
+		}
+
+		.invite-table tr {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 4px 10px;
+			padding: 12px;
+			border: 1px solid var(--line);
+			border-radius: var(--r-sm);
+		}
+
+		.invite-table tbody tr:hover {
+			background: transparent;
+		}
+
+		.invite-table td {
+			padding: 0;
+			border: 0;
+		}
+
+		.invite-table th:first-child,
+		.invite-table td:first-child,
+		.invite-table th:last-child,
+		.invite-table td:last-child {
+			padding: 0;
+		}
+
+		.cell-email {
+			grid-column: 1;
+			grid-row: 1;
+		}
+
+		.cell-state {
+			grid-column: 2;
+			grid-row: 1;
+			text-align: right;
+		}
+
+		.cell-role {
+			grid-column: 1;
+			grid-row: 2;
+		}
+
+		.cell-created {
+			grid-column: 1;
+			grid-row: 3;
+		}
+
+		.cell-actions {
+			grid-column: 2;
+			grid-row: 2 / span 2;
+			align-self: center;
+		}
+
+		.cell-role::before,
+		.cell-created::before {
+			margin-right: 6px;
+			font-family: var(--font-mono);
+			font-size: 9.5px;
+			letter-spacing: 0.1em;
+			text-transform: uppercase;
+			color: var(--ink-3);
+		}
+
+		.cell-role::before {
+			content: 'role';
+		}
+
+		.cell-created::before {
+			content: 'created';
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
@@ -1670,6 +2269,10 @@
 		}
 
 		.pw-seg {
+			transition: none;
+		}
+
+		.invite-table tbody tr {
 			transition: none;
 		}
 	}

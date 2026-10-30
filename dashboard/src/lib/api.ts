@@ -16,8 +16,10 @@ import type {
 	DeviceStatus,
 	Health,
 	HealthResult,
+	InviteList,
 	MeInfo,
 	MessagesResult,
+	MintedInvite,
 	PairingCode,
 	RedeemInfo,
 	Rule,
@@ -91,6 +93,7 @@ const CODE_MESSAGES: Record<string, string> = {
 	// Account paths (AUTH_PLAN §4). Each one names the next action, not the wire.
 	invite_invalid: 'That invite was already used or has expired. Ask the owner for a new one.',
 	already_registered: 'That address already has an account. Sign in instead.',
+	forbidden: 'This account is not allowed to do that.',
 	session_failed: 'The invite worked, but no session was issued. Open the link again.',
 	auth_unavailable: 'This deployment has no auth secret yet.',
 	owner_exists: 'This deployment already has an owner. Sign in instead.',
@@ -337,6 +340,42 @@ export async function signOutAccount(): Promise<void> {
 	} catch {
 		// Leaving the screen matters more than the cookie clearing itself.
 	}
+}
+
+/* ------------------------------------------------------------------ invites */
+
+/**
+ * `GET /v1/admin/invites` — pending and spent rows, with the gateway's clock.
+ *
+ * The list is the operator's record of who may still make an account; `now` is
+ * what decides whether a row is open or expired, so the page does not have to
+ * trust the browser's clock for that call.
+ */
+export function getInvites(): Promise<InviteList> {
+	return get<InviteList>('/v1/admin/invites');
+}
+
+/**
+ * `POST /v1/admin/invites` — mint one single-use invite.
+ *
+ * The response's `token` is the only copy that will ever exist outside the
+ * invitee's hands. Refusals worth naming: `already_registered` (409) and
+ * `forbidden` (403) when a non-owner asks for the owner role.
+ */
+export function createInvite(input: {
+	email: string;
+	role: 'owner' | 'admin' | 'member';
+	expires_in_s: number;
+}): Promise<MintedInvite> {
+	return get<MintedInvite>('/v1/admin/invites', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+/** `DELETE /v1/admin/invites/:id` — revoke an unspent invite; 404 when it is gone. */
+export function revokeInvite(id: string): Promise<{ ok: boolean; deleted: number }> {
+	return get(`/v1/admin/invites/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /* ------------------------------------------------------------------- audit */
