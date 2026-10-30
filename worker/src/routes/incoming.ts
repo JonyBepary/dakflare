@@ -634,7 +634,8 @@ async function applyRules(
       });
       // A DO failure is not a reason to try lower-priority rules: the queue as a
       // whole is unavailable. Leave the message unanswered so flows may still run.
-      if (!queued) break;
+      // A rules reply never carries an idempotency key, so `replayed` is false.
+      if (!queued.ok) break;
 
       try {
         await env.DB.batch([

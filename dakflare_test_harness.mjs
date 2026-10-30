@@ -1999,6 +1999,43 @@ async function cmdSuite() {
     rep.check('batch send to an unregistered device -> 404', bogusBatch.status, 404);
     const noRoute = await fetch(`${WORKER_URL}/v1/nope`);
     rep.check('unknown route -> 404', noRoute.status, 404);
+
+    // Idempotency (CLI slice 2b). Lives here, at the end, because the commands
+    // these checks enqueue are deliberately left PENDING and would otherwise
+    // show up in the poll and ack-timeout assertions above.
+    const key = `suite-idem-${Date.now()}`;
+    const first = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent', idempotency_key: key,
+    });
+    rep.check('send with an idempotency key -> 200', first.status, 200);
+    rep.check('...reports replayed false', first.data?.replayed, false);
+
+    const replay = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent', idempotency_key: key,
+    });
+    rep.check('replay with the same key -> 200', replay.status, 200);
+    rep.check('...returns the original command id', replay.data?.command_id, first.data?.command_id);
+    rep.check('...reports replayed true', replay.data?.replayed, true);
+
+    const other = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent',
+      idempotency_key: `${key}-b`,
+    });
+    rep.check('a different key creates a new command',
+      other.data?.command_id !== first.data?.command_id, true);
+
+    const tooLong = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'x', idempotency_key: 'k'.repeat(129),
+    });
+    rep.check('over-long key -> 400', tooLong.status, 400);
+
+    const batchKey = await admin('POST', '/v1/sms/send/batch', {
+      device_id: identity.deviceId,
+      commands: [{ to: '+8801712345678', body: 'x', idempotency_key: 'nope' }],
+    });
+    rep.check('batch with a key -> 400', batchKey.status, 400);
+    rep.check('...names the reason', batchKey.data?.error, 'idempotency_key_not_supported_in_batch');
+
     run(rep);
   }
 

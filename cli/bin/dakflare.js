@@ -40,6 +40,8 @@ const DEFAULT_PAIR_TTL_S = 600;
 const DEFAULT_PHONE_MAX_AGE_MIN = 60;
 const MAX_LABEL_CHARS = 64;
 const MAX_BODY_CHARS = 4096;
+/** Mirrors worker/src/lib/config.ts. */
+const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 
 const REQUIRED_BINDINGS = [
   'DB',
@@ -107,6 +109,7 @@ const VALUE_FLAGS = new Set([
   'tail',
   'wait',
   'until',
+  'idempotency-key',
 ]);
 
 function parseArgv(argv) {
@@ -1466,7 +1469,7 @@ function looksLikeE164(value) {
 async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
-  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until']);
+  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until', 'idempotency-key']);
   const json = Boolean(flags.json);
   const cfg = requireConfig();
 
@@ -1478,7 +1481,20 @@ async function commandSend(argv) {
 
   const { deviceId, note: deviceNote } = await resolveDevice(cfg, stringFlag(flags, 'device'));
 
-  const result = await api(cfg, 'POST', '/v1/sms/send', { device_id: deviceId, to, body });
+  // A retry with the same key returns the command it already created instead of
+  // sending a second SMS. The key travels in the body because the device's
+  // signature covers the body digest and not the headers.
+  const idempotencyKey = stringFlag(flags, 'idempotency-key');
+  if (idempotencyKey !== undefined && (idempotencyKey === '' || idempotencyKey.length > MAX_IDEMPOTENCY_KEY_CHARS)) {
+    throw usage(`--idempotency-key must be 1 to ${MAX_IDEMPOTENCY_KEY_CHARS} characters`);
+  }
+
+  const result = await api(cfg, 'POST', '/v1/sms/send', {
+    device_id: deviceId,
+    to,
+    body,
+    ...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
+  });
   if (result.status === 404 && result.data?.error === 'device_unknown') {
     throw new CliError(
       `device_unknown — "${deviceId}" is not in the D1 registry. Run \`dakflare devices\`.`,
@@ -1492,6 +1508,9 @@ async function commandSend(argv) {
   if (typeof commandId !== 'string' || commandId === '') {
     throw new CliError('the Worker did not return a command_id', 1, { error: 'bad_response' });
   }
+  // True when the key matched a command that already existed: nothing was
+  // enqueued by this call, and the id is the original one.
+  const replayed = result.data?.replayed === true;
 
   const wantsWait = flags.wait !== undefined;
   let command;
@@ -1528,6 +1547,7 @@ async function commandSend(argv) {
           device_selection: deviceNote,
           to,
           command_id: commandId,
+          replayed,
           state: command.state,
           verification,
         },
@@ -1539,7 +1559,7 @@ async function commandSend(argv) {
     return;
   }
 
-  out('Queued outbound message');
+  out(replayed ? 'Already queued (idempotency key matched)' : 'Queued outbound message');
   out(`  command       ${commandId}`);
   out(`  device        ${deviceId}${deviceNote ? ` (${deviceNote})` : ''}`);
   out(`  to            ${to}`);
@@ -2036,7 +2056,7 @@ The FCM token itself is never printed; only whether one is present.`,
 Revokes a device in D1 and in its Durable Object. Asks for confirmation;
 --yes skips it for automation. This is irreversible: the phone must pair again.`,
 
-  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--json]
+  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--idempotency-key <k>] [--json]
 
 Queues one outbound SMS and prints the command id and its state.
 
@@ -2046,6 +2066,10 @@ Queues one outbound SMS and prints the command id and its state.
   --wait [d]      follow the command until it settles (default 30s, max 5m)
   --until <s>     with --wait, stop at this state instead of waiting for delivery:
                   pending, dispatched, acked, sent, delivered (default: delivered)
+  --idempotency-key <k>
+                  retry-safe: the same key returns the command it already created
+                  instead of sending a second SMS. The reply carries replayed:true
+                  when that happened, and the exit code is still success.
 
 Exit 0 means the command was accepted; with --wait it means the outcome, so FAILED
 and EXPIRED exit 1 and a timeout exits 75. The envelope's verification.passed is

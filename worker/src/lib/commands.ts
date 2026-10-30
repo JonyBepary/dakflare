@@ -17,7 +17,21 @@ export interface OutboundCommandInput {
   body: string;
   priority: string;
   expiresAt: number;
+  /**
+   * Dedupe key. When the Durable Object already has a command for this key it
+   * returns that command instead of creating a second one, and `replayed` says
+   * which happened.
+   */
+  idempotencyKey?: string | null;
 }
+
+/**
+ * What the enqueue did. `replayed` is not an error: a retry with the same key is
+ * supposed to look like success, which is the whole point of the key.
+ */
+export type EnqueueOutcome =
+  | { ok: true; commandId: string; replayed: boolean }
+  | { ok: false };
 
 /**
  * Enqueue one command in the device's Durable Object, then mirror it into D1.
@@ -31,7 +45,7 @@ export interface OutboundCommandInput {
 export async function enqueueOutboundCommand(
   env: Env,
   command: OutboundCommandInput
-): Promise<boolean> {
+): Promise<EnqueueOutcome> {
   const stub = env.DEVICE.get(env.DEVICE.idFromName(command.deviceId));
   let res: Response;
   try {
@@ -44,25 +58,39 @@ export async function enqueueOutboundCommand(
         body: command.body,
         priority: command.priority,
         expires_at: command.expiresAt,
+        idempotency_key: command.idempotencyKey ?? null,
       }),
     });
   } catch (error) {
     console.error(`[command] DO unreachable: ${String(error)}`);
-    return false;
+    return { ok: false };
   }
   if (!res.ok) {
     console.error(`[command] enqueue rejected with HTTP ${res.status}`);
-    return false;
+    return { ok: false };
   }
+
+  const answer = (await res.json().catch(() => null)) as
+    | { replayed?: unknown; command_id?: unknown }
+    | null;
+  const replayed = answer?.replayed === true;
+  // A replay returns the command that already exists, which is not the id this
+  // call generated. Everything downstream has to use the DO's answer.
+  const commandId =
+    typeof answer?.command_id === "string" && answer.command_id !== ""
+      ? answer.command_id
+      : command.commandId;
+
+  if (replayed) return { ok: true, commandId, replayed: true };
 
   await persistOutboundMessage(
     env,
     command.deviceId,
-    command.commandId,
+    commandId,
     command.to,
     command.body
   );
-  return true;
+  return { ok: true, commandId, replayed: false };
 }
 
 /**

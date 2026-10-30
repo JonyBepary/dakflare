@@ -42,7 +42,12 @@ export type ErrorCode =
   /** The caller's own daily write reservation is exhausted. Retry tomorrow. */
   | "daily_quota_exceeded"
   /** A backing store failed; the batch was NOT written and the device should retry. */
-  | "storage_unavailable";
+  | "storage_unavailable"
+  /**
+   * Admin-only: `POST /v1/sms/send/batch` does not carry per-entry replay
+   * semantics yet, so a key there is refused rather than silently ignored.
+   */
+  | "idempotency_key_not_supported_in_batch";
 
 /** §8 status codes, as a compile-time map so call sites cannot drift. */
 export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
@@ -62,6 +67,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = {
   device_exists: 409,
   daily_quota_exceeded: 429,
   storage_unavailable: 503,
+  idempotency_key_not_supported_in_batch: 400,
 };
 
 const KNOWN_CODES = new Set<string>(Object.keys(ERROR_STATUS));

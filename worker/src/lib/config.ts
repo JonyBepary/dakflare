@@ -129,6 +129,11 @@ export const MAX_PEER_CHARS = 32;
 /** Operator-facing device label. Optional, trimmed, and never a routing key. */
 export const MAX_LABEL_CHARS = 64;
 export const MAX_ID_CHARS = 128;
+/**
+ * Caller-supplied idempotency key. Long enough for a UUID or a hash, short
+ * enough that a key cannot be used as a storage channel.
+ */
+export const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 export const MAX_FCM_TOKEN_CHARS = 512;
 export const MAX_RULE_VALUE_CHARS = 512;
 export const MAX_REPLY_TEMPLATE_CHARS = 1_000;
