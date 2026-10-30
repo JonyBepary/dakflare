@@ -50,6 +50,7 @@ import {
 import { requestMeta, writeAudit, type AdminActor } from "./audit";
 import { handleRedeemInvite, handleAuthMe } from "./routes/auth";
 import { handleBootstrap } from "./routes/bootstrap";
+import { handleResetUser } from "./routes/reset-user";
 import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
 import { handleAuditList } from "./routes/audit";
 import { err } from "./lib/errors";
@@ -427,6 +428,9 @@ export default {
     // First owner, for `dakflare init`. ADMIN_TOKEN only and never a cookie.
     if (method === "POST" && pathname === "/v1/admin/bootstrap") {
       return withAdminToken(req, env, () => handleBootstrap(req, env));
+    }
+    if (method === "POST" && pathname === "/v1/admin/auth/reset-user") {
+      return withAdminToken(req, env, () => handleResetUser(req, env));
     }
 
     // Pepper rotation is ADMIN_TOKEN only: it changes how every password row is

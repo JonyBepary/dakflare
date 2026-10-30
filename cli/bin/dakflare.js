@@ -1316,12 +1316,54 @@ function webInvite(base, token) {
   return `${base.replace(/\/+$/, '')}/admin/invite?code=${encodeURIComponent(token)}`;
 }
 
+async function commandAuthReset(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['email', 'ttl', 'yes', 'json']);
+  const json = Boolean(flags.json);
+  const email = stringFlag(flags, 'email');
+  if (!email || !email.includes('@')) throw usage('--email is required');
+  if (!flags.yes) {
+    throw usage('refusing to reset an account without --yes (it deletes the account, its sessions and passkeys)');
+  }
+  const ttlFlag = stringFlag(flags, 'ttl');
+  const ttlSeconds = ttlFlag === undefined ? 86400 : Number(ttlFlag);
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'POST', '/v1/admin/auth/reset-user', {
+    email,
+    expires_in_s: Math.round(ttlSeconds),
+  });
+  if (result.status === 404) {
+    const message = 'that address has no account to reset';
+    if (json) out(JSON.stringify({ ok: false, error: 'not_registered' }, null, 2));
+    else out(message);
+    return 1;
+  }
+  if (result.status !== 200) throw requestFailure('reset', result);
+
+  const token = result.data?.token ?? null;
+  const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
+  if (json) out(JSON.stringify({ ok: true, email, link }, null, 2));
+  else {
+    out(`Account reset: ${email}`);
+    if (link) {
+      out(`  open           ${webInvite(cfg.url, token)}`);
+      out(`  app            ${link}`);
+    }
+    out('  deleted        sessions, credentials, passkeys, authenticator');
+    out('  next           redeem the invite and finish passkey enrolment.');
+  }
+  return 0;
+}
+
 async function commandAuth(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('auth');
   if (sub === 'bootstrap') return commandAuthBootstrap(rest);
   if (sub === 'invite') return commandAuthInvite(rest);
   if (sub === 'invites') return commandAuthInvites(rest);
+  if (sub === 'reset') return commandAuthReset(rest);
   err(`dakflare: unknown auth subcommand "${sub}"`);
   err('try `dakflare auth --help`');
   return 2;
@@ -1698,12 +1740,13 @@ Queues one outbound SMS and prints the command id and its current state.
 
   For a body that begins with "-", use --body="…".`,
 
-  auth: `Usage: dakflare auth <bootstrap|invite|invites> [options]
+  auth: `Usage: dakflare auth <bootstrap|invite|invites|reset> [options]
 
   bootstrap --email <address>            create the first owner (no credential; enrol a passkey next)
   invite --email <address> [--role r] [--ttl seconds]
                                          mint a single-use invite; prints the dakflare://invite link
   invites                                list invites and whether they were used
+  reset --email <address> --yes          recovery: delete the account and mint a fresh owner invite
 
 Roles: owner, admin, member. The invite link is shown once; only its hash is stored.`,
   audit: `Usage: dakflare audit --tail [n] [--actor <label>] [--limit <n>] [--json]
