@@ -1,21 +1,23 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# R8 rules for the DakFlare shell.
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# The bridge classes are reached by name at runtime, from two directions that R8
+# cannot see:
+#   * Rust calls Kotlin through Tauri's mobile plugin registry, which resolves
+#     `dev.dakflare.simulator.bridge.SmsPlugin` by class name (`run_mobile_plugin`).
+#   * Kotlin calls Rust through JNI, whose symbols are the fully qualified class
+#     and method names (`Java_dev_dakflare_simulator_bridge_NativeBridge_*`).
+#   * Android instantiates every receiver and service from the manifest.
+# Without these, a release build strips the plugin class and the app dies at
+# startup with ClassNotFoundException — which is exactly what 0.2.0 did.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+-keep class dev.dakflare.simulator.bridge.** { *; }
+-keep class dev.dakflare.simulator.KeyVault { *; }
+-keep class dev.dakflare.simulator.MainActivity { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# JNI entry points are matched by their Java names, never by obfuscated ones.
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep the metadata the manifest and the runtime reflection rely on.
+-keepattributes *Annotation*, InnerClasses, Signature, EnclosingMethod
