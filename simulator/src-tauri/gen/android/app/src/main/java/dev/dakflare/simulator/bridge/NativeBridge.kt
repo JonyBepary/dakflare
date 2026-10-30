@@ -657,7 +657,16 @@ object NativeBridge {
         if (appDir.isEmpty() || deviceId.isEmpty()) return false
 
         return try {
-            isOk(syncFlows(appDir, deviceId))
+            // Logged like the other two: a refused sync used to be invisible,
+            // and a phone that silently stops fetching flows is a phone that
+            // runs yesterday's automation.
+            val parsed = JSONObject(syncFlows(appDir, deviceId))
+            if (parsed.optBoolean("ok")) {
+                true
+            } else {
+                Log.w(TAG, "syncFlows refused: ${parsed.optString("error")}")
+                false
+            }
         } catch (error: UnsatisfiedLinkError) {
             Log.e(TAG, "syncFlows symbol missing: ${error.javaClass.simpleName}")
             false
