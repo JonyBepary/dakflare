@@ -148,6 +148,8 @@ object NativeBridge {
     @JvmStatic
     external fun flushPending(appDir: String, deviceId: String): String
 
+    external fun drainOutbox(appDir: String, deviceId: String): String
+
     /**
      * Replace the cached flow set with this deployment's current set.
      *
@@ -555,13 +557,50 @@ object NativeBridge {
         if (appDir.isEmpty() || deviceId.isEmpty()) return false
 
         return try {
-            isOk(flushPending(appDir, deviceId))
+            // The refusal code is logged: a flush that fails silently is a row
+            // that never reaches the deployment and leaves no trace anywhere.
+            val parsed = JSONObject(flushPending(appDir, deviceId))
+            if (parsed.optBoolean("ok")) {
+                true
+            } else {
+                Log.w(TAG, "flushPending refused: ${parsed.optString("error")}")
+                false
+            }
         } catch (error: UnsatisfiedLinkError) {
             Log.e(TAG, "flushPending symbol missing: ${error.javaClass.simpleName}")
             false
         } catch (error: Throwable) {
             Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
             false
+        }
+    }
+
+    /**
+     * Collect the deployment's queued commands as local ids, or an empty list.
+     *
+     * Never throws: a missing symbol, a store error or a network error returns
+     * an empty list and leaves the Worker's queue untouched, so the next tick
+     * tries again. The ids are local `queued` rows; sending is the caller's job.
+     */
+    fun drainOutboxSafely(appDir: String, deviceId: String): List<String> {
+        if (loadFailure != null) return emptyList()
+        if (appDir.isEmpty() || deviceId.isEmpty()) return emptyList()
+
+        return try {
+            val parsed = JSONObject(drainOutbox(appDir, deviceId))
+            if (!parsed.optBoolean("ok")) {
+                Log.w(TAG, "drainOutbox refused: ${parsed.optString("error")}")
+                return emptyList()
+            }
+            val captured = parsed.optJSONArray("captured") ?: return emptyList()
+            (0 until captured.length())
+                .mapNotNull { index -> captured.optString(index).takeIf { it.isNotEmpty() } }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "drainOutbox symbol missing: ${error.javaClass.simpleName}")
+            emptyList()
+        } catch (error: Throwable) {
+            Log.e(TAG, "drainOutbox failed: ${error.javaClass.simpleName}")
+            emptyList()
         }
     }
 

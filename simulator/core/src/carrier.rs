@@ -418,11 +418,15 @@ async fn capture_commands(
 
     if !ack_ids.is_empty() {
         client.poll(&ack_ids).await?;
-        for message in &captured {
-            store.set_message_state(&message.id, "sent").await?;
-        }
-        // Mirror what the device just sent. Best effort: an unsent row keeps
-        // `mirrored = 0` and is retried on the next sync.
+        // Deliberately NOT `set_message_state(..., "sent")`. Acknowledging a
+        // command says the phone holds it, not that the radio transmitted it;
+        // the row stays `queued` until the send path marks it from its own
+        // SENT/DELIVERED receipt. Claiming `sent` here made every Worker-queued
+        // message look delivered while nothing had touched the radio.
+        //
+        // Mirror what the device now holds. Best effort: an unsent row keeps
+        // `mirrored = 0` and is retried on the next sync, and the state change
+        // when the radio reports re-opens it for mirroring.
         if let Err(error) = mirror_pending(store, client, device_id).await {
             eprintln!("[carrier] outbound mirror failed: {error}");
         }

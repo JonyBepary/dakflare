@@ -22,14 +22,16 @@ import java.util.Date
  * The long-lived half of the gateway: one `remoteMessaging` foreground service
  * that drains what the deployment has not accepted yet.
  *
- * It owns two jobs. Every [INTERVAL_MS] while this process lives it calls
- * [NativeBridge.flushPendingSafely] so inbound rows stored while offline, their
- * flow runs and replies already marked `sent` reach the deployment; then it asks
- * [SmsSender.retryQueued] to re-send queued rows whose earlier attempt failed for
- * a transient radio reason. Last it calls [NativeBridge.syncFlowsSafely] so a
- * Worker-side flow edit reaches a phone the operator never opens. It does not
- * execute queued commands and makes no other network calls — the receive path
- * stays in [SmsReceiver] and needs no service.
+ * It owns three jobs. Every [TICK_MS] it calls [NativeBridge.drainOutboxSafely]
+ * to collect the deployment's queued commands and hands each one to the radio
+ * through [SmsSender.resend]; without that, outbound commands were only fetched
+ * while the webview was open. It then asks [SmsSender.retryQueued] to re-send
+ * queued rows whose earlier attempt failed for a transient radio reason. Every
+ * [SLOW_EVERY] ticks it calls [NativeBridge.flushPendingSafely] so inbound rows
+ * stored while offline, their flow runs and replies already marked `sent` reach
+ * the deployment, and [NativeBridge.syncFlowsSafely] so a Worker-side flow edit
+ * reaches a phone the operator never opens. The receive path stays in
+ * [SmsReceiver] and needs no service.
  *
  * Started from [MainActivity] when the app opens with a paired identity, from
  * [SmsReceiver] after a successful inbound store, and from [BootReceiver] after
@@ -68,7 +70,7 @@ class GatewayService : Service() {
 
         startForegroundCompat(notification(deviceId, lastContact()))
         startLoop(appDir, deviceId)
-        Log.i(TAG, "gateway started interval_ms=$INTERVAL_MS")
+        Log.i(TAG, "gateway started tick_ms=$TICK_MS slow_every=$SLOW_EVERY")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,6 +104,7 @@ class GatewayService : Service() {
         val thread = Thread(
             {
                 var deviceId = initialDeviceId
+                var tick = 0
                 while (running) {
                     // Re-read the identity every tick. `delete_device` and
                     // `revoke_device` run in Rust, so this is the backstop that
@@ -116,27 +119,57 @@ class GatewayService : Service() {
                     }
                     deviceId = current
 
+                    // Outbound first, and every tick. Collect what the
+                    // deployment queued and hand it to the radio. Without this
+                    // the phone only drained while its UI was open, so a
+                    // `dakflare send` sat PENDING until it expired; and the
+                    // drain used to mark the row `sent` without touching the
+                    // radio, which is now the send path's job alone.
+                    val captured = NativeBridge.drainOutboxSafely(appDir, deviceId)
+                    var handed = 0
+                    for (localId in captured) {
+                        if (SmsSender.resend(this, appDir, deviceId, localId)) handed += 1
+                    }
+                    if (captured.isNotEmpty()) saveLastContact(System.currentTimeMillis())
+
+                    // M5.5: give queued rows whose radio failure was transient
+                    // another chance. The store only offers rows older than
+                    // 60 s with attempts left, so a row this tick just captured
+                    // cannot be retried in the same pass. Each retry is
+                    // finished by its own SENT/DELIVERED receipt.
+                    val retried = SmsSender.retryQueued(this, appDir, deviceId)
+
+                    // Every tick, because a send result is only visible to the
+                    // deployment once it is uploaded: gating this to the slow
+                    // cadence would leave a failed message looking in-flight for
+                    // fifteen minutes. An idle flush returns before touching the
+                    // network, so this costs a local query per minute, not a
+                    // request.
                     val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
                     if (ok) saveLastContact(System.currentTimeMillis())
-                    // M5.5: after the flush, give queued rows whose radio
-                    // failure was transient another chance. The store only
-                    // offers rows older than 60 s with attempts left, so this
-                    // cannot race a send that is merely slow to report. Each
-                    // retry is finished by its own SENT/DELIVERED receipt.
-                    val retried = SmsSender.retryQueued(this, appDir, deviceId)
-                    // Flows ride the same tick: at most one fetch per interval,
-                    // never more often than the flush. A failed sync keeps the
-                    // cached set, so the receive path is unaffected.
-                    val flowsOk = NativeBridge.syncFlowsSafely(appDir, deviceId)
+
+                    // The flow set is the expensive fetch and changes rarely, so
+                    // it keeps the slow cadence. A failed sync keeps the cached
+                    // set, so the receive path is unaffected.
+                    var flowsOk = false
+                    if (tick % SLOW_EVERY == 0) {
+                        flowsOk = NativeBridge.syncFlowsSafely(appDir, deviceId)
+                    }
+                    tick += 1
+
                     // Counts are deliberately absent: the notification shows a
                     // timestamp, which cannot drift from the store.
                     updateNotification(deviceId, lastContact())
-                    Log.i(TAG, "gateway flush ok=$ok retried=$retried flows ok=$flowsOk")
+                    Log.i(
+                        TAG,
+                        "gateway captured=${captured.size} handed=$handed retried=$retried " +
+                            "flush ok=$ok flows ok=$flowsOk",
+                    )
 
                     synchronized(sleeper) {
                         if (!running) return@Thread
                         try {
-                            sleeper.wait(INTERVAL_MS)
+                            sleeper.wait(TICK_MS)
                         } catch (_: InterruptedException) {
                             return@Thread
                         }
@@ -234,7 +267,14 @@ class GatewayService : Service() {
         private const val PREFS = "dakflare_gateway"
         private const val KEY_LAST_CONTACT = "last_contact_ms"
         private const val ONGOING = "Receiving SMS for the gateway"
-        private const val INTERVAL_MS = 15L * 60L * 1000L
+        /**
+         * Outbound polling cadence. A phone without an FCM token only learns
+         * about a queued command by asking, so this is what bounds the delay
+         * between `dakflare send` and the radio: 60 s, or ~1440 requests a day.
+         * The inbound flush and the flow sync are gated to one in SLOW_EVERY.
+         */
+        private const val TICK_MS = 60L * 1000L
+        private const val SLOW_EVERY = 15
 
         /** Create the channel once, low importance and silent like `dakflare_messages`. */
         fun ensureChannel(context: Context) {

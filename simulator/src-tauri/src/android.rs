@@ -14,8 +14,9 @@ use std::path::Path;
 
 use dakflare_core::{
     Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
-    StoreError, Target, carrier::flush_pending, is_device_fact_key, receive_and_reply,
-    reply_local_id, sync_flows,
+    StoreError, Target,
+    carrier::{drain_outbox, flush_pending},
+    is_device_fact_key, receive_and_reply, reply_local_id, sync_flows,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -518,6 +519,51 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] flushPending panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.drainOutbox`
+///
+/// Fetches the deployment's queued commands and records them locally as
+/// `queued` outbound rows. Returns `{"ok":true,"captured":["out-…"]}` or
+/// `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+///
+/// The ids are what the gateway tick hands to the radio. This call never sends:
+/// an id here means "the phone holds it", not "the phone sent it".
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_drainOutbox(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(&mut env, &app_dir, &device_id) {
+            Ok((app_dir, device_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    drain_blocking(&app_dir, &device_id)
+                })) {
+                    Ok(Ok(captured)) => serde_json::json!({
+                        "ok": true,
+                        "captured": captured,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] drainOutbox panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] drainOutbox panicked before storage");
             error_json("storage")
         }
     };
@@ -1181,6 +1227,25 @@ fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static st
         record_contact_blocking(&store, device_id);
     }
     Ok(flushed)
+}
+
+/// Collect every command the deployment has queued for this device.
+///
+/// `drain_outbox` records each one as a local `queued` row and acknowledges it,
+/// so the Worker stops redelivering it; it does not touch the radio. The caller
+/// hands the returned local ids to `SmsSender`, which is the only path allowed
+/// to mark a row `sent`.
+fn drain_blocking(app_dir: &str, device_id: &str) -> Result<Vec<String>, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+
+    let captured = tauri::async_runtime::block_on(drain_outbox(&store, &client, device_id))
+        .map_err(map_network_error)?;
+    // A poll is answered even when it carries no commands, so the answer itself
+    // is contact. This is what keeps `last_seen` fresh while the webview is shut.
+    record_contact_blocking(&store, device_id);
+
+    Ok(captured.into_iter().filter_map(|message| message.local_id).collect())
 }
 
 /// Record that a signed request was answered. Mirrors `lib.rs::record_contact`;
