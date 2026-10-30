@@ -1,67 +1,1739 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SMS Gateway</title>
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FBF6EE">
+<title>DakFlare — the phone is the radio</title>
+<meta name="description" content="A self-hosted SMS gateway. One Android handset, your own Cloudflare account, and a signed protocol between them. AGPL-3.0.">
 <style>
-  :root { color-scheme: light dark; }
-  body {
-    margin: 0; min-height: 100vh; display: grid; place-items: center;
-    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: #0b0d10; color: #e6e8eb; padding: 24px;
+/* ------------------------------------------------------------------
+   DakFlare landing page — one file, no requests, no webfonts, no JS.
+   Palette and radii mirror design/tokens.css. Warm cream field,
+   umber ink, one coral action per screen, mono for anything an
+   operator would compare with a log.
+   ------------------------------------------------------------------ */
+:root {
+  --cream-50: #fffdf8;
+  --cream-100: #fbf6ee;
+  --cream-200: #f6efe3;
+  --cream-300: #ede3d3;
+  --cream-400: #e7dccb;
+  --cream-500: #d3c4ac;
+
+  --umber-300: #857a6b;
+  --umber-400: #6b6153;
+  --umber-500: #5b5348;
+  --umber-900: #241f1a;
+
+  --coral-100: #fbe3da;
+  --coral-300: #ff9b7a;
+  --coral-500: #d9502c;
+  --coral-600: #c9482a;
+  --coral-700: #b23b20;
+  --coral-800: #983018;
+
+  --mint-100: #ddf3e4;
+  --mint-700: #1f6b45;
+  --sky-100: #ddebfb;
+  --sky-700: #2a5488;
+  --butter-100: #fbebc8;
+  --butter-700: #7a5310;
+  --peach-100: #fbe0d3;
+  --peach-700: #a33218;
+  --stone-100: #ede7dc;
+  --stone-700: #5b5348;
+
+  --night-600: #332a22;
+  --night-800: #1c1814;
+  --night-900: #14110e;
+  --mist-50: #f4ece2;
+  --mist-300: #c9beaf;
+  --mist-500: #a0968a;
+
+  --surface-page: var(--cream-100);
+  --surface-card: var(--cream-50);
+  --surface-well: var(--cream-200);
+  --line: var(--cream-400);
+  --line-strong: var(--cream-500);
+
+  --ink: var(--umber-900);
+  --ink-2: var(--umber-500);
+  --ink-3: var(--umber-400);
+  --accent: var(--coral-700);
+  --accent-fill: var(--coral-600);
+  --accent-fill-hover: var(--coral-700);
+  --accent-soft: var(--coral-100);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+
+  --shadow-1: 0 1px 2px rgba(74, 52, 26, .06);
+  --shadow-2: 0 2px 4px rgba(74, 52, 26, .06), 0 12px 28px -18px rgba(74, 52, 26, .35);
+  --shadow-3: 0 24px 60px -30px rgba(74, 52, 26, .45);
+
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Liberation Sans", "Helvetica Neue", Arial, sans-serif;
+  --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", C059,
+    "Century Schoolbook L", Georgia, "Liberation Serif", serif;
+  --mono: "iA Writer Mono S", "JetBrainsMono NF", ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+html {
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  border-top: 3px solid var(--coral-600);
+  background: var(--surface-page);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--coral-100); color: var(--ink); }
+
+h1, h2, h3, p, figure, blockquote { margin: 0; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--coral-800); }
+code, pre, .mono {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+}
+code {
+  font-size: .9em;
+  background: var(--cream-200);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+img, svg { display: block; max-width: 100%; }
+hr { border: 0; border-top: 1px solid var(--line); }
+
+.wrap {
+  width: 100%;
+  max-width: 1264px;
+  margin-inline: auto;
+  padding-inline: 32px;
+}
+
+.sr {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip {
+  position: absolute;
+  left: 16px; top: -60px;
+  z-index: 100;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--cream-50);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip:focus { top: 12px; color: var(--cream-50); }
+
+/* ---------- masthead ---------- */
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--surface-page);
+  background: color-mix(in srgb, var(--surface-page) 90%, transparent);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(12px) saturate(120%);
+}
+.mast-in {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  min-height: 66px;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  color: var(--ink);
+  text-decoration: none;
+  flex: none;
+}
+.brand:hover { color: var(--ink); }
+.brand-mark {
+  width: 34px; height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.brand-mark svg { width: 20px; height: 20px; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.1; }
+.brand-name { font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+.brand-sub {
+  font-size: 9px;
+  letter-spacing: .08em;
+  color: var(--ink-3);
+  margin-top: 3px;
+  text-transform: uppercase;
+}
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-left: 12px;
+}
+.nav a {
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  padding: 6px 0;
+}
+.nav a:hover { color: var(--ink); }
+.mast-actions {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-left: auto;
+}
+.quiet {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.quiet:hover { color: var(--accent); }
+.console-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 2px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1.5px solid var(--ink);
+}
+.console-link span { color: var(--accent); transition: transform .16s ease; }
+.console-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.console-link:hover span { transform: translateX(3px); }
+
+/* ---------- hero ---------- */
+.hero {
+  position: relative;
+  padding: 64px 0 56px;
+  background:
+    radial-gradient(90% 70% at 82% -10%, rgba(255, 253, 248, .95), rgba(255, 253, 248, 0) 62%),
+    var(--surface-page);
+}
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 26px;
+}
+.eyebrow::before {
+  content: "";
+  width: 7px; height: 7px;
+  background: var(--accent);
+  display: inline-block;
+}
+h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: clamp(2.75rem, 6vw, 4.4rem);
+  line-height: .99;
+  letter-spacing: -.032em;
+  max-width: none;
+}
+h1 em {
+  font-style: italic;
+  color: var(--accent);
+}
+.hero-lower {
+  display: grid;
+  grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+  gap: 64px;
+  align-items: start;
+  margin-top: 44px;
+}
+.lede {
+  font-size: 17.5px;
+  line-height: 1.62;
+  color: var(--ink-2);
+  max-width: 46ch;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 30px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 20px;
+  border-radius: var(--r-sm);
+  border: 1.5px solid transparent;
+  font-family: var(--sans);
+  font-size: 14.5px;
+  font-weight: 650;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color .16s ease, color .16s ease,
+    border-color .16s ease, transform .16s ease;
+}
+.btn .arw { transition: transform .16s ease; }
+.btn-primary {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  color: var(--cream-50);
+}
+.btn-primary:hover {
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
+  color: var(--cream-50);
+}
+.btn-primary:hover .arw { transform: translateX(3px); }
+.btn-ghost {
+  background: transparent;
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.btn-ghost:hover {
+  background: var(--cream-200);
+  color: var(--ink);
+}
+.btn-ghost:hover .arw { transform: translate(2px, -2px); }
+.btn:active { transform: translateY(1px); }
+.hero-note {
+  margin-top: 20px;
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ---------- plate ---------- */
+.plate {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  max-width: 580px;
+  justify-self: end;
+  width: 100%;
+}
+.plate-art { width: 100%; height: auto; }
+.plate-art text {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.plate figcaption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 11px 16px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.plate figcaption::before {
+  content: "";
+  width: 5px; height: 5px;
+  background: var(--accent);
+  flex: none;
+}
+@keyframes packet {
+  0% { opacity: 0; }
+  8% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.packet { animation: packet 3.4s linear infinite; }
+
+/* ---------- fact strip ---------- */
+.facts {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-card);
+}
+.fact-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.fact {
+  padding: 20px 24px;
+  border-left: 1px solid var(--line);
+}
+.fact:first-child { border-left: 0; padding-left: 0; }
+.fact:last-child { padding-right: 0; }
+.fact dt {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 5px;
+}
+.fact dd {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.fact dd strong { color: var(--ink); font-weight: 600; }
+
+/* ---------- sections ---------- */
+.sec { padding: 88px 0 0; scroll-margin-top: 88px; }
+.sec-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-bottom: 44px;
+}
+.sec-head span {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sec-head .sec-num { color: var(--accent); }
+.sec-head .sec-note { text-align: right; }
+
+h2 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: clamp(2rem, 3.5vw, 2.9rem);
+  line-height: 1.06;
+  letter-spacing: -.024em;
+  max-width: 16ch;
+  text-wrap: balance;
+}
+.body {
+  font-size: 15.5px;
+  line-height: 1.66;
+  color: var(--ink-2);
+}
+.body + .body { margin-top: 14px; }
+
+/* ---------- 01 / what it is ---------- */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr);
+  gap: 72px;
+  align-items: start;
+}
+.split-lead .body { margin-top: 22px; max-width: 40ch; }
+.pull {
+  margin-top: 34px;
+  padding-left: 18px;
+  border-left: 2px solid var(--accent-fill);
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.45;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  max-width: 34ch;
+}
+.pull cite {
+  display: block;
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.ledger {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
+.ledger-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 76px;
+  gap: 18px;
+  padding: 24px 0;
+  border-top: 1px solid var(--line);
+}
+.ledger-row .idx {
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  color: var(--ink-3);
+  padding-top: 4px;
+}
+.ledger-body h3 {
+  font-size: 16.5px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -.012em;
+  margin-bottom: 7px;
+}
+.ledger-body p {
+  font-size: 14px;
+  line-height: 1.62;
+  color: var(--ink-2);
+  max-width: 54ch;
+}
+.ledger-body p + p { margin-top: 10px; }
+.ledger-body code { font-size: 12px; }
+.tag {
+  justify-self: end;
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-top: 5px;
+  text-align: right;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 13px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.chip .dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.chip-live { background: var(--mint-100); color: var(--mint-700); }
+.chip-synced { background: var(--sky-100); color: var(--sky-700); }
+.chip-stale { background: var(--butter-100); color: var(--butter-700); }
+.chip-offline { background: var(--peach-100); color: var(--peach-700); }
+.chip-unknown { background: var(--stone-100); color: var(--stone-700); }
+
+/* ---------- 02 / route ---------- */
+.path-intro {
+  display: grid;
+  grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr);
+  gap: 72px;
+  align-items: end;
+  margin-bottom: 20px;
+}
+.path-intro .body { max-width: 46ch; }
+.route {
+  list-style: none;
+  margin: 44px 0 0;
+  padding: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-height: 330px;
+}
+.route::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 2px;
+  background: var(--ink);
+  transform: translateY(-1px);
+}
+.route::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-top: 2px solid var(--ink);
+  border-right: 2px solid var(--ink);
+  transform: translateY(-50%) rotate(45deg);
+}
+.stop {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr 26px 1fr;
+  padding-right: 26px;
+}
+.stop-body {
+  grid-row: 1;
+  align-self: end;
+  padding-bottom: 26px;
+}
+.stop:nth-child(even) .stop-body {
+  grid-row: 3;
+  align-self: start;
+  padding-top: 26px;
+  padding-bottom: 0;
+}
+.node {
+  grid-row: 2;
+  align-self: center;
+  justify-self: start;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--surface-page);
+  border: 2px solid var(--ink);
+  position: relative;
+  z-index: 1;
+}
+.stop:first-child .node {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.stop-k {
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.stop-body h3 {
+  font-family: var(--serif);
+  font-size: 21px;
+  font-weight: 400;
+  line-height: 1.12;
+  letter-spacing: -.015em;
+  margin-bottom: 8px;
+}
+.stop-body p {
+  font-size: 13.5px;
+  line-height: 1.58;
+  color: var(--ink-2);
+  max-width: 30ch;
+}
+.stop-body .code {
+  display: inline-block;
+  margin-top: 11px;
+  font-size: 10px;
+  letter-spacing: .02em;
+  color: var(--ink-3);
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+  white-space: nowrap;
+}
+.path-foot {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 24px;
+}
+.path-foot p {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 50ch;
+}
+.path-foot strong {
+  display: block;
+  color: var(--ink);
+  font-weight: 650;
+  font-size: 14px;
+  margin-bottom: 3px;
+}
+
+/* ---------- 03 / security ---------- */
+.sec-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.28fr) minmax(0, .82fr);
+  gap: 64px;
+  align-items: start;
+}
+.sec-grid .body { margin-top: 20px; max-width: 46ch; }
+.factor-head {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 14px;
+  margin-top: 32px;
+  padding-bottom: 8px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.factor-head span:last-child { text-align: right; }
+.factors {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
+.factor {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: baseline;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.factor .fnum {
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: .06em;
+}
+.factor h3 {
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  margin-bottom: 4px;
+}
+.factor p {
+  font-size: 13.5px;
+  line-height: 1.58;
+  color: var(--ink-2);
+  max-width: 52ch;
+}
+.factor .cost {
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+  white-space: nowrap;
+  text-align: right;
+}
+.fine {
+  margin-top: 22px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-3);
+  max-width: 62ch;
+}
+.fine code { font-size: 11px; }
+
+.sign {
+  background: var(--night-900);
+  color: var(--mist-50);
+  border-radius: var(--r-lg);
+  padding: 28px 26px 26px;
+  box-shadow: var(--shadow-3);
+  position: sticky;
+  top: 92px;
+}
+.sign-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.sign-k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--coral-300);
+}
+.sign-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .1em;
+  color: var(--mist-300);
+  border: 1px solid var(--night-600);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.canon {
+  border-left: 2px solid var(--coral-300);
+  padding-left: 14px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 5px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.canon .ln {
+  color: var(--mist-500);
+  text-align: right;
+}
+.canon .val { color: var(--mist-50); }
+.sign-note {
+  margin-top: 16px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--mist-300);
+}
+.sign hr {
+  border: 0;
+  border-top: 1px solid var(--night-600);
+  margin: 22px 0;
+}
+.key {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--coral-300);
+  background: var(--night-800);
+  border: 1px solid var(--night-600);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.honest {
+  margin-top: 56px;
+  background: var(--peach-100);
+  border-left: 3px solid var(--coral-700);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: 26px 30px 28px;
+}
+.honest-k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--coral-700);
+}
+.honest ul {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 44px;
+}
+.honest li {
+  font-size: 13px;
+  line-height: 1.58;
+  color: var(--ink-2);
+  padding-left: 14px;
+  position: relative;
+}
+.honest li::before {
+  content: "";
+  position: absolute;
+  left: 0; top: .55em;
+  width: 5px; height: 1px;
+  background: var(--coral-700);
+}
+.honest strong {
+  display: block;
+  color: var(--ink);
+  font-weight: 650;
+  font-size: 13.5px;
+  margin-bottom: 2px;
+}
+.honest code { font-size: 11px; background: rgba(255, 253, 248, .55); }
+
+/* ---------- 04 / run ---------- */
+.run-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr);
+  gap: 64px;
+  align-items: start;
+}
+.run-copy .body { margin-top: 20px; max-width: 42ch; }
+.reqs {
+  list-style: none;
+  margin: 24px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.reqs li {
+  position: relative;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.reqs li::before {
+  content: "";
+  position: absolute;
+  left: 0; top: .62em;
+  width: 6px; height: 6px;
+  background: var(--accent);
+}
+details.all {
+  margin-top: 30px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+details.all summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+}
+details.all summary::-webkit-details-marker { display: none; }
+details.all summary::after {
+  content: "+";
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--accent);
+  line-height: 1;
+}
+details.all[open] summary::after { content: "−"; }
+details.all pre {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  background: var(--surface-well);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  user-select: all;
+  cursor: copy;
+}
+details.all pre .cm { color: var(--ink-3); }
+
+.terminal {
+  background: var(--night-900);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 20px;
+  border-bottom: 1px solid var(--night-600);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--mist-500);
+}
+.term-head .live { color: var(--mist-300); display: inline-flex; align-items: center; gap: 7px; }
+.term-head .live::before {
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--coral-300);
+}
+.term-group {
+  padding: 18px 20px 20px;
+  border-bottom: 1px solid var(--night-600);
+}
+.term-group:last-of-type { border-bottom: 0; }
+.term-k {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--mist-300);
+  margin-bottom: 9px;
+}
+.term-k .c { color: var(--coral-300); }
+.terminal pre {
+  margin: 0 -10px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--mist-50);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  user-select: all;
+  cursor: copy;
+  transition: background-color .16s ease;
+}
+.terminal pre:hover { background: rgba(244, 236, 226, .05); }
+.terminal pre .cm { color: var(--mist-500); }
+.term-foot {
+  padding: 13px 20px 15px;
+  border-top: 1px solid var(--night-600);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .03em;
+  color: var(--mist-500);
+}
+.term-foot b { color: var(--coral-300); font-weight: 500; }
+.run-after {
+  margin-top: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 74ch;
+}
+.run-after code { font-size: 11.5px; white-space: normal; overflow-wrap: anywhere; }
+
+/* ---------- footer ---------- */
+.foot {
+  margin-top: 96px;
+  background: var(--night-900);
+  color: var(--mist-50);
+  padding: 64px 0 28px;
+}
+.foot-line {
+  font-family: var(--serif);
+  font-size: clamp(1.65rem, 3.2vw, 2.5rem);
+  line-height: 1.14;
+  letter-spacing: -.02em;
+  max-width: 24ch;
+  margin-bottom: 48px;
+}
+.foot-grid {
+  display: grid;
+  grid-template-columns: .9fr 1.15fr 1.15fr;
+  gap: 48px;
+  border-top: 1px solid var(--night-600);
+  padding-top: 30px;
+}
+.foot h4 {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--coral-300);
+  margin: 0 0 10px;
+}
+.foot p {
+  font-size: 13px;
+  line-height: 1.62;
+  color: var(--mist-300);
+  margin: 0 0 12px;
+  max-width: 40ch;
+}
+.foot a {
+  color: var(--coral-300);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.foot a:hover { color: var(--mist-50); }
+.foot-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.foot-mark {
+  width: 30px; height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--night-800);
+  color: var(--coral-300);
+}
+.foot-mark svg { width: 18px; height: 18px; }
+.foot-name { font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+.foot-ver {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--mist-500);
+  letter-spacing: .06em;
+}
+.foot-base {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px 24px;
+  border-top: 1px solid var(--night-600);
+  margin-top: 44px;
+  padding-top: 18px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--mist-500);
+}
+.foot-base a { color: var(--mist-300); text-decoration: none; }
+.foot-base a:hover { color: var(--coral-300); }
+
+/* ---------- focus ---------- */
+:where(a, summary, pre, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.foot :where(a):focus-visible,
+.sign :where(a):focus-visible,
+.terminal :where(pre):focus-visible {
+  outline-color: var(--coral-300);
+}
+
+/* ---------- motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
   }
-  @media (prefers-color-scheme: light) { body { background: #f7f8fa; color: #14171a; } }
-  main { max-width: 34rem; width: 100%; }
-  h1 { font-size: 1.35rem; margin: 0 0 4px; letter-spacing: -0.01em; }
-  p { margin: 0 0 14px; color: #9aa4af; }
-  @media (prefers-color-scheme: light) { p { color: #5b6672; } }
-  .card {
-    border: 1px solid #222933; border-radius: 10px; padding: 18px 20px;
-    margin: 18px 0; background: #11151a;
+  .packet { display: none; }
+}
+
+/* ---------- responsive ---------- */
+@media (max-width: 1080px) {
+  .hero-lower { gap: 40px; }
+  .split, .path-intro, .run-grid, .sec-grid { gap: 44px; }
+  .nav { gap: 16px; }
+}
+
+@media (max-width: 900px) {
+  .nav { display: none; }
+  .hero { padding-top: 52px; }
+  .hero-lower { grid-template-columns: 1fr; gap: 40px; }
+  .plate { justify-self: start; max-width: 560px; }
+  .split, .path-intro, .run-grid, .sec-grid { grid-template-columns: 1fr; gap: 36px; }
+  .split-lead .body, .path-intro .body, .run-copy .body { max-width: 56ch; }
+  .sign { position: static; }
+  .route { min-height: 300px; }
+  .foot-grid { grid-template-columns: 1fr 1fr; }
+  .foot-grid > :first-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 820px) {
+  .route {
+    display: block;
+    min-height: 0;
+    margin-top: 32px;
   }
-  @media (prefers-color-scheme: light) {
-    .card { border-color: #e1e5ea; background: #fff; }
+  .route::before {
+    left: 6px;
+    right: auto;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    height: auto;
+    transform: none;
   }
-  a { color: #6aa8ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  ul { margin: 8px 0 0; padding-left: 18px; }
-  li { margin: 6px 0; }
-  code {
-    font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #1a2027; padding: 1px 5px; border-radius: 4px;
+  .route::after { display: none; }
+  .stop {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    grid-template-rows: auto;
+    gap: 0 18px;
+    padding: 0 0 34px;
   }
-  @media (prefers-color-scheme: light) { code { background: #eef1f4; } }
-  footer { margin-top: 22px; font-size: 12.5px; color: #6f7a86; }
+  .stop:last-child { padding-bottom: 0; }
+  .stop .node {
+    grid-row: 1;
+    grid-column: 1;
+    align-self: start;
+    margin-top: 4px;
+  }
+  .stop .stop-body,
+  .stop:nth-child(even) .stop-body {
+    grid-row: 1;
+    grid-column: 2;
+    align-self: start;
+    padding: 0;
+  }
+  .stop-body p { max-width: 46ch; }
+  .stop-body .code { white-space: normal; }
+}
+
+@media (max-width: 640px) {
+  body { font-size: 15.5px; }
+  .wrap { padding-inline: 20px; }
+  .mast-in { min-height: 58px; gap: 12px; }
+  .brand-sub { display: none; }
+  .brand-mark { width: 30px; height: 30px; border-radius: 9px; }
+  .brand-name { font-size: 15px; }
+  .mast-actions { gap: 14px; }
+  .mast-actions .quiet { display: none; }
+  .console-link { min-height: 44px; }
+  .hero { padding: 40px 0 44px; }
+  h1 { font-size: clamp(2.4rem, 11.5vw, 3.4rem); max-width: none; }
+  .eyebrow { font-size: 9px; letter-spacing: .12em; margin-bottom: 20px; }
+  .lede { font-size: 16px; }
+  .actions { flex-direction: column; align-items: stretch; margin-top: 24px; }
+  .btn { width: 100%; }
+  .hero-note { font-size: 9px; }
+  .fact-grid { grid-template-columns: 1fr 1fr; }
+  .fact { padding: 16px 0; }
+  .fact:nth-child(odd) { border-left: 0; padding-right: 16px; }
+  .fact:nth-child(even) { border-left: 1px solid var(--line); padding-left: 16px; }
+  .fact:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .sec { padding-top: 64px; }
+  .sec-head { margin-bottom: 30px; }
+  .sec-head .sec-note { display: none; }
+  h2 { font-size: clamp(1.85rem, 8vw, 2.4rem); max-width: none; }
+  .pull { font-size: 18px; }
+  .ledger-row { grid-template-columns: 30px minmax(0, 1fr); gap: 12px; padding: 20px 0; }
+  .ledger-row .tag { display: none; }
+  .ledger-body h3 { font-size: 16px; }
+  .path-foot { grid-template-columns: 1fr; gap: 18px; }
+  .factor { grid-template-columns: 24px minmax(0, 1fr); }
+  .factor .cost { grid-column: 2; text-align: left; padding-top: 2px; }
+  .factor .cost::before { content: "cost · "; color: var(--ink-3); }
+  .factor-head { grid-template-columns: 24px 1fr; }
+  .factor-head span:last-child { display: none; }
+  .honest { padding: 22px 20px 24px; }
+  .honest ul { grid-template-columns: 1fr; gap: 14px; }
+  .sign { padding: 24px 20px; }
+  .term-head { padding: 10px 16px; font-size: 8.5px; }
+  .term-group { padding: 16px 16px 18px; }
+  .terminal pre { font-size: 11px; }
+  .term-foot { padding: 12px 16px; font-size: 9px; }
+  .foot { margin-top: 64px; padding-top: 48px; }
+  .foot-grid { grid-template-columns: 1fr; gap: 28px; }
+  .foot-line { margin-bottom: 36px; }
+  .foot-base { margin-top: 32px; }
+}
+
+@media (max-width: 380px) {
+  .fact dd { font-size: 12.5px; }
+  .chip { font-size: 9px; padding: 0 7px; }
+  .canon { font-size: 11px; }
+}
 </style>
 </head>
 <body>
-<main>
-  <h1>SMS Gateway</h1>
-  <p>This deployment is running in its operator's own Cloudflare account.</p>
+<a class="skip" href="#main">Skip to content</a>
 
-  <div class="card">
-    <strong>You are looking at the API host, not the console.</strong>
-    <ul>
-      <li>Device traffic is ECDSA-signed and lives under <code>/v1/device/*</code> and <code>/v1/sms/*</code>.</li>
-      <li>Operator endpoints live under <code>/v1/admin/*</code> and require a bearer token.</li>
-      <li>Health and installed version: <code>GET /v1/admin/health</code> (admin token required).</li>
-    </ul>
+<header class="masthead">
+  <div class="wrap mast-in">
+    <a class="brand" href="/" aria-label="DakFlare home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M12 3v10"/>
+          <path d="M8.5 6.5a5 5 0 1 0 7 0"/>
+          <circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">DakFlare</span>
+        <span class="brand-sub mono">v5.1.0 · self-hosted</span>
+      </span>
+    </a>
+
+    <nav class="nav" aria-label="Sections">
+      <a href="#what">What it is</a>
+      <a href="#path">How it works</a>
+      <a href="#security">Security</a>
+      <a href="#run">Run it</a>
+    </nav>
+
+    <div class="mast-actions">
+      <a class="quiet" href="/source">Source</a>
+      <a class="console-link" href="/admin/">Console <span aria-hidden="true">→</span></a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">A self-hosted SMS gateway · AGPL-3.0</p>
+      <h1>The phone is the <em>radio</em>.<br>The Worker is the coordinator.</h1>
+
+      <div class="hero-lower">
+        <div class="hero-copy">
+          <p class="lede">DakFlare pairs one Android handset with your own Cloudflare account. Messages arrive at the phone, flows run on the phone, and the edge only sees signed facts. No telecom SaaS in the middle, and no shared secret between the two.</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="/admin/">Open the console <span class="arw" aria-hidden="true">→</span></a>
+            <a class="btn btn-ghost" href="/source">Read the source <span class="arw" aria-hidden="true">↗</span></a>
+          </div>
+          <p class="hero-note mono">Workers free tier · one Durable Object per device</p>
+        </div>
+
+        <figure class="plate">
+          <svg class="plate-art" viewBox="0 0 560 420" role="img" aria-labelledby="figTitle figDesc">
+            <title id="figTitle">One handset, one edge node, one console</title>
+            <desc id="figDesc">A phone receives an SMS, sends a signed request across a dashed line to a Worker node, which mirrors the result to a console.</desc>
+            <defs>
+              <pattern id="plateGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <circle cx="1" cy="1" r=".9" fill="var(--cream-400)"/>
+              </pattern>
+            </defs>
+            <rect width="560" height="420" fill="var(--surface-card)"/>
+            <rect width="560" height="420" fill="url(#plateGrid)" opacity=".55"/>
+
+            <g stroke="var(--umber-400)" stroke-width="1.5" opacity=".4">
+              <path d="M16 30V16h14"/><path d="M530 16h14v14"/>
+              <path d="M16 390v14h14"/><path d="M544 390v14h-14"/>
+            </g>
+
+            <text x="28" y="36" font-size="9" fill="var(--umber-400)" letter-spacing="1.4">FIG. 1</text>
+            <text x="532" y="36" font-size="9" fill="var(--umber-400)" letter-spacing="1.4" text-anchor="end">SMS · EDGE · CONSOLE</text>
+
+            <g fill="none" stroke="var(--coral-500)" stroke-width="2" stroke-linecap="round">
+              <path d="M240.3 89.8A30 30 0 0 1 259.9 115.4" opacity=".95"/>
+              <path d="M247.8 69.1A52 52 0 0 1 281.8 113.5" opacity=".6"/>
+              <path d="M255.3 48.5A74 74 0 0 1 303.7 111.6" opacity=".32"/>
+            </g>
+
+            <rect x="64" y="60" width="176" height="300" rx="30" fill="var(--surface-card)" stroke="var(--ink)" stroke-width="2"/>
+            <rect x="78" y="78" width="148" height="246" rx="16" fill="var(--cream-100)" stroke="var(--line)" stroke-width="1"/>
+            <path d="M142 69h20" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/>
+
+            <text x="92" y="100" font-size="7.5" fill="var(--umber-400)" letter-spacing="1.2">THREADS</text>
+            <circle cx="214" cy="96" r="3" fill="var(--coral-500)"/>
+            <rect x="90" y="110" width="116" height="46" rx="10" fill="var(--cream-200)"/>
+            <path d="M102 126h84M102 136h62" stroke="var(--cream-500)" stroke-width="2" stroke-linecap="round"/>
+
+            <rect x="90" y="166" width="92" height="20" rx="6" fill="none" stroke="var(--coral-700)" stroke-width="1.5"/>
+            <text x="136" y="180" font-size="8" fill="var(--coral-700)" text-anchor="middle" letter-spacing=".6">flow · hours</text>
+
+            <rect x="122" y="196" width="104" height="38" rx="10" fill="var(--coral-100)" stroke="var(--coral-700)" stroke-width="1.5"/>
+            <path d="M134 211h70M134 221h46" stroke="var(--coral-700)" stroke-width="1.5" stroke-linecap="round" opacity=".55"/>
+
+            <path d="M92 250l4 4 7-8" stroke="var(--umber-500)" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="108" y="256" font-size="7.5" fill="var(--umber-400)" letter-spacing=".6">sent · 14:02</text>
+            <path d="M90 270h124" stroke="var(--line)" stroke-width="1"/>
+
+            <g stroke="var(--umber-500)" stroke-width="1.5" fill="none" stroke-linecap="round">
+              <circle cx="95" cy="288" r="4"/><path d="M99 288h14M108 284v8"/>
+            </g>
+            <text x="120" y="292" font-size="7.5" fill="var(--umber-400)" letter-spacing=".6">P-256 · wrapped</text>
+            <path d="M136 334h32" stroke="var(--ink)" stroke-width="2" stroke-linecap="round"/>
+
+            <text x="64" y="384" font-size="9" fill="var(--umber-500)" letter-spacing="1.4">HANDSET</text>
+            <text x="64" y="398" font-size="8" fill="var(--umber-400)" letter-spacing=".8">the radio</text>
+
+            <path d="M240 244H358" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 5" opacity=".8"/>
+            <text x="299" y="234" font-size="7.5" fill="var(--umber-400)" text-anchor="middle" letter-spacing=".8">SIGNED REQUEST</text>
+            <text x="299" y="260" font-size="7.5" fill="var(--umber-400)" text-anchor="middle" letter-spacing=".8">P-256 · NONCE</text>
+            <circle class="packet" r="3" fill="var(--coral-500)">
+              <animateMotion dur="3.4s" repeatCount="indefinite" path="M240 244H358"/>
+            </circle>
+
+            <circle cx="410" cy="236" r="52" fill="var(--surface-card)" stroke="var(--ink)" stroke-width="2"/>
+            <circle cx="410" cy="236" r="62" fill="none" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 6"/>
+            <path d="M410 208v26" stroke="var(--ink)" stroke-width="2" stroke-linecap="round"/>
+            <path d="M396 222a14 14 0 0 1 28 0" stroke="var(--ink)" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <circle cx="410" cy="248" r="3.5" fill="var(--coral-500)"/>
+            <text x="478" y="230" font-size="9" fill="var(--umber-500)" letter-spacing="1.2">WORKER</text>
+            <text x="478" y="244" font-size="7.5" fill="var(--umber-400)" letter-spacing=".6">DO · D1 · KV</text>
+
+            <path d="M410 288V338" stroke="var(--ink)" stroke-width="2"/>
+            <path d="M405 333l5 5 5-5" stroke="var(--ink)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="420" y="318" font-size="7.5" fill="var(--umber-400)" letter-spacing=".6">mirrors</text>
+
+            <rect x="326" y="342" width="200" height="68" rx="10" fill="var(--surface-card)" stroke="var(--ink)" stroke-width="2"/>
+            <path d="M326 360h200" stroke="var(--line)" stroke-width="1"/>
+            <circle cx="340" cy="351" r="2.5" fill="var(--coral-500)"/>
+            <circle cx="350" cy="351" r="2.5" fill="var(--cream-500)"/>
+            <circle cx="360" cy="351" r="2.5" fill="var(--cream-500)"/>
+            <text x="514" y="354" font-size="7.5" fill="var(--umber-400)" text-anchor="end" letter-spacing="1">CONSOLE</text>
+            <path d="M340 374h120M340 384h96M340 394h64" stroke="var(--cream-500)" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="508" cy="374" r="2.5" fill="var(--coral-500)"/>
+          </svg>
+          <figcaption>Fig. 1 — one handset, one edge, no shared device secret</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <div class="facts">
+    <div class="wrap">
+      <dl class="fact-grid">
+        <div class="fact">
+          <dt>One handset</dt>
+          <dd><strong>The radio and the SIM.</strong> A real SMS app, not a config page.</dd>
+        </div>
+        <div class="fact">
+          <dt>Five states</dt>
+          <dd>Live · synced · stale · offline · unknown. Each from a real signal.</dd>
+        </div>
+        <div class="fact">
+          <dt>P-256</dt>
+          <dd>Every device request signed. The key is wrapped by Android Keystore.</dd>
+        </div>
+        <div class="fact">
+          <dt>AGPL-3.0</dt>
+          <dd>The source for this deployment is at <a href="/source">/source</a>.</dd>
+        </div>
+      </dl>
+    </div>
   </div>
 
-  <div class="card">
-    <strong>Source</strong>
-    <p style="margin:6px 0 0">
-      This software is licensed <strong>AGPL-3.0</strong>. Under section 13, users interacting with it
-      over a network are entitled to its source.
-      <a href="/source">Get the source</a>.
-    </p>
-  </div>
+  <section class="sec" id="what">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-num">01 / What it is</span>
+        <span class="sec-note">The shape</span>
+      </div>
 
-  <footer>
-    If you did not expect this service to exist, contact the account owner — this page is served
-    from their Worker, not from a shared platform.
-  </footer>
+      <div class="split">
+        <div class="split-lead">
+          <h2>One handset, one account, no middleman.</h2>
+          <p class="body">DakFlare is not a telecom SaaS with a phone app bolted on. It is a dedicated Android handset, your own Cloudflare account, and a signed protocol between them. The phone holds the SIM; the Worker holds the record.</p>
+          <blockquote class="pull">
+            “The handset is the radio. The Worker is the coordinator. The console is where an operator watches both.”
+            <cite>README</cite>
+          </blockquote>
+        </div>
+
+        <ol class="ledger">
+          <li class="ledger-row">
+            <span class="idx mono">01</span>
+            <div class="ledger-body">
+              <h3>Five states, no guessing.</h3>
+              <p>Live is an open socket. Synced is a contact within 15 minutes. Stale is within 24 hours. Offline is older than that. Unknown has never synced since pairing. The word is always there; colour is only the second cue.</p>
+              <div class="chips" role="list" aria-label="The five device states">
+                <span class="chip chip-live" role="listitem"><span class="dot" aria-hidden="true"></span>live</span>
+                <span class="chip chip-synced" role="listitem"><span class="dot" aria-hidden="true"></span>synced</span>
+                <span class="chip chip-stale" role="listitem"><span class="dot" aria-hidden="true"></span>stale</span>
+                <span class="chip chip-offline" role="listitem"><span class="dot" aria-hidden="true"></span>offline</span>
+                <span class="chip chip-unknown" role="listitem"><span class="dot" aria-hidden="true"></span>unknown</span>
+              </div>
+            </div>
+            <span class="tag mono">fleet</span>
+          </li>
+
+          <li class="ledger-row">
+            <span class="idx mono">02</span>
+            <div class="ledger-body">
+              <h3>The reply is written on the phone.</h3>
+              <p>Android hands <code>SMS_RECEIVED</code> to the receiver even when the app is closed. Kotlin calls the same Rust flow interpreter through JNI, then hands the reply to <code>SmsManager</code>. The webview is not in the path.</p>
+            </div>
+            <span class="tag mono">JNI</span>
+          </li>
+
+          <li class="ledger-row">
+            <span class="idx mono">03</span>
+            <div class="ledger-body">
+              <h3>A key that cannot be copied out.</h3>
+              <p>Each device signs with a P-256 key. At rest it is <code>keystore:v1:&lt;iv&gt;:&lt;ciphertext&gt;</code>, wrapped by a non-exportable AndroidKeyStore AES-GCM key. A copied database is not a copied phone.</p>
+            </div>
+            <span class="tag mono">Keystore</span>
+          </li>
+
+          <li class="ledger-row">
+            <span class="idx mono">04</span>
+            <div class="ledger-body">
+              <h3>The operator’s actions are on the record.</h3>
+              <p>Sign-ins, invites, factor changes and admin actions write an audit row with ids and statuses. Message bodies, phone numbers and tokens are never written there.</p>
+            </div>
+            <span class="tag mono">audit_log</span>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="path">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-num">02 / How it works</span>
+        <span class="sec-note">Inbound · answered · mirrored</span>
+      </div>
+
+      <div class="path-intro">
+        <h2>The path of one message.</h2>
+        <p class="body">Two trust boundaries, four stops. The edge never holds the SIM, and the phone never needs the edge to answer.</p>
+      </div>
+
+      <ol class="route">
+        <li class="stop">
+          <span class="node" aria-hidden="true"></span>
+          <div class="stop-body">
+            <p class="stop-k mono">01 · the radio</p>
+            <h3>SMS arrives</h3>
+            <p>The carrier hands the PDU to the handset. Multipart parts are joined before anything else sees them.</p>
+            <span class="code mono">SmsReceiver · goAsync()</span>
+          </div>
+        </li>
+        <li class="stop">
+          <span class="node" aria-hidden="true"></span>
+          <div class="stop-body">
+            <p class="stop-k mono">02 · on the phone</p>
+            <h3>Stored, then answered</h3>
+            <p>The receiver opens the same libSQL database and runs the flow through the Rust core. The row is stored and the reply decided without waking the webview.</p>
+            <span class="code mono">NativeBridge.processIncoming</span>
+          </div>
+        </li>
+        <li class="stop">
+          <span class="node" aria-hidden="true"></span>
+          <div class="stop-body">
+            <p class="stop-k mono">03 · out of the radio</p>
+            <h3>The reply leaves</h3>
+            <p>The same subscription slot sends it. One reply per message; alphanumeric senders and shortcodes are filtered before anything is sent.</p>
+            <span class="code mono">SmsManager · sendTextMessage</span>
+          </div>
+        </li>
+        <li class="stop">
+          <span class="node" aria-hidden="true"></span>
+          <div class="stop-body">
+            <p class="stop-k mono">04 · at the edge</p>
+            <h3>The console mirrors it</h3>
+            <p>On the next sync the phone reports the row exactly as a flow would. The Worker verifies the signature, writes D1, and the console shows who answered.</p>
+            <span class="code mono">POST /v1/sms/incoming/batch</span>
+          </div>
+        </li>
+      </ol>
+
+      <div class="path-foot">
+        <p><strong>The edge is not in the reply path.</strong> A flow runs with the screen off and the app closed. The reply leaves the radio even if the Worker is unreachable; the phone keeps the authoritative copy.</p>
+        <p><strong>The phone is not trusted blindly.</strong> Every batch is checked against a canonical string, a timestamp window and a replay-guard nonce before a single row is written.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="security">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-num">03 / Security</span>
+        <span class="sec-note">The factor ladder</span>
+      </div>
+
+      <div class="sec-grid">
+        <div>
+          <h2>Trust is a ladder, not a checkbox.</h2>
+          <p class="body">The console offers three sign-in factors, cheapest first. Device traffic uses a different scheme entirely: a signature, not a shared secret.</p>
+
+          <div class="factor-head" aria-hidden="true">
+            <span>#</span>
+            <span>Factor</span>
+            <span>Cost on a Worker</span>
+          </div>
+          <ol class="factors">
+            <li class="factor">
+              <span class="fnum mono">1</span>
+              <div>
+                <h3>Passkey</h3>
+                <p>Default. A discoverable credential — no username to phish, no shared secret to leak.</p>
+              </div>
+              <span class="cost mono">1–2 ms</span>
+            </li>
+            <li class="factor">
+              <span class="fnum mono">2</span>
+              <div>
+                <h3>TOTP</h3>
+                <p>Optional second factor for every role. Backup codes are shown once. Enrolment needs a passkey first.</p>
+              </div>
+              <span class="cost mono">µs</span>
+            </li>
+            <li class="factor">
+              <span class="fnum mono">3</span>
+              <div>
+                <h3>Password</h3>
+                <p>Off unless you choose it. PBKDF2-SHA256 at 210,000 iterations, run in the browser.</p>
+              </div>
+              <span class="cost mono">~1 ms</span>
+            </li>
+          </ol>
+
+          <p class="fine">A server-side PBKDF2 at 210,000 iterations costs 60–150 ms against the free tier’s 10 ms CPU budget, so <code>client-derived</code> is the free-tier mode. The pepper is applied after the KDF, so both modes store the same value and an upgrade re-hashes nobody.</p>
+        </div>
+
+        <aside class="sign" aria-label="How a device proves itself">
+          <div class="sign-top">
+            <p class="sign-k">What the phone signs</p>
+            <span class="sign-badge">P-256</span>
+          </div>
+          <div class="canon">
+            <span class="ln">1</span><span class="val">METHOD</span>
+            <span class="ln">2</span><span class="val">PATH</span>
+            <span class="ln">3</span><span class="val">TIMESTAMP</span>
+            <span class="ln">4</span><span class="val">NONCE</span>
+            <span class="ln">5</span><span class="val">SHA256(body)</span>
+          </div>
+          <p class="sign-note">The Worker rebuilds this string and verifies the signature. A nonce window makes the same request useless twice.</p>
+
+          <hr>
+
+          <p class="sign-k">At rest</p>
+          <code class="key">keystore:v1:&lt;iv&gt;:&lt;ciphertext&gt;</code>
+          <p class="sign-note">Wrapped by a non-exportable AndroidKeyStore AES-GCM key. Copying the database does not copy the phone.</p>
+        </aside>
+      </div>
+
+      <div class="honest">
+        <p class="honest-k">Not claimed</p>
+        <ul>
+          <li>
+            <strong>Delivery is not claimed yet.</strong>
+            <span><code>sent</code> means the radio accepted the message, not that the other handset received it. A carrier report is not guaranteed.</span>
+          </li>
+          <li>
+            <strong>No MMS.</strong>
+            <span>A push that is not SMS produces a notification that says so; it does not vanish.</span>
+          </li>
+          <li>
+            <strong>No magic link yet.</strong>
+            <span>It needs a sender; until one is configured, the factor is advertised as unavailable.</span>
+          </li>
+          <li>
+            <strong>No public sign-up.</strong>
+            <span>Accounts are invite-only; the first owner comes from <code>dakflare auth bootstrap</code>.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="run">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-num">04 / Run it</span>
+        <span class="sec-note">Self-hosted</span>
+      </div>
+
+      <div class="run-grid">
+        <div class="run-copy">
+          <h2>Run it on your own account.</h2>
+          <p class="body">A Worker, one D1 database, one KV namespace and three secrets. <code>npm run deploy</code> builds the console into <code>worker/public/admin</code> first.</p>
+
+          <ul class="reqs">
+            <li>A Cloudflare account — the free tier is the target.</li>
+            <li>An Android handset that can hold the default-SMS role.</li>
+            <li>No domain required: workers.dev is on the Public Suffix List, so the passkey rpId works there.</li>
+          </ul>
+
+          <details class="all">
+            <summary>The whole sequence, in one block</summary>
+            <pre class="mono"><span class="cm"># 1 · the edge</span>
+git clone https://github.com/JonyBepary/dakflare
+cd dakflare/worker && npm install
+cp wrangler.template.toml wrangler.toml
+cp cloudflare.config.template.ts cloudflare.config.ts
+npx wrangler d1 create sms_gateway
+npx wrangler kv namespace create KV
+npx wrangler d1 migrations apply sms_gateway --remote
+
+<span class="cm"># 2 · the three secrets</span>
+npx wrangler secret put ADMIN_TOKEN --name dakflare-worker
+npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
+npx wrangler secret put AUTH_PEPPER --name dakflare-worker
+
+<span class="cm"># 3 · deploy and point the CLI at it</span>
+npm run deploy
+npm install -g .
+dakflare init
+dakflare doctor</pre>
+          </details>
+        </div>
+
+        <div class="terminal">
+          <div class="term-head">
+            <span class="live">shell</span>
+            <span class="hint">Select a block to copy</span>
+          </div>
+
+          <div class="term-group">
+            <p class="term-k"><span class="c">#</span> 1 · create the edge</p>
+            <pre class="mono" tabindex="0" aria-label="Commands to create the edge">cd worker &amp;&amp; npm install
+cp wrangler.template.toml wrangler.toml
+cp cloudflare.config.template.ts cloudflare.config.ts
+npx wrangler d1 create sms_gateway
+npx wrangler kv namespace create KV
+npx wrangler d1 migrations apply sms_gateway --remote</pre>
+          </div>
+
+          <div class="term-group">
+            <p class="term-k"><span class="c">#</span> 2 · the three secrets</p>
+            <pre class="mono" tabindex="0" aria-label="Commands to set the three secrets">npx wrangler secret put ADMIN_TOKEN --name dakflare-worker
+npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
+npx wrangler secret put AUTH_PEPPER --name dakflare-worker</pre>
+          </div>
+
+          <div class="term-group">
+            <p class="term-k"><span class="c">#</span> 3 · deploy, then pair the CLI</p>
+            <pre class="mono" tabindex="0" aria-label="Commands to deploy and pair the CLI">npm run deploy
+npm install -g .
+dakflare init
+dakflare doctor</pre>
+          </div>
+
+          <p class="term-foot"><b>then</b> · dakflare auth bootstrap --email you@example.com</p>
+        </div>
+      </div>
+
+      <p class="run-after"><code>dakflare auth bootstrap --email you@example.com</code> prints a one-time owner invite. Redeem it in a browser and create a passkey — that account is the owner. <code>dakflare doctor</code> runs 11 checks across the edge and the handset.</p>
+    </div>
+  </section>
+
 </main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p class="foot-line">The handset is the radio. The Worker is the coordinator. The console is where you watch.</p>
+
+    <div class="foot-grid">
+      <div>
+        <div class="foot-brand">
+          <span class="foot-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M12 3v10"/>
+              <path d="M8.5 6.5a5 5 0 1 0 7 0"/>
+              <circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/>
+            </svg>
+          </span>
+          <span class="foot-name">DakFlare</span>
+          <span class="foot-ver">v5.1.0</span>
+        </div>
+        <p>A sovereign device-to-edge SMS relay. The phone owns the radio; the edge verifies and records.</p>
+      </div>
+
+      <div>
+        <h4>Source</h4>
+        <p>Licensed AGPL-3.0-only. Under section 13, anyone interacting with this service over a network is entitled to its source.</p>
+        <a href="/source">Get the source →</a>
+      </div>
+
+      <div>
+        <h4>One operator’s deployment</h4>
+        <p>This page is served from one operator’s own Cloudflare account, not from a shared platform. If you did not expect this service to exist, contact the account owner.</p>
+      </div>
+    </div>
+
+    <div class="foot-base">
+      <span>DakFlare v5.1.0</span>
+      <span>AGPL-3.0-only</span>
+      <span><a href="/source">/source</a> · <a href="/admin/">/admin</a></span>
+    </div>
+  </div>
+</footer>
+
 </body>
 </html>
