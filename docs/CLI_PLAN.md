@@ -116,7 +116,7 @@ fail.
 | Says what to do next | **partial** | `doctor` prints fixes; `send` does not |
 | `--agent` | **no** | — |
 | Idempotency on send | **no** | a retried `send` can double-text |
-| Waits for the real outcome | **no** | one immediate status read, then it exits |
+| Waits for the real outcome | **yes**, since slice 2a | `status` and `send --wait` follow the command to a terminal state |
 | Discovery | **no** | `--help` is one screen per command |
 | Provisioning | **no** | the operator runs `wrangler` by hand |
 
@@ -263,9 +263,10 @@ Four changes follow:
 2. **`verification.passed` is `true` only on `DELIVERED`.** `SENT` means the radio
    accepted it, which is exactly what the landing page's "Not claimed" block says. The
    CLI must not be the one place that overstates delivery.
-3. **`--wait [duration]`** polls until a terminal state or the timeout, emitting JSONL
-   progress in agent mode. This is the flag that makes `send` usable from CI without a
-   hand-written loop.
+3. **`--wait [duration]`** polls until a terminal state or the timeout. Progress is one
+   line on stderr and only on a TTY, so stdout stays a single document; a JSONL event
+   stream is deferred until something actually needs to watch a send in progress. This
+   is the flag that makes `send` usable from CI without a hand-written loop.
 4. **`--idempotency-key`** binds a caller-supplied key to the Durable Object, so a retry
    after a timeout returns the same `command_id` instead of a second SMS. Paired with
    `safe_to_retry: false`, it makes the dangerous case impossible rather than discouraged.
@@ -335,7 +336,8 @@ Four slices, each shippable and each worth its own commit.
 | # | Slice | Done when |
 |---|---|---|
 | 1 | Envelope, exit codes, `--agent`, semantic tokens | every command emits `schema_version: 1`; `jq .status` works on success and failure; the TTY output is byte-identical to today except where a code changed |
-| 2 | Truth: `--wait`, `--idempotency-key`, `verification` | `send --wait` returns `DELIVERED` on a real handset, and a replayed `send` returns the same `command_id` |
+| 2a | Truth, CLI half: `status`, `--wait`, `--until`, `verification` | **shipped** — proven live on EXPIRED, PENDING, timeout and unknown-id |
+| 2b | Truth, server half: `--idempotency-key` in the Durable Object | a replayed `send` returns the same `command_id` instead of a second SMS |
 | 3 | Discovery: `capabilities`, `describe`, `schema`, `examples` | `dakflare capabilities --agent` is under 40 lines and covers every command |
 | 4 | Provisioning: `dakflare up` | a clean account goes from zero to a healthy doctor with one command and no pasted ids |
 

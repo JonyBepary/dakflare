@@ -11,7 +11,9 @@
  * an existing secret.
  *
  * Exit codes: 0 ok, 1 a check or request failed, 2 usage / missing config /
- * missing local tool.
+ * missing local tool, 3 not found (device, command), 75 a --wait budget ran out
+ * with the command still in flight. `status` and `send --wait` exit from the
+ * outcome rather than the request: see `outcomeExitCode`.
  */
 
 import crypto from 'node:crypto';
@@ -103,6 +105,8 @@ const VALUE_FLAGS = new Set([
   'keystore',
   'alias',
   'tail',
+  'wait',
+  'until',
 ]);
 
 function parseArgv(argv) {
@@ -1205,6 +1209,254 @@ async function commandRevoke(argv) {
   out(`revoked ${deviceId} (D1 rows deleted: ${d1Deleted})`);
 }
 
+/* ────────────────────────── command state ────────────────────────── */
+
+/**
+ * The command state machine, mirrored from `worker/src/durable-object.ts`
+ * (`ALLOWED_PREDECESSORS`). The CLI does not invent vocabulary here: it reports
+ * the state the Worker stores and says what that state means to a caller.
+ *
+ * `SENT` is deliberately NOT terminal. The radio accepting a message is not the
+ * carrier delivering it, and this is the one place in the product that would
+ * overstate delivery if it treated them as the same event.
+ */
+const COMMAND_STATES = {
+  PENDING: { rank: 0, terminal: false, meaning: 'waiting for the phone to collect it' },
+  DISPATCHED: { rank: 1, terminal: false, meaning: 'handed to the phone, no acknowledgement yet' },
+  ACKED_BY_DEVICE: { rank: 2, terminal: false, meaning: 'the phone acknowledged it and is sending' },
+  SENT: { rank: 3, terminal: false, meaning: 'the radio accepted it; delivery is not claimed' },
+  DELIVERED: { rank: 4, terminal: true, meaning: 'a carrier report confirmed delivery' },
+  FAILED: { rank: 4, terminal: true, meaning: 'the radio or the carrier refused it' },
+  EXPIRED: { rank: 4, terminal: true, meaning: 'it expired before the phone collected it' },
+};
+
+const UNKNOWN_STATE = { rank: -1, terminal: false, meaning: 'a state this CLI does not know; upgrade it' };
+
+const stateMeta = (state) => COMMAND_STATES[state] ?? UNKNOWN_STATE;
+
+/** `--until` takes the word a caller would say, not the wire spelling. */
+const UNTIL_ALIASES = {
+  pending: 'PENDING',
+  dispatched: 'DISPATCHED',
+  acked: 'ACKED_BY_DEVICE',
+  acknowledged: 'ACKED_BY_DEVICE',
+  sent: 'SENT',
+  delivered: 'DELIVERED',
+};
+
+const WAIT_DEFAULT_MS = 30_000;
+const WAIT_MAX_MS = 300_000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * `30s`, `2m`, `500ms`, or a bare number of seconds. Clamped on purpose: an agent
+ * that passes `--wait 3600` gets a bounded call, not a hung one.
+ */
+function parseDuration(value, { fallbackMs = WAIT_DEFAULT_MS } = {}) {
+  if (value === undefined || value === true) return fallbackMs;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i.exec(String(value).trim());
+  if (!match) throw usage(`--wait expects a duration like 30s or 2m, got "${value}"`);
+  const amount = Number(match[1]);
+  const unit = (match[2] ?? 's').toLowerCase();
+  const ms =
+    unit === 'ms' ? amount
+      : unit === 's' ? amount * 1000
+        : unit === 'm' ? amount * 60_000
+          : amount * 3_600_000;
+  if (!Number.isFinite(ms) || ms <= 0) throw usage('--wait must be a positive duration');
+  return Math.min(Math.round(ms), WAIT_MAX_MS);
+}
+
+/**
+ * Which phone a command goes through. `send` and `status` need the same answer:
+ * a command id alone does not identify the Durable Object that holds it.
+ *
+ * With one device paired the choice is obvious. With several, the freshest one
+ * wins and the caller is told, because choosing silently among equals is how a
+ * message leaves from the wrong SIM.
+ */
+async function resolveDevice(cfg, explicitId) {
+  if (explicitId) return { deviceId: explicitId, note: null };
+
+  const devices = (await listDevices(cfg)).map(publicDevice);
+  if (devices.length === 0) {
+    throw new CliError('no paired device yet — run `dakflare pair` first.', 1, {
+      error: 'no_device',
+    });
+  }
+  if (devices.length === 1) return { deviceId: devices[0].device_id, note: null };
+
+  const ranked = devices
+    .map((device) => ({ device, seen: Number(device.last_seen ?? 0) }))
+    .sort((a, b) => b.seen - a.seen);
+  if (!ranked[0].seen) {
+    throw usage(
+      `multiple devices are paired and none has a last-seen time; pass --device <id> (${devices
+        .map((device) => device.device_id)
+        .join(', ')})`
+    );
+  }
+  return {
+    deviceId: ranked[0].device.device_id,
+    note: `freshest of ${devices.length} paired devices`,
+  };
+}
+
+/**
+ * Reads one command straight from the owning Durable Object. A null command is
+ * the Worker saying "no such command", which is exit 3 and not a usage error:
+ * the call was well formed, the thing is not there.
+ */
+async function fetchCommand(cfg, deviceId, commandId) {
+  const result = await api(
+    cfg,
+    'GET',
+    `/v1/sms/commands/${encodeURIComponent(commandId)}?device_id=${encodeURIComponent(deviceId)}`
+  );
+  if (result.status === 404) {
+    throw new CliError(`no command "${commandId}" on ${deviceId}.`, 3, {
+      error: 'command_unknown',
+      command_id: commandId,
+      device_id: deviceId,
+    });
+  }
+  if (result.status !== 200) throw requestFailure('reading the command', result);
+
+  const command = result.data?.command;
+  if (!command || typeof command.state !== 'string') {
+    throw new CliError(`no command "${commandId}" on ${deviceId}.`, 3, {
+      error: 'command_unknown',
+      command_id: commandId,
+      device_id: deviceId,
+    });
+  }
+  return command;
+}
+
+/* Progress is a stderr line on a TTY only: stdout stays one document, and an
+   agent gets silence followed by the result. */
+let progressOpen = false;
+
+function progressLine(command, startedAt) {
+  if (!process.stderr.isTTY) return;
+  const seconds = Math.round((Date.now() - startedAt) / 1000);
+  process.stderr.write(`\r\x1b[K  waiting · ${command.state} · ${seconds}s`);
+  progressOpen = true;
+}
+
+function clearProgress() {
+  if (!progressOpen) return;
+  process.stderr.write('\r\x1b[K');
+  progressOpen = false;
+}
+
+/**
+ * Polls until the command reaches `until`, reaches a terminal state, or the
+ * budget runs out. The delay backs off, so a 30 s wait is ~15 requests, not 60,
+ * and the admin rate limit is never the thing that fails.
+ */
+async function waitForCommand(cfg, deviceId, commandId, { until, budgetMs, quiet }) {
+  const wanted = String(until ?? 'delivered').toLowerCase();
+  const target = UNTIL_ALIASES[wanted];
+  if (!target) {
+    throw usage(`--until expects one of ${Object.keys(UNTIL_ALIASES).join(', ')}`);
+  }
+  const targetRank = stateMeta(target).rank;
+  const startedAt = Date.now();
+  const deadline = startedAt + budgetMs;
+
+  const settled = (command) => {
+    const meta = stateMeta(command.state);
+    return meta.terminal || meta.rank >= targetRank;
+  };
+
+  let command = await fetchCommand(cfg, deviceId, commandId);
+  let delay = 500;
+  try {
+    while (!settled(command)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { command, timedOut: true };
+      if (!quiet) progressLine(command, startedAt);
+      await sleep(Math.max(50, Math.min(delay, remaining)));
+      delay = Math.min(Math.round(delay * 1.6), 3000);
+      command = await fetchCommand(cfg, deviceId, commandId);
+    }
+    return { command, timedOut: false };
+  } finally {
+    if (!quiet) clearProgress();
+  }
+}
+
+/**
+ * The outcome, separated from the request. `passed` is true only on DELIVERED:
+ * `SENT` means the radio took the message and the carrier has not confirmed it,
+ * which is exactly what the landing page's "Not claimed" block says.
+ */
+function verificationFor(command, { timedOut = false } = {}) {
+  const meta = stateMeta(command.state);
+  const passed = command.state === 'DELIVERED' ? true : meta.terminal ? false : null;
+  const reason =
+    COMMAND_STATES[command.state] === undefined
+      ? 'state_unknown'
+      : command.state === 'DELIVERED'
+      ? 'carrier_confirmed'
+      : command.state === 'SENT'
+        ? 'radio_accepted_delivery_not_claimed'
+        : command.state === 'FAILED'
+          ? 'refused'
+          : command.state === 'EXPIRED'
+            ? 'expired_before_collection'
+            : timedOut
+              ? 'timeout'
+              : 'in_flight';
+
+  return {
+    passed,
+    state: command.state,
+    terminal: meta.terminal,
+    reason,
+    next_command:
+      passed === true
+        ? null
+        : command.state === 'FAILED'
+          ? 'dakflare doctor --json'
+          : command.state === 'EXPIRED'
+            ? null
+            : `dakflare status ${command.command_id} --wait 60s --json`,
+  };
+}
+
+/**
+ * Exit code from the outcome, not from the request. 75 is "temporary": the
+ * command is still queued, so retrying the *check* may succeed while retrying
+ * the *send* would text someone twice. Callers distinguish the two by reading
+ * `verification.passed`, never by re-running `send`.
+ */
+function outcomeExitCode(command, timedOut) {
+  if (command.state === 'DELIVERED') return 0;
+  if (stateMeta(command.state).terminal) return 1;
+  return timedOut ? 75 : 0;
+}
+
+function renderCommand(command, { deviceId, note }) {
+  const meta = stateMeta(command.state);
+  out(`${command.command_id}  ${command.state}`);
+  out(`  meaning       ${meta.meaning}`);
+  if (command.to) out(`  to            ${command.to}`);
+  out(`  device        ${deviceId}${note ? ` (${note})` : ''}`);
+  if (Number.isFinite(command.created_at)) {
+    const age = Math.max(0, Math.round((Date.now() - command.created_at) / 1000));
+    out(`  age           ${age}s`);
+  }
+  if (Number.isFinite(command.expires_at)) {
+    const left = Math.round((command.expires_at - Date.now()) / 1000);
+    out(`  expires       ${left > 0 ? `in ${left}s` : 'already'}`);
+  }
+  const next = verificationFor(command).next_command;
+  if (next) out(`  next          ${next}`);
+}
+
 /* ───────────────────────────── send ───────────────────────────── */
 
 function looksLikeE164(value) {
@@ -1214,7 +1466,7 @@ function looksLikeE164(value) {
 async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
-  assertFlags(flags, ['to', 'body', 'device']);
+  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until']);
   const json = Boolean(flags.json);
   const cfg = requireConfig();
 
@@ -1224,34 +1476,7 @@ async function commandSend(argv) {
   if (body.length === 0) throw usage('--body must not be empty');
   if (body.length > MAX_BODY_CHARS) throw usage(`--body is limited to ${MAX_BODY_CHARS} characters`);
 
-  let deviceId = stringFlag(flags, 'device');
-  let deviceNote = null;
-  if (!deviceId) {
-    const devices = (await listDevices(cfg)).map(publicDevice);
-    if (devices.length === 0) {
-      throw new CliError('no paired device to send through — run `dakflare pair` first.', 1, {
-        error: 'no_device',
-      });
-    }
-    if (devices.length === 1) {
-      deviceId = devices[0].device_id;
-    } else {
-      // The command has to work without --device. Pick the phone that spoke to
-      // the Worker most recently and say so; never pick silently among equals.
-      const ranked = devices
-        .map((device) => ({ device, seen: Number(device.last_seen ?? 0) }))
-        .sort((a, b) => b.seen - a.seen);
-      if (!ranked[0].seen) {
-        throw usage(
-          `multiple devices are paired and none has a last-seen time; pass --device <id> (${devices
-            .map((device) => device.device_id)
-            .join(', ')})`
-        );
-      }
-      deviceId = ranked[0].device.device_id;
-      deviceNote = `freshest of ${devices.length} paired devices`;
-    }
-  }
+  const { deviceId, note: deviceNote } = await resolveDevice(cfg, stringFlag(flags, 'device'));
 
   const result = await api(cfg, 'POST', '/v1/sms/send', { device_id: deviceId, to, body });
   if (result.status === 404 && result.data?.error === 'device_unknown') {
@@ -1268,37 +1493,49 @@ async function commandSend(argv) {
     throw new CliError('the Worker did not return a command_id', 1, { error: 'bad_response' });
   }
 
-  let command = null;
-  let state = 'unknown';
-  try {
-    const statusResult = await api(
-      cfg,
-      'GET',
-      `/v1/sms/commands/${encodeURIComponent(commandId)}?device_id=${encodeURIComponent(deviceId)}`
-    );
-    if (statusResult.status === 200) {
-      command = statusResult.data?.command ?? null;
-      if (command && typeof command.state === 'string') state = command.state;
+  const wantsWait = flags.wait !== undefined;
+  let command;
+  let timedOut = false;
+
+  if (wantsWait) {
+    const waited = await waitForCommand(cfg, deviceId, commandId, {
+      until: stringFlag(flags, 'until'),
+      budgetMs: parseDuration(flags.wait),
+      quiet: json || !process.stderr.isTTY,
+    });
+    command = waited.command;
+    timedOut = waited.timedOut;
+  } else {
+    // One read, no polling. A read failure must not turn a queued command into a
+    // failed send, so an unreadable state is reported as `unknown`, not thrown.
+    try {
+      command = await fetchCommand(cfg, deviceId, commandId);
+    } catch {
+      command = { command_id: commandId, state: 'unknown', to };
     }
-  } catch {
-    /* The command is queued; a status read failure must not turn it into a send failure. */
   }
+
+  const verification = verificationFor(command, { timedOut });
 
   if (json) {
     out(
       JSON.stringify(
         {
+          // `ok` means the Worker answered and the command exists. The outcome is
+          // `verification`, and the exit code follows it when --wait was asked for.
           ok: true,
           device_id: deviceId,
           device_selection: deviceNote,
           to,
           command_id: commandId,
-          state,
+          state: command.state,
+          verification,
         },
         null,
         2
       )
     );
+    process.exitCode = outcomeExitCode(command, timedOut);
     return;
   }
 
@@ -1306,7 +1543,75 @@ async function commandSend(argv) {
   out(`  command       ${commandId}`);
   out(`  device        ${deviceId}${deviceNote ? ` (${deviceNote})` : ''}`);
   out(`  to            ${to}`);
-  out(`  state         ${state}`);
+  out(`  state         ${command.state}`);
+  out(`  meaning       ${stateMeta(command.state).meaning}`);
+  if (verification.reason === 'timeout') {
+    out(`  not confirmed the command is still queued; check it again rather than sending again`);
+  }
+  if (verification.next_command) out(`  next          ${verification.next_command}`);
+  return outcomeExitCode(command, timedOut);
+}
+
+/* ───────────────────────────── status ───────────────────────────── */
+
+/**
+ * `dakflare status <command-id>` — the verb `send` was missing.
+ *
+ * Before this, `send` printed a command id that nothing in the CLI could look up
+ * again, so the id was write-only and the outcome unreachable. The Worker has
+ * served `GET /v1/sms/commands/:id` all along; nothing was using it.
+ */
+async function commandStatus(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('status');
+  assertFlags(flags, ['device', 'wait', 'until']);
+  const json = Boolean(flags.json);
+  const cfg = requireConfig();
+
+  const commandId = rest[0];
+  if (!commandId) throw usage('status needs a command id: dakflare status <command-id>');
+  if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+
+  const { deviceId, note } = await resolveDevice(cfg, stringFlag(flags, 'device'));
+
+  let command;
+  let timedOut = false;
+  if (flags.wait !== undefined) {
+    const waited = await waitForCommand(cfg, deviceId, commandId, {
+      until: stringFlag(flags, 'until'),
+      budgetMs: parseDuration(flags.wait),
+      quiet: json || !process.stderr.isTTY,
+    });
+    command = waited.command;
+    timedOut = waited.timedOut;
+  } else {
+    command = await fetchCommand(cfg, deviceId, commandId);
+  }
+
+  const verification = verificationFor(command, { timedOut });
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: true,
+          device_id: deviceId,
+          device_selection: note,
+          command_id: commandId,
+          state: command.state,
+          command,
+          verification,
+        },
+        null,
+        2
+      )
+    );
+    process.exitCode = outcomeExitCode(command, timedOut);
+    return;
+  }
+
+  renderCommand(command, { deviceId, note });
+  return outcomeExitCode(command, timedOut);
 }
 
 /* ───────────────────────────── audit ───────────────────────────── */
@@ -1669,13 +1974,14 @@ Usage: dakflare <command> [options]
   devices     list paired devices
   revoke      revoke one device (asks first; --yes to skip)
   send        queue an outbound SMS through a paired phone
+  status      read one command's state; --wait follows it to the end
   audit       tail the audit log (phase 2; says so when the endpoint is absent)
   key         signing-key helpers: \`key fingerprint\`
 
 Every command accepts --json. Each has its own --help.
 
 Config: ${CONFIG_FILE} (mode 600), written by \`dakflare init\`.
-Exit:   0 ok · 1 failed check/request · 2 usage, missing config or missing tool`,
+Exit:   0 ok · 1 failed check/request · 2 usage · 3 not found · 75 still in flight`,
 
   init: `Usage: dakflare init [--url <url>] [--token <token> | --token-file <path>]
                      [--local [--force]] [--json]
@@ -1730,15 +2036,32 @@ The FCM token itself is never printed; only whether one is present.`,
 Revokes a device in D1 and in its Durable Object. Asks for confirmation;
 --yes skips it for automation. This is irreversible: the phone must pair again.`,
 
-  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--json]
+  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--json]
 
-Queues one outbound SMS and prints the command id and its current state.
+Queues one outbound SMS and prints the command id and its state.
 
   --to <e164>     recipient, for example +8801540196080
   --body <text>   message text (max ${MAX_BODY_CHARS} characters)
   --device <id>   send through this device; omitted when exactly one is paired
+  --wait [d]      follow the command until it settles (default 30s, max 5m)
+  --until <s>     with --wait, stop at this state instead of waiting for delivery:
+                  pending, dispatched, acked, sent, delivered (default: delivered)
+
+Exit 0 means the command was accepted; with --wait it means the outcome, so FAILED
+and EXPIRED exit 1 and a timeout exits 75. The envelope's verification.passed is
+true only on DELIVERED: SENT means the radio accepted it, not that it arrived.
 
   For a body that begins with "-", use --body="…".`,
+
+  status: `Usage: dakflare status <command-id> [--device <id>] [--wait [duration]] [--until <state>] [--json]
+
+Prints one command's state straight from the Durable Object that owns it, or
+follows it with --wait. Takes the same --until and returns the same exit codes as
+\`dakflare send\`.
+
+  --device <id>   the phone that owns the command; omitted when exactly one is paired
+  --wait [d]      poll until the command settles (default 30s, max 5m)
+  --until <s>     stop at pending, dispatched, acked, sent or delivered`,
 
   auth: `Usage: dakflare auth <bootstrap|invite|invites|reset> [options]
 
@@ -1784,6 +2107,7 @@ const COMMANDS = {
   devices: commandDevices,
   revoke: commandRevoke,
   send: commandSend,
+  status: commandStatus,
   audit: commandAudit,
   auth: commandAuth,
   key: commandKey,
