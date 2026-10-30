@@ -150,6 +150,8 @@ object NativeBridge {
 
     external fun drainOutbox(appDir: String, deviceId: String): String
 
+    external fun awaitCommand(appDir: String, deviceId: String, timeoutMs: Long): String
+
     external fun reportStatus(
         appDir: String,
         deviceId: String,
@@ -614,6 +616,49 @@ object NativeBridge {
         } catch (error: Throwable) {
             Log.e(TAG, "reportStatus failed: ${error.javaClass.simpleName}")
             false
+        }
+    }
+
+    /**
+     * What one wait on the device socket produced.
+     *
+     * `live` is whether the socket was connected when the wait ended, so the
+     * gateway can say "polling only" instead of implying a socket it does not
+     * have.
+     */
+    class AwaitResult(val captured: List<String>, val live: Boolean)
+
+    /**
+     * Wait up to [timeoutMs] for the socket to deliver commands.
+     *
+     * Blocks the calling thread; that is the design. Never throws: a missing
+     * symbol, a store error or a dead socket returns an empty result, and the
+     * caller's next wait resumes.
+     */
+    fun awaitCommandSafely(appDir: String, deviceId: String, timeoutMs: Long): AwaitResult {
+        if (loadFailure != null) return AwaitResult(emptyList(), false)
+        if (appDir.isEmpty() || deviceId.isEmpty()) return AwaitResult(emptyList(), false)
+
+        return try {
+            val parsed = JSONObject(awaitCommand(appDir, deviceId, timeoutMs))
+            if (!parsed.optBoolean("ok")) {
+                Log.w(TAG, "awaitCommand refused: ${parsed.optString("error")}")
+                return AwaitResult(emptyList(), false)
+            }
+            val captured = parsed.optJSONArray("captured")
+            val ids = if (captured == null) {
+                emptyList()
+            } else {
+                (0 until captured.length())
+                    .mapNotNull { index -> captured.optString(index).takeIf { it.isNotEmpty() } }
+            }
+            AwaitResult(ids, parsed.optBoolean("live"))
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "awaitCommand symbol missing: ${error.javaClass.simpleName}")
+            AwaitResult(emptyList(), false)
+        } catch (error: Throwable) {
+            Log.e(TAG, "awaitCommand failed: ${error.javaClass.simpleName}")
+            AwaitResult(emptyList(), false)
         }
     }
 

@@ -20,6 +20,7 @@ use tauri::{Manager, State};
 /// Direct JNI surface for the Android `SmsReceiver`. Not compiled on desktop.
 #[cfg(target_os = "android")]
 mod android;
+mod socket;
 
 /// Android Keystore bridge for the identity vault. Not compiled on desktop.
 #[cfg(target_os = "android")]

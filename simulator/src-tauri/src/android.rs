@@ -31,6 +31,8 @@ const MAX_RECIPIENT_LEN: usize = 64;
 const MAX_DEVICE_ID_LEN: usize = 64;
 const MAX_LOCAL_ID_LEN: usize = 200;
 const MAX_STATE_LEN: usize = 16;
+/// The longest a single `awaitCommand` may park the gateway thread.
+const MAX_AWAIT_MS: i64 = 120_000;
 const DB_FILE: &str = "simulator.db";
 
 /// `dev.dakflare.simulator.bridge.NativeBridge.storeIncoming`
@@ -519,6 +521,55 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] flushPending panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.awaitCommand`
+///
+/// Parks this thread until the device socket delivers commands, or until
+/// `timeout_ms` passes. Returns `{"ok":true,"captured":["<local id>"],"live":bool}`
+/// — `live` is whether the socket was connected when the wait ended, which is
+/// what the gateway notification reports.
+///
+/// The commands are already recorded as `queued` rows and acknowledged to the
+/// deployment by the time this returns; the caller's job is the radio.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_awaitCommand(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    timeout_ms: jlong,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(&mut env, &app_dir, &device_id) {
+            Ok((app_dir, device_id)) => {
+                // A caller cannot ask to park for an hour; the gateway's own tick
+                // is the thing that decides how often this is called.
+                let clamped = timeout_ms.clamp(0, MAX_AWAIT_MS) as u64;
+                match crate::socket::await_commands(
+                    &app_dir,
+                    &device_id,
+                    std::time::Duration::from_millis(clamped),
+                ) {
+                    Ok(result) => serde_json::json!({
+                        "ok": true,
+                        "captured": result.captured,
+                        "live": result.live,
+                    })
+                    .to_string(),
+                    Err(code) => error_json(code),
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] awaitCommand panicked");
             error_json("storage")
         }
     };
@@ -1105,7 +1156,7 @@ fn incoming_blocking(
 /// The Keystore cipher is installed here too: this is the coldest entry point in
 /// the app (a broadcast with no Activity), and an identity stored by an older
 /// build is wrapped before the caller can sign with it.
-fn open_store_blocking(app_dir: &str) -> Result<Store, &'static str> {
+pub(crate) fn open_store_blocking(app_dir: &str) -> Result<Store, &'static str> {
     let dir = Path::new(app_dir);
     std::fs::create_dir_all(dir).map_err(|_| "storage")?;
     tauri::async_runtime::block_on(Store::open_with_cipher(
@@ -1230,7 +1281,10 @@ fn queue_blocking(
 /// identity. A missing pairing or key is `unpaired`; a missing or invalid
 /// target is `storage`. Shared by the flush and flow-sync entries so both
 /// always talk to the same deployment as the same identity.
-fn signed_client_blocking(store: &Store, device_id: &str) -> Result<DeviceClient, &'static str> {
+pub(crate) fn signed_client_blocking(
+    store: &Store,
+    device_id: &str,
+) -> Result<DeviceClient, &'static str> {
     tauri::async_runtime::block_on(async {
         let base_url = store
             .get_setting("base_url")

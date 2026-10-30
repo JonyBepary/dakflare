@@ -380,7 +380,7 @@ pub async fn inject_inbound(
 /// rule: the HTTP poll acks with a second `poll`, and the device socket acks
 /// with its own `{"op":"ack"}` frame. Neither path is allowed to claim the row
 /// was sent.
-pub(crate) async fn record_commands(
+pub async fn record_commands(
     store: &Store,
     device_id: &str,
     commands: &serde_json::Value,

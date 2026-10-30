@@ -42,6 +42,12 @@ pub struct Target {
 }
 
 impl Target {
+    /// The absolute URL for a path. Public because the WebSocket upgrade is
+    /// handed to tungstenite's own client, which builds the request itself.
+    pub fn absolute(&self, path: &str) -> String {
+        self.url(path)
+    }
+
     pub fn new(base_url: impl Into<String>, admin_token: Option<String>) -> Result<Self, ProtocolError> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
@@ -403,6 +409,20 @@ impl DeviceClient {
     }
 
     /* ---- device: signed requests ---------------------------------------- */
+
+    /// The base URL this client signs for, without a trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.target.base_url
+    }
+
+    /// Signed headers for the WebSocket upgrade.
+    ///
+    /// §1.2: the upgrade is a signed GET carrying no query string, so the
+    /// canonical string covers the empty body. That is vector B in
+    /// `test-support/protocol-vectors.json`.
+    pub fn upgrade_headers(&self) -> Result<HeaderMap, ProtocolError> {
+        self.signed_headers("GET", "/v1/device/ws", b"")
+    }
 
     fn signed_headers(&self, method: &str, path: &str, body: &[u8]) -> Result<HeaderMap, ProtocolError> {
         let signed = sign_request(
