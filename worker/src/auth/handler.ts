@@ -224,10 +224,10 @@ async function withStepUpGrant(auth: Auth, env: Env, res: Response): Promise<Res
  * clears from the challenge it already resolved; this covers the path where
  * there is no `two_factor` cookie.
  */
-async function clearFromVerifyResponse(res: Response): Promise<void> {
+async function clearFromVerifyResponse(res: Response, env: Env): Promise<void> {
   try {
     const body = (await res.clone().json()) as { user?: { email?: unknown } };
-    if (typeof body.user?.email === "string") clearAuthFailures(body.user.email);
+    if (typeof body.user?.email === "string") await clearAuthFailures(env, body.user.email);
   } catch {
     // A success body we cannot read is not a reason to fail the request.
   }
@@ -257,7 +257,7 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
     const challenge = await resolveSignInChallenge(env, req);
     if (challenge !== null) {
       const ip = clientIp(req);
-      const before = checkAuthLockout(env, { email: challenge.email, ip });
+      const before = await checkAuthLockout(env, { email: challenge.email, ip });
       if (before.locked) return lockoutResponse(before);
 
       // Clone: the original request body still has to reach `auth.handler`.
@@ -278,7 +278,7 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
       }
 
       const res = await auth.handler(req);
-      if (res.ok) clearAuthFailures(challenge.email);
+      if (res.ok) await clearAuthFailures(env, challenge.email);
       return res;
     }
   }
@@ -286,7 +286,7 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
   const res = await auth.handler(req);
 
   if (relative === "/two-factor/verify-totp" && res.ok) {
-    await clearFromVerifyResponse(res);
+    await clearFromVerifyResponse(res, env);
   }
 
   if (relative === "/passkey/verify-authentication" && res.ok) {
@@ -294,7 +294,7 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
     // A TOTP account is not fully authenticated yet: its challenge success is
     // what clears the window. A passkey with no second factor is a full sign-in.
     if (challenged !== null) return challenged;
-    await clearFromVerifyResponse(res);
+    await clearFromVerifyResponse(res, env);
     return await withStepUpGrant(auth, env, res);
   }
 

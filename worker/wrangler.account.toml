@@ -30,9 +30,21 @@ preview_urls = false
 name = "DEVICE"
 class_name = "DeviceGateway"
 
+# The global failed-auth counter. See lib/auth-limits.ts and wrangler.toml.
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceGateway"]
+
+# A new tag, not an edit to v1: v1 is already applied wherever this config has
+# run. wrangler.toml uses `[exports.*]` instead; this file keeps the ordered
+# migration history because it predates the exports switch.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["AuthGuard"]
 
 # remote = true -> the real preview database, while the Worker and DO run locally.
 [[d1_databases]]
@@ -71,7 +83,8 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
-# Failed-auth lockout backstop (see lib/auth-limits.ts and wrangler.toml).
+# Failed-auth lockout FALLBACK (the authoritative counter is the AUTH_GUARD
+# Durable Object above; see lib/auth-limits.ts and wrangler.toml).
 [[ratelimits]]
 name = "AUTH_ACCOUNT_LIMITER"
 namespace_id = "1006"

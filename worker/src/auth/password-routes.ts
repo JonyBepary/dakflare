@@ -217,7 +217,7 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
   // One account window (5/15 min) and one IP window (20/15 min). The account
   // window is shared with the TOTP paths, so a password guess and a code guess
   // spend the same budget. Checked before the KDF/HMAC work and before D1.
-  const before = checkAuthLockout(env, { email, ip });
+  const before = await checkAuthLockout(env, { email, ip });
   if (before.locked) return lockoutResponse(before);
 
   const loaded = loadPepperRing(env);
@@ -346,7 +346,7 @@ export async function handlePasswordSignIn(req: Request, env: Env): Promise<Resp
   // account does NOT clear here — its first factor is not the end of the
   // sign-in, and clearing would let a password holder reset the code lockout by
   // starting a new challenge.
-  clearAuthFailures(email);
+  await clearAuthFailures(env, email);
 
   await writeAudit(env, {
     action: "sign_in.success",
@@ -507,7 +507,7 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
   const meta = requestMeta(req);
   const ip = clientIp(req);
 
-  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  const before = await checkAuthLockout(env, { email: guard.user.email, ip });
   if (before.locked) return lockoutResponse(before);
 
   if (guard.user.twoFactorEnabled) {
@@ -578,7 +578,7 @@ export async function handlePasswordRemove(req: Request, env: Env): Promise<Resp
     }
   }
 
-  clearAuthFailures(guard.user.email);
+  await clearAuthFailures(env, guard.user.email);
 
   const deleted = await env.DB.prepare(
     `DELETE FROM account WHERE "userId" = ? AND "providerId" = 'credential'`

@@ -306,7 +306,7 @@ export async function handleMagicLinkConsume(req: Request, env: Env): Promise<Re
     return Response.json({ error: issued.error }, { status: issued.status, headers: NO_STORE });
   }
 
-  clearAuthFailures(email);
+  await clearAuthFailures(env, email);
 
   await writeAudit(env, {
     action: "sign_in.success",

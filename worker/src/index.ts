@@ -11,6 +11,7 @@
  */
 
 import { DeviceGateway } from "./durable-object";
+import { AuthGuard } from "./auth-guard";
 import { verifyDeviceSignature } from "./auth/ecdsa";
 import { handleAdminPairingCode, handleDevicePair, handleDevicesList } from "./routes/pair";
 import { handleSend, handleSendBatch } from "./routes/send";
@@ -59,7 +60,7 @@ import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
 import { authMode, MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
-export { DeviceGateway };
+export { DeviceGateway, AuthGuard };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -67,6 +68,12 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export interface Env {
   DEVICE: DurableObjectNamespace<DeviceGateway>;
+  /**
+   * One globally named AuthGuard object owns the failed-auth windows. Optional
+   * so an older deployment without the binding still type-checks and runs; the
+   * limiter then falls back to its isolate counters (see lib/auth-limits.ts).
+   */
+  AUTH_GUARD?: DurableObjectNamespace<AuthGuard>;
   DB: D1Database;
   /** Load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token here. */
   KV: KVNamespace;

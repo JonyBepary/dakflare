@@ -19,6 +19,11 @@
  *   password        AUTH_PLAN §2 cases: salt shape/determinism, construction
  *                   parity, mode rules, sign-in, deletion. Reads the mode from
  *                   /v1/admin/health.
+ *   lockout-global  the failed-auth window is in the AuthGuard Durable Object,
+ *                   not isolate memory: three failures on one Worker process and
+ *                   two on a restarted process still make the fifth 429, and the
+ *                   lock survives another restart. Owns its `wrangler dev` and
+ *                   isolated D1/DO state under /tmp/opencode.
  *   password-rotate pepper rotation end to end. Starts its own wrangler dev
  *                   (ring v1 -> v2,v1 -> v2) on PASSWORD_ROTATE_PORT, isolated
  *                   D1 state under /tmp/opencode.
@@ -3556,6 +3561,190 @@ async function cmdPasswordRotate() {
   process.exit(allOk ? 0 : 1);
 }
 
+/* ─────────────────────── global lockout command ──────────────────────────── */
+
+const LOCKOUT_GLOBAL_PORT = Number(process.env.LOCKOUT_GLOBAL_PORT ?? 8797);
+
+/**
+ * The failed-auth window used to be isolate memory, so an attacker rotating
+ * Cloudflare locations got a fresh 5-failure budget at each. It now lives in one
+ * globally named AuthGuard Durable Object.
+ *
+ * Local `wrangler dev` runs one isolate per process. This command therefore
+ * starts a Worker, records three failures, stops it (which discards the isolate
+ * cache), starts a second process on the same persisted D1/DO state, and records
+ * two more: the fifth is still 429. A third restart then shows the lock itself
+ * survives, and a success clears it in the object, not just in one process's
+ * memory.
+ *
+ * Two simultaneous `wrangler dev` processes are deliberately not used: each
+ * owns its own Miniflare and they would contend on the same local DO SQLite file.
+ * The restart exercises exactly the property that matters — the counter is not
+ * in the isolate — without that flake.
+ */
+async function cmdLockoutGlobal() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-lockout-${Date.now()}`);
+  const base = `http://127.0.0.1:${LOCKOUT_GLOBAL_PORT}`;
+  const rep = new Report('lockout-global');
+  const servers = [];
+
+  const pepper = 'v1:' + crypto.createHash('sha256').update('lockout-global-pepper').digest('base64');
+  const secret = crypto.randomBytes(32).toString('base64');
+
+  const startWorker = async (label) => {
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'dev', '--local',
+      '--port', String(LOCKOUT_GLOBAL_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_TRUSTED_ORIGINS:${base}`,
+      '--var', `BETTER_AUTH_SECRET:${secret}`,
+      '--var', `AUTH_PEPPER:${pepper}`,
+      '--var', 'AUTH_PASSWORD_MODE:client-derived',
+      '--var', 'AUTH_LOCKOUT_WINDOW_SECONDS:20',
+      '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+    ], { cwd: workerDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) {
+        throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      }
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: {
+            Authorization: `Bearer ${ADMIN_TOKEN}`,
+            'X-Dakflare-Client': 'cli',
+          },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const adminAt = async (method, pathname, body) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+        'Content-Type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+
+  const raw = (method, pathname, opts) => api(base, method, pathname, opts);
+
+  let server = null;
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    const email = `global-lock-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const password = 'correct horse battery staple';
+    const wrongMaterial = crypto.randomBytes(32);
+
+    server = await startWorker('first isolate');
+    const invite = await adminAt('POST', '/v1/admin/invites', {
+      email,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    rep.check('lockout-global: invite created', invite.status, 200);
+    const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: invite.data?.token } });
+    rep.check('lockout-global: invite redeemed', redeemed.status, 200);
+    const session = sessionCookieOf(redeemed.cookies);
+    const saltRes = await raw('POST', '/v1/auth/salt', { body: { email } });
+    const salt = Buffer.from(saltRes.data?.salt ?? '', 'base64');
+    const iterations = saltRes.data?.iterations ?? PW_ITERATIONS;
+    const material = pwMaterial(password, salt, iterations);
+    const set = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material), salt: b64Of(salt), iterations },
+    });
+    rep.check('lockout-global: password set', set.status, 200);
+
+    const signIn = (candidate, ip) => raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(candidate) },
+      headers: { 'CF-Connecting-IP': ip },
+    });
+
+    const ipA = `198.51.100.${(crypto.randomBytes(1)[0] % 200) + 10}`;
+    const first = [];
+    for (let i = 0; i < 3; i += 1) first.push(await signIn(wrongMaterial, ipA));
+    rep.check('lockout-global: three failures on the first process -> 401', first.map((r) => r.status), [401, 401, 401]);
+
+    // Stopping wrangler dev discards the isolate-local cache. A second process
+    // reads the same persisted Durable Object.
+    await stopWorker(server);
+    server = await startWorker('second isolate');
+    const ipB = `203.0.113.${(crypto.randomBytes(1)[0] % 200) + 10}`;
+    const fourth = await signIn(wrongMaterial, ipB);
+    const fifth = await signIn(wrongMaterial, ipB);
+    rep.check('lockout-global: the fourth failure overall -> 401', fourth.status, 401);
+    rep.check('lockout-global: the fifth failure overall, on a new process -> 429', fifth.status, 429);
+    rep.check(
+      'lockout-global: the 429 carries Retry-After',
+      Number(fifth.headers?.get?.('retry-after')),
+      fifth.data?.retry_after
+    );
+    const lockWindow = Number(fifth.data?.retry_after ?? 1);
+
+    // A third process has an empty cache: the lock must come from the object.
+    await stopWorker(server);
+    server = await startWorker('third isolate');
+    const correctDuring = await signIn(material, ipB);
+    rep.check('lockout-global: the lock survives a third process (correct password still 429)', correctDuring.status, 429);
+
+    await sleep((lockWindow + 1) * 1000);
+    const correctAfter = await signIn(material, ipB);
+    rep.check('lockout-global: correct password after the window -> 200', correctAfter.status, 200);
+    const afterClear = await signIn(wrongMaterial, ipB);
+    rep.check('lockout-global: the success cleared the account in the object (next wrong -> 401)', afterClear.status, 401);
+
+    await stopWorker(server);
+  } finally {
+    for (const running of servers) {
+      await stopWorker(running).catch(() => {});
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'GLOBAL LOCKOUT CASES PASSED' : 'GLOBAL LOCKOUT CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ───────────────────────────────── stub command ──────────────────────────── */
 
 async function cmdStub() {
@@ -3577,6 +3766,7 @@ const COMMANDS = {
   multidevice: cmdMultiDevice,
   auth: cmdAuth,
   password: cmdPassword,
+  'lockout-global': cmdLockoutGlobal,
   'password-rotate': cmdPasswordRotate,
   magic: cmdMagic,
   proxy: cmdProxy,

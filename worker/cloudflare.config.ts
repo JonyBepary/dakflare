@@ -52,6 +52,8 @@ export default defineConfig({
 		 */
 		exports: {
 			DeviceGateway: exports.durableObject({ storage: "sqlite" }),
+			// The single globally named failed-auth counter (lib/auth-limits.ts).
+			AuthGuard: exports.durableObject({ storage: "sqlite" }),
 		},
 
 		triggers: [
@@ -86,6 +88,10 @@ export default defineConfig({
 			DEVICE: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "DeviceGateway",
+			}),
+			AUTH_GUARD: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "AuthGuard",
 			}),
 
 			// ── rate limiting (hardening S3) ────────────────────────────────────

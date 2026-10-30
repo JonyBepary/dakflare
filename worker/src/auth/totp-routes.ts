@@ -314,7 +314,7 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
 
   // Refuse before checking the code: a correct code during the lockout is still
   // 429 (that is the point), and a refused request costs no HMAC and no row.
-  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  const before = await checkAuthLockout(env, { email: guard.user.email, ip });
   if (before.locked) return lockoutResponse(before);
 
   if (!(await verifyCurrentCode(auth, req, parsed.value.code))) {
@@ -334,7 +334,7 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
   }
 
   // A successful proof clears the account's failure window, not the IP's.
-  clearAuthFailures(guard.user.email);
+  await clearAuthFailures(env, guard.user.email);
 
   const ctx = await auth.$context;
   await ctx.internalAdapter.updateUser(guard.user.id, { twoFactorEnabled: false });
@@ -390,7 +390,7 @@ export async function handleTotpRegenerate(req: Request, env: Env): Promise<Resp
 
   if (!guard.user.twoFactorEnabled) return json({ error: "totp_not_enabled" }, 409);
 
-  const before = checkAuthLockout(env, { email: guard.user.email, ip });
+  const before = await checkAuthLockout(env, { email: guard.user.email, ip });
   if (before.locked) return lockoutResponse(before);
 
   if (!(await verifyCurrentCode(auth, req, parsed.value.code))) {
@@ -409,7 +409,7 @@ export async function handleTotpRegenerate(req: Request, env: Env): Promise<Resp
     return json({ error: "invalid_code" }, 401);
   }
 
-  clearAuthFailures(guard.user.email);
+  await clearAuthFailures(env, guard.user.email);
 
   const ctx = await auth.$context;
   const row = await findRow(ctx, guard.user.id);

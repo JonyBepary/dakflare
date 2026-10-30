@@ -202,7 +202,8 @@ function buildAuth(env: Env) {
         // URI, the verification window, and the `verify-totp` endpoint.
         allowPasswordless: true,
         totpOptions: { digits: TOTP_DIGITS, period: TOTP_PERIOD },
-        // Our zero-D1 limiter (`lib/auth-limits.ts`) owns the account lockout.
+        // Our zero-D1 limiter (`lib/auth-limits.ts`, backed by the global
+        // AuthGuard Durable Object) owns the account lockout.
         // The plugin's built-in lockout increments `twoFactor.failedVerificationCount`
         // and writes `lockedUntil` on every failed sign-in — exactly the D1 row
         // per guess this hardening is meant to avoid. Keeping both would also

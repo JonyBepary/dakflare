@@ -43,7 +43,19 @@ name = "DEVICE"
 # instances, and renaming it requires a new migration tag. Display name: DakFlareDeviceDO.
 class_name = "DeviceGateway"
 
+# One globally named AuthGuard object (name "global") owns the failed-auth
+# counters, so every location sees the same 15-minute account/IP window. Before
+# this, the window was isolate memory and an attacker rotating locations got a
+# fresh budget at each. The Rate Limiting bindings remain only a fallback.
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
 [exports.DeviceGateway]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthGuard]
 type = "durable-object"
 storage = "sqlite"
 
@@ -109,12 +121,12 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
-# Failed-auth lockout (AUTH_PLAN §3). These are the cross-instance backstop for
-# `lib/auth-limits.ts`, not the whole counter: the Rate Limiting API only accepts
-# a 10- or 60-second period and returns no count, so the 15-minute sliding window
-# and the fixed lockout expiry live in isolate memory. Counted on FAILURES only,
-# and only after the memory window has not already tripped, so a refused request
-# costs no row and no limiter call.
+# Failed-auth lockout (AUTH_PLAN §3). The authoritative counter is the global
+# AuthGuard Durable Object (see lib/auth-limits.ts and `[exports.AuthGuard]`).
+# These Rate Limiting bindings are only the FALLBACK used while that object is
+# unreachable: the Rate Limiting API accepts only a 10- or 60-second period and
+# returns no count, so it cannot express the 15-minute window or the fixed
+# lockout expiry. Counted on FAILURES only, so a refused request costs no row.
 [[ratelimits]]
 name = "AUTH_ACCOUNT_LIMITER"
 namespace_id = "1006"
@@ -130,7 +142,7 @@ simple = { limit = 20, period = 60 }
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
 # (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
-AUTH_MODE = "legacy"
+AUTH_MODE = "new"
 # Which side runs the password KDF (AUTH_PLAN §2, phase 4):
 #   off (default) | client-derived (free tier) | server-kdf (paid plan)
 # `off` disables the whole password factor: /v1/auth/salt still answers (same
@@ -157,7 +169,7 @@ MAGIC_LINK_TTL_SECONDS = "900"
 # Production should leave this unset (defaults to https://api.resend.com).
 # RESEND_BASE_URL = "http://127.0.0.1:8791"
 # Failed-auth lockout window, in seconds (AUTH_PLAN §3). 900 = 15 minutes. The
-# in-memory window in `lib/auth-limits.ts` is clamped to [1, 3600]; lower it only
+# AuthGuard window in `lib/auth-limits.ts` is clamped to [1, 3600]; lower it only
 # for the conformance harness, which waits out the window it starts the Worker
 # with. The Rate Limiting bindings cannot express this window (10/60 s only).
 AUTH_LOCKOUT_WINDOW_SECONDS = "900"
