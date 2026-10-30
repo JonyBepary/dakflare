@@ -1,0 +1,21 @@
+-- SMS Gateway v5 — non-destructive device retirement.
+--
+-- Revoking a device (`DELETE /v1/admin/devices/:id`) destroys its D1 row and its
+-- message history, which is the right answer for a compromised phone and the
+-- wrong one for a phone that was merely uninstalled. `archived_at` is the
+-- non-destructive option: the row keeps its key, its FCM token and every message
+-- it ever relayed, and the operator can hide it from the fleet view.
+--
+-- Semantics:
+--   NULL      the device is live (the default, and what every existing row is)
+--   INTEGER   ms since epoch at which it was archived
+--
+-- Archiving deliberately does NOT touch the device's Durable Object: an archived
+-- device is still a valid device, and an authenticated request from it clears
+-- `archived_at` again (a phone that comes back is not archived). Only `revoke`
+-- removes the key.
+--
+-- No index: `GET /v1/devices` returns the whole fleet (an operator deployment is
+-- tens of rows), and the column is only ever filtered by `IS NULL`.
+
+ALTER TABLE devices ADD COLUMN archived_at INTEGER;

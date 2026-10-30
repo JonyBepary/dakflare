@@ -1049,6 +1049,214 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── re-pair inheritance + device archive (2026-10-30 cutover) ─────────── */
+  console.log('-- re-pair inheritance + device archive --');
+  {
+    const rep = new Report('re-pair inheritance');
+    const label = `Harness Reinstall ${crypto.randomBytes(3).toString('hex')}`;
+
+    /** Mint a code (optionally scoped/rotate) and pair `idn` with it. */
+    const pairWith = async (idn, { label: reported, mint } = {}) => {
+      const minted = await admin('POST', '/v1/admin/pairing-code', {
+        ttl_ms: 60_000, ...(mint ?? {}),
+      });
+      const res = await fetch(`${WORKER_URL}/v1/device/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pairing_code: minted.data?.pairing_code,
+          device_id: idn.deviceId,
+          public_key_spki: idn.publicKeySpki,
+          ...(reported === undefined ? {} : { label: reported }),
+        }),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const workflows = async () =>
+      (await admin('GET', '/v1/admin/workflows')).data?.workflows ?? [];
+    const flowsFor = async (deviceId) =>
+      (await workflows()).filter((w) => w.device_id === deviceId);
+    const fleet = async (query = '') =>
+      (await admin('GET', `/v1/devices${query}`)).data?.devices ?? [];
+    const waitFor = async (fn, tries = 40) => {
+      for (let i = 0; i < tries; i++) {
+        const value = await fn();
+        if (value) return value;
+        await sleep(100);
+      }
+      return null;
+    };
+
+    /* 1. The old phone: pair with a label, then build two flows. ---------- */
+    const old = newIdentity();
+    const oldKey = { ...old, privateKey: crypto.createPrivateKey(old.privateKeyPem) };
+    const firstPair = await pairWith(old, { label });
+    rep.check('pair the original device with a label -> 200', firstPair.status, 200);
+    rep.check('...a first pair copies nothing', firstPair.data?.copied_workflows, 0);
+
+    const graph = (to) => ({
+      nodes: [
+        { id: 'trigger_1', type: 'trigger', position: { x: 0, y: 0 }, data: { kind: 'incoming' } },
+        { id: 'send_1', type: 'send_sms', position: { x: 0, y: 100 }, data: { to, body: 'ack {{body}}' } },
+        { id: 'stop_1', type: 'stop', position: { x: 0, y: 200 }, data: { reason: 'done' } },
+      ],
+      edges: [
+        { id: 'edge_1', source: 'trigger_1', target: 'send_1' },
+        { id: 'edge_2', source: 'send_1', target: 'stop_1' },
+      ],
+    });
+    const originals = [
+      { id: `harness_flow_a_${crypto.randomBytes(4).toString('hex')}`,
+        name: 'Harness flow A', graph: graph('{{sender}}') },
+      { id: `harness_flow_b_${crypto.randomBytes(4).toString('hex')}`,
+        name: 'Harness flow B', graph: graph('+8801700000002') },
+    ];
+    for (const flow of originals) {
+      const saved = await admin('PUT', `/v1/admin/workflows/${flow.id}`, {
+        name: flow.name, device_id: old.deviceId, graph: flow.graph,
+      });
+      rep.check(`save ${flow.name} for the original device -> 200`, saved.status, 200);
+    }
+    rep.check('the original device owns both flows', (await flowsFor(old.deviceId)).length, 2);
+
+    /* 2. The reinstalled phone: a NEW device_id, the same label. ---------- */
+    const fresh = newIdentity();
+    const secondPair = await pairWith(fresh, { label });
+    rep.check('pair a NEW device with the same label -> 200', secondPair.status, 200);
+    rep.check('...the pair response reports copied_workflows: 2',
+      secondPair.data?.copied_workflows, 2);
+
+    const copied = await flowsFor(fresh.deviceId);
+    rep.check('the new device now owns two flows', copied.length, 2);
+    rep.check('...every copied id is a fresh wf_ id',
+      copied.every((w) => /^wf_[0-9a-f]{16}$/.test(w.id)), true);
+    rep.check('...each name says where it came from',
+      copied.every((w) => w.name.endsWith(` (copied from ${old.deviceId})`)), true);
+
+    const sourceDocs = [];
+    for (const flow of originals) {
+      sourceDocs.push((await admin('GET', `/v1/admin/workflows/${flow.id}`)).data?.workflow);
+    }
+    let copiesMatch = true;
+    const copiedVersions = [];
+    for (const row of copied) {
+      const doc = (await admin('GET', `/v1/admin/workflows/${row.id}`)).data?.workflow;
+      copiedVersions.push(doc?.version);
+      const base = String(doc?.name ?? '').replace(/ \(copied from .*\)$/, '');
+      const source = sourceDocs.find((s) => s?.name === base);
+      if (!source || JSON.stringify(doc?.graph) !== JSON.stringify(source.graph)) copiesMatch = false;
+    }
+    rep.check('...each copy starts at version 1', copiedVersions, [1, 1]);
+    rep.check('...each copy carries the original graph', copiesMatch, true);
+
+    /* 3. The originals are untouched. ------------------------------------ */
+    const after = await flowsFor(old.deviceId);
+    rep.check('the original device still owns both flows', after.length, 2);
+    rep.check('...with the same ids',
+      after.map((w) => w.id).sort(), originals.map((f) => f.id).sort());
+    const originalVersions = [];
+    for (const flow of originals) {
+      originalVersions.push((await admin('GET', `/v1/admin/workflows/${flow.id}`)).data?.workflow?.version);
+    }
+    rep.check('...and version 1 (never re-saved)', originalVersions, [1, 1]);
+
+    /* 4. Re-pairing the new device does not duplicate or overwrite. ------ */
+    const again = await pairWith(fresh, {
+      label,
+      mint: { device_id: fresh.deviceId, purpose: 'rotate' },
+    });
+    rep.check('re-pair the new device with the same label -> 200', again.status, 200);
+    rep.check('...it copies nothing a second time', again.data?.copied_workflows, 0);
+    rep.check('...and the new device still owns exactly two flows',
+      (await flowsFor(fresh.deviceId)).length, 2);
+
+    /* 5. Archive keeps the history and hides the row. -------------------- */
+    const historyId = `arch_${crypto.randomBytes(6).toString('hex')}`;
+    const posted = await device(oldKey, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: historyId,
+        sender: '+8801700000003',
+        body: 'archive history probe',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('the original device relays one message -> 200', posted.status, 200);
+
+    const archived = await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('archive -> 200', archived.status, 200);
+    rep.check('...archived_at is set', typeof archived.data?.archived_at, 'number');
+    rep.check('...changed is true', archived.data?.changed, true);
+    rep.check('an archived device is hidden from GET /v1/devices',
+      (await fleet()).some((d) => d.device_id === old.deviceId), false);
+    const listed = (await fleet('?include_archived=1')).find((d) => d.device_id === old.deviceId);
+    rep.check('...but ?include_archived=1 still lists it', Boolean(listed), true);
+    rep.check('...with archived_at exposed', typeof listed?.archived_at, 'number');
+
+    const history = await admin('GET', `/v1/messages?device_id=${old.deviceId}&limit=200`);
+    rep.check('an archived device still answers /v1/messages -> 200', history.status, 200);
+    rep.check('...its history is intact',
+      (history.data?.messages ?? []).some((m) => m.local_id === historyId), true);
+
+    const rearchived = await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('archiving twice is a no-op 200', rearchived.status, 200);
+    rep.check('...it does not move the timestamp',
+      rearchived.data?.archived_at, archived.data?.archived_at);
+    rep.check('...and reports changed: false', rearchived.data?.changed, false);
+
+    /* 6. Unarchive restores it. ------------------------------------------ */
+    const unarchived = await admin('POST', `/v1/admin/devices/${old.deviceId}/unarchive`);
+    rep.check('unarchive -> 200', unarchived.status, 200);
+    rep.check('...archived_at is null', unarchived.data?.archived_at, null);
+    const visible = (await fleet()).find((d) => d.device_id === old.deviceId);
+    rep.check('...the device is back in GET /v1/devices', Boolean(visible), true);
+    rep.check('...with archived_at null', visible?.archived_at, null);
+
+    /* 7. A poll from an archived device un-archives it automatically. ---- */
+    await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('re-archive for the poll case',
+      (await fleet()).some((d) => d.device_id === old.deviceId), false);
+    const polled = await device(oldKey, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+    rep.check('an archived device can still poll -> 200', polled.status, 200);
+    const back = await waitFor(async () =>
+      (await fleet()).find((d) => d.device_id === old.deviceId && d.archived_at === null) ?? null);
+    rep.check('a poll from an archived device un-archives it', Boolean(back), true);
+
+    /* 8. Audit: both new events are recorded. ---------------------------- */
+    const copyEvents = ((await admin('GET', '/v1/admin/audit?action=workflows.copied&limit=50'))
+      .data?.events ?? []).filter((e) => e.subject === fresh.deviceId);
+    const copyEvent = copyEvents.find((e) => e.detail?.count === 2);
+    rep.check('audit has workflows.copied for the new device', Boolean(copyEvent), true);
+    rep.check('...detail names both devices',
+      [copyEvent?.detail?.from, copyEvent?.detail?.to], [old.deviceId, fresh.deviceId]);
+    rep.check('...detail carries the count', copyEvent?.detail?.count, 2);
+    rep.check('...the repeat pair is audited as count 0 with the skip counted',
+      copyEvents.some((e) => e.detail?.count === 0 && e.detail?.skipped === 2), true);
+
+    const autoEvent = ((await admin('GET', '/v1/admin/audit?action=device.unarchived&limit=50'))
+      .data?.events ?? []).find((e) => e.subject === old.deviceId && e.detail?.automatic === true);
+    rep.check('audit has the automatic device.unarchived', Boolean(autoEvent), true);
+
+    rep.check('audit has device.archived for the device',
+      ((await admin('GET', '/v1/admin/audit?action=device.archived&limit=50'))
+        .data?.events ?? []).some((e) => e.subject === old.deviceId), true);
+
+    /* 9. Teardown: delete every flow created here, then revoke both. ----- */
+    for (const row of [...(await flowsFor(old.deviceId)), ...(await flowsFor(fresh.deviceId))]) {
+      await admin('DELETE', `/v1/admin/workflows/${row.id}`);
+    }
+    rep.check('every flow created here is gone',
+      (await flowsFor(old.deviceId)).length + (await flowsFor(fresh.deviceId)).length, 0);
+    await admin('DELETE', `/v1/admin/devices/${old.deviceId}`);
+    await admin('DELETE', `/v1/admin/devices/${fresh.deviceId}`);
+    rep.check('both harness devices are revoked',
+      (await fleet('?include_archived=1')).filter(
+        (d) => d.device_id === old.deviceId || d.device_id === fresh.deviceId).length, 0);
+
+    run(rep);
+  }
+
   /* ── outbound reply state ──────────────────────────────────────────────── */
   console.log('-- outbound reply state --');
   {

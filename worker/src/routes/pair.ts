@@ -56,6 +56,7 @@ import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, MAX_LABEL_CHARS, clampTtlMs } from "../lib/config";
+import { MAX_WORKFLOW_NAME_CHARS } from "../lib/workflow";
 
 /**
  * How long a claim blocks other redeemers before it is treated as abandoned.
@@ -318,17 +319,209 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
     ...requestMeta(req),
   });
 
-  return Response.json({ ok: true });
+  // --- Step 6. Re-pair inheritance: adopt the previous phone's workflows. ---
+  //
+  // Workflows are scoped by `device_id`, and a reinstall mints a NEW device_id.
+  // Without this step every flow the operator built is orphaned and `/v1/flows`
+  // silently answers nothing — which is exactly what happened on 2026-10-30.
+  // The phone's only stable identity hint is its label, so a pair that reports
+  // one inherits from the most recently paired other device that shares it.
+  //
+  // This runs AFTER the pair has committed and is deliberately best-effort: the
+  // device is already registered, so a storage failure here must not turn a
+  // successful pair into a 500 the phone would answer by re-pairing.
+  let copiedWorkflows = 0;
+  try {
+    // The effective label, not just the reported one: a rotation that omits the
+    // label keeps the row's existing one (see the COALESCE in the upsert above).
+    const effectiveLabel =
+      label ??
+      (
+        await env.DB.prepare(`SELECT label FROM devices WHERE device_id = ?`)
+          .bind(deviceId)
+          .first<{ label: string | null }>()
+      )?.label ??
+      null;
+
+    const inherited = await inheritWorkflows(env, deviceId, effectiveLabel);
+    copiedWorkflows = inherited.copied;
+
+    if (inherited.from !== null && (inherited.copied > 0 || inherited.skipped > 0)) {
+      await writeAudit(env, {
+        action: "workflows.copied",
+        actor: { userId: null, label: "pairing-code" },
+        subject: deviceId,
+        detail: {
+          from: inherited.from,
+          to: deviceId,
+          count: inherited.copied,
+          // Additive: how many source flows were left alone because the new
+          // device already had a workflow with that name.
+          skipped: inherited.skipped,
+          // Additive: more than one device shares the label, so `from` is the
+          // most recently paired one.
+          ...(inherited.ambiguous ? { ambiguous_label: true } : {}),
+        },
+        ...requestMeta(req),
+      });
+    }
+  } catch (error) {
+    console.error(`[pair] workflow inheritance failed for ${deviceId}: ${String(error)}`);
+  }
+
+  // `copied_workflows` is additive: existing clients ignore an unknown key.
+  return Response.json({ ok: true, copied_workflows: copiedWorkflows });
 }
 
-/** `GET /v1/devices` — admin fleet visibility. */
-export async function handleDevicesList(env: Env): Promise<Response> {
+/**
+ * `GET /v1/devices` — admin fleet visibility.
+ *
+ * Archived devices are hidden by default: archiving is how an uninstalled phone
+ * stops appearing in the fleet view WITHOUT losing its history. `?include_archived=1`
+ * asks for them too, which is what the console's "archived" filter uses. The
+ * `archived_at` column is returned either way so the caller can render the state
+ * (null = live).
+ */
+export async function handleDevicesList(env: Env, requestUrl: URL): Promise<Response> {
+  const includeArchived = requestUrl.searchParams.get("include_archived");
+  const archivedFilter =
+    includeArchived === "1" || includeArchived === "true" ? "" : "WHERE archived_at IS NULL";
+
   const rows = await env.DB.prepare(
-    `SELECT device_id, fcm_token, label, sim_slot, paired_at, last_seen
+    `SELECT device_id, fcm_token, label, sim_slot, paired_at, last_seen, archived_at
        FROM devices
+       ${archivedFilter}
       ORDER BY last_seen DESC`
   ).all();
   return Response.json({ devices: rows.results ?? [] });
+}
+
+/** What `inheritWorkflows` did, for the response count and the audit detail. */
+interface InheritedWorkflows {
+  /** The device the flows were copied FROM, or null when no candidate existed. */
+  from: string | null;
+  copied: number;
+  /** Source flows left alone because the new device already had that name. */
+  skipped: number;
+  /** More than one other device shares the label; `from` is the newest. */
+  ambiguous: boolean;
+}
+
+/**
+ * Copy the previous phone's workflows onto a newly paired device.
+ *
+ * The rule, exactly: on a successful pair, find the most recently paired OTHER
+ * device row whose `label` matches the new device's effective label, and copy
+ * every workflow scoped to it. Each copy is a NEW row (`wf_<hex>`, version 1,
+ * `created_at = updated_at = now`) owned by the new device; the source rows are
+ * never touched, so an operator can still see what the old phone had. The name
+ * gains a `" (copied from <old id>)"` suffix so the two generations are
+ * distinguishable in the canvas list.
+ *
+ * Nothing on the new device is ever overwritten: a copy whose target name is
+ * already present there is skipped and counted. That also makes a repeated pair
+ * with the same label idempotent rather than duplicating the fleet's flows.
+ *
+ * A null label inherits nothing — "unknown" is not a match, or every unlabelled
+ * phone would adopt the flows of the last unlabelled one.
+ */
+async function inheritWorkflows(
+  env: Env,
+  newDeviceId: string,
+  label: string | null
+): Promise<InheritedWorkflows> {
+  const none: InheritedWorkflows = { from: null, copied: 0, skipped: 0, ambiguous: false };
+  if (label === null) return none;
+
+  // LIMIT 2 is enough to answer "is this label ambiguous?" without reading the
+  // whole fleet: `paired_at DESC` makes row 0 the most recent candidate.
+  const candidates = await env.DB.prepare(
+    `SELECT device_id FROM devices
+      WHERE label = ? AND device_id <> ?
+      ORDER BY paired_at DESC, device_id DESC
+      LIMIT 2`
+  )
+    .bind(label, newDeviceId)
+    .all<{ device_id: string }>();
+
+  const matches = candidates.results ?? [];
+  if (matches.length === 0) return none;
+
+  const from = matches[0].device_id;
+  const ambiguous = matches.length > 1;
+  if (ambiguous) {
+    // The response has one count and no room for a provenance list, so the
+    // operator is told through the log and the audit detail instead.
+    console.warn(
+      `[pair] ${newDeviceId}: more than one device shares label ${JSON.stringify(
+        label
+      )}; inheriting from the most recently paired (${from})`
+    );
+  }
+
+  const source = await env.DB.prepare(
+    `SELECT id, name, enabled, graph FROM workflows WHERE device_id = ? ORDER BY created_at, id`
+  )
+    .bind(from)
+    .all<{ id: string; name: string; enabled: number; graph: string }>();
+
+  const rows = source.results ?? [];
+  if (rows.length === 0) return { ...none, from, ambiguous };
+
+  // Snapshot of the names already on the new device. Only these are protected;
+  // two source flows that happen to share a name are BOTH copied, because that
+  // is a duplicate in the source, not an overwrite on the target.
+  const existing = await env.DB.prepare(`SELECT name FROM workflows WHERE device_id = ?`)
+    .bind(newDeviceId)
+    .all<{ name: string }>();
+  const taken = new Set((existing.results ?? []).map((row) => row.name));
+
+  const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
+  let skipped = 0;
+
+  for (const row of rows) {
+    const suffix = ` (copied from ${from})`;
+    // The suffix is bounded by the device-id grammar (64 chars), so this only
+    // trims a long name; the result still satisfies MAX_WORKFLOW_NAME_CHARS.
+    const room = MAX_WORKFLOW_NAME_CHARS - suffix.length;
+    const name = `${row.name.slice(0, Math.max(0, room)).trimEnd()}${suffix}`;
+
+    if (taken.has(name)) {
+      skipped++;
+      continue;
+    }
+
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO workflows (id, name, enabled, device_id, graph, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      ).bind(
+        newWorkflowId(),
+        name,
+        Number(row.enabled) === 1 ? 1 : 0,
+        newDeviceId,
+        row.graph,
+        now,
+        now
+      )
+    );
+  }
+
+  if (statements.length > 0) await env.DB.batch(statements);
+
+  return { from, copied: statements.length, skipped, ambiguous };
+}
+
+/**
+ * A fresh workflow id for an inherited copy: `wf_<16 hex>`, which fits
+ * `RE_WORKFLOW_ID`. Random rather than derived from the source id, because the
+ * source row stays and two rows must never share a primary key.
+ */
+function newWorkflowId(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return `wf_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** §8 covers device-protocol errors only; a server fault is a plain 500. */

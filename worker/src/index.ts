@@ -29,8 +29,10 @@ import {
 } from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
+  handleDeviceArchive,
   handleDeviceCommands,
   handleDeviceRevoke,
+  handleDeviceUnarchive,
   handleRuleDelete,
   handleRulesListAdmin,
 } from "./routes/admin";
@@ -302,26 +304,47 @@ function actorFromUser(user: AuthUser): AdminActor {
 }
 
 /**
- * Advance `devices.last_seen` after an authenticated device request.
+ * Advance `devices.last_seen` after an authenticated device request, and clear
+ * an archive if the device came back.
  *
  * §11.12: this is authenticated contact, not pairing time. It is deliberately
  * fire-and-forget (`ctx.waitUntil`) and conditional on being at least 60 s stale,
  * so it never delays a response and cannot turn a D1 hiccup into a device failure.
  * Every failure mode is swallowed; a stale liveness value is worse than a failed
  * request only if the request itself fails.
+ *
+ * The archive clear rides along in the same batch. "A phone that comes back is
+ * not archived": the operator archived it because it was gone, and the first
+ * authenticated request proves it is not. It is a separate statement because the
+ * 60 s staleness guard would otherwise hide the transition on a device archived
+ * moments after its last contact. Audited as `device.unarchived` with
+ * `automatic: true`, so it is distinguishable from the admin endpoint.
  */
 function recordDeviceContact(ctx: ExecutionContext, env: Env, deviceId: string): void {
   ctx.waitUntil(
     (async () => {
       try {
         const now = Date.now();
-        await env.DB.prepare(
-          `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
-        )
-          .bind(now, deviceId, now - 60_000)
-          .run();
+        const [unarchived] = await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL`
+          ).bind(deviceId),
+          env.DB.prepare(
+            `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
+          ).bind(now, deviceId, now - 60_000),
+        ]);
+
+        if (Number(unarchived.meta?.changes ?? 0) > 0) {
+          await writeAudit(env, {
+            action: "device.unarchived",
+            actor: { userId: null, label: "device" },
+            subject: deviceId,
+            detail: { automatic: true },
+          });
+        }
       } catch {
-        // Presence is diagnostic. Never surface it.
+        // Presence is diagnostic. Never surface it. A failed unarchive retries on
+        // the next authenticated request.
       }
     })()
   );
@@ -519,6 +542,23 @@ export default {
       );
     }
 
+    // Archive is the non-destructive alternative to revoke: the row, its key and
+    // its messages stay, and only the fleet view hides it.
+    const deviceArchiveMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/archive$/);
+    if (method === "POST" && deviceArchiveMatch) {
+      const target = decodeURIComponent(deviceArchiveMatch[1]);
+      return withAdminAccess(req, env, "write", "archive devices", (actor) =>
+        handleDeviceArchive(env, target, actor)
+      );
+    }
+    const deviceUnarchiveMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/unarchive$/);
+    if (method === "POST" && deviceUnarchiveMatch) {
+      const target = decodeURIComponent(deviceUnarchiveMatch[1]);
+      return withAdminAccess(req, env, "write", "unarchive devices", (actor) =>
+        handleDeviceUnarchive(env, target, actor)
+      );
+    }
+
     const deviceCommandsMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/commands$/);
     if (method === "GET" && deviceCommandsMatch) {
       // Decoding happens INSIDE `withAdmin`, so a malformed escape is an
@@ -586,7 +626,7 @@ export default {
     }
     if (method === "GET" && pathname === "/v1/devices") {
       return withAdminAccess(req, env, "read", "list devices", (_actor) =>
-        handleDevicesList(env)
+        handleDevicesList(env, url)
       );
     }
     if (method === "GET" && pathname === "/v1/messages") {
