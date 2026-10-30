@@ -656,17 +656,13 @@
 
 	<div class="stack">
 		{#if revokedNotice}
-			<div aria-live="polite">
-				<Notice tone="ok" title="Device revoked">{revokedNotice}</Notice>
-			</div>
+			<Notice tone="ok" title="Device revoked">{revokedNotice}</Notice>
 		{/if}
 
 		{#if archiveNotice}
-			<div aria-live="polite">
-				<Notice tone={archiveNotice.tone} title={archiveNotice.title}>
-					{archiveNotice.text}
-				</Notice>
-			</div>
+			<Notice tone={archiveNotice.tone} title={archiveNotice.title}>
+				{archiveNotice.text}
+			</Notice>
 		{/if}
 
 		{#if mintOpen}

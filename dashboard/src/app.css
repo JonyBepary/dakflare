@@ -1677,7 +1677,9 @@ select.input {
 		height: 40px;
 		border-radius: 12px;
 		background: var(--df-accent-soft);
-		color: var(--df-accent-text);
+		/* The mark's slab is currentColor, so this is the ink the icon is drawn
+		   in: coral text here would put a coral slab under a coral arc. */
+		color: var(--df-text-primary);
 		flex: none;
 	}
 
@@ -1787,6 +1789,26 @@ select.input {
 
 	.input {
 		min-height: 40px;
+	}
+
+	/* iOS zooms the page when a focused field is under 16px. */
+	input,
+	textarea,
+	select,
+	.input,
+	.input-mono {
+		font-size: 16px;
+	}
+}
+
+/* The same rule on a large touch screen, where the width query does not fire. */
+@media (pointer: coarse) {
+	input,
+	textarea,
+	select,
+	.input,
+	.input-mono {
+		font-size: 16px;
 	}
 }
 

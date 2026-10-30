@@ -1756,7 +1756,8 @@
 
 	.login-more summary {
 		/* A summary is a control: give it a full-height hit area, not just the
-		   glyph line. */
+		   glyph line. The chevron replaces the native marker so the cue is
+		   visible wherever ::marker is suppressed. */
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -1766,6 +1767,28 @@
 		font-size: 12px;
 		font-weight: 500;
 		border-radius: 2px;
+		list-style: none;
+	}
+
+	.login-more summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.login-more summary::after {
+		content: '';
+		display: inline-block;
+		flex: none;
+		width: 6px;
+		height: 6px;
+		margin-left: 6px;
+		border-right: 1.5px solid currentColor;
+		border-bottom: 1.5px solid currentColor;
+		transform: translateY(-2px) rotate(45deg);
+		transition: transform 140ms ease;
+	}
+
+	.login-more[open] summary::after {
+		transform: translateY(1px) rotate(225deg);
 	}
 
 	.login-more summary:hover {
@@ -1799,7 +1822,8 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.door,
-		.door-go {
+		.door-go,
+		.login-more summary::after {
 			transition: none;
 		}
 

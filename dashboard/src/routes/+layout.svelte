@@ -5,6 +5,7 @@
 	import { page } from '$app/state';
 	import { deleteSession, setUnauthorizedHandler, signOutAccount } from '$lib/api';
 	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
+	import { announcer } from '$lib/announce.svelte';
 	import { formatAbsolute, formatCount } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
@@ -238,6 +239,14 @@
 	<meta name="robots" content="noindex, nofollow" />
 </svelte:head>
 
+<!-- The one polite live region: it exists before any notice text does, in
+     every branch, so writing into it is announced. -->
+<div class="sr-only" role="status" aria-live="polite">{announcer.text}</div>
+
+{#if boot === 'ready'}
+	<a class="skip" href="#main">Skip to content</a>
+{/if}
+
 {#if boot === 'checking'}
 	<div class="boot" aria-live="polite" aria-busy="true">
 		<Brand href={ROUTES.login} />
@@ -261,7 +270,9 @@
 		</div>
 	</div>
 {:else if isPreauth}
-	{@render children()}
+	<main id="main" tabindex="-1">
+		{@render children()}
+	</main>
 {:else}
 	<div class="shell">
 		<aside class="rail">
@@ -317,10 +328,9 @@
 		<div class="main-wrap">
 			<header class="topbar">
 				<a class="topbar-brand" href={ROUTES.overview} aria-label="DakFlare overview">
-					<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-						<rect x="2.5" y="9.5" width="2.6" height="4" rx="0.6" fill="currentColor" />
-						<rect x="6.7" y="6.5" width="2.6" height="7" rx="0.6" fill="currentColor" />
-						<rect x="10.9" y="2.5" width="2.6" height="11" rx="0.6" fill="currentColor" />
+					<svg width="15" height="15" viewBox="18 18 72 72" aria-hidden="true" focusable="false">
+						<rect class="slab" x="41" y="40" width="26" height="42" rx="9" fill="currentColor" />
+						<path class="arc" d="M46.5 34a7.5 7.5 0 0 1 15 0" />
 					</svg>
 				</a>
 				<span class="topbar-brand-name">DakFlare</span>
@@ -360,7 +370,7 @@
 
 			<AlertBanner />
 
-			<main class="main">
+			<main class="main" id="main" tabindex="-1">
 				{@render children()}
 			</main>
 		</div>
@@ -368,6 +378,46 @@
 {/if}
 
 <style>
+	/* The console's first focusable control: hidden above the viewport until
+	   focused, then a real target at the top-left. */
+	.skip {
+		position: absolute;
+		left: var(--df-p-space-4);
+		top: calc(-1 * var(--df-p-space-8));
+		z-index: 100;
+		display: inline-flex;
+		align-items: center;
+		min-height: 44px;
+		padding: 0 var(--df-p-space-3);
+		background: var(--df-p-cream-100);
+		color: var(--df-p-umber-900);
+		border-radius: var(--df-p-radius-sm);
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+		text-decoration: none;
+	}
+
+	.skip:focus {
+		top: var(--df-p-space-3);
+		outline: 2px solid var(--df-p-coral-500);
+		outline-offset: 2px;
+		color: var(--df-p-umber-900);
+	}
+
+	/* Same drawing as Brand.svelte: the slab in the surrounding ink, the arc
+	   coral at the proportion the 27px plate uses. */
+	.topbar-brand .arc {
+		fill: none;
+		stroke: var(--df-p-coral-500);
+		stroke-width: 5.5;
+		stroke-linecap: round;
+	}
+
+	#main:focus {
+		outline: none;
+	}
+
 	/* The role word reads as a value, not as a sentence: mono, lower case,
 	   separated from the expiry by the same dot the rest of the rail uses. */
 	.operator-role {
