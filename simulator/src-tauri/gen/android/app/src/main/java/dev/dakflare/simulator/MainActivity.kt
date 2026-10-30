@@ -13,6 +13,7 @@ import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.View
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -166,15 +167,27 @@ class MainActivity : TauriActivity() {
   /**
    * Turn a SENDTO/VIEW intent into a webview route.
    *
-   * Only the four SMS/MMS schemes qualify. A `sms:`/`smsto:` number opens that
-   * thread; an empty number, or an mms: link (MMS has no thread here), opens
-   * Threads. Anything else offers nothing, so a normal launch is unchanged.
+   * `dakflare://pair` is the link `dakflare pair` prints and `dakflare://invite`
+   * is the console's; both are handled here before the SMS schemes. Pairing
+   * links become a Settings route carrying the link, so the fields are filled
+   * and the operator confirms. Invite links belong to the console, so they are
+   * handed to a browser.
+   *
+   * Only the four SMS/MMS schemes and the two DakFlare hosts qualify. A
+   * `sms:`/`smsto:` number opens that thread; an empty number, or an mms: link
+   * (MMS has no thread here), opens Threads. Anything else offers nothing, so a
+   * normal launch is unchanged.
    */
   private fun offerSmsRoute(intent: Intent?) {
     val action = intent?.action
     if (action != Intent.ACTION_SENDTO && action != Intent.ACTION_VIEW) return
     val data = intent.data ?: return
     val scheme = data.scheme?.lowercase() ?: return
+
+    if (scheme == "dakflare") {
+      offerDakflareLink(data)
+      return
+    }
     if (scheme !in SMS_SCHEMES) return
 
     // `sms:+8801…?body=…` puts the number in schemeSpecificPart; `sms://+8801…`
@@ -194,6 +207,77 @@ class MainActivity : TauriActivity() {
     SmsRoute.offer(route)
     // The notifier reads this to stay quiet for the thread the user is on.
     AppVisibility.thread = if (route.startsWith("/messages/")) peer else null
+  }
+
+  /**
+   * Handle a `dakflare://` link.
+   *
+   * `pair` fills Settings with the target and the code; it never pairs on its
+   * own, because the operator must see which deployment and which identity the
+   * code will bind. `invite` is the console's link (`u` = console origin,
+   * `t` = token): this app is not the console, so it opens the invite page in a
+   * browser. Anything malformed is refused with one sentence instead of a
+   * half-filled form or a silent no-op.
+   */
+  private fun offerDakflareLink(data: Uri) {
+    when (data.host?.lowercase()) {
+      "pair" -> {
+        val target = data.getQueryParameter("u")?.trim().orEmpty()
+        val code = data.getQueryParameter("c")?.trim().orEmpty()
+        val problem = pairingLinkProblem(target, code)
+        if (problem != null) {
+          toast(problem)
+          return
+        }
+        // The webview takes the link as a route parameter, so it parses and
+        // fills both fields with the same strict rules the Rust command uses.
+        SmsRoute.offer("/settings?pair=" + Uri.encode(data.toString()))
+      }
+      "invite" -> openConsoleInvite(data)
+      else -> toast("This DakFlare link is not a pairing or invite link.")
+    }
+  }
+
+  /** One sentence for the reason a `dakflare://pair` link cannot be used. */
+  private fun pairingLinkProblem(target: String, code: String): String? {
+    if (target.isEmpty() || code.isEmpty()) {
+      return "That pairing link is incomplete: it needs the worker URL (u) and the pairing code (c)."
+    }
+    val url = Uri.parse(target)
+    val scheme = url.scheme?.lowercase()
+    if ((scheme != "http" && scheme != "https") || url.host.isNullOrEmpty()) {
+      return "That pairing link's worker URL is not an http(s) address."
+    }
+    if (code.length != 12 || !code.all { Character.digit(it, 16) >= 0 }) {
+      return "That pairing link's code is not 12 hexadecimal characters."
+    }
+    return null
+  }
+
+  /**
+   * `dakflare://invite?u=<console>&t=<token>` is the console's own invitation.
+   * The app cannot redeem it, so open the page the CLI prints beside it:
+   * `<console>/admin/invite?code=<token>`.
+   */
+  private fun openConsoleInvite(data: Uri) {
+    val base = data.getQueryParameter("u")?.trim().orEmpty().trimEnd('/')
+    val token = data.getQueryParameter("t")?.trim().orEmpty()
+    val url = Uri.parse(base)
+    val scheme = url.scheme?.lowercase()
+    if ((scheme != "http" && scheme != "https") || url.host.isNullOrEmpty() || token.isEmpty()) {
+      toast("That invite link is incomplete: it needs the console URL (u) and the token (t).")
+      return
+    }
+    val page = Uri.parse("$base/admin/invite?code=" + Uri.encode(token))
+    try {
+      startActivity(Intent(Intent.ACTION_VIEW, page))
+    } catch (_: Throwable) {
+      toast("No browser is available to open the console invite.")
+    }
+  }
+
+  private fun toast(sentence: String) {
+    Toast.makeText(this, sentence, Toast.LENGTH_LONG).show()
   }
 
   /**

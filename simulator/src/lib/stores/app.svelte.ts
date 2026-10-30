@@ -156,6 +156,8 @@ class AppStore {
 
 	/** A local record of this session's successful signed contacts. */
 	contactAt = $state<Record<string, number>>({});
+	/** The last signed contact the shell recorded on disk, per device. */
+	lastContactAt = $state<Record<string, number>>({});
 	/** Pairing recorded by this session. */
 	pairedAt = $state<Record<string, number>>({});
 	/** Pairing recorded on disk by an earlier session, per device. */
@@ -252,6 +254,7 @@ class AppStore {
 		try {
 			const devices = await this.call<Device[]>('list_devices');
 			this.devices = devices;
+			await this.loadContacts(devices);
 			if (!devices.some((d) => d.device_id === this.selectedId)) {
 				this.selectedId = devices[0]?.device_id ?? '';
 				this.messages = [];
@@ -269,6 +272,7 @@ class AppStore {
 		try {
 			const devices = await this.call<Device[]>('list_devices');
 			this.devices = devices;
+			await this.loadContacts(devices);
 			if (!devices.some((d) => d.device_id === this.selectedId)) {
 				this.selectedId = devices[0]?.device_id ?? '';
 			}
@@ -279,6 +283,32 @@ class AppStore {
 		} finally {
 			this.busy.devices = false;
 		}
+	}
+
+	/**
+	 * Read the stored `last_contact:<device_id>` for every listed identity.
+	 *
+	 * The Device frame must not derive `live` from `devices.updated_at`: that
+	 * column is stamped at creation, so a phone that has never reached the
+	 * deployment would read live for two minutes. Only a completed signed request
+	 * writes this setting, so a missing value is honestly `unknown`.
+	 */
+	private async loadContacts(devices: Device[]) {
+		const entries = await Promise.all(
+			devices.map(async (device) => {
+				try {
+					const at = await this.call<number | null>('get_last_contact', {
+						deviceId: device.device_id
+					});
+					return [device.device_id, at] as const;
+				} catch {
+					return [device.device_id, null] as const;
+				}
+			})
+		);
+		const next: Record<string, number> = {};
+		for (const [id, at] of entries) if (at) next[id] = at;
+		this.lastContactAt = next;
 	}
 
 	selectDevice(deviceId: string) {
@@ -427,6 +457,18 @@ class AppStore {
 			});
 			if (paired) this.pairingAt[this.selectedId] = paired;
 			else delete this.pairingAt[this.selectedId];
+			// A background flush can answer while this frame is open; read the
+			// stored contact rather than trusting only this session's memory. An
+			// older shell without the command keeps the session-only reading.
+			try {
+				const lastContact = await this.call<number | null>('get_last_contact', {
+					deviceId: this.selectedId
+				});
+				if (lastContact) this.lastContactAt[this.selectedId] = lastContact;
+				else delete this.lastContactAt[this.selectedId];
+			} catch {
+				// Keep whatever this session already recorded.
+			}
 			const page = await this.pageMessages(null);
 			this.messages = page.messages;
 			this.messagesHasMore = page.has_more;
@@ -544,6 +586,7 @@ class AppStore {
 			await this.call<boolean>('delete_device', { deviceId });
 			this.devices = this.devices.filter((d) => d.device_id !== deviceId);
 			delete this.contactAt[deviceId];
+			delete this.lastContactAt[deviceId];
 			delete this.pairedAt[deviceId];
 			if (this.selectedId === deviceId) {
 				this.selectedId = this.devices[0]?.device_id ?? '';

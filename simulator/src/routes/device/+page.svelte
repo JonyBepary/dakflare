@@ -2,7 +2,7 @@
 	import DeviceSelect from '$lib/components/DeviceSelect.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import { app, type DevicePermissions } from '$lib/stores/app.svelte';
-	import { deviceState, relativeTime, STATE_LABEL, stateSentence } from '$lib/device-state';
+	import { lastContact, deviceState, relativeTime, STATE_LABEL, stateSentence } from '$lib/device-state';
 
 	let now: number = $state(Date.now());
 	$effect(() => {
@@ -11,7 +11,13 @@
 	});
 
 	const device = $derived(app.selected);
-	const contact = $derived(device ? (app.contactAt[device.device_id] ?? device.updated_at ?? null) : null);
+	// Only a signed answer counts: this session's poll, else the shell's stored
+	// `last_contact`. `devices.updated_at` is creation time and is never evidence.
+	const contact = $derived(
+		device
+			? lastContact(app.contactAt[device.device_id], app.lastContactAt[device.device_id])
+			: null
+	);
 	const deviceStatus = $derived(deviceState(app.offline, contact, now));
 	const pairing = $derived.by(() => {
 		if (!device) return '—';
@@ -144,7 +150,7 @@
 			</div>
 			<p class="state-sentence">{stateSentence(deviceStatus, contact)}</p>
 			<p class="state-last mono">
-				{contact ? `last signed contact · ${relativeTime(contact, now)}` : 'no signed contact this session'}
+				{contact ? `last signed contact · ${relativeTime(contact, now)}` : 'no signed contact yet'}
 			</p>
 		</section>
 

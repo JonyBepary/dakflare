@@ -1172,8 +1172,27 @@ fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static st
     let store = open_store_blocking(app_dir)?;
     let client = signed_client_blocking(&store, device_id)?;
 
-    tauri::async_runtime::block_on(flush_pending(&store, &client, device_id))
-        .map_err(map_network_error)
+    let flushed = tauri::async_runtime::block_on(flush_pending(&store, &client, device_id))
+        .map_err(map_network_error)?;
+    // An empty queue returns without touching the network, so only a real upload
+    // is contact. This is the background path that keeps `last_contact` fresh
+    // while the webview is closed.
+    if flushed.inbound > 0 || flushed.outbound > 0 {
+        record_contact_blocking(&store, device_id);
+    }
+    Ok(flushed)
+}
+
+/// Record that a signed request was answered. Mirrors `lib.rs::record_contact`;
+/// this path runs without a Tauri `State`, so it takes the store directly.
+fn record_contact_blocking(store: &Store, device_id: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = tauri::async_runtime::block_on(
+        store.set_setting(&format!("last_contact:{device_id}"), &now.to_string()),
+    );
 }
 
 /// Replace the cached flow set with this deployment's current set.

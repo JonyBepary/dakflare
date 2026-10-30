@@ -79,6 +79,21 @@
                 <data android:scheme="mms" />
                 <data android:scheme="mmsto" />
             </intent-filter>
+
+            <!--
+                Onboarding links. `dakflare pair` prints `dakflare://pair?u=…&c=…`
+                and the console mints `dakflare://invite?u=…&t=…`; without this
+                filter the phone answers "unable to resolve Intent". Both land in
+                MainActivity, which fills Settings for the pair link and opens the
+                console page for the invite.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="dakflare" android:host="pair" />
+                <data android:scheme="dakflare" android:host="invite" />
+            </intent-filter>
         </activity>
 
         <!--

@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { AlertDialog } from 'bits-ui';
+	import { page } from '$app/state';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import { app, DEFAULT_SMS_PACKAGE, retentionKept, retentionWords } from '$lib/stores/app.svelte';
-	import { relativeTime } from '$lib/device-state';
+	import { lastContact, relativeTime } from '$lib/device-state';
+	import { readPairLink } from '$lib/pair-link';
 
 	let baseUrl = $state('');
 	let adminToken = $state('');
@@ -80,6 +82,34 @@
 		baseUrl = app.target.base_url ?? '';
 	});
 
+	// A `dakflare://pair` link arrives as `/settings?pair=<the link>`: the
+	// Android shell validates it and hands it over, and the layout routes here.
+	// Fill both fields and stop — pairing is the operator's confirm, never a
+	// side effect of opening a link. Guarded so a re-render (or a later edit of
+	// the fields) does not apply the same link twice.
+	let appliedLink = $state<string | null>(null);
+	$effect(() => {
+		const raw = page.url.searchParams.get('pair');
+		if (!raw || raw === appliedLink) return;
+		appliedLink = raw;
+		const link = readPairLink(raw);
+		if (!link) {
+			app.notify(
+				'pair',
+				'That pairing link is malformed. Expected dakflare://pair?u=…&c=… with an http(s) worker URL and a 12-character code.',
+				'error'
+			);
+			return;
+		}
+		baseUrl = link.baseUrl;
+		codeInput = link.code;
+		app.notify(
+			'pair',
+			'Pairing link opened: the target and the code are filled in below. Check them, then press Pair with code. Nothing has been sent yet.',
+			'info'
+		);
+	});
+
 	$effect(() => {
 		if (!app.devices.some((device) => device.device_id === codeDeviceId)) {
 			codeDeviceId = app.selectedId || app.devices[0]?.device_id || '';
@@ -98,6 +128,19 @@
 
 	async function pairWithCode(event: SubmitEvent) {
 		event.preventDefault();
+		// A link fills the target field but does not save it. Saving here, on the
+		// operator's explicit Pair press, is what makes a bare code usable without
+		// a second trip to the target card. An unchanged field is left alone.
+		const typedTarget = baseUrl.trim().replace(/\/+$/, '');
+		const storedTarget = (app.target.base_url ?? '').trim().replace(/\/+$/, '');
+		if (typedTarget && typedTarget !== storedTarget) {
+			const saved = await app.saveTarget(typedTarget, adminToken);
+			if (!saved) {
+				app.notify('pair', 'The target could not be saved. Fix the Worker URL above, then retry.', 'error');
+				return;
+			}
+			adminToken = '';
+		}
 		const paired = await app.pairWithCode(codeDeviceId, codeInput);
 		// The code is spent; leaving it in the field invites a confusing retry.
 		if (paired) codeInput = '';
@@ -189,16 +232,34 @@
 
 	<section class="sheet" aria-labelledby="pair-title">
 		<h2 class="sheet-title" id="pair-title">Pair with code</h2>
-		<p class="note">
-			The operator mints a one-time code in the dashboard. Paste the code — or the whole
-			<code>dakflare://pair?u=…&amp;c=…</code> link, whose worker URL is saved as the target first.
-			No admin token is needed.
-		</p>
+		{#if app.devices.length === 0}
+			<!-- The card sits above the identity form, so a fresh install met a
+			     disabled field with no explanation. Say the order and offer the jump. -->
+			<div class="pair-gate" id="pair-gate" role="note">
+				<p class="pair-gate-line">Create an identity below, then pair.</p>
+				<p class="note">
+					Pairing registers this phone's keypair with the deployment, so there is nothing to
+					pair until one exists.
+					<a class="inline-link" href="#identity">Go to Device identity</a>
+				</p>
+			</div>
+		{:else}
+			<p class="note">
+				The operator mints a one-time code in the dashboard. Paste the code — or the whole
+				<code>dakflare://pair?u=…&amp;c=…</code> link, whose worker URL is saved as the target first.
+				No admin token is needed.
+			</p>
+		{/if}
 
 		<form onsubmit={pairWithCode}>
 			<div class="field">
 				<label for="pair-device">Device</label>
-				<select id="pair-device" bind:value={codeDeviceId} disabled={app.devices.length === 0}>
+				<select
+					id="pair-device"
+					bind:value={codeDeviceId}
+					disabled={app.devices.length === 0}
+					aria-describedby={app.devices.length === 0 ? 'pair-gate' : undefined}
+				>
 					{#if app.devices.length === 0}
 						<option value="">No device identity</option>
 					{/if}
@@ -216,7 +277,11 @@
 					autocomplete="off"
 					spellcheck="false"
 					disabled={!app.backendAvailable || app.devices.length === 0}
+					aria-describedby={app.devices.length === 0 ? 'pair-gate pair-code-reason' : undefined}
 				/>
+				{#if app.devices.length === 0}
+					<small id="pair-code-reason">Disabled until a device identity exists.</small>
+				{/if}
 			</div>
 			<p class="note">
 				Single-use and short-lived. If it fails, mint a fresh code and retry.
@@ -321,7 +386,7 @@
 		<Notice scope="retention" />
 	</section>
 
-	<section class="sheet" aria-labelledby="identity-title">
+	<section class="sheet" id="identity" aria-labelledby="identity-title">
 		<h2 class="sheet-title" id="identity-title">Device identity</h2>
 		<p class="note">
 			This creates a real P-256 keypair. The public half registers with the deployment at
@@ -402,7 +467,7 @@
 							<span>
 								{app.pairedAt[device.device_id]
 									? `paired ${relativeTime(app.pairedAt[device.device_id])}`
-									: app.contactAt[device.device_id]
+									: lastContact(app.contactAt[device.device_id], app.lastContactAt[device.device_id])
 										? 'signed contact answered'
 										: 'not recorded'}
 							</span>
@@ -485,6 +550,28 @@
 </section>
 
 <style>
+	/* The pair card comes before the identity card, so its empty state has to
+	   send the reader there rather than leave a disabled field unexplained. */
+	.pair-gate {
+		margin-top: 10px;
+		padding: 10px 12px;
+		border: 1px solid var(--df-border-input);
+		border-left: 3px solid var(--accent);
+		border-radius: 10px;
+		background: var(--df-surface-well);
+	}
+
+	.pair-gate .note {
+		margin-top: 4px;
+	}
+
+	.pair-gate-line {
+		margin: 0;
+		font-size: 12.5px;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
 	/* The one control on this screen where a wrong tap deletes history, so it
 	   is four named cards rather than a dropdown that hides the consequences. */
 	.keep {

@@ -213,6 +213,7 @@ async fn pair_device(
         .await
         .map_err(|e| e.to_string())?;
     record_pairing(&state, &device.device_id).await;
+    record_contact(&state, &device.device_id).await;
     Ok(pairing_message(&state, &client, &device.device_id).await)
 }
 
@@ -270,6 +271,7 @@ async fn pair_with_code(
         .await
         .map_err(pair_failure)?;
     record_pairing(&state, &device.device_id).await;
+    record_contact(&state, &device.device_id).await;
     Ok(pairing_message(&state, &client, &device.device_id).await)
 }
 
@@ -321,7 +323,11 @@ async fn poll_device(
         }
     };
     let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
-    // Both calls above are signed and were answered, so this is a real contact.
+    // The poll above is signed and was answered, so this is a real contact. The
+    // Device frame reads this setting, never `devices.updated_at`.
+    record_contact(&state, &device_id).await;
+    // `updated_at` is kept for the device list's recency order only; it is not
+    // contact evidence.
     let _ = state.store.touch_device(&device_id).await;
     // A deployment that answers this identity has accepted it. That backfills the
     // pairing time for identities created before it was recorded, without
@@ -366,14 +372,45 @@ async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<
 /// handshake. The Device frame would otherwise have to say "not recorded" about
 /// a phone that plainly is, so the one fact that matters is kept beside it.
 async fn record_pairing(state: &State<'_, AppState>, device_id: &str) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
     let _ = state
         .store
-        .set_setting(&format!("paired:{device_id}"), &now.to_string())
+        .set_setting(&format!("paired:{device_id}"), &now_ms().to_string())
         .await;
+}
+
+/// Remember when a signed request to this identity was last answered.
+///
+/// `devices.updated_at` is stamped at creation and cannot tell a phone that has
+/// never reached the deployment from one that answered a poll a second ago, so
+/// the Device frame must not derive `live` from it. This setting is written only
+/// by the paths that actually completed a signed exchange (poll, flush, pair),
+/// and `get_last_contact` is the only thing the UI reads.
+async fn record_contact(state: &State<'_, AppState>, device_id: &str) {
+    let _ = state
+        .store
+        .set_setting(&format!("last_contact:{device_id}"), &now_ms().to_string())
+        .await;
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// When this identity last answered a signed request, if it ever has.
+#[tauri::command]
+async fn get_last_contact(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Option<i64>, String> {
+    let value = state
+        .store
+        .get_setting(&format!("last_contact:{device_id}"))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(value.and_then(|raw| raw.trim().parse::<i64>().ok()))
 }
 
 /// When this identity last completed a pairing handshake, if it ever did.
@@ -446,6 +483,12 @@ async fn carrier_inject(
     .await
     .map_err(|e| e.to_string())?;
 
+    // The upload (and the flow fetch above) were signed; an offline inject is
+    // local-only and must not count as contact.
+    if client.is_some() {
+        record_contact(&state, &device_id).await;
+    }
+
     Ok(serde_json::json!({
         "uploaded": result.uploaded,
         "accepted": result.accepted,
@@ -473,9 +516,13 @@ async fn carrier_drain(
     }
 
     let (client, _device) = client_for(&state, &device_id).await?;
-    drain_outbox(state.store.as_ref(), &client, &device_id)
+    let captured = drain_outbox(state.store.as_ref(), &client, &device_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // `drain_outbox` polls the deployment with this identity's key; the answer
+    // is contact even when it carried no commands.
+    record_contact(&state, &device_id).await;
+    Ok(captured)
 }
 
 /* ---------------------------------------------------------------- compose */
@@ -644,12 +691,13 @@ async fn request_default_sms_role(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// Take the pending sms:/smsto: route from the Android shell, once.
+/// Take the pending sms:/smsto: or pairing route from the Android shell, once.
 ///
 /// `MainActivity` records it when a SENDTO/VIEW intent arrives; the webview
-/// opens the matching thread. Only a `/messages` path is accepted, so a
-/// malformed intent cannot steer the router elsewhere. A desktop build has no
-/// intents and returns `None`.
+/// opens the matching thread, or Settings for a `dakflare://pair` link. Only a
+/// `/messages` path and the one `/settings?pair=` route the shell builds from a
+/// validated link are accepted, so a malformed intent cannot steer the router
+/// elsewhere. A desktop build has no intents and returns `None`.
 #[tauri::command]
 async fn take_sms_route(app: tauri::AppHandle) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]
@@ -662,9 +710,11 @@ async fn take_sms_route(app: tauri::AppHandle) -> Result<Option<String>, String>
             .run_mobile_plugin_async::<SmsRouteReply>("takeSmsRoute", ())
             .await
             .map_err(sms_plugin_error)?;
-        Ok(reply
-            .route
-            .filter(|route| route == "/messages" || route.starts_with("/messages/")))
+        Ok(reply.route.filter(|route| {
+            route == "/messages"
+                || route.starts_with("/messages/")
+                || route.starts_with("/settings?pair=")
+        }))
     }
 
     #[cfg(not(target_os = "android"))]
@@ -927,6 +977,7 @@ pub fn run() {
             list_flow_runs,
             get_device_facts,
             get_device_pairing,
+            get_last_contact,
             clear_messages,
             set_offline,
             get_offline,

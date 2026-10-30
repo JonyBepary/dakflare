@@ -1,13 +1,27 @@
 /**
  * The five device states from CONSOLE_UX.md §2, derived from the only evidence
  * this shell actually has: the carrier toggle and the last successful signed
- * contact (poll, self-pair or pair-with-code) in this session.
+ * contact (poll, self-pair or pair-with-code).
  *
  * `live` is not a socket state here — the webview cannot see the device
  * socket. A signed poll that answered under two minutes ago is the closest
  * honest reading, and it is labelled as such on screen.
+ *
+ * Creation is not contact. `devices.updated_at` is stamped when the identity is
+ * created and tells the webview nothing about whether the deployment ever
+ * answered it. The shell records `last_contact:<device_id>` only after a signed
+ * request completes (poll, flush or pair), and `get_last_contact` is the only
+ * stored evidence the frame reads. No record means `unknown`.
  */
 export type DeviceState = 'live' | 'synced' | 'stale' | 'offline' | 'unknown';
+
+/** The last answered signed contact: this session's, else the stored one. */
+export function lastContact(
+	sessionContact: number | null | undefined,
+	storedContact: number | null | undefined
+): number | null {
+	return sessionContact ?? storedContact ?? null;
+}
 
 export const STATE_LABEL: Record<DeviceState, string> = {
 	live: 'live',
@@ -49,7 +63,7 @@ export function stateSentence(state: DeviceState, lastContact: number | null): s
 				? 'No signed contact in the last day. The deployment will read this phone as offline.'
 				: 'The carrier is off on this phone. Nothing uploads until you turn it back on.';
 		case 'unknown':
-			return 'No signed contact recorded in this session. Poll from this screen to verify the phone.';
+			return 'No signed contact yet. Poll from this screen to verify the phone.';
 	}
 }
 
