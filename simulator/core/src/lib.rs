@@ -14,6 +14,7 @@ pub mod protocol;
 
 pub use carrier::{
     CarrierError, Flushed, Injected, drain_outbox, flush_pending, inject_inbound,
+    report_command_state,
     receive_and_reply, receive_offline, reply_local_id, sync_flows,
 };
 pub use compose::{

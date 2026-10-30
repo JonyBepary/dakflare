@@ -496,6 +496,23 @@ impl DeviceClient {
         Ok(value.get("commands").cloned().unwrap_or(Value::Array(vec![])))
     }
 
+    /// `POST /v1/sms/status/batch` — report a terminal state for commands this
+    /// device collected.
+    ///
+    /// §6.1: a rejected transition is a successful no-op, so an unknown or
+    /// already-terminal command id is not an error here.
+    pub async fn report_status(
+        &self,
+        updates: &[(String, String)],
+    ) -> Result<Value, ProtocolError> {
+        let payload: Vec<Value> = updates
+            .iter()
+            .map(|(command_id, status)| json!({ "command_id": command_id, "status": status }))
+            .collect();
+        self.signed_post("/v1/sms/status/batch", json!({ "updates": payload }))
+            .await
+    }
+
     /// `POST /v1/sms/incoming/batch` — upload messages and acknowledge commands.
     pub async fn upload_inbound(
         &self,

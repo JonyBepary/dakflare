@@ -408,9 +408,12 @@ async fn capture_commands(
             continue;
         }
 
-        let outbound_id = format!("out-{}", random_hex(8)?);
+        // The row's local id is the command id. That keeps one identity for the
+        // command from the moment it is collected until its receipt is
+        // reported, which is what lets `report_command_state` address the
+        // Worker's state machine without a second column.
         let message = store
-            .record_message(device_id, "out", &to, &body, "queued", Some(&outbound_id))
+            .record_message(device_id, "out", &to, &body, "queued", Some(&command_id))
             .await?;
         ack_ids.push(command_id);
         captured.push(message);
@@ -439,6 +442,51 @@ async fn capture_commands(
 ///
 /// Acknowledgement happens in a second poll, exactly as a device would do, so the
 /// command leaves `PENDING`/`DISPATCHED` and stops being redelivered.
+/// Report a command's terminal state to the deployment.
+///
+/// The Worker's command state machine is keyed by `command_id`, and a row this
+/// device captured carries that id as its `local_id`. Composer sends and flow
+/// replies mint their own ids, so the shape check keeps their states out of a
+/// request the Worker would only reject.
+///
+/// Returns whether a report was sent. A rejected transition is a successful
+/// no-op (§6.1), so an already-terminal command is not an error.
+pub async fn report_command_state(
+    client: &DeviceClient,
+    local_id: &str,
+    state: &str,
+) -> Result<bool, CarrierError> {
+    let Some(status) = protocol_status(state) else {
+        return Ok(false);
+    };
+    if !looks_like_command_id(local_id) {
+        return Ok(false);
+    }
+    client
+        .report_status(&[(local_id.to_string(), status.to_string())])
+        .await?;
+    Ok(true)
+}
+
+fn protocol_status(state: &str) -> Option<&'static str> {
+    match state {
+        "sent" => Some("SENT"),
+        "failed" => Some("FAILED"),
+        "delivered" => Some("DELIVERED"),
+        _ => None,
+    }
+}
+
+/// `crypto.randomUUID()` on the Worker: 8-4-4-4-12 hex. Ids minted on the phone
+/// are `out-…` or `native-…`, so this cannot match one of those.
+fn looks_like_command_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, ch)| match index {
+            8 | 13 | 18 | 23 => ch == '-',
+            _ => ch.is_ascii_hexdigit(),
+        })
+}
+
 pub async fn drain_outbox(
     store: &Store,
     client: &DeviceClient,

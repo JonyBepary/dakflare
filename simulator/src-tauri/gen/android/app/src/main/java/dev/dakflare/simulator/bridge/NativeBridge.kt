@@ -150,6 +150,13 @@ object NativeBridge {
 
     external fun drainOutbox(appDir: String, deviceId: String): String
 
+    external fun reportStatus(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+    ): String
+
     /**
      * Replace the cached flow set with this deployment's current set.
      *
@@ -571,6 +578,41 @@ object NativeBridge {
             false
         } catch (error: Throwable) {
             Log.e(TAG, "flushPending failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Tell the deployment how a collected command ended.
+     *
+     * Returns true when a report was sent. False is normal: the row was a
+     * composer send or a flow reply, whose local id is not a command id, and
+     * the Worker's command state machine has nothing to say about it. Never
+     * throws: a network failure leaves the command where it is and the next
+     * receipt or tick can report again.
+     */
+    fun reportStatusSafely(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+    ): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || deviceId.isEmpty() || localId.isEmpty()) return false
+
+        return try {
+            val parsed = JSONObject(reportStatus(appDir, deviceId, localId, state))
+            if (!parsed.optBoolean("ok")) {
+                Log.w(TAG, "reportStatus refused: ${parsed.optString("error")}")
+                false
+            } else {
+                parsed.optBoolean("reported")
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "reportStatus symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "reportStatus failed: ${error.javaClass.simpleName}")
             false
         }
     }

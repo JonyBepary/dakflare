@@ -16,7 +16,7 @@ use dakflare_core::{
     Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
     StoreError, Target,
     carrier::{drain_outbox, flush_pending},
-    is_device_fact_key, receive_and_reply, reply_local_id, sync_flows,
+    is_device_fact_key, receive_and_reply, reply_local_id, report_command_state, sync_flows,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -519,6 +519,53 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] flushPending panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.reportStatus`
+///
+/// Tells the deployment how a collected command ended. Returns
+/// `{"ok":true,"reported":true|false}` — `false` means the row was not a
+/// command (a composer send or a flow reply), so nothing was sent.
+///
+/// §6.1: a rejected transition is a successful no-op, so a command that already
+/// reached a terminal state is not an error here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportStatus(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+    state: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_status_inputs(&mut env, &app_dir, &device_id, &local_id, &state) {
+            Ok((app_dir, device_id, local_id, state)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    report_status_blocking(&app_dir, &device_id, &local_id, &state)
+                })) {
+                    Ok(Ok(reported)) => serde_json::json!({
+                        "ok": true,
+                        "reported": reported,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] reportStatus panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] reportStatus panicked before storage");
             error_json("storage")
         }
     };
@@ -1235,6 +1282,35 @@ fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static st
 /// so the Worker stops redelivering it; it does not touch the radio. The caller
 /// hands the returned local ids to `SmsSender`, which is the only path allowed
 /// to mark a row `sent`.
+/// Report one command's terminal state. The client signs with the device key,
+/// so the Worker can trust the claim without a session.
+fn report_status_blocking(
+    app_dir: &str,
+    device_id: &str,
+    local_id: &str,
+    state: &str,
+) -> Result<bool, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+    tauri::async_runtime::block_on(report_command_state(&client, local_id, state))
+        .map_err(map_network_error)
+}
+
+fn read_status_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    device_id: &JString,
+    local_id: &JString,
+    state: &JString,
+) -> Result<(String, String, String, String), &'static str> {
+    let (app_dir, device_id, local_id) = read_local_id_inputs(env, app_dir, device_id, local_id)?;
+    let state = java_string(env, state)?;
+    if state.is_empty() || state.len() > MAX_STATE_LEN {
+        return Err("bad_input");
+    }
+    Ok((app_dir, device_id, local_id, state))
+}
+
 fn drain_blocking(app_dir: &str, device_id: &str) -> Result<Vec<String>, &'static str> {
     let store = open_store_blocking(app_dir)?;
     let client = signed_client_blocking(&store, device_id)?;

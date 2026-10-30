@@ -63,6 +63,11 @@ class SendStatusReceiver : BroadcastReceiver() {
                                 "sent",
                             )
                             Log.i(TAG, "send status id=$localId result=$result state=sent stored=$stored")
+                            // Tell the deployment, not just the local store: a
+                            // command collected from the outbound poll only
+                            // leaves ACKED_BY_DEVICE when its terminal state is
+                            // reported here.
+                            report(appDir, deviceId, localId, "sent")
 
                             // Same worker that marked the row, after the mark: the
                             // provider copy is a record of a real send, not a reason
@@ -98,6 +103,7 @@ class SendStatusReceiver : BroadcastReceiver() {
                             )
                             Log.i(TAG, "send status id=$localId result=$result state=failed stored=$stored")
                             Log.i(TAG, "provider write skipped state=failed")
+                            report(appDir, deviceId, localId, "failed")
                         }
                     }
 
@@ -137,6 +143,7 @@ class SendStatusReceiver : BroadcastReceiver() {
                     } else {
                         val marked = NativeBridge.markDeliveredSafely(appDir, deviceId, localId)
                         Log.i(TAG, "delivery status id=$localId result=$result delivered=$marked")
+                        report(appDir, deviceId, localId, "delivered")
                     }
 
                     // The transition is local-only (the Worker's log has no state
@@ -150,6 +157,19 @@ class SendStatusReceiver : BroadcastReceiver() {
             },
             "dakflare-sms-delivery",
         ).start()
+    }
+
+    /**
+     * Report one terminal state to the deployment.
+     *
+     * Silent by design: the local row already holds the truth, and a refused
+     * report leaves the command where it was for the next receipt or tick. The
+     * id is logged only on success, and it is a command id, never a body.
+     */
+    private fun report(appDir: String, deviceId: String, localId: String, state: String) {
+        if (NativeBridge.reportStatusSafely(appDir, deviceId, localId, state)) {
+            Log.i(TAG, "command status id=$localId state=$state reported")
+        }
     }
 
     /**
