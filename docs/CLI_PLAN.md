@@ -361,8 +361,12 @@ someone gets there. If only one ships, ship 2.
    `up` we write.)
 2. Does `cf workers secrets update --text` take effect without a follow-up deploy, or is
    `--secrets-file` the only correct path? (Determines whether `up` is one deploy or two.)
-3. ~~Should `dakflare send` require `--wait` in `--agent` mode?~~ **Decided:**
-   `--agent` defaults to `--wait 10s`, with `--no-wait` to opt out. A caller that gets
-   `PENDING` and exits has learned nothing, but the full 5-minute budget would make every
-   CI call slow. Ten seconds catches the common case (the phone polls every 60 s), and
-   `--until sent` remains available when "the radio took it" is enough.
+3. ~~Should `dakflare send` require `--wait` in `--agent` mode?~~ **Decided, and then
+   widened.** `send` waits 10 s by default for everyone, not only under `--agent`, with
+   `--no-wait` to opt out. Once the device socket landed, a send settled in ~3.5 s, so
+   waiting stopped being a cost and became the thing an operator wants: a default that
+   said "queued" only sent them off to run `status`. The default `--until` is `sent`, not
+   `delivered` — ten seconds is enough for the radio to accept a message and not enough
+   for a carrier report, and waiting for one that never comes would report every good
+   send as a timeout. Exit codes follow: 0 the radio took it, 1 FAILED or EXPIRED, 75
+   still in flight, and `--no-wait` restores the old "queued means exit 0" contract.

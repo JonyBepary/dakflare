@@ -42,6 +42,8 @@ const MAX_LABEL_CHARS = 64;
 const MAX_BODY_CHARS = 4096;
 /** Mirrors worker/src/lib/config.ts. */
 const MAX_IDEMPOTENCY_KEY_CHARS = 128;
+/** How long `send` waits when the caller does not say. */
+const SEND_WAIT_MS = 10_000;
 
 const REQUIRED_BINDINGS = [
   'DB',
@@ -1469,7 +1471,7 @@ function looksLikeE164(value) {
 async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
-  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until', 'idempotency-key']);
+  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until', 'idempotency-key', 'no-wait']);
   const json = Boolean(flags.json);
   const cfg = requireConfig();
 
@@ -1512,14 +1514,23 @@ async function commandSend(argv) {
   // enqueued by this call, and the id is the original one.
   const replayed = result.data?.replayed === true;
 
-  const wantsWait = flags.wait !== undefined;
+  // A send now settles in seconds over the device socket, so waiting is the
+  // useful default: `queued` alone sends the operator off to run `status`
+  // anyway. `--no-wait` keeps the fire-and-forget contract for scripts.
+  if (flags['no-wait'] === true && flags.wait !== undefined) {
+    throw usage('--no-wait and --wait are opposites; pass one');
+  }
+  const wantsWait = flags['no-wait'] !== true;
   let command;
   let timedOut = false;
 
   if (wantsWait) {
     const waited = await waitForCommand(cfg, deviceId, commandId, {
-      until: stringFlag(flags, 'until'),
-      budgetMs: parseDuration(flags.wait),
+      // `sent` by default, not `delivered`: ten seconds is enough for the radio
+      // to accept a message and not enough for a carrier report, and waiting for
+      // one that never comes would report every good send as a timeout.
+      until: stringFlag(flags, 'until') ?? 'sent',
+      budgetMs: parseDuration(flags.wait, { fallbackMs: SEND_WAIT_MS }),
       quiet: json || !process.stderr.isTTY,
     });
     command = waited.command;
@@ -2056,24 +2067,27 @@ The FCM token itself is never printed; only whether one is present.`,
 Revokes a device in D1 and in its Durable Object. Asks for confirmation;
 --yes skips it for automation. This is irreversible: the phone must pair again.`,
 
-  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--idempotency-key <k>] [--json]
+  send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--no-wait] [--idempotency-key <k>] [--json]
 
 Queues one outbound SMS and prints the command id and its state.
 
   --to <e164>     recipient, for example +8801540196080
   --body <text>   message text (max ${MAX_BODY_CHARS} characters)
   --device <id>   send through this device; omitted when exactly one is paired
-  --wait [d]      follow the command until it settles (default 30s, max 5m)
-  --until <s>     with --wait, stop at this state instead of waiting for delivery:
-                  pending, dispatched, acked, sent, delivered (default: delivered)
+  --no-wait       queue and return immediately instead of following the command
+  --wait [d]      how long to follow it (default 10s, max 5m)
+  --until <s>     stop at this state instead of waiting for delivery:
+                  pending, dispatched, acked, sent, delivered (default: sent)
   --idempotency-key <k>
                   retry-safe: the same key returns the command it already created
                   instead of sending a second SMS. The reply carries replayed:true
                   when that happened, and the exit code is still success.
 
-Exit 0 means the command was accepted; with --wait it means the outcome, so FAILED
-and EXPIRED exit 1 and a timeout exits 75. The envelope's verification.passed is
-true only on DELIVERED: SENT means the radio accepted it, not that it arrived.
+By default the command is followed for up to 10 s, so exit 0 means the radio
+accepted it, 1 means FAILED or EXPIRED, and 75 means it was still in flight. With
+--no-wait, exit 0 means only that the deployment queued it. The envelope's
+verification.passed is true only on DELIVERED: SENT means the radio accepted it,
+not that it arrived.
 
   For a body that begins with "-", use --body="…".`,
 
