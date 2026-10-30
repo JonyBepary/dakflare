@@ -188,3 +188,51 @@ export function passwordMode(env: { AUTH_PASSWORD_MODE?: string }): PasswordMode
   if (value === "client-derived" || value === "server-kdf") return value;
   return "off";
 }
+
+/* ======================================================================== */
+/* Magic links (AUTH_PLAN §1, factor 2)                                     */
+/* ======================================================================== */
+
+/** The contract's 15 minutes. Exposed so `/v1/auth/mode` can tell the console. */
+export const DEFAULT_MAGIC_LINK_TTL_SECONDS = 15 * 60;
+
+/**
+ * Token lifetime. Read per request and clamped to [1 s, 1 h]: the default is
+ * the contract's 15 minutes, while the conformance harness shortens it to
+ * exercise expiry without waiting a quarter of an hour. The lower bound is 1
+ * second rather than 60 so a test deployment can make a link expire promptly;
+ * production operators should leave the default alone.
+ */
+export function magicLinkTtlSeconds(env: { MAGIC_LINK_TTL_SECONDS?: string }): number {
+  return readIntEnv(
+    env.MAGIC_LINK_TTL_SECONDS,
+    DEFAULT_MAGIC_LINK_TTL_SECONDS,
+    1,
+    60 * 60
+  );
+}
+
+/** Where a magic link lands in the console. The SvelteKit base is `/admin`. */
+export const MAGIC_LINK_PATH = "/admin/magic";
+
+/**
+ * Sanitise the `next` a link carries.
+ *
+ * Only a same-origin console path is accepted: it must start with `/admin` and
+ * must not be a protocol-relative `//host` or contain a backslash (browsers
+ * normalise `\` to `/`, so `/\evil.example` would become `//evil.example`).
+ * Anything else falls back to the console's overview. This is the one place a
+ * URL from a request body reaches a link, so it fails closed.
+ */
+export function sanitizeAdminNext(value: unknown): string {
+  if (typeof value !== "string") return "/admin";
+  const next = value.trim();
+  if (next.length === 0 || next.length > 512) return "/admin";
+  if (!next.startsWith("/admin")) return "/admin";
+  if (next.startsWith("//") || next.includes("\\")) return "/admin";
+  // `/administrator` is not the console. Require the base itself or a child.
+  if (next.length > "/admin".length && next.charAt("/admin".length) !== "/" && next.charAt("/admin".length) !== "?") {
+    return "/admin";
+  }
+  return next;
+}

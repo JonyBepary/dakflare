@@ -21,6 +21,7 @@ export type {
   Role,
 } from "./guard";
 export { handleAuthRequest, startSecondFactorChallenge } from "./handler";
+export { handleMagicLinkConsume, handleMagicLinkRequest } from "./magic-routes";
 export { createSessionForUser, issueSessionCookie, sessionCookieHeader } from "./session";
 export {
   handlePasswordRemove,

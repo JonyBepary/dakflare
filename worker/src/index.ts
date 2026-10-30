@@ -37,6 +37,8 @@ import { handleAlertAck, handleAlertsList } from "./routes/alerts";
 import { requireRole, type AuthUser, type Permission } from "./auth";
 import {
   handleAuthRequest,
+  handleMagicLinkConsume,
+  handleMagicLinkRequest,
   handlePasswordRemove,
   handlePasswordSalt,
   handlePasswordSet,
@@ -102,6 +104,18 @@ export interface Env {
    * tier) or `server-kdf` (paid). Read per request; see lib/config.ts.
    */
   AUTH_PASSWORD_MODE?: string;
+  /**
+   * Resend API key for magic-link delivery. A Worker secret, never `[vars]`.
+   * Absent => the factor is advertised as unavailable (`magic_link:false`) and
+   * the no-op sender logs `[mail] mail disabled`; requests still answer 202.
+   */
+  RESEND_API_KEY?: string;
+  /** Redirectable Resend API base (default https://api.resend.com), for a local capture. */
+  RESEND_BASE_URL?: string;
+  /** From address for magic links. Defaults to Resend's sandbox sender. */
+  MAGIC_LINK_FROM?: string;
+  /** Magic-link lifetime in seconds. Default 900; clamped in lib/config.ts. */
+  MAGIC_LINK_TTL_SECONDS?: string;
   /** Redirectable so the harness can point FCM at a local stub. */
   FCM_BASE_URL: string;
   GOOGLE_TOKEN_URL: string;
@@ -398,6 +412,16 @@ export default {
       return handleAuthMode(req, env);
     }
 
+    // Magic-link factor (AUTH_PLAN §1, factor 2). The request route answers the
+    // same 202 for known, unknown and malformed addresses; the consume route is
+    // the only thing that spends a token.
+    if (method === "POST" && pathname === "/v1/auth/magic-link") {
+      return handleMagicLinkRequest(req, env, ctx);
+    }
+    if (method === "POST" && pathname === "/v1/auth/magic-link/consume") {
+      return handleMagicLinkConsume(req, env);
+    }
+
     // Password factor (AUTH_PLAN §2). These are ours, not Better Auth's:
     // `/api/auth/sign-in/email` stays disabled so AUTH_PASSWORD_MODE cannot be
     // bypassed by a library route that always runs the KDF on the Worker.
@@ -678,6 +702,13 @@ async function runRetention(env: Env): Promise<void> {
     .bind(Date.now())
     .run();
 
+  // Magic-link rows are single use and short lived. Removing them at expiry
+  // keeps an attacker who knows a valid address from growing the table (the
+  // request route is rate-limited, but the rows would otherwise never go away).
+  const magicLinks = await env.DB.prepare(`DELETE FROM magic_link WHERE expires_at <= ?`)
+    .bind(Date.now())
+    .run();
+
   // `rule_hits` is what enforces each rule's cooldown and hourly cap. It grows one
   // row per automated reply, so it needs the same retention as the log — but the
   // horizon must never be shorter than a cooldown that is still configured, or a
@@ -718,7 +749,9 @@ async function runRetention(env: Env): Promise<void> {
   console.log(
     `[retention] days=${days} messages=${deleted} pairing_codes=${Number(
       codes.meta?.changes ?? 0
-    )} rule_hits=${hitsDeleted} alerts=${Number(alerts.meta?.changes ?? 0)}`
+    )} magic_links=${Number(magicLinks.meta?.changes ?? 0)} rule_hits=${hitsDeleted} alerts=${Number(
+      alerts.meta?.changes ?? 0
+    )}`
   );
 }
 

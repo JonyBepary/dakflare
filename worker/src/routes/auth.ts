@@ -17,7 +17,13 @@ import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
-import { authMode, MAX_BODY_BYTES, passwordMode } from "../lib/config";
+import {
+  authMode,
+  MAX_BODY_BYTES,
+  magicLinkTtlSeconds,
+  passwordMode,
+} from "../lib/config";
+import { magicLinkMailEnabled } from "../auth/mailer";
 import { consumeInvite, hashInviteToken } from "../lib/invites";
 
 export async function handleRedeemInvite(req: Request, env: Env): Promise<Response> {
@@ -144,9 +150,12 @@ export async function handleAuthMode(req: Request, env: Env): Promise<Response> 
     password_mode: passwordMode(env),
     password_configured:
       typeof env.AUTH_PEPPER === "string" && env.AUTH_PEPPER.trim() !== "",
-    // Magic links are not mounted in this phase: there is no mail provider
-    // binding, so advertising the factor would send the login page to a route
-    // that cannot deliver a link.
-    magic_link: false,
+    // The factor is offered only when a sender exists. The routes are always
+    // mounted (they answer 202 even without a sender), but advertising a door
+    // that cannot deliver a link would strand the login page.
+    magic_link: magicLinkMailEnabled(env),
+    // The token lifetime the Worker actually uses, so the console's copy cannot
+    // drift from the deployment's configured TTL.
+    magic_link_ttl_s: magicLinkTtlSeconds(env),
   });
 }

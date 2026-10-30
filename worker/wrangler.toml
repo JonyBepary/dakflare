@@ -144,6 +144,18 @@ AUTH_MODE = "legacy"
 # The KDF runs in the browser: a server-side PBKDF2 measured ~27 ms against the
 # free tier's 10 ms budget. Set to "server-kdf" only on Workers Paid.
 AUTH_PASSWORD_MODE = "client-derived"
+# Magic-link factor (AUTH_PLAN §1, factor 2). The routes are always mounted, but
+# `/v1/auth/mode` reports `magic_link:false` and no mail is sent unless a sender
+# is configured. RESEND_API_KEY is a Worker secret, never a var here:
+#   wrangler secret put RESEND_API_KEY
+# The sandbox sender (onboarding@resend.dev) is fine until a domain exists.
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+# Token lifetime in seconds (default 900 = 15 minutes). Clamped to [1, 3600];
+# the conformance harness lowers it so expiry can be tested without a wait.
+MAGIC_LINK_TTL_SECONDS = "900"
+# Redirectable Resend API base so a local capture can stand in for the provider.
+# Production should leave this unset (defaults to https://api.resend.com).
+# RESEND_BASE_URL = "http://127.0.0.1:8791"
 # Failed-auth lockout window, in seconds (AUTH_PLAN §3). 900 = 15 minutes. The
 # in-memory window in `lib/auth-limits.ts` is clamped to [1, 3600]; lower it only
 # for the conformance harness, which waits out the window it starts the Worker

@@ -22,6 +22,11 @@
  *   password-rotate pepper rotation end to end. Starts its own wrangler dev
  *                   (ring v1 -> v2,v1 -> v2) on PASSWORD_ROTATE_PORT, isolated
  *                   D1 state under /tmp/opencode.
+ *   magic           AUTH_PLAN §1 factor 2: 202 for known/unknown/malformed,
+ *                   single-use and expiry 410s, TOTP challenge, and the
+ *                   no-sender deployment. Starts its own wrangler dev with a
+ *                   local Resend capture on MAGIC_PORT, isolated D1 state under
+ *                   /tmp/opencode.
  *   proxy           start the :8788 signing proxy for Hoppscotch.
  *   ws              connect a virtual device and hold a session open.
  *   stub            run the FCM/OAuth2 stub.
@@ -205,11 +210,11 @@ function absorbCookies(jar, setCookies) {
 }
 
 /** One call to Better Auth's mount, carrying and absorbing the cookie jar. */
-async function authCall(method, pathname, body, jar) {
-  const headers = { Accept: 'application/json', Origin: WORKER_URL };
+async function authCall(method, pathname, body, jar, base = WORKER_URL) {
+  const headers = { Accept: 'application/json', Origin: base };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (jar && jar.size > 0) headers.Cookie = jarString(jar);
-  const res = await fetch(WORKER_URL + pathname, {
+  const res = await fetch(base + pathname, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -219,9 +224,9 @@ async function authCall(method, pathname, body, jar) {
 }
 
 /** Enrol a real ES256 passkey for `sessionCookie` (one registration ceremony). */
-async function createPasskey(sessionCookie) {
+async function createPasskey(sessionCookie, base = WORKER_URL) {
   const jar = cookieJar(sessionCookie);
-  const options = await authCall('GET', '/api/auth/passkey/generate-register-options', undefined, jar);
+  const options = await authCall('GET', '/api/auth/passkey/generate-register-options', undefined, jar, base);
   absorbCookies(jar, options.cookies);
   if (options.status !== 200) return { status: options.status, data: options.data, jar };
 
@@ -232,7 +237,7 @@ async function createPasskey(sessionCookie) {
     JSON.stringify({
       type: 'webauthn.create',
       challenge: options.data.challenge,
-      origin: WORKER_URL,
+      origin: base,
       crossOrigin: false,
     }),
     'utf8'
@@ -277,7 +282,8 @@ async function createPasskey(sessionCookie) {
       },
       name: 'harness step-up',
     },
-    jar
+    jar,
+    base
   );
   absorbCookies(jar, verified.cookies);
   return {
@@ -288,6 +294,7 @@ async function createPasskey(sessionCookie) {
     credentialId,
     rpId: options.data.rp.id,
     counter: 0,
+    base,
   };
 }
 
@@ -296,9 +303,9 @@ async function createPasskey(sessionCookie) {
  * Worker mints the step-up grant on this response; both cookies travel together
  * to `/v1/auth/totp/enable`.
  */
-async function assertPasskey(passkey) {
+async function assertPasskey(passkey, base = passkey.base ?? WORKER_URL) {
   const jar = new Map(passkey.jar);
-  const options = await authCall('GET', '/api/auth/passkey/generate-authenticate-options', undefined, jar);
+  const options = await authCall('GET', '/api/auth/passkey/generate-authenticate-options', undefined, jar, base);
   absorbCookies(jar, options.cookies);
   if (options.status !== 200) return { status: options.status, data: options.data, jar };
 
@@ -306,7 +313,7 @@ async function assertPasskey(passkey) {
     JSON.stringify({
       type: 'webauthn.get',
       challenge: options.data.challenge,
-      origin: WORKER_URL,
+      origin: base,
       crossOrigin: false,
     }),
     'utf8'
@@ -345,7 +352,8 @@ async function assertPasskey(passkey) {
         clientExtensionResults: {},
       },
     },
-    jar
+    jar,
+    base
   );
   absorbCookies(jar, verified.cookies);
   return { status: verified.status, data: verified.data, jar, cookies: verified.cookies };
@@ -1810,7 +1818,7 @@ async function cmdAuth() {
   rep.check(
     'mode payload has exactly the documented keys',
     Object.keys(modeProbe.data ?? {}).sort(),
-    ['auth_configured', 'auth_mode', 'magic_link', 'password_configured', 'password_mode']
+    ['auth_configured', 'auth_mode', 'magic_link', 'magic_link_ttl_s', 'password_configured', 'password_mode']
   );
   rep.check('mode reports the deployed AUTH_MODE', modeProbe.data?.auth_mode, mode);
   rep.check('auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
@@ -2421,7 +2429,7 @@ async function cmdPassword() {
   rep.check(
     'mode payload has exactly the documented keys',
     Object.keys(modeProbe.data ?? {}).sort(),
-    ['auth_configured', 'auth_mode', 'magic_link', 'password_configured', 'password_mode']
+    ['auth_configured', 'auth_mode', 'magic_link', 'magic_link_ttl_s', 'password_configured', 'password_mode']
   );
   rep.check('mode agrees with health on password_mode', modeProbe.data?.password_mode, mode);
   rep.check('mode password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
@@ -2986,6 +2994,364 @@ async function cmdPassword() {
   process.exit(allOk ? 0 : 1);
 }
 
+/* ───────────────────────────── magic-link command ─────────────────────────── */
+
+const MAGIC_PORT = Number(process.env.MAGIC_PORT ?? 8798);
+
+/**
+ * AUTH_PLAN §1 factor 2, end to end.
+ *
+ * The command owns its Worker because two of the assertions are about
+ * deployment state that cannot be changed on a running `wrangler dev`:
+ *
+ *   - expiry needs a short MAGIC_LINK_TTL_SECONDS (the contract's 15 minutes
+ *     would make the command take a quarter of an hour);
+ *   - "no sender configured" needs a Worker without RESEND_API_KEY, and the
+ *     mode endpoint must then say magic_link:false.
+ *
+ * A local HTTP server stands in for Resend (`RESEND_BASE_URL`), so the command
+ * can assert the exact message and prove that an unknown address produces no
+ * mail at all. D1 state is isolated under /tmp/opencode, like password-rotate.
+ */
+async function cmdMagic() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-magic-${Date.now()}`);
+  const base = `http://127.0.0.1:${MAGIC_PORT}`;
+  const rep = new Report('magic');
+  const servers = [];
+  const mail = [];
+
+  const secret = crypto.randomBytes(32).toString('base64');
+
+  // A minimal Resend stand-in: records the JSON body of POST /emails and
+  // answers the way Resend does. It never sees a real provider key.
+  const capture = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/emails') {
+        try { mail.push(JSON.parse(body)); } catch { mail.push({ raw: body }); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: `capture-${mail.length}` }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((resolve) => capture.listen(0, '127.0.0.1', resolve));
+  const captureBase = `http://127.0.0.1:${capture.address().port}`;
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const startWorker = async ({ sender, ttl, label }) => {
+    const args = [
+      'wrangler', 'dev', '--local',
+      '--port', String(MAGIC_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_TRUSTED_ORIGINS:${base}`,
+      '--var', `BETTER_AUTH_SECRET:${secret}`,
+      '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+      '--var', 'AUTH_PASSWORD_MODE:off',
+    ];
+    if (ttl !== undefined) args.push('--var', `MAGIC_LINK_TTL_SECONDS:${ttl}`);
+    if (sender) {
+      args.push('--var', 'RESEND_API_KEY:harness-resend-key');
+      args.push('--var', `RESEND_BASE_URL:${captureBase}`);
+      args.push('--var', 'MAGIC_LINK_FROM:DakFlare <onboarding@resend.dev>');
+    }
+
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, {
+      cwd: workerDir,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) {
+        throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      }
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const raw = async (method, pathname, { body, cookie, headers } = {}) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(headers ?? {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: 'manual',
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
+  };
+
+  const adminAt = async (method, pathname, body) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+        'Content-Type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+
+  const makeAccount = async (label) => {
+    const email = `magic-${label}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const invite = await adminAt('POST', '/v1/admin/invites', {
+      email,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    if (invite.status !== 200) throw new Error(`invite for ${label} failed: ${invite.status}`);
+    const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: invite.data?.token } });
+    return { email, session: sessionCookieOf(redeemed.cookies), redeemed };
+  };
+
+  /**
+   * Request a link. The Worker answers 202 before it writes the row or calls
+   * the provider (`ctx.waitUntil`), so a positive expectation polls the local
+   * capture; a negative one gives a late message a chance to show up before the
+   * "nothing was sent" assertion.
+   */
+  const requestAndCapture = async (email, expectMail = true) => {
+    const before = mail.length;
+    const res = await raw('POST', '/v1/auth/magic-link', { body: { email } });
+    if (expectMail) {
+      const deadline = Date.now() + 5_000;
+      while (mail.length === before && Date.now() < deadline) await sleep(25);
+    } else {
+      await sleep(250);
+    }
+    return { res, before };
+  };
+
+  const tokenFrom = (message) => {
+    const text = String(message?.text ?? '');
+    const line = text.split('\n').find((entry) => entry.startsWith('http'));
+    if (!line) return null;
+    const url = new URL(line);
+    return {
+      url,
+      token: url.searchParams.get('token'),
+      email: url.searchParams.get('email'),
+      next: url.searchParams.get('next'),
+      text,
+    };
+  };
+
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    // ---- 1. a sender is configured: the factor is advertised ----------------
+    let server = await startWorker({ sender: true, ttl: 3, label: 'sender configured' });
+
+    const mode = await raw('GET', '/v1/auth/mode');
+    rep.check('mode with a sender -> 200', mode.status, 200);
+    rep.check('mode advertises the magic-link factor', mode.data?.magic_link, true);
+    rep.check('mode reports the configured TTL', mode.data?.magic_link_ttl_s, 3);
+
+    const known = await makeAccount('known');
+    rep.check('known account created', known.redeemed.status, 200);
+
+    // ---- 2. known and unknown addresses answer the same 202 -----------------
+    const knownReq = await requestAndCapture(known.email);
+    rep.check('request for a known address -> 202', knownReq.res.status, 202);
+    rep.check('request body is exactly {ok:true}', knownReq.res.data, { ok: true });
+    rep.check('a message was sent for the known address', mail.length, knownReq.before + 1);
+
+    const unknownEmail = `magic-nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+    const unknownReq = await requestAndCapture(unknownEmail, false);
+    rep.check('request for an unknown address -> 202', unknownReq.res.status, 202);
+    rep.check('unknown body is byte-identical to known', unknownReq.res.data, knownReq.res.data);
+    rep.check('no message was sent for the unknown address', mail.length, knownReq.before + 1);
+
+    const malformed = await requestAndCapture('not-an-address', false);
+    rep.check('malformed address -> 202, same body', [malformed.res.status, malformed.res.data], [202, { ok: true }]);
+    rep.check('malformed address sent no message', mail.length, knownReq.before + 1);
+
+    // ---- 3. the exact message ----------------------------------------------
+    const message = mail[mail.length - 1];
+    const link = tokenFrom(message);
+    rep.check('the message is addressed to the known account', message?.to, [known.email]);
+    rep.check('the link is /admin/magic', link?.url?.pathname, '/admin/magic');
+    rep.check('the link carries the account address', link?.email, known.email);
+    rep.check('the link defaults next to the console overview', link?.next, '/admin');
+    rep.check('the token is 32 random bytes in base64url', /^[A-Za-z0-9_-]{43}$/.test(link?.token ?? ''), true);
+    rep.check('the token is not the stored form', link?.token?.includes('$') ?? true, false);
+
+    console.log('\n--- captured magic-link mail (text/plain) ---');
+    console.log(link?.text ?? '(none)');
+    console.log('--- end captured mail ---\n');
+
+    const bodyText = String(message?.text ?? '') + String(message?.html ?? '');
+    rep.check('the mail does not contain ADMIN_TOKEN', bodyText.includes(ADMIN_TOKEN), false);
+    rep.check('the mail does not contain BETTER_AUTH_SECRET', bodyText.includes(secret), false);
+    rep.check('the mail does not contain AUTH_PEPPER', bodyText.includes('AUTH_PEPPER'), false);
+
+    // ---- 4. consume once, then not again -----------------------------------
+    const consumed = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: link?.token },
+    });
+    rep.check('first consume -> 200', consumed.status, 200);
+    rep.check('first consume body is {ok:true}', consumed.data, { ok: true });
+    const session = sessionCookieOf(consumed.cookies);
+    rep.check('first consume sets a session cookie', typeof session, 'string');
+    if (session) {
+      const me = await raw('GET', '/v1/auth/me', { cookie: session });
+      rep.check('the magic-link session resolves via requireRole', me.status, 200);
+      rep.check('it is the account the link was sent to', me.data?.user?.email, known.email);
+    }
+
+    const second = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: link?.token },
+    });
+    rep.check('second consume -> 410 used', [second.status, second.data?.error], [410, 'used']);
+
+    // ---- 5. expiry ----------------------------------------------------------
+    const expiringReq = await requestAndCapture(known.email);
+    const expiringLink = tokenFrom(mail[mail.length - 1]);
+    rep.check('a second link was sent', mail.length, expiringReq.before + 1);
+    await sleep(4_000);
+    const expired = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: expiringLink?.token },
+    });
+    rep.check('an expired link -> 410 expired', [expired.status, expired.data?.error], [410, 'expired']);
+
+    // ---- 6. a TOTP account gets the challenge, never a session -------------
+    const totpAccount = await makeAccount('totp');
+    rep.check('TOTP account created', totpAccount.redeemed.status, 200);
+    const passkey = await createPasskey(totpAccount.session, base);
+    rep.check('passkey enrolled for the step-up', passkey.status, 200);
+    const stepUp = await assertPasskey(passkey, base);
+    rep.check('passkey assertion -> 200', stepUp.status, 200);
+    const enable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp.jar) });
+    rep.check('TOTP enabled', enable.status, 200);
+    const totpSecret = enable.data?.totpURI
+      ? new URL(enable.data.totpURI).searchParams.get('secret')
+      : null;
+    rep.check('enable returns a TOTP secret', typeof totpSecret, 'string');
+    const verified = await authCall(
+      'POST',
+      '/api/auth/two-factor/verify-totp',
+      { code: totpNow(totpSecret) },
+      stepUp.jar,
+      base
+    );
+    rep.check('the first TOTP code verifies', verified.status, 200);
+
+    const totpReq = await requestAndCapture(totpAccount.email);
+    rep.check('request for the TOTP account -> 202', totpReq.res.status, 202);
+    const totpLink = tokenFrom(mail[mail.length - 1]);
+    const totpConsume = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: totpLink?.token },
+    });
+    rep.check(
+      'TOTP consume returns the same challenge shape as a passkey',
+      [totpConsume.status, totpConsume.data?.twoFactorRedirect, totpConsume.data?.twoFactorMethods],
+      [200, true, ['totp']]
+    );
+    const sessionCookies = totpConsume.cookies.filter((cookie) => cookie.includes('session_token='));
+    rep.check(
+      'TOTP consume leaves no usable session cookie',
+      sessionCookies.some((cookie) => cookie.split(';')[0].split('=')[1] !== ''),
+      false
+    );
+    rep.check(
+      'any session cookie on the challenge is explicitly expired',
+      sessionCookies.every((cookie) => /Max-Age=0/.test(cookie)),
+      true
+    );
+    rep.check(
+      'TOTP consume sets a two_factor cookie',
+      totpConsume.cookies.some((cookie) => cookie.includes('two_factor=')),
+      true
+    );
+    const challengeJar = new Map();
+    absorbCookies(challengeJar, totpConsume.cookies);
+    const codeVerified = await authCall(
+      'POST',
+      '/api/auth/two-factor/verify-totp',
+      { code: totpNow(totpSecret) },
+      challengeJar,
+      base
+    );
+    rep.check('the challenge code completes the sign-in -> 200', codeVerified.status, 200);
+    rep.check('…and mints a session', typeof sessionCookieOf(codeVerified.cookies), 'string');
+
+    // ---- 7. no sender: mode says false, request still 202, no mail ---------
+    await stopWorker(server);
+    server = await startWorker({ sender: false, label: 'no sender' });
+
+    const offMode = await raw('GET', '/v1/auth/mode');
+    rep.check('mode without a sender -> 200', offMode.status, 200);
+    rep.check('mode says magic_link:false', offMode.data?.magic_link, false);
+    rep.check('mode still reports the default TTL', offMode.data?.magic_link_ttl_s, 900);
+
+    const beforeOff = mail.length;
+    const offReq = await requestAndCapture(known.email, false);
+    rep.check('a request without a sender still answers 202', offReq.res.status, 202);
+    rep.check('…with the same body', offReq.res.data, { ok: true });
+    rep.check('…and sends nothing', mail.length, beforeOff);
+    const logDeadline = Date.now() + 2_000;
+    while (!server.log().includes('[mail] mail disabled') && Date.now() < logDeadline) {
+      await sleep(25);
+    }
+    rep.check('the no-op sender logs "mail disabled"', server.log().includes('[mail] mail disabled'), true);
+
+    await stopWorker(server);
+  } finally {
+    for (const server of servers) {
+      await stopWorker(server).catch(() => {});
+    }
+    await new Promise((resolve) => capture.close(resolve));
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'MAGIC CASES PASSED' : 'MAGIC CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ──────────────────────── pepper rotation command ─────────────────────────── */
 
 const ROTATE_PORT = Number(process.env.PASSWORD_ROTATE_PORT ?? 8799);
@@ -3212,6 +3578,7 @@ const COMMANDS = {
   auth: cmdAuth,
   password: cmdPassword,
   'password-rotate': cmdPasswordRotate,
+  magic: cmdMagic,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,
