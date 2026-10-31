@@ -130,6 +130,16 @@ node dakflare_test_harness.mjs pair          # with WORKER_URL/ADMIN_TOKEN expor
 node test-support/platform-gate.mjs             # ~5.5 min
 ```
 
+**Run it with `STALE_SOCKET_MS=120000`, the production default.** Section A idles for 38 s and
+expects the socket to still be routable, section D idles for 135 s and expects it to be closed as
+stale. Only a window between the two satisfies both, and `dev.sh`'s 2 s default sits below both: with
+it, A fails because every quiet socket is stale, and at 180 s D fails because none is. The window is
+the assertion, so the knob is not free:
+
+```bash
+STALE_SOCKET_MS=120000 ./test-support/dev.sh
+```
+
 It asserts:
 
 - **Hibernation.** A socket survives 38 s idle (past the DO's ~10 s eviction), a push wakes the DO, and
