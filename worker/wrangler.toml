@@ -51,11 +51,23 @@ class_name = "DeviceGateway"
 name = "AUTH_GUARD"
 class_name = "AuthGuard"
 
+# One globally named AuthorityGuard (name "global") owns the authority-grant
+# expiry timers (v6.1 P0). D1 refuses an expired grant with or without it, so it
+# is optional at runtime; what it adds is the expiry audit row and the place a
+# console or handset notification will hang off.
+[[durable_objects.bindings]]
+name = "AUTHORITY_GUARD"
+class_name = "AuthorityGuard"
+
 [exports.DeviceGateway]
 type = "durable-object"
 storage = "sqlite"
 
 [exports.AuthGuard]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthorityGuard]
 type = "durable-object"
 storage = "sqlite"
 

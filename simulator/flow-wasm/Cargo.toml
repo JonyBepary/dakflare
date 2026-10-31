@@ -1,6 +1,6 @@
 [package]
 name = "dakflare-flow-wasm"
-version = "6.0.0"
+version = "6.1.0"
 description = "WASM ABI for the DakFlare flow interpreter (Worker fallback)"
 edition = "2024"
 license = "AGPL-3.0-only"

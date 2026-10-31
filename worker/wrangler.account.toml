@@ -35,6 +35,11 @@ class_name = "DeviceGateway"
 name = "AUTH_GUARD"
 class_name = "AuthGuard"
 
+# The global authority-grant expiry timer (v6.1 P0). See authority-guard.ts.
+[[durable_objects.bindings]]
+name = "AUTHORITY_GUARD"
+class_name = "AuthorityGuard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceGateway"]
@@ -45,6 +50,11 @@ new_sqlite_classes = ["DeviceGateway"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["AuthGuard"]
+
+# v6.1 P0. A new tag because v2 is already applied wherever this config has run.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["AuthorityGuard"]
 
 # remote = true -> the real preview database, while the Worker and DO run locally.
 [[d1_databases]]

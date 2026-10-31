@@ -22,10 +22,18 @@ export interface AuditActor {
 /**
  * The caller an admin route resolved to. `role: "machine"` is the ADMIN_TOKEN
  * path (legacy mode, or a CLI request in new mode); it is never a human login.
+ *
+ * `role: "agent"` is a `dkf_agt_` token. It is a third credential type, not a
+ * fifth role: it carries no Better Auth account, so `userId` is null and the two
+ * agent fields below are the only identity the send gate needs.
  */
 export interface AdminActor extends AuditActor {
-  role: "owner" | "admin" | "member" | "machine";
+  role: "owner" | "admin" | "member" | "machine" | "agent";
   canGrantOwner: boolean;
+  /** Set only when the credential was an agent token. */
+  agentTokenId?: string;
+  /** The handset that token is bound to, or null when it is fleet-wide. */
+  agentDeviceId?: string | null;
 }
 
 export interface AuditEvent {

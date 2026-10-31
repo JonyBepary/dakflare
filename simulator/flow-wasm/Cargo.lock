@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "dakflare-flow"
-version = "6.0.0"
+version = "6.1.0"
 dependencies = [
  "regex",
  "serde",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "dakflare-flow-wasm"
-version = "6.0.0"
+version = "6.1.0"
 dependencies = [
  "dakflare-flow",
  "serde_json",

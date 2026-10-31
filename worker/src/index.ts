@@ -39,6 +39,21 @@ import {
 import { handleAlertAck, handleAlertsList } from "./routes/alerts";
 import { requireRole, type AuthUser, type Permission } from "./auth";
 import {
+  handleAgentTokenList,
+  handleAgentTokenMint,
+  handleAgentTokenRevoke,
+} from "./routes/agent-tokens";
+import {
+  handleApprovalApprove,
+  handleApprovalReject,
+  handleApprovalsList,
+  handleGrantRevoke,
+  handleGrantsList,
+} from "./routes/approvals";
+import { AuthorityGuard } from "./authority-guard";
+import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
+import { scopeForAction } from "./lib/agent-scopes";
+import {
   handleAuthRequest,
   handleMagicLinkConsume,
   handleMagicLinkRequest,
@@ -62,7 +77,7 @@ import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
-export { DeviceGateway, AuthGuard };
+export { DeviceGateway, AuthGuard, AuthorityGuard };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -76,6 +91,13 @@ export interface Env {
    * limiter then falls back to its isolate counters (see lib/auth-limits.ts).
    */
   AUTH_GUARD?: DurableObjectNamespace<AuthGuard>;
+  /**
+   * One globally named object owning the authority-grant expiry timers. Optional
+   * for the same reason as AUTH_GUARD: D1 refuses an expired grant with or
+   * without it, so a deployment that has not provisioned it loses the expiry
+   * audit row and nothing else.
+   */
+  AUTHORITY_GUARD?: DurableObjectNamespace<AuthorityGuard>;
   DB: D1Database;
   /** Load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token here. */
   KV: KVNamespace;
@@ -238,14 +260,25 @@ async function withAdmin(
 }
 
 /**
- * Admin gate. Two credentials, and only two:
+ * Admin gate. Three credentials:
  *
  *   a Better Auth session with role owner/admin, for a person;
- *   ADMIN_TOKEN with `X-Dakflare-Client: cli`, for a machine (AUTH_PLAN §8).
+ *   ADMIN_TOKEN with `X-Dakflare-Client: cli`, for a machine (AUTH_PLAN §8);
+ *   a `dkf_agt_` agent token, for an autonomous agent (v6.1 P0).
  *
- * There is no third path. `AUTH_MODE=legacy` used to make ADMIN_TOKEN alone a
- * full admin credential; it is gone, because a bearer token that never expires
- * and needs no client header is the weakest credential the system had.
+ * The agent path is a THIRD credential type rather than a role, and it is
+ * narrower than either of the other two in two ways that matter:
+ *
+ *   - It reaches a route only if `SCOPE_FOR_ACTION` names a scope for that
+ *     action. A route that is absent from that table is invisible to agents,
+ *     which is the safe default for a route added later.
+ *   - `revoke` and `auth reset` are not in `TOKEN_SCOPES` at all, so no token can
+ *     hold them and no grant can add them. The refusal is structural, not a
+ *     policy someone can edit in the wrong direction.
+ *
+ * What it does NOT decide here is the grant. `send` needs a target-shaped,
+ * time-boxed grant that this layer cannot see, so the route enforces that itself
+ * (`lib/agent-send.ts`). This gate answers "may you ask", not "may you do".
  *
  * Every admin route resolves an actor here so the audited ones can log who acted
  * without re-reading the credential anywhere else.
@@ -257,12 +290,80 @@ async function withAdminAccess(
   action: string,
   handler: (actor: AdminActor) => Promise<Response>
 ): Promise<Response> {
+  const bearer = readBearer(req);
+  if (looksLikeAgentToken(bearer)) {
+    return withAgentAccess(req, env, bearer as string, action, handler);
+  }
   if (req.headers.get("X-Dakflare-Client") === "cli") {
     return withAdmin(req, env, () => handler(machineActor()));
   }
   const guard = await requireRole(req, env, permission, { action });
   if (!guard.ok) return guard.response;
   return handler(actorFromUser(guard.user));
+}
+
+/** The `Bearer …` value, or `null`. Header names are case-insensitive. */
+function readBearer(req: Request): string | null {
+  const header = req.headers.get("Authorization");
+  if (header === null) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match === null ? null : match[1];
+}
+
+/**
+ * The agent credential path.
+ *
+ * Rate limiting is keyed on the TOKEN ID, not a constant: two agents have two
+ * budgets, and one runaway token cannot deny the other. It runs after the token
+ * verifies, for the same reason the admin limiter does — keying on unverified
+ * material lets an attacker mint a fresh key per guess.
+ */
+async function withAgentAccess(
+  req: Request,
+  env: Env,
+  raw: string,
+  action: string,
+  handler: (actor: AdminActor) => Promise<Response>
+): Promise<Response> {
+  const token = await resolveAgentToken(env, raw);
+  if (token === null) return unauthorized();
+
+  const scope = scopeForAction(action);
+  if (scope === null) {
+    return Response.json(
+      {
+        error: "forbidden",
+        message: `an agent token cannot ${action}`,
+      },
+      { status: 403 }
+    );
+  }
+  if (!token.scopes.includes(scope)) {
+    return Response.json(
+      {
+        error: "forbidden",
+        message: `this agent token lacks the ${scope} scope needed to ${action}`,
+        scope,
+      },
+      { status: 403 }
+    );
+  }
+
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `agent:${token.id}` });
+    if (!success) return err("rate_limited", 429);
+  }
+
+  await recordTokenUse(env, token.id);
+
+  return handler({
+    userId: null,
+    label: `agent:${token.name}`,
+    role: "agent",
+    canGrantOwner: false,
+    agentTokenId: token.id,
+    agentDeviceId: token.device_id,
+  });
 }
 
 /**
@@ -530,6 +631,59 @@ export default {
       // A read: a member may see who did what, including their own actions.
       return withAdminAccess(req, env, "read", "read the audit log", (_actor) =>
         handleAuditList(env, url)
+      );
+    }
+
+    /* ---- agent control plane (v6.1 P0) --------------------------------- */
+    // Human-only by construction: none of these actions appear in
+    // SCOPE_FOR_ACTION, so an agent token is refused before the handler runs. A
+    // credential that can mint credentials, approve its own requests or read the
+    // grant table is a credential that can escalate itself.
+    if (method === "POST" && pathname === "/v1/admin/agent-tokens") {
+      return withAdminAccess(req, env, "write", "mint agent tokens", (actor) =>
+        handleAgentTokenMint(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/agent-tokens") {
+      return withAdminAccess(req, env, "read", "list agent tokens", (_actor) =>
+        handleAgentTokenList(env, url)
+      );
+    }
+    const agentTokenMatch = pathname.match(/^\/v1\/admin\/agent-tokens\/([^/]+)$/);
+    if (method === "DELETE" && agentTokenMatch) {
+      return withAdminAccess(req, env, "write", "revoke agent tokens", (actor) =>
+        handleAgentTokenRevoke(req, env, decodeURIComponent(agentTokenMatch[1]), actor)
+      );
+    }
+
+    if (method === "GET" && pathname === "/v1/admin/approvals") {
+      return withAdminAccess(req, env, "read", "read approvals", (_actor) =>
+        handleApprovalsList(env, url)
+      );
+    }
+    const approvalDecisionMatch = pathname.match(
+      /^\/v1\/admin\/approvals\/([^/]+)\/(approve|reject)$/
+    );
+    if (method === "POST" && approvalDecisionMatch) {
+      const approvalId = decodeURIComponent(approvalDecisionMatch[1]);
+      const decision = approvalDecisionMatch[2];
+      const action = decision === "approve" ? "approve authority" : "reject authority";
+      return withAdminAccess(req, env, "write", action, (actor) =>
+        decision === "approve"
+          ? handleApprovalApprove(req, env, approvalId, actor)
+          : handleApprovalReject(req, env, approvalId, actor)
+      );
+    }
+
+    if (method === "GET" && pathname === "/v1/admin/grants") {
+      return withAdminAccess(req, env, "read", "read grants", (_actor) =>
+        handleGrantsList(env, url)
+      );
+    }
+    const grantMatch = pathname.match(/^\/v1\/admin\/grants\/([^/]+)$/);
+    if (method === "DELETE" && grantMatch) {
+      return withAdminAccess(req, env, "write", "revoke grants", (actor) =>
+        handleGrantRevoke(req, env, decodeURIComponent(grantMatch[1]), actor)
       );
     }
     if (method === "POST" && pathname === "/v1/admin/pairing-code") {

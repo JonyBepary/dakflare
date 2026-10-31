@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '6.0.0';
+const CLI_VERSION = '6.1.0';
 
 const HOME = os.homedir();
 const CONFIG_DIR = path.join(HOME, '.config', 'dakflare');
@@ -152,6 +152,31 @@ const ERROR_RULES = {
   unauthorized: { exit: 4, category: 'permission', remediation: 'dakflare init', fix: 're-verify the admin token' },
 
   exists: { exit: 5, category: 'conflict' },
+
+  // The agent control plane (v6.1). These are the outcomes an autonomous caller
+  // has to tell apart: "a human has to decide" (6, and it becomes retryable),
+  // "you spent your hour" (6, wait for resets_at), and "you may not do that at
+  // all" (4, a different credential is the fix).
+  approval_required: {
+    exit: 6,
+    category: 'precondition',
+    retryable: true,
+    remediation: 'dakflare auth approvals',
+    fix: 'a human must approve the request, then retry',
+  },
+  agent_quota_exceeded: {
+    exit: 6,
+    category: 'precondition',
+    retryable: true,
+    fix: 'the agent token spent its hourly SMS budget; wait for resets_at',
+  },
+  forbidden: { exit: 4, category: 'permission', fix: 'this credential cannot perform that action' },
+  already_revoked: { exit: 5, category: 'conflict' },
+  not_pending: { exit: 5, category: 'conflict' },
+  expired: { exit: 6, category: 'precondition', remediation: 'dakflare auth approvals' },
+  not_grantable: { exit: 4, category: 'permission' },
+  bad_target: { exit: 2, category: 'usage' },
+  not_found: { exit: 3, category: 'not_found' },
 
   no_device: { exit: 6, category: 'precondition', remediation: 'dakflare pair', fix: 'pair a handset first' },
   bad_health: { exit: 6, category: 'precondition', remediation: 'dakflare doctor --json', fix: 'see which check fails' },
@@ -313,18 +338,37 @@ const COMMAND_SPECS = {
     examples: ['dakflare audit --tail 5', 'dakflare audit --limit 100 --actor owner --json'],
   },
   auth: {
-    summary: 'Owner bootstrap, invites and recovery (bootstrap|invite|invites|reset)',
+    summary:
+      'Accounts and the agent control plane (bootstrap|invite|invites|reset|mint-agent-token|agent-tokens|revoke-agent-token|approvals|approve|reject|grants)',
     effect: 'mutating',
-    usage: 'dakflare auth <bootstrap|invite|invites|reset> [options]',
+    usage: 'dakflare auth <subcommand> [options]',
     flags: {
       email: { type: 'string', note: 'the account address' },
       role: { type: 'string', note: 'owner|admin|member, invite only' },
-      ttl: { type: 'number', note: 'invite lifetime in seconds' },
-      yes: { type: 'boolean', note: 'reset: skip the confirmation' },
+      ttl: { type: 'number', note: 'invite lifetime, or agent token lifetime, in seconds' },
+      yes: { type: 'boolean', note: 'skip the confirmation (reset, revoke-*)' },
+      name: { type: 'string', note: 'mint-agent-token: a short name for the agent' },
+      scope: {
+        type: 'string',
+        note: 'mint-agent-token: comma-separated scopes, e.g. messages:read,sms:send',
+      },
+      device: { type: 'string', note: 'mint-agent-token: bind the token to one handset' },
+      'max-per-hour': { type: 'number', note: 'mint-agent-token: SMS budget, default 20' },
+      for: {
+        type: 'duration',
+        note: 'approve: 1m, 5m, 15m, 30m, 1h, 1d, 7d or 30d; clamped per scope',
+      },
+      all: { type: 'boolean', note: 'agent-tokens: include revoked tokens' },
+      live: { type: 'boolean', note: 'grants: only grants still inside their window' },
+      state: { type: 'string', note: 'approvals: filter by state, e.g. PENDING' },
     },
     examples: [
       'dakflare auth bootstrap --email you@example.com',
       'dakflare auth invite --email teammate@example.com --role member',
+      'dakflare auth mint-agent-token --name "night shift" --scope messages:read,sms:send',
+      'dakflare auth approvals',
+      'dakflare auth approve 6f0c… --for 15m',
+      'dakflare auth grants --live',
     ],
   },
   up: {
@@ -435,8 +479,14 @@ function errorEnvelope(payload) {
       retryable,
       // A retry of a mutating command can cause a second SMS or a second
       // revocation, so "could waiting help" and "is repeating safe" are only the
-      // same answer for reads.
-      safe_to_retry: retryable && !MUTATING.has(CURRENT_COMMAND),
+      // same answer for reads. Two codes are the exception, and they earn it by
+      // definition: an approval request and a spent budget both mean the action
+      // did NOT happen, so retrying after a human answers is safe.
+      safe_to_retry:
+        retryable &&
+        (!MUTATING.has(CURRENT_COMMAND) ||
+          code === 'approval_required' ||
+          code === 'agent_quota_exceeded'),
       ...(rule.remediation === undefined
         ? {}
         : { remediation: [{ command: rule.remediation, description: rule.fix ?? '' }] }),
@@ -498,6 +548,11 @@ const VALUE_FLAGS = new Set([
   'wait',
   'until',
   'idempotency-key',
+  'name',
+  'scope',
+  'max-per-hour',
+  'for',
+  'state',
 ]);
 
 function parseArgv(argv) {
@@ -1914,6 +1969,33 @@ async function commandSend(argv) {
       { error: 'device_unknown' }
     );
   }
+  // 202 means an agent token asked and a human has to decide. It is not a failure
+  // and it is not a send; reporting either would be a lie the caller acts on.
+  if (result.status === 202 && result.data?.approval_request) {
+    const approval = result.data.approval_request;
+    if (json) {
+      emitJson(
+        {
+          ok: false,
+          error: 'approval_required',
+          to,
+          sent: false,
+          approval_request: approval,
+          next: result.data.next,
+        },
+        MODE
+      );
+      return exitCodeFor('approval_required');
+    }
+    out(warn('Not sent. A human has to approve this first.'));
+    out(`  approval       ${approval.id}`);
+    out(`  scope          ${approval.scope}`);
+    out(`  target         ${describeTarget(approval.target)}`);
+    out(`  ceiling        ${approval.max_s === null ? 'n/a' : humanDuration(approval.max_s)}`);
+    out(`  expires        ${iso(approval.expires_at)}`);
+    out(`  approve        dakflare auth approve ${approval.id} --for 15m`);
+    return exitCodeFor('approval_required');
+  }
   if (result.status !== 200) throw requestFailure('queueing the message', result);
 
   const commandId = result.data?.command_id;
@@ -2446,7 +2528,22 @@ const SUMMARY_BUILDERS = {
   send: (data) => (data.replayed ? 'already queued for that key' : 'queued for the radio'),
   status: (data) => `command is ${data.state ?? 'unknown'}`,
   audit: (data) => `${(data.entries ?? data.events ?? []).length} audit rows`,
-  auth: (data) => (data.link ? 'invite minted' : 'owner account updated'),
+  auth: (data) =>
+    data.token
+      ? 'agent token minted'
+      : data.agent_tokens
+        ? `${(data.agent_tokens ?? []).length} agent tokens`
+        : data.approvals
+          ? `${(data.approvals ?? []).length} approval requests`
+          : data.grants
+            ? `${(data.grants ?? []).length} grants`
+            : data.grant
+              ? 'authority granted'
+              : data.approval
+                ? `request ${data.approval.state.toLowerCase()}`
+                : data.link
+                  ? 'invite minted'
+                  : 'owner account updated',
   key: () => 'signing key read',
   up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
   capabilities: (data) => `${(data.commands ?? []).length} commands`,
@@ -2584,6 +2681,13 @@ async function commandAuth(argv) {
   if (sub === 'invite') return commandAuthInvite(rest);
   if (sub === 'invites') return commandAuthInvites(rest);
   if (sub === 'reset') return commandAuthReset(rest);
+  if (sub === 'mint-agent-token') return commandAuthMintAgentToken(rest);
+  if (sub === 'agent-tokens') return commandAuthAgentTokens(rest);
+  if (sub === 'revoke-agent-token') return commandAuthRevokeAgentToken(rest);
+  if (sub === 'approvals') return commandAuthApprovals(rest);
+  if (sub === 'approve') return commandAuthApprove(rest);
+  if (sub === 'reject') return commandAuthReject(rest);
+  if (sub === 'grants') return commandAuthGrants(rest);
   err(`dakflare: unknown auth subcommand "${sub}"`);
   err('try `dakflare auth --help`');
   return 2;
@@ -2690,6 +2794,367 @@ async function commandAuthInvites(argv) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
   }
+  return 0;
+}
+
+/* ────────────────── agent control plane (v6.1 P0) ────────────────── */
+
+/**
+ * The ladder an operator may pick from, mirrored from
+ * `worker/src/lib/agent-scopes.ts`. It is duplicated here rather than fetched so
+ * `--for 15m` can be rejected before a round trip; the Worker clamps anyway, and
+ * the response says when it did.
+ */
+const GRANT_LADDER_S = [60, 300, 900, 1_800, 3_600, 86_400, 604_800, 2_592_000];
+
+function humanDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  if (value < 60) return `${value}s`;
+  if (value < 3_600) return `${Math.round(value / 60)}m`;
+  if (value < 86_400) return `${Math.round(value / 3_600)}h`;
+  if (value < 604_800) return `${Math.round(value / 86_400)}d`;
+  return `${Math.round(value / 2_592_000)}mo`;
+}
+
+/** `--for 15m` / `1h` / `1d` / `30d` / `900` -> seconds. */
+function parseGrantDuration(value) {
+  if (value === undefined || value === true) return undefined;
+  const match = /^(\d+(?:\.\d+)?)(mo|s|m|h|d|w)?$/.exec(String(value).trim().toLowerCase());
+  if (!match) throw usage(`--for expects a duration like 15m, 1h or 1d, got "${value}"`);
+  const amount = Number(match[1]);
+  const unit = match[2] ?? 's';
+  const factor =
+    unit === 's' ? 1
+      : unit === 'm' ? 60
+        : unit === 'h' ? 3_600
+          : unit === 'd' ? 86_400
+            : unit === 'w' ? 604_800
+              : 2_592_000;
+  const seconds = Math.round(amount * factor);
+  if (!Number.isFinite(seconds) || seconds <= 0) throw usage('--for must be positive');
+  return seconds;
+}
+
+/** A grant target, in words short enough for a table row. */
+function describeTarget(target) {
+  if (!target || typeof target !== 'object') return 'any';
+  const parts = [];
+  if (Array.isArray(target.recipients) && target.recipients.length > 0) {
+    parts.push(`to ${target.recipients.join(', ')}`);
+  }
+  if (target.device_id) parts.push(`device ${target.device_id}`);
+  if (target.flow_id) parts.push(`flow ${target.flow_id}`);
+  if (target.rule_id) parts.push(`rule ${target.rule_id}`);
+  return parts.length === 0 ? 'any' : parts.join(' + ');
+}
+
+/**
+ * Mint an agent token. The value is printed once: the Worker stores only a
+ * digest of the secret, so a lost token is replaced rather than recovered.
+ */
+async function commandAuthMintAgentToken(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['name', 'scope', 'device', 'ttl', 'max-per-hour', 'json']);
+  const json = MODE.json;
+
+  requireFlags(flags, ['name', 'scope']);
+  const name = stringFlag(flags, 'name');
+  const scopes = String(stringFlag(flags, 'scope'))
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (scopes.length === 0) throw usage('--scope needs at least one scope');
+
+  const device = stringFlag(flags, 'device');
+  const ttlFlag = stringFlag(flags, 'ttl');
+  const ttl = ttlFlag === undefined ? undefined : Number(ttlFlag);
+  if (ttl !== undefined && (!Number.isFinite(ttl) || ttl < 60)) {
+    throw usage('--ttl must be at least 60 seconds');
+  }
+  const maxFlag = stringFlag(flags, 'max-per-hour');
+  const maxPerHour = maxFlag === undefined ? undefined : Number(maxFlag);
+  if (maxPerHour !== undefined && (!Number.isFinite(maxPerHour) || maxPerHour < 1)) {
+    throw usage('--max-per-hour must be at least 1');
+  }
+
+  const cfg = requireConfig();
+  const body = { name, scopes };
+  if (device !== undefined) body.device_id = device;
+  if (ttl !== undefined) body.expires_in_s = Math.round(ttl);
+  if (maxPerHour !== undefined) body.max_per_hour = Math.round(maxPerHour);
+
+  const result = await api(cfg, 'POST', '/v1/admin/agent-tokens', body);
+  if (result.status !== 200) {
+    const unknown = result.data?.unknown_scopes;
+    if (Array.isArray(unknown) && unknown.length > 0) {
+      throw new CliError(`unknown scope${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`, 2, {
+        error: 'usage',
+        unknown_scopes: unknown,
+      });
+    }
+    throw requestFailure('mint agent token', result);
+  }
+
+  const token = result.data ?? {};
+  if (json) {
+    emitJson({ ok: true, ...token }, MODE);
+    return 0;
+  }
+
+  out(`Agent token "${token.name}" (${token.id})`);
+  out(`  token          ${token.token}`);
+  out(`  scopes         ${(token.scopes ?? []).join(', ')}`);
+  out(`  device         ${token.device_id ?? 'any handset'}`);
+  out(`  budget         ${token.max_per_hour} SMS per hour`);
+  out(`  expires        ${token.expires_at ? iso(token.expires_at) : 'never'}`);
+  out('');
+  out(warn('Shown once. Only a digest is stored, so save this value now.'));
+  out(muted('A token may ASK; a production send still needs a time-boxed grant:'));
+  out(muted('  dakflare auth approvals   then   dakflare auth approve <id> --for 15m'));
+  return 0;
+}
+
+async function commandAuthAgentTokens(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['all', 'json']);
+  const json = MODE.json;
+  const cfg = requireConfig();
+
+  const query = flags.all === true ? '?revoked=1' : '';
+  const result = await api(cfg, 'GET', `/v1/admin/agent-tokens${query}`);
+  if (result.status !== 200) throw requestFailure('agent tokens', result);
+
+  const tokens = result.data?.agent_tokens ?? [];
+  if (json) {
+    emitJson({ ok: true, agent_tokens: tokens }, MODE);
+    return 0;
+  }
+  if (tokens.length === 0) {
+    out('no agent tokens');
+    return 0;
+  }
+  out(`Agent tokens (${tokens.length})`);
+  for (const token of tokens) {
+    const revoked = token.revoked_at !== null && token.revoked_at !== undefined;
+    const expired = !revoked && token.expires_at !== null && token.expires_at <= Date.now();
+    const state = revoked ? 'revoked' : expired ? 'expired' : 'live';
+    out(
+      `  ${String(token.id).padEnd(18)} ${String(token.name).slice(0, 22).padEnd(23)} ` +
+        `${state.padEnd(8)} ${token.sent_current_hour}/${token.max_per_hour} this hour`
+    );
+  }
+  return 0;
+}
+
+async function commandAuthRevokeAgentToken(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['yes', 'json']);
+  const json = MODE.json;
+  const id = rest[0];
+  if (!id) throw usage('dakflare auth revoke-agent-token <id>');
+
+  if (flags.yes !== true) {
+    const proceed = await confirm(`Revoke agent token ${id}? It stops working on its next request.`);
+    if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+  }
+
+  const cfg = requireConfig();
+  const result = await api(cfg, 'DELETE', `/v1/admin/agent-tokens/${encodeURIComponent(id)}`);
+  if (result.status === 409) {
+    if (json) emitJson({ ok: false, error: 'already_revoked', id }, MODE);
+    else out('already revoked');
+    return exitCodeFor('already_revoked');
+  }
+  if (result.status !== 200) throw decisionFailure('revoke agent token', result);
+
+  if (json) {
+    emitJson({ ok: true, id, revoked_at: result.data?.revoked_at ?? Date.now() }, MODE);
+    return 0;
+  }
+  out(`Revoked ${id}. It is refused on its next request.`);
+  return 0;
+}
+
+async function commandAuthApprovals(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['state', 'json']);
+  const json = MODE.json;
+  const state = stringFlag(flags, 'state');
+  const cfg = requireConfig();
+
+  const query = state === undefined ? '' : `?state=${encodeURIComponent(state.toUpperCase())}`;
+  const result = await api(cfg, 'GET', `/v1/admin/approvals${query}`);
+  if (result.status !== 200) throw requestFailure('approvals', result);
+
+  const approvals = result.data?.approvals ?? [];
+  if (json) {
+    emitJson({ ok: true, approvals }, MODE);
+    return 0;
+  }
+  if (approvals.length === 0) {
+    out('no approval requests');
+    return 0;
+  }
+
+  out(`Approval requests (${approvals.length})`);
+  const now = Date.now();
+  for (const approval of approvals) {
+    const left = Math.max(0, Math.round((approval.expires_at - now) / 1000));
+    out(`  ${approval.id}`);
+    out(
+      `    ${approval.scope}  ${describeTarget(approval.target)}  ` +
+        `${approval.state.toLowerCase()}${approval.state === 'PENDING' ? `, ${humanDuration(left)} left` : ''}`
+    );
+    if (approval.state === 'PENDING') {
+      out(
+        muted(
+          `    approve: dakflare auth approve ${approval.id} --for <${GRANT_LADDER_S.map(humanDuration).join('|')}>` +
+            `   (max ${approval.max_s === null ? 'n/a' : humanDuration(approval.max_s)})`
+        )
+      );
+    }
+  }
+  return 0;
+}
+
+/** Map the Worker's decision errors onto the CLI's exit codes. */
+function decisionFailure(what, result) {
+  const code = apiErrorBody(result.data, result.status);
+  if (code === 'not_found' || code === 'not_pending' || code === 'expired' || code === 'not_grantable' || code === 'bad_target') {
+    return new CliError(`${what} failed: ${result.data?.message ?? code}`, exitCodeFor(code), {
+      error: code,
+      status: result.status,
+    });
+  }
+  return requestFailure(what, result);
+}
+
+async function commandAuthApprove(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['for', 'json']);
+  const json = MODE.json;
+  const id = rest[0];
+  if (!id) throw usage('dakflare auth approve <approval-id> [--for 15m]');
+
+  const seconds = parseGrantDuration(flags.for) ?? 900;
+  const cfg = requireConfig();
+  const result = await api(cfg, 'POST', `/v1/admin/approvals/${encodeURIComponent(id)}/approve`, {
+    duration_s: seconds,
+  });
+  if (result.status !== 200) throw decisionFailure('approve', result);
+
+  const data = result.data ?? {};
+  if (json) {
+    emitJson({ ok: true, ...data }, MODE);
+    return 0;
+  }
+
+  out(`Approved ${data.approval?.scope ?? 'authority'} for ${describeTarget(data.approval?.target)}`);
+  if (data.grant) {
+    out(`  grant          ${data.grant.id}`);
+    out(`  expires        ${iso(data.grant.expires_at)} (${humanDuration(data.granted_s)})`);
+  }
+  if (data.clamped === true) {
+    // Say it out loud: a silently shortened grant teaches an operator to
+    // distrust the tool, and this is the one place the ceiling bends a request.
+    out(
+      warn(
+        `  clamped        asked for ${humanDuration(data.requested_s)}, granted ${humanDuration(data.granted_s)}` +
+          (data.max_s === null ? '' : ` (max ${humanDuration(data.max_s)} for this scope)`)
+      )
+    );
+  }
+  return 0;
+}
+
+async function commandAuthReject(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['json']);
+  const json = MODE.json;
+  const id = rest[0];
+  if (!id) throw usage('dakflare auth reject <approval-id>');
+
+  const cfg = requireConfig();
+  const result = await api(cfg, 'POST', `/v1/admin/approvals/${encodeURIComponent(id)}/reject`, {});
+  if (result.status !== 200) throw decisionFailure('reject', result);
+
+  if (json) {
+    emitJson({ ok: true, ...(result.data ?? {}) }, MODE);
+    return 0;
+  }
+  out(`Rejected ${id}. The agent keeps being refused until it asks again.`);
+  return 0;
+}
+
+async function commandAuthGrants(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  if (rest[0] === 'revoke') return commandAuthGrantRevoke(rest.slice(1));
+
+  assertFlags(flags, ['token', 'live', 'json']);
+  const json = MODE.json;
+  const cfg = requireConfig();
+
+  const params = new URLSearchParams();
+  const token = stringFlag(flags, 'token');
+  if (token !== undefined) params.set('token', token);
+  if (flags.live === true) params.set('live', '1');
+  const query = params.toString() === '' ? '' : `?${params.toString()}`;
+
+  const result = await api(cfg, 'GET', `/v1/admin/grants${query}`);
+  if (result.status !== 200) throw requestFailure('grants', result);
+
+  const grants = result.data?.grants ?? [];
+  if (json) {
+    emitJson({ ok: true, grants }, MODE);
+    return 0;
+  }
+  if (grants.length === 0) {
+    out('no grants');
+    return 0;
+  }
+  out(`Grants (${grants.length})`);
+  const now = Date.now();
+  for (const grant of grants) {
+    const left = Math.round((grant.expires_at - now) / 1000);
+    const state = grant.revoked_at ? 'revoked' : left > 0 ? `${humanDuration(left)} left` : 'expired';
+    out(`  ${grant.id}`);
+    out(
+      `    ${grant.scope}  ${describeTarget(grant.target)}  ${state}  ` +
+        `used ${grant.use_count}  by ${grant.granted_by}`
+    );
+  }
+  return 0;
+}
+
+async function commandAuthGrantRevoke(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('auth');
+  assertFlags(flags, ['yes', 'json']);
+  const json = MODE.json;
+  const id = rest[0];
+  if (!id) throw usage('dakflare auth grants revoke <grant-id>');
+
+  if (flags.yes !== true) {
+    const proceed = await confirm(`Revoke grant ${id}? It stops working on the next request.`);
+    if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+  }
+
+  const cfg = requireConfig();
+  const result = await api(cfg, 'DELETE', `/v1/admin/grants/${encodeURIComponent(id)}`);
+  if (result.status !== 200) throw decisionFailure('revoke grant', result);
+
+  if (json) {
+    emitJson({ ok: true, ...(result.data ?? {}) }, MODE);
+    return 0;
+  }
+  out(`Revoked grant ${id}. It is refused on the next request.`);
   return 0;
 }
 
@@ -2990,7 +3455,7 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
   --wait [d]      poll until the command settles (default 30s, max 5m)
   --until <s>     stop at pending, dispatched, sent or delivered`,
 
-  auth: `Usage: dakflare auth <bootstrap|invite|invites|reset> [options]
+  auth: `Usage: dakflare auth <subcommand> [options]
 
   bootstrap --email <address>            create the first owner (no credential; enrol a passkey next)
   invite --email <address> [--role r] [--ttl seconds]
@@ -2998,7 +3463,21 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
   invites                                list invites and whether they were used
   reset --email <address> --yes          recovery: delete the account and mint a fresh owner invite
 
-Roles: owner, admin, member. The invite link is shown once; only its hash is stored.`,
+  mint-agent-token --name <text> --scope <a,b> [--device <id>] [--ttl seconds] [--max-per-hour n]
+                                         mint a dkf_agt_ token; printed once, only a digest is stored
+  agent-tokens [--all]                   list agent tokens, their budget and last use
+  revoke-agent-token <id> --yes          stop a token; it is refused on its next request
+
+  approvals [--state PENDING]            what agents are waiting on, with the ladder to pick from
+  approve <id> [--for 15m]               grant it for 1m|5m|15m|30m|1h|1d|7d|30d, clamped per scope
+  reject <id>                            refuse it; the agent is told, and may ask again
+
+  grants [--token <id>] [--live]         what is currently allowed, and how often it was used
+  grants revoke <grant-id> --yes         close a grant window now
+
+Roles: owner, admin, member. Agent tokens are a third credential, not a role: they
+may ASK, and a time-boxed grant decides what they may DO. --agent never prompts,
+so pass --yes on the revoking subcommands.`,
   up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
 
 Provisions the deployment on the account \`cf\` is logged into: creates the D1

@@ -50,6 +50,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -2257,6 +2258,225 @@ async function cmdSuite() {
     });
     rep.check('batch with a key -> 400', batchKey.status, 400);
     rep.check('...names the reason', batchKey.data?.error, 'idempotency_key_not_supported_in_batch');
+
+    run(rep);
+  }
+
+  /* ── agent control plane (v6.1 P0) ─────────────────────────────────────── */
+  console.log('-- agent control plane (v6.1 P0) --');
+  {
+    const rep = new Report('agent control plane');
+
+    // Talk to the Worker as an agent token: no X-Dakflare-Client, no admin token.
+    const agentApi = async (token, method, pathname, body) => {
+      const res = await fetch(WORKER_URL + pathname, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const mint = async (name, scopes, extra = {}) => {
+      const res = await admin('POST', '/v1/admin/agent-tokens', { name, scopes, ...extra });
+      return res;
+    };
+
+    const created = [];
+    const approving = async (approvalId, durationS) =>
+      admin('POST', `/v1/admin/approvals/${approvalId}/approve`, { duration_s: durationS });
+    /** Ask once and return the approval the Worker opened. */
+    const askAndApprove = async (token, to, durationS) => {
+      const asked = await agentApi(token, 'POST', '/v1/sms/send', {
+        device_id: identity.deviceId, to, body: 'p0',
+      });
+      const approvalId = asked.data?.approval_request?.id;
+      if (approvalId === undefined) return { asked, approvalId: null, approved: null };
+      return { asked, approvalId, approved: await approving(approvalId, durationS) };
+    };
+
+    /* identity and blast radius ------------------------------------------- */
+    const agent = await mint('p0 agent', ['messages:read', 'sms:send'], { max_per_hour: 20 });
+    created.push(agent.data?.id);
+    rep.check('mint an agent token -> 200', agent.status, 200);
+    rep.checkFn('the token is dkf_agt_<16 hex>_<secret>',
+      () => /^dkf_agt_[0-9a-f]{16}_[A-Za-z0-9_-]{40,}$/.test(String(agent.data?.token)));
+    rep.check('the mint does not echo the digest', 'token_hash' in (agent.data ?? {}), false);
+    rep.check('the list never carries the token',
+      ((await admin('GET', '/v1/admin/agent-tokens')).data?.agent_tokens ?? [])
+        .some((row) => 'token' in row || 'token_hash' in row), false);
+
+    const unknownScope = await mint('bad', ['devices:revoke']);
+    rep.check('minting a never-grantable scope -> 400', unknownScope.status, 400);
+    rep.check('...and it is named, not dropped',
+      (unknownScope.data?.unknown_scopes ?? []).includes('devices:revoke'), true);
+
+    rep.check('a scoped read is allowed -> 200',
+      (await agentApi(agent.data.token, 'GET',
+        `/v1/messages?device_id=${identity.deviceId}&limit=1`)).status, 200);
+    rep.check('revoking a device is refused by construction -> 403',
+      (await agentApi(agent.data.token, 'DELETE', '/v1/admin/devices/dev_does_not_exist')).status, 403);
+    rep.check('minting another token is refused -> 403',
+      (await agentApi(agent.data.token, 'POST', '/v1/admin/agent-tokens',
+        { name: 'x', scopes: ['messages:read'] })).status, 403);
+    rep.check('reading the grant table is refused -> 403',
+      (await agentApi(agent.data.token, 'GET', '/v1/admin/grants')).status, 403);
+
+    /* a production send needs a grant -------------------------------------- */
+    const recipient = '+8801711111111';
+    const firstAsk = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: recipient, body: 'p0 agent',
+    });
+    rep.check('a production send with no grant -> 202', firstAsk.status, 202);
+    rep.check('...says nothing was sent', firstAsk.data?.sent, false);
+    const first = firstAsk.data?.approval_request;
+    rep.check('...names the grant scope', first?.scope, 'sms:send:production');
+    rep.check('...names the recipient it is limited to',
+      (first?.target?.recipients ?? []).includes(recipient), true);
+    rep.check('...offers the eight-rung ladder', (first?.ladder_s ?? []).length, 8);
+    rep.check('...states the one-hour ceiling for production SMS', first?.max_s, 3600);
+
+    const repeat = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: recipient, body: 'p0 agent',
+    });
+    rep.check('repeating the same ask returns the same request',
+      repeat.data?.approval_request?.id, first?.id);
+    const elsewhere = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801722222222', body: 'p0 agent',
+    });
+    rep.check('a different recipient opens a different request',
+      elsewhere.data?.approval_request?.id !== first?.id, true);
+
+    /* the ceiling bends the request, and says so --------------------------- */
+    const monthLong = await approving(first.id, 2_592_000);
+    rep.check('approving a 30-day request -> 200', monthLong.status, 200);
+    rep.check('...is clamped to one hour', monthLong.data?.granted_s, 3600);
+    rep.check('...reports it clamped', monthLong.data?.clamped, true);
+    rep.check('...and names what was asked for', monthLong.data?.requested_s, 2_592_000);
+    rep.check('...with that scope\'s ceiling', monthLong.data?.max_s, 3600);
+    const grant = monthLong.data?.grant;
+
+    const sent = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: recipient, body: 'p0 granted',
+    });
+    rep.check('the same send under a live grant -> 200', sent.status, 200);
+    rep.check('...and queues a command', typeof sent.data?.command_id, 'string');
+
+    const outside = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801733333333', body: 'p0 outside',
+    });
+    rep.check('a grant for one recipient does not cover another -> 202', outside.status, 202);
+
+    const liveGrants = (await admin('GET', `/v1/admin/grants?token=${agent.data.id}&live=1`)).data?.grants ?? [];
+    rep.check('the grant records the send it authorised',
+      (liveGrants.find((row) => row.id === grant?.id)?.use_count ?? 0) >= 1, true);
+
+    /* revoking a grant is immediate ---------------------------------------- */
+    rep.check('revoking the grant -> 200',
+      (await admin('DELETE', `/v1/admin/grants/${grant?.id}`)).status, 200);
+    const afterGrantRevoke = await agentApi(agent.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: recipient, body: 'p0 after revoke',
+    });
+    rep.check('the next send after the grant was revoked -> 202', afterGrantRevoke.status, 202);
+
+    /* a 15-minute grant is enough, and its own hour is finite -------------- */
+    const shortLived = await approving(afterGrantRevoke.data.approval_request.id, 900);
+    rep.check('a 15-minute grant is granted in full', shortLived.data?.granted_s, 900);
+    rep.check('...and is not reported as clamped', shortLived.data?.clamped, false);
+
+    const budgetToken = await mint('p0 budget', ['sms:send'], { max_per_hour: 2 });
+    created.push(budgetToken.data?.id);
+    const budgetApproval = await askAndApprove(budgetToken.data.token, '+8801744444444', 900);
+    rep.check('a second agent gets its own request',
+      budgetApproval.approvalId !== null, true);
+    const firstOfTwo = await agentApi(budgetToken.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801744444444', body: 'budget 1',
+    });
+    const secondOfTwo = await agentApi(budgetToken.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801744444444', body: 'budget 2',
+    });
+    rep.check('two sends inside the budget -> 200',
+      [firstOfTwo.status, secondOfTwo.status], [200, 200]);
+    const thirdSend = await agentApi(budgetToken.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801744444444', body: 'budget 3',
+    });
+    rep.check('the third send with a budget of 2 -> 429', thirdSend.status, 429);
+    rep.check('...names agent_quota_exceeded', thirdSend.data?.error, 'agent_quota_exceeded');
+    rep.check('...and is retryable', thirdSend.data?.retryable, true);
+
+    /* an agent cannot approve its own request, and revocation is immediate -- */
+    const pendingForRefusal = await agentApi(budgetToken.data.token, 'POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801755555555', body: 'needs approval',
+    });
+    rep.check('an agent cannot approve its own request -> 403',
+      (await agentApi(budgetToken.data.token, 'POST',
+        `/v1/admin/approvals/${pendingForRefusal.data?.approval_request?.id}/approve`,
+        { duration_s: 900 })).status, 403);
+    rep.check('revoking an agent token -> 200',
+      (await admin('DELETE', `/v1/admin/agent-tokens/${agent.data.id}`)).status, 200);
+    rep.check('the revoked token is refused on its next request -> 401',
+      (await agentApi(agent.data.token, 'GET', '/v1/messages')).status, 401);
+
+    /* the CLI, as an agent: exit codes are part of the contract ------------- */
+    const cliHome = fs.mkdtempSync('/tmp/opencode/dakflare-agent-cli-');
+    const cliConfigDir = path.join(cliHome, '.config', 'dakflare');
+    fs.mkdirSync(cliConfigDir, { recursive: true });
+    const cliToken = await mint('p0 cli', ['sms:send', 'messages:read', 'devices:read'], {
+      max_per_hour: 1,
+    });
+    created.push(cliToken.data?.id);
+    fs.writeFileSync(
+      path.join(cliConfigDir, 'config.json'),
+      JSON.stringify({ url: WORKER_URL, token: cliToken.data.token })
+    );
+    const runCli = (...args) =>
+      spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: cliHome, NO_COLOR: '1' },
+      });
+    const cliSend = (...extra) =>
+      runCli('send', '--device', identity.deviceId, '--to', '+8801766666666',
+        '--body', 'cli agent', '--no-wait', '--agent', ...extra);
+
+    // The CLI envelope nests the failure under `error`, so read it there.
+    const cliDoc = (run) => JSON.parse(run.stdout.trim().split('\n').pop());
+
+    const cliNoGrant = cliSend();
+    rep.check('`dakflare send` as an agent with no grant exits 6', cliNoGrant.status, 6);
+    rep.checkFn('...and the document says approval_required', () => {
+      const doc = cliDoc(cliNoGrant);
+      return doc.status === 'error' && doc.error?.code === 'approval_required';
+    });
+    rep.checkFn('...and that nothing was sent', () => cliDoc(cliNoGrant).error?.details?.sent === false);
+
+    const cliApprovalId = cliDoc(cliNoGrant).error?.details?.approval_request?.id;
+    await approving(cliApprovalId, 900);
+    rep.check('the agent CLI sends once the grant exists -> exit 0', cliSend().status, 0);
+    const cliOverBudget = cliSend();
+    rep.check('the second send against a budget of 1 exits 6', cliOverBudget.status, 6);
+    rep.checkFn('...with agent_quota_exceeded', () =>
+      cliDoc(cliOverBudget).error?.code === 'agent_quota_exceeded');
+    rep.checkFn('...and safe_to_retry, because nothing was sent', () =>
+      cliDoc(cliOverBudget).error?.safe_to_retry === true);
+
+    // `audit` needs audit:read, which this token does not hold. Chosen over
+    // `revoke` because the CLI checks the device locally first and would answer
+    // not-found (exit 3) without ever reaching the gate.
+    const cliDenied = runCli('audit', '--agent');
+    rep.check('an agent CLI on an out-of-scope read -> exit 4', cliDenied.status, 4);
+    rep.checkFn('...with forbidden', () => cliDoc(cliDenied).error?.code === 'forbidden');
+
+    /* teardown ------------------------------------------------------------- */
+    for (const id of created) {
+      if (typeof id === 'string') await admin('DELETE', `/v1/admin/agent-tokens/${id}`);
+    }
+    const remaining = (await admin('GET', '/v1/admin/agent-tokens')).data?.agent_tokens ?? [];
+    rep.check('the suite revokes every token it minted',
+      remaining.filter((row) => created.includes(row.id)).length, 0);
+    fs.rmSync(cliHome, { recursive: true, force: true });
 
     run(rep);
   }

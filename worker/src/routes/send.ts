@@ -29,6 +29,7 @@ import {
 } from "../lib/config";
 import { internalError } from "./pair";
 import { enqueueOutboundCommand } from "../lib/commands";
+import { enforceAgentSend } from "../lib/agent-send";
 
 interface CommandPayload {
   command_id: string;
@@ -61,6 +62,22 @@ export async function handleSend(
   // device will ever poll, so the command would sit PENDING until it expired
   // with no signal to the caller. Reject it up front rather than black-hole it.
   if (!(await deviceIsRegistered(env, deviceId))) return err("device_unknown", 404);
+
+  // An agent token clears its target, its grant and its hourly budget before
+  // anything is queued. A human caller passes straight through.
+  //
+  // Order is deliberate: the gate runs BEFORE the enqueue, so there is no window
+  // in which a command is queued but its authority was refused. The cost is that
+  // an idempotent REPLAY also spends one grant use and one budget unit for a
+  // command it did not create. That is the safe direction (a retry can run out of
+  // budget, never out of grants), and the replay is still reported honestly.
+  const authority = await enforceAgentSend(env, actor, {
+    deviceId,
+    recipients: [to],
+    allRecipients: false,
+    ...(typeof input.reason === "string" ? { reason: input.reason.slice(0, 200) } : {}),
+  });
+  if (!authority.ok) return authority.response;
 
   const commandId = crypto.randomUUID();
   const expiresAt = Date.now() + clampExpiresInS(input.expires_in_s) * 1000;
@@ -107,7 +124,13 @@ export async function handleSend(
     action: "message.sent",
     actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
     subject: deviceId,
-    detail: { command_id: queued.commandId, count: 1 },
+    // The grant id is what makes "what did that 15-minute grant actually do" a
+    // query. It rides on this row rather than a second one per send.
+    detail: {
+      command_id: queued.commandId,
+      count: 1,
+      ...(authority.grantId === null ? {} : { grant_id: authority.grantId }),
+    },
   });
 
   return Response.json({ command_id: queued.commandId, replayed: false });
@@ -159,6 +182,15 @@ export async function handleSendBatch(
 
   if (prepared.length === 0) return Response.json({ command_ids: [] });
 
+  // One grant has to cover EVERY recipient in the batch, not just one of them.
+  const authority = await enforceAgentSend(env, actor, {
+    deviceId,
+    recipients: prepared.map((command) => command.to),
+    allRecipients: true,
+    ...(typeof input.reason === "string" ? { reason: input.reason.slice(0, 200) } : {}),
+  });
+  if (!authority.ok) return authority.response;
+
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   let res: Response;
   try {
@@ -191,7 +223,11 @@ export async function handleSendBatch(
     action: "message.sent",
     actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
     subject: deviceId,
-    detail: { command_ids: prepared.map((c) => c.command_id), count: prepared.length },
+    detail: {
+      command_ids: prepared.map((c) => c.command_id),
+      count: prepared.length,
+      ...(authority.grantId === null ? {} : { grant_id: authority.grantId }),
+    },
   });
 
   return Response.json({ command_ids: prepared.map((c) => c.command_id) });

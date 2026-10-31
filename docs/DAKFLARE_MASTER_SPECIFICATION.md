@@ -1,18 +1,19 @@
 # DakFlare — Master System Specification & Repository Reference
 
-> **Revision:** 6.0.0 (lease cutover · Corrected against the code)  
+> **Revision:** 6.1.0 P0 (agent identity and blast radius · Corrected against the code)  
 > **Component Versions:**
-> - Worker: `6.0.0` (`worker/package.json`, and `worker/src/lib/version.ts`, which is what `/v1/admin/health` reports)
-> - CLI (`dakflare`): `6.0.0` (`cli/bin/dakflare.js`)
-> - Root Package: `6.0.0` (`package.json`)
-> - Web Console: `6.0.0`, Svelte 5.57, SvelteKit 3.0 (`dashboard/package.json`)
-> - Mobile Simulator: `6.0.0` (versionCode 600), Svelte 5.56, SvelteKit 2.65, Tauri v2 (`simulator/package.json`, `simulator/src-tauri/tauri.conf.json`)
+> - Worker: `6.1.0` (`worker/package.json`, and `worker/src/lib/version.ts`, which is what `/v1/admin/health` reports)
+> - CLI (`dakflare`): `6.1.0` (`cli/bin/dakflare.js`)
+> - Root Package: `6.1.0` (`package.json`)
+> - Web Console: `6.1.0`, Svelte 5.57, SvelteKit 3.0 (`dashboard/package.json`)
+> - Mobile Simulator: `6.1.0` (versionCode 610), Svelte 5.56, SvelteKit 2.65, Tauri v2 (`simulator/package.json`, `simulator/src-tauri/tauri.conf.json`)
 > - Wire Protocol: `PROTOCOL_CONTRACT_V5.md` (Frozen Rev E)
 >
 > **Authority Map:**
 > - Wire Protocol Contract: `PROTOCOL_CONTRACT_V5.md`
 > - Consolidated Database Schema: `worker/migrations/0001_baseline.sql`
 > - v6 Enterprise & Hardening Schema: `worker/migrations/0002_v6_enterprise_and_hardening.sql`
+> - v6.1 Agent Control Plane Schema: `worker/migrations/0003_agent_control_plane.sql`
 > - Deployment & Operations: `docs/OPS_DEPLOY.md` and `docs/OPS_BACKUP.md`
 > - Agent Skills: `skills/dakflare-provision/`, `skills/dakflare-messaging/`, `skills/dakflare-flows/`
 > - Coding Agent Guidelines: `AGENTS.md`
@@ -20,6 +21,10 @@
 > **What 6.0.0 changed, in one line:** the command handoff is now an exclusive,
 > 60 s, token-bearing **lease**, the device acknowledges **after** `SmsManager`
 > accepts the message, acks are objects, and `ACKED_BY_DEVICE` is gone. See §4.3.
+>
+> **What 6.1.0 P0 adds, in one line:** a third credential type — an agent token —
+> plus a **time-boxed authority grant** that bounds what it may actually do. An
+> agent may *ask*; a human decides for how long, and over which recipients. See §4.4.
 
 ---
 
@@ -702,6 +707,105 @@ yet.
 
 ---
 
+### 4.4 The Agent Control Plane (6.1.0 P0)
+
+An autonomous caller is a third credential type, not a fifth role. It holds a
+**scope** (what it may attempt) and needs a **grant** (what it may actually do,
+until when, over what) before anything that costs money or interrupts traffic.
+
+#### 4.4.1 Tokens
+
+```
+dkf_agt_<id>_<secret>
+   id      16 lowercase hex, stored plainly: the lookup key, and what a human
+           names when revoking.
+   secret  32 random bytes, base64url. Stored ONLY as SHA-256 hex.
+```
+
+A plain digest is correct here and a password KDF would be wrong: the secret is
+256 bits of CSPRNG output with no structure to guess, so there is no dictionary to
+attack, and the comparison is over a fixed 32 bytes. The raw value is returned
+once by the mint and never stored, logged or listed.
+
+`agent_tokens` also carries the token's own **fixed hourly send budget**
+(`max_per_hour`, default 20; `sent_current_hour` + `hour_window_start`). It is a
+fixed window rather than a token bucket, deliberately: one row, one conditional
+`UPDATE`, no drift, and no dependence on when the previous window happened to
+roll. The spend is `UPDATE … WHERE id = ? AND (window expired OR sent < max)`,
+read back through `meta.changes` — the same shape the Durable Object's
+`write_budget` uses, for the same reason.
+
+#### 4.4.2 Scopes and grants
+
+`SCOPE_FOR_ACTION` (`worker/src/lib/agent-scopes.ts`) maps each admin route's
+audit action to the scope an agent needs. A route absent from that table is
+invisible to agents — the safe default for a route added later. `revoke` and
+`auth reset` are not in `TOKEN_SCOPES` at all, so no token can hold them and no
+grant can add them: the refusal is structural.
+
+An **authority grant** is a lease, in the same spirit as the command lease:
+
+| Column | Meaning |
+|---|---|
+| `scope`, `target_json` | one permission, over recipients / a device / a flow / a rule |
+| `granted_by`, `granted_at` | a human, a moment |
+| `expires_at` | absolute; every check is `expires_at > now` |
+| `revoked_at` | revoked is a timestamp, not a delete |
+| `use_count`, `last_used_at` | what the grant actually did |
+
+The ladder an operator may pick from is **1 m, 5 m, 15 m, 30 m, 1 h, 1 d, 7 d,
+30 d**; anything else snaps to the nearest rung (ties go shorter), then the
+scope's ceiling applies:
+
+| Scope | Max TTL | Target must name |
+|---|---|---|
+| `sms:send:production` | **1 h** | the recipients or the device |
+| `enable_shortcode` | 15 m | one rule or flow |
+| `dlq_bulk_replay` | 15 m | one device |
+| `flow_deploy_prod` | 1 d | one flow |
+| `rules:write`, `webhooks:write` | 1 d | — |
+| read scopes | 30 d | — |
+| `devices:revoke`, `auth:reset` | never | a human credential only |
+
+A request that is clamped says so: the response carries `requested_s`,
+`granted_s`, `clamped` and `max_s`. Silently shortening a grant is how an
+operator learns to distrust the tool.
+
+#### 4.4.3 The send decision
+
+Order matters, and each step is one statement:
+
+1. **Target.** A token bound to a handset may only use it.
+2. **Grant.** A live `sms:send:production` grant whose target covers every
+   recipient (a batch requires ALL of them, not one).
+3. **Grant use.** One conditional `UPDATE … WHERE revoked_at IS NULL AND
+   expires_at > ?`; `meta.changes == 0` is the refusal.
+4. **Budget.** One conditional `UPDATE` against the token's hourly window.
+
+No grant is an **approval request**, not a refusal: `202` with
+`{"error":"approval_required","sent":false,"state":"PENDING","approval_request":{…}}`,
+carrying the scope, the target, the ladder and the ceiling. The uniqueness key is
+`(token, scope, target)`, so a retry loop gets the same request instead of
+flooding the operator. A spent budget is `429 agent_quota_exceeded`.
+
+`authority_grants` and `approval_requests` are human-only surfaces: they are
+absent from `SCOPE_FOR_ACTION`, so an agent cannot approve its own request.
+
+#### 4.4.4 Expiry
+
+D1's `expires_at` check is the only thing that can ever grant access, so a grant
+is unusable the millisecond its window closes with or without help. The
+`AuthorityGuard` Durable Object (one object named `"global"`, mirroring
+`AuthGuard`) owns a timer per grant so the window also *closes observably*: it
+writes the `authority.expired` audit row on time even if no request touches the
+deployment, and it is where a console or handset notification will hang off. A
+timer that fires late, or not at all, costs an audit row and nothing else.
+
+Every use is audited: `message.sent` carries `grant_id` in its detail, so "what
+did that 15-minute grant actually do" is a query rather than a reconstruction.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -806,7 +910,7 @@ Every command output in `--json` and `--agent` mode adheres to this exact contra
   "command": "devices",
   "context": {
     "profile": "default",
-    "cli_version": "6.0.0",
+    "cli_version": "6.1.0",
     "worker_url": "https://dakflare-worker.example.workers.dev"
   },
   "data": { ... },
@@ -842,10 +946,15 @@ Every command output in `--json` and `--agent` mode adheres to this exact contra
 | `1` | Failed | Command failed, terminal state reached (`FAILED`/`EXPIRED`), check failed. |
 | `2` | Usage | Malformed syntax, unknown flag, missing required argument. |
 | `3` | Not Found | Device unknown, command ID unknown, missing route. |
-| `4` | Permission | Invalid admin token, failed authentication. |
-| `5` | Conflict | Duplicate entry, race condition. |
-| `6` | Precondition | No device paired, required prerequisite unfulfilled. |
+| `4` | Permission | Invalid admin token, failed authentication, a scope the agent token does not hold (`forbidden`). |
+| `5` | Conflict | Duplicate entry, race condition, an approval already decided (`not_pending`, `already_revoked`). |
+| `6` | Precondition | No device paired, required prerequisite unfulfilled, `approval_required`, `agent_quota_exceeded`. |
 | `75` | Temporary | Still in flight after wait timeout; network temporary failure. Safe to poll. |
+
+Two of the `6` codes are `retryable: true` and also `safe_to_retry: true` even
+though `send` is a mutating command: an `approval_required` and an
+`agent_quota_exceeded` both mean the action did **not** happen, so repeating it
+after a human answers cannot cause a second SMS.
 
 ### 6.3 Complete 15-Command CLI Matrix
 
@@ -859,7 +968,7 @@ Every command output in `--json` and `--agent` mode adheres to this exact contra
 | `revoke` | `<device-id>`, `--yes`, `--json`, `--agent` | Irreversibly decommissions a device in D1 and wipes DO state. |
 | `send` | `--to <e164>`, `--body <txt>`, `--device <id>`, `--wait [d]`, `--no-wait`, `--until <s>`, `--idempotency-key <k>` | Enqueues outbound SMS. **Waits up to 10s by default until `sent`** (`--until` defaults to `sent`). `--until` accepts `pending`, `dispatched`, `sent`, `delivered`; `acked` was removed in 6.0.0 and is not accepted. `SENT` means accepted by radio, **not** delivered! `verification.passed` is true only on `DELIVERED`. Exit 75 means still in flight. |
 | `status` | `<command-id>`, `--device <id>`, `--wait [d]`, `--until <s>` | Inspects live delivery state from DO SQLite queue. |
-| `auth` | `bootstrap`, `invite`, `invites`, `reset` | Manages operator bootstrap, single-use invite minting, and owner reset. |
+| `auth` | `bootstrap`, `invite`, `invites`, `reset`, `mint-agent-token --name <t> --scope <a,b> [--device <id>] [--ttl <s>] [--max-per-hour <n>]`, `agent-tokens [--all]`, `revoke-agent-token <id> --yes`, `approvals [--state S]`, `approve <id> [--for 15m]`, `reject <id>`, `grants [--token <id>] [--live]`, `grants revoke <grant-id> --yes` | Accounts and the agent control plane. Agent tokens are a third credential, not a role: `mint-agent-token` prints the value once and stores a digest; `approve` picks a duration from the ladder (1m/5m/15m/30m/1h/1d/7d/30d), clamps it to the scope's ceiling and says when it did. `--agent` never prompts, so pass `--yes` on the revoking subcommands. |
 | `audit` | `--tail [n]`, `--actor <lbl>`, `--limit <n>` | Reads operational audit trail from `/v1/admin/audit`. |
 | `key` | `fingerprint [--keystore <path>] [--alias <name>]` | Computes SHA-256 fingerprint of the release signing keystore. |
 | `capabilities` | `--agent` | Emits self-describing JSON manifest of all commands, effects (`read`, `mutating`, `destructive`), and flags. |
@@ -1009,6 +1118,7 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+- **The agent blast radius (6.1.0 P0), 49 checks:** a minted `dkf_agt_` token reads only what its scopes allow, cannot revoke a device, mint another token, read the grant table or approve its own request; a production send with no grant is `202 approval_required` and sends nothing; the same ask returns the same request; a 30-day request is clamped to one hour and says so; a grant covers its named recipients and not others; revoking a grant and revoking a token both take effect on the very next request; the third send against a budget of two is `429 agent_quota_exceeded`; and the CLI, driven by an agent token, exits `6`, `6`, `0` and `4` for those four outcomes.
 
 `simulator/core` additionally proves, without a network, that a recorded command keeps its lease token, that the ack body is `{"acks":[{"command_id":…,"claim_token":…}]}`, and that a row with no token (a composer send) sends no request at all.
 
