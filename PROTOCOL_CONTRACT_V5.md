@@ -1,16 +1,23 @@
-# DakFlare — Device↔Edge Protocol Contract (v5, Rev D)
+# DakFlare — Device↔Edge Protocol Contract (v5, Rev E)
 
 > **Status:** FROZEN. This document is the sole authority for the wire format between the Android
 > device and the Cloudflare Worker. Where it disagrees with any other document, **this file wins.**
-> **Frozen at:** Rev D · **Plan:** `dakflare_v5_master_plan_rev_c.md`
+> **Frozen at:** Rev E · **Plan:** `dakflare_v5_master_plan_rev_c.md`
 > **Supersedes:** §4 of `sms_gateway_v5_master_plan_and_timeline.md` (Rev B)
 > **Change policy:** any edit requires bumping the version and regenerating the test vectors.
 >
-> **Rev D** adds the routes shipped in P0/S10 (`GET /v1/admin/health`, `GET /source`,
+> **Rev D** added the routes shipped in P0/S10 (`GET /v1/admin/health`, `GET /source`,
 > `DELETE /v1/admin/devices/:id`, `GET|DELETE /v1/admin/rules`), the `413 payload_too_large` code, and
 > §11.7 input caps. **The signed wire format is unchanged** — §2 canonical string, §1.1 header grammars,
 > §3 signature encoding, and §4 vectors A/B/C are byte-identical, so the freeze still holds for any
 > already-written client.
+>
+> **Rev E** is a deliberate protocol break, and the one revision that is not additive. §6 replaces the
+> read-then-mark command handoff with an exclusive, token-bearing lease and renames two states; the
+> ack becomes an object array and the retired `ack_command_ids` key is refused with `400 bad_request`.
+> §2 to §5 are untouched, so an already-written client still signs correctly — it simply cannot
+> acknowledge a command until it sends `acks`. Worker and handset must ship together; there is no
+> compatibility shim, by decision, because a shim would keep two meanings of `DISPATCHED` alive.
 
 ---
 

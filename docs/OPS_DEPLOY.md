@@ -36,7 +36,7 @@ binding that is `undefined` in one tool and present in the other.
 | `worker` | `tsc --noEmit`, and the three configs agree |
 | `dashboard` | the console type-checks and builds |
 | `simulator` | the phone's Svelte UI type-checks |
-| `rust` | `cargo test --locked` in `simulator/core` (84 tests) and `simulator/flow` (8) |
+| `rust` | `cargo test --locked` in `simulator/core` (86 tests) and `simulator/flow` (8) |
 | `suite` | the conformance suite against a local stack: `pair` then `suite` |
 | `deploy` | only on a push to `main`, or a manual run: build, `cf build`, `cf deploy --prebuilt`, smoke test, `doctor` |
 
