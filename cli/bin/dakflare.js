@@ -1096,6 +1096,19 @@ function adbPresence() {
   return { available: true };
 }
 
+/** Every serial `adb devices` reports, in order, whatever its state. */
+function attachedSerials() {
+  const result = runAdb(['devices'], 8000);
+  if (result.error || result.status !== 0) return [];
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(/\s+/)[0])
+    .filter(Boolean);
+}
+
 function attachedDevice(preferredSerial) {
   const result = runAdb(['devices'], 8000);
   if (result.error || result.status !== 0) return null;
@@ -1138,8 +1151,17 @@ function probePhone(checks, serialFlag, json) {
 
   const device = attachedDevice(serialFlag);
   if (!device) {
-    checks.push({ name: 'phone-role', status: 'skip', detail: 'no adb device attached' });
-    checks.push({ name: 'phone-build', status: 'skip', detail: 'no adb device attached' });
+    // "no adb device attached" is wrong when one *is* attached and a pin points
+    // elsewhere: `--serial` or ANDROID_SERIAL naming a stale address used to
+    // report an empty bench, which sends the operator to look at the phone
+    // instead of at the variable.
+    const wanted = serialFlag ?? process.env.ANDROID_SERIAL ?? null;
+    const attached = attachedSerials();
+    const detail = wanted
+      ? `${wanted} is not attached (attached: ${attached.length > 0 ? attached.join(', ') : 'none'})`
+      : 'no adb device attached';
+    checks.push({ name: 'phone-role', status: 'skip', detail });
+    checks.push({ name: 'phone-build', status: 'skip', detail });
     return;
   }
   if (device.state !== 'device') {
