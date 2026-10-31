@@ -5,6 +5,7 @@
 	import Composer from '$lib/components/Composer.svelte';
 	import Dock from '$lib/components/Dock.svelte';
 	import Notice from '$lib/components/Notice.svelte';
+	import PermissionGate from '$lib/components/PermissionGate.svelte';
 	import { app } from '$lib/stores/app.svelte';
 	import { composer } from '$lib/stores/composer.svelte';
 
@@ -51,6 +52,11 @@
 		};
 	});
 </script>
+
+<!-- A sibling of the shell, not a child: the gate is fixed to the viewport so
+     it is not clipped by the phone frame, and it never sits inside the grid
+     that lays out the topbar, the scroll area and the dock. -->
+<PermissionGate />
 
 <div class="app">
 	<header class="topbar">
