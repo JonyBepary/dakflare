@@ -2,6 +2,7 @@
   "version": 1,
   "source": [
     "PROTOCOL_CONTRACT_V5.md \u00a74.2 \u2014 the five-line canonical string",
+    "NOTE Rev E: these vectors pin the SIGNING computation, which Rev E did not change. \u00a72 \u00a73 remain byte-identical. The sample body still says ack_command_ids and must not be read as the body to send: the live ack key is `acks`, and a request carrying ack_command_ids is refused with 400.",
     "RFC 6238 Appendix B \u2014 TOTP, HMAC-SHA1, 30 s step, ASCII secret 12345678901234567890"
   ],
   "empty_body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

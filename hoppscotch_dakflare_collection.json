@@ -64,7 +64,7 @@
           "auth": { "authType": "none", "authActive": true },
           "body": {
             "contentType": "application/json",
-            "body": "{\n  \"ack_command_ids\": [],\n  \"fcm_token\": \"hoppscotch-fcm-token\"\n}"
+            "body": "{\n  \"acks\": [],\n  \"fcm_token\": \"hoppscotch-fcm-token\"\n}"
           },
           "requestVariables": [],
           "responses": {}
@@ -83,7 +83,7 @@
           "auth": { "authType": "none", "authActive": true },
           "body": {
             "contentType": "application/json",
-            "body": "{\n  \"messages\": [\n    {\n      \"local_id\": \"hoppscotch_0001\",\n      \"sender\": \"+8801712345678\",\n      \"body\": \"hello from Hoppscotch\",\n      \"received_at\": \"2026-10-19T10:00:00.000Z\",\n      \"auto_reply_sent\": false\n    }\n  ],\n  \"ack_command_ids\": []\n}"
+            "body": "{\n  \"messages\": [\n    {\n      \"local_id\": \"hoppscotch_0001\",\n      \"sender\": \"+8801712345678\",\n      \"body\": \"hello from Hoppscotch\",\n      \"received_at\": \"2026-10-19T10:00:00.000Z\",\n      \"auto_reply_sent\": false\n    }\n  ],\n  \"acks\": []\n}"
           },
           "requestVariables": [],
           "responses": {}
