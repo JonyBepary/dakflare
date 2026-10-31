@@ -140,6 +140,10 @@ const ERROR_RULES = {
   device_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'list the paired devices' },
   command_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'find the command id' },
   unknown_command: { exit: 3, category: 'not_found', remediation: 'dakflare capabilities', fix: 'list the commands' },
+  cf_missing: { exit: 2, category: 'tooling', remediation: 'npm i -g cf', fix: 'install the Cloudflare CLI, then `cf auth login`' },
+  cf_not_authenticated: { exit: 4, category: 'permission', remediation: 'cf auth login', fix: 'authenticate cf, then re-run' },
+  cf_failed: { exit: 1, category: 'internal' },
+  provision_failed: { exit: 6, category: 'precondition' },
   not_registered: { exit: 3, category: 'not_found', remediation: 'dakflare auth bootstrap --email you@example.com', fix: 'create the owner account' },
   keystore_missing: { exit: 3, category: 'not_found' },
   fingerprint_missing: { exit: 3, category: 'not_found' },
@@ -303,6 +307,20 @@ const COMMAND_SPECS = {
     examples: [
       'dakflare auth bootstrap --email you@example.com',
       'dakflare auth invite --email teammate@example.com --role member',
+    ],
+  },
+  up: {
+    summary: 'Provision the deployment: resources, deploy, owner, pairing',
+    effect: 'mutating',
+    usage: 'dakflare up [--email <address>] [--yes] [--dry-run]',
+    flags: {
+      email: { type: 'string', note: 'owner address; skips the bootstrap prompt' },
+      yes: { type: 'boolean', note: 'skip the confirmation before deploying' },
+      'dry-run': { type: 'boolean', note: 'resolve, check and print the plan; change nothing' },
+    },
+    examples: [
+      'dakflare up --dry-run',
+      'dakflare up --email you@example.com --yes',
     ],
   },
   capabilities: {
@@ -1895,6 +1913,313 @@ async function commandSend(argv) {
   return outcomeExitCode(command, timedOut);
 }
 
+/* ───────────────────────────── up ───────────────────────────── */
+
+/**
+ * `dakflare up` — the whole install, on the operator's own account.
+ *
+ * The CLI itself never talks to Cloudflare; this command shells out to `cf`,
+ * which owns auth and the Worker upload. `cf` is a hard requirement rather than
+ * an optional one: a second deploy path (wrangler) would differ from this one
+ * only on someone else's machine, which is the hardest kind of bug to reproduce.
+ *
+ * Every step converges. An existing database, namespace or deployment is reused,
+ * so running `up` twice is safe and running it on a live deployment repairs it
+ * rather than replacing it.
+ */
+async function commandUp(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('up');
+  assertCommandFlags(flags, 'up');
+
+  const dryRun = flags['dry-run'] === true;
+  const email = stringFlag(flags, 'email');
+  if (email !== undefined && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw usage('--email must be an address, for example you@example.com');
+  }
+
+  const workerDir = path.join(__dirname, '..', '..', 'worker');
+  const plan = [];
+
+  // 1. cf, and a session it can use. Both failures name the fix rather than
+  //    leaving the operator to guess why a deploy did not happen.
+  const version = cf(['--version'], { allowFailure: true });
+  if (version === null) {
+    throw new CliError('the Cloudflare CLI (`cf`) is not on PATH.', 2, {
+      error: 'cf_missing',
+    });
+  }
+  const accounts = cf(['accounts', 'list'], { allowFailure: true });
+  if (accounts === null) {
+    throw new CliError('`cf` is installed but not authenticated.', 4, {
+      error: 'cf_not_authenticated',
+    });
+  }
+
+  // 2. Converge the two resources. `d1 list --name` is a search, so the match is
+  //    on the exact name; anything else would adopt the preview database.
+  const databaseId = ensureD1('sms_gateway', dryRun, plan);
+  const namespaceId = ensureKv('KV', dryRun, plan);
+
+  // 3. Write the ids into the config the deploy reads.
+  const configPath = path.join(workerDir, 'cloudflare.config.ts');
+  const configChange = writeConfigIds(configPath, databaseId, namespaceId, dryRun);
+  plan.push(configChange);
+
+  // 4. Migrate, then deploy with the secrets `init --local` already wrote.
+  plan.push(`cf d1 migrations apply ${databaseId} --remote`);
+  plan.push('cf deploy --secrets-file .dev.vars');
+  plan.push(
+    email === undefined
+      ? 'owner: skipped (pass --email to bootstrap one)'
+      : `owner: bootstrap ${email} (skipped if one exists)`
+  );
+  plan.push('pair: mint one pairing code');
+
+  if (dryRun) {
+    if (MODE.json) {
+      emitJson({ ok: true, summary: `plan: ${plan.length} steps`, dry_run: true, plan }, MODE);
+      return 0;
+    }
+    out('Plan (nothing was changed)');
+    for (const step of plan) out(`  ${step}`);
+    out('');
+    out('Re-run without --dry-run to apply.');
+    return 0;
+  }
+
+  if (flags.yes !== true) {
+    const confirmed = await confirm(`Deploy to the account cf is logged into? [y/N] `);
+    if (!confirmed) {
+      throw new CliError('cancelled before deploying.', 1, { error: 'cancelled' });
+    }
+  }
+
+  runCf(['d1', 'migrations', 'apply', databaseId, '--remote'], workerDir, 'applying migrations');
+  const deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
+
+  // 5. Verify against the deployment, not against the exit status of a deploy.
+  const url = readDeployUrl(deploy.stdout) ?? readConfigUrl();
+  if (url === null) {
+    throw new CliError(
+      'the deploy succeeded but its URL could not be read; run `dakflare init --url <url>`.',
+      6,
+      { error: 'provision_failed' }
+    );
+  }
+  const health = await fetchHealthFor(url);
+
+  // 6. The owner account, then a pairing code. Both are what "installed" means:
+  //    a deployment nobody can sign in to, or pair with, is not one.
+  const owner = await bootstrapOwner(url, email);
+  const pairing = await mintPairingCode(url);
+
+  if (MODE.json) {
+    emitJson(
+      {
+        ok: true,
+        summary: `deployed ${url}`,
+        data: {
+          url,
+          database_id: databaseId,
+          kv_namespace_id: namespaceId,
+          healthy: health,
+          owner,
+          pairing,
+        },
+      },
+      MODE
+    );
+    return 0;
+  }
+  out(`Deployed ${url}`);
+  out(`  database      ${databaseId}`);
+  out(`  kv namespace  ${namespaceId}`);
+  out(`  health        ${health ? 'ok' : 'not healthy — run `dakflare doctor`'}`);
+  if (owner.state === 'created') {
+    out('');
+    out('Owner invite (shown once):');
+    out(`  ${owner.link}`);
+  } else if (owner.state === 'exists') {
+    out('  owner         already exists; no invite minted');
+  }
+  if (pairing?.code) {
+    out('');
+    out(`Pairing code ${pairing.code} (expires in ${pairing.expires_in}s)`);
+  }
+  return 0;
+}
+
+/** Run `cf`, returning stdout, or null when the command failed. */
+function cf(args, { allowFailure = false, cwd } = {}) {
+  const result = spawnSync('cf', args, { cwd, encoding: 'utf8' });
+  if (result.error || result.status !== 0) {
+    if (allowFailure) return null;
+    throw new CliError(
+      `cf ${args.join(' ')} failed: ${(result.stderr || result.stdout || result.error?.message || '').trim()}`,
+      1,
+      { error: 'cf_failed' }
+    );
+  }
+  return result.stdout;
+}
+
+/** Run `cf` and turn a failure into a named step, so the operator knows where it stopped. */
+function runCf(args, cwd, step) {
+  const result = spawnSync('cf', args, { cwd, encoding: 'utf8' });
+  if (result.error || result.status !== 0) {
+    const detail = (result.stderr || result.stdout || result.error?.message || '').trim();
+    throw new CliError(`cf ${step} failed: ${detail}`, 1, { error: 'cf_failed', step });
+  }
+  return result;
+}
+
+function cfJson(args) {
+  const raw = cf(args);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** The database id, creating it only when the name is not already taken. */
+function ensureD1(name, dryRun, plan) {
+  const rows = cfJson(['d1', 'list', '--name', name]) ?? [];
+  const existing = rows.find((row) => row.name === name);
+  if (existing?.uuid) {
+    plan.push(`d1 ${name}: reuse ${existing.uuid}`);
+    return existing.uuid;
+  }
+  if (dryRun) {
+    plan.push(`d1 ${name}: create`);
+    return '<new-database-id>';
+  }
+  const created = cfJson(['d1', 'create', name]);
+  const uuid = created?.uuid ?? created?.result?.uuid;
+  if (typeof uuid !== 'string') {
+    throw new CliError('`cf d1 create` did not return an id.', 6, { error: 'provision_failed' });
+  }
+  return uuid;
+}
+
+/** The namespace id, matched on the exact title. */
+function ensureKv(title, dryRun, plan) {
+  const rows = cfJson(['kv', 'namespaces', 'list']) ?? [];
+  const existing = rows.find((row) => row.title === title);
+  if (existing?.id) {
+    plan.push(`kv ${title}: reuse ${existing.id}`);
+    return existing.id;
+  }
+  if (dryRun) {
+    plan.push(`kv ${title}: create`);
+    return '<new-namespace-id>';
+  }
+  const created = cfJson(['kv', 'namespaces', 'create', title]);
+  const id = created?.id ?? created?.result?.id;
+  if (typeof id !== 'string') {
+    throw new CliError('`cf kv namespaces create` did not return an id.', 6, {
+      error: 'provision_failed',
+    });
+  }
+  return id;
+}
+
+/**
+ * Put both ids into `cloudflare.config.ts`, editing in place.
+ *
+ * The file is regenerated from the template only when it is missing: a fork
+ * starts from the template, and the maintainer's copy may carry local edits that
+ * a regeneration would silently drop.
+ */
+function writeConfigIds(configPath, databaseId, namespaceId, dryRun) {
+  const templatePath = path.join(path.dirname(configPath), 'cloudflare.config.template.ts');
+  let source;
+  try {
+    source = fs.readFileSync(configPath, 'utf8');
+  } catch {
+    source = fs.readFileSync(templatePath, 'utf8');
+  }
+
+  const withKv = source.replace(
+    /(KV: bindings\.kv\(\{[\s\S]*?id:\s*")[^"]*(")/,
+    `$1${namespaceId}$2`
+  );
+  const withDb = withKv.replace(
+    /(DB: bindings\.d1\(\{)([\s\S]*?)(\})/,
+    (match, head, body, tail) =>
+      /id:\s*"[^"]*"/.test(body)
+        ? `${head}${body.replace(/id:\s*"[^"]*"/, `id: "${databaseId}"`)}${tail}`
+        : `${head}${body.trimEnd()}\n\t\t\t\tid: "${databaseId}",\n\t\t\t${tail}`
+  );
+
+  if (withDb === source) {
+    return 'cloudflare.config.ts: ids already match';
+  }
+  if (!dryRun) fs.writeFileSync(configPath, withDb);
+  return `cloudflare.config.ts: ${dryRun ? 'would set' : 'set'} DB and KV ids`;
+}
+
+/** The deployment URL from a `cf deploy` transcript, if it prints one. */
+function readDeployUrl(stdout) {
+  const match = /https:\/\/[A-Za-z0-9.-]+\.workers\.dev/.exec(String(stdout ?? ''));
+  return match ? match[0] : null;
+}
+
+function readConfigUrl() {
+  const { cfg } = readConfig();
+  return typeof cfg?.url === 'string' && cfg.url !== '' ? cfg.url.replace(/\/+$/, '') : null;
+}
+
+/** One health read, without needing a config that points at the new deployment. */
+async function fetchHealthFor(url) {
+  try {
+    const response = await fetch(`${url}/v1/admin/health`, {
+      headers: { Accept: 'application/json', 'X-Dakflare-Client': 'cli' },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    return response.status === 200 || response.status === 503;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create the owner, or report that one exists.
+ *
+ * `auth bootstrap` refuses once an owner is present, which on a second `up` is
+ * the correct and uninteresting outcome.
+ */
+async function bootstrapOwner(url, email) {
+  const address = email ?? process.env.DAKFLARE_OWNER_EMAIL;
+  if (address === undefined || address === '') {
+    return { state: 'skipped', reason: 'no --email given' };
+  }
+  const cfg = { url, token: readConfig().cfg?.token ?? '' };
+  if (cfg.token === '') return { state: 'skipped', reason: 'no admin token saved' };
+
+  const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email: address, role: 'owner' });
+  if (result.status === 201 || result.status === 200) {
+    return { state: 'created', email: address, link: result.data?.link ?? null };
+  }
+  if (result.status === 409) return { state: 'exists', email: address };
+  return { state: 'failed', email: address, status: result.status };
+}
+
+/** Mint one pairing code so the install ends with a phone-ready deployment. */
+async function mintPairingCode(url) {
+  const cfg = { url, token: readConfig().cfg?.token ?? '' };
+  if (cfg.token === '') return null;
+  const result = await api(cfg, 'POST', '/v1/admin/pairing-code', {
+    ttl_ms: DEFAULT_PAIR_TTL_S * 1000,
+  });
+  if (result.status !== 200) return null;
+  return {
+    code: result.data?.pairing_code ?? null,
+    expires_in: Math.round(((result.data?.expires_at ?? 0) - Date.now()) / 1000) || DEFAULT_PAIR_TTL_S,
+  };
+}
+
 /* ───────────────────────────── discovery ───────────────────────────── */
 
 /**
@@ -2443,6 +2768,7 @@ Usage: dakflare <command> [options]
   revoke        revoke one device (asks first; --yes to skip)
   send          queue an outbound SMS through a paired phone
   status        read one command's state; --wait follows it to the end
+  up            provision the deployment: resources, deploy, owner, pairing
   capabilities  every command, its effect and its flags
   describe      purpose, usage and flags for one command
   schema        the flag contract for one command, with types
@@ -2551,6 +2877,25 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
   reset --email <address> --yes          recovery: delete the account and mint a fresh owner invite
 
 Roles: owner, admin, member. The invite link is shown once; only its hash is stored.`,
+  up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
+
+Provisions the deployment on the account \`cf\` is logged into: creates the D1
+database and the KV namespace if they are missing, writes both ids into
+worker/cloudflare.config.ts, applies migrations, deploys with the secrets
+\`dakflare init --local\` wrote, checks health, creates the owner, and mints one
+pairing code.
+
+Every step converges, so running it twice is safe and running it on a live
+deployment repairs it rather than replacing it.
+
+  --email <address>  bootstrap this owner; skipped when one already exists
+  --yes              skip the confirmation before deploying
+  --dry-run          resolve, check and print the plan; change nothing
+
+Requires \`cf\` on PATH and authenticated (\`cf auth login\`). There is no
+wrangler fallback on purpose: two deploy paths differ only on someone else's
+machine.
+`,
   capabilities: `Usage: dakflare capabilities [--agent]
 
 Every command on one screen: its name, what it does to the world (read,
@@ -2609,6 +2954,7 @@ const COMMANDS = {
   revoke: commandRevoke,
   send: commandSend,
   status: commandStatus,
+  up: commandUp,
   capabilities: commandCapabilities,
   describe: commandDescribe,
   schema: commandSchema,
