@@ -1891,6 +1891,15 @@ async function cmdSuite() {
     rep.check('stale ack returns 200 (no-op, not an error)', staleAck.status, 200);
     rep.check('stale ack did NOT regress DELIVERED', (await readState()).state, 'DELIVERED');
 
+    // The retired v5.2.1 key is refused, not ignored. Silence would leave an old
+    // handset believing it acknowledged while its leases churn underneath it.
+    const retiredPoll = await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { ack_command_ids: [cmdId] });
+    rep.check('retired ack_command_ids on poll -> 400', retiredPoll.status, 400);
+    const retiredBatch = await device(identity, 'POST', '/v1/sms/incoming/batch',
+      { messages: [], ack_command_ids: [] });
+    rep.check('retired ack_command_ids on batch -> 400', retiredBatch.status, 400);
+
     // A wrong claim_token must be accepted (200) and do nothing: the command is
     // still LEASED and stays claimable by its real token holder.
     const wrongTokened = await admin('POST', '/v1/sms/send', {

@@ -1,20 +1,25 @@
 # DakFlare — Master System Specification & Repository Reference
 
-> **Revision:** 5.2.1 (Post-PR #1 · Corrected against the code)  
+> **Revision:** 6.0.0 (lease cutover · Corrected against the code)  
 > **Component Versions:**
-> - Worker: `5.1.0` (`worker/package.json`)
-> - CLI (`dakflare`): `0.2.0` (`cli/bin/dakflare.js`)
-> - Root Package: `5.0.0` (`package.json`)
-> - Web Console: Svelte 5.57, SvelteKit 3.0 (`dashboard/package.json`)
-> - Mobile Simulator: Svelte 5.56, SvelteKit 2.65, Tauri v2 (`simulator/package.json`)
-> - Wire Protocol: `PROTOCOL_CONTRACT_V5.md` (Frozen Rev D)
+> - Worker: `6.0.0` (`worker/package.json`, and `worker/src/lib/version.ts`, which is what `/v1/admin/health` reports)
+> - CLI (`dakflare`): `6.0.0` (`cli/bin/dakflare.js`)
+> - Root Package: `6.0.0` (`package.json`)
+> - Web Console: `6.0.0`, Svelte 5.57, SvelteKit 3.0 (`dashboard/package.json`)
+> - Mobile Simulator: `6.0.0` (versionCode 600), Svelte 5.56, SvelteKit 2.65, Tauri v2 (`simulator/package.json`, `simulator/src-tauri/tauri.conf.json`)
+> - Wire Protocol: `PROTOCOL_CONTRACT_V5.md` (Frozen Rev E)
 >
 > **Authority Map:**
 > - Wire Protocol Contract: `PROTOCOL_CONTRACT_V5.md`
 > - Consolidated Database Schema: `worker/migrations/0001_baseline.sql`
+> - v6 Enterprise & Hardening Schema: `worker/migrations/0002_v6_enterprise_and_hardening.sql`
 > - Deployment & Operations: `docs/OPS_DEPLOY.md` and `docs/OPS_BACKUP.md`
 > - Agent Skills: `skills/dakflare-provision/`, `skills/dakflare-messaging/`, `skills/dakflare-flows/`
 > - Coding Agent Guidelines: `AGENTS.md`
+>
+> **What 6.0.0 changed, in one line:** the command handoff is now an exclusive,
+> 60 s, token-bearing **lease**, the device acknowledges **after** `SmsManager`
+> accepts the message, acks are objects, and `ACKED_BY_DEVICE` is gone. See §4.3.
 
 ---
 
@@ -48,11 +53,12 @@ The central thesis: **The phone is the radio; the Worker is the coordinator.**
 │            ▼                                         ▼                                                 ▼
 │   [Cloudflare D1]                             [Cloudflare KV]                   [DeviceGateway DO]     │
 │   Database: sms_gateway                       Cache: KV                         One instance per phone │
-│   Baseline: 0001_baseline.sql                 FCM OAuth2 Bearer Access Token    - SQLite Command Queue │
-│   (17 tables: messages, devices,              (Google Service Account JWT)      - Forward State Mach.  │
-│    rules, workflows, user, passkey,                                             - Replay Nonces Table  │
-│    alerts, rule_hits, audit_log, etc.)                                          - Alarms (ACK/Offline) │
-│                                                                                 - WebSocket Server     │
+│   0001_baseline.sql (17 tables)               FCM OAuth2 Bearer Access Token    - SQLite Command Queue │
+│   0002_v6_enterprise (+5 tables,              (Google Service Account JWT)      - Lease state machine  │
+│   3 columns) = 22 tables: messages,                                             - Replay Nonces Table  │
+│   devices, rules, workflows, user,                                              - Alarms (lease/offln) │
+│   passkey, alerts, rule_hits, webhooks,                                         - WebSocket Server     │
+│   integration_deliveries, device_sims, etc.)                                                           │
 └────────────┬─────────────────────────────────────────┬──────────────────────────────────▲──────────────┘
              │                                         │                                  │
              │                                         ▼                                  │ Signed Wire
@@ -65,8 +71,8 @@ The central thesis: **The phone is the radio; the Worker is the coordinator.**
 │                                                      ▼                                                 │
 │   [Android Handset (Tauri v2 + Rust Core)] ◄─────────┘                                                 │
 │   - Role: android.app.role.SMS (Default Messaging App owns content://sms provider write path)          │
-│   - Identity: Non-exportable P-256 Key wrapped by Android KeyStore (keystore:v1:<iv>:<ct>)              │
-│   - Background: GatewayService (persistent gateway loop) & RespondViaMessageService                     │
+│   - Identity: Non-exportable P-256 Key wrapped by Android KeyStore (keystore:v1:<iv>:<ct>)             │
+│   - Background: GatewayService (persistent gateway loop) & RespondViaMessageService                    │
 │   - Dedicated WebSocket Client (simulator/src-tauri/src/socket.rs): real-time command delivery (~3.5s) │
 │   - Embedded libSQL Store (simulator.db): immediate local durability before network transmission       │
 │   - Dual-Target Flow Engine: Native Rust (Phone) & WebAssembly flow.wasm (Edge)                        │
@@ -82,7 +88,7 @@ The central thesis: **The phone is the radio; the Worker is the coordinator.**
 
 ---
 
-## 2. Architectural Evolutions (Post-PR #1 Consolidation)
+## 2. Architectural Evolutions (Consolidation and the 6.0.0 Lease Cutover)
 
 The codebase underwent a major architectural cleanup and hardening during the PR #1 consolidation:
 
@@ -112,12 +118,18 @@ The codebase underwent a major architectural cleanup and hardening during the PR
    - Every CLI command outputs a strict envelope with `status: "ok" | "error"`.
    - Error categories live under `error.category` (`"usage"`, `"tooling"`, `"not_found"`, `"permission"`, `"conflict"`, `"precondition"`, `"temporary"`, `"internal"`).
    - Exit codes: `0` ok, `1` failed, `2` usage, `3` not found, `4` permission, `5` conflict, `6` precondition, `75` temporary (in flight).
+8. **Exclusive Command Lease (6.0.0, the one deliberate protocol break):**
+   - The read-then-mark handoff is gone. A command is claimed by a single `UPDATE … RETURNING` that sets `state = 'LEASED'`, a per-row `claim_token` and `lease_until`, so a WebSocket push and an HTTP poll racing for the same command cannot both receive it. See §4.3.
+   - `ACKED_BY_DEVICE` is deleted. The machine is `PENDING → LEASED → DISPATCHED → SENT → DELIVERED` (+ `FAILED`, `EXPIRED`), and the two old values moved: 5.x `DISPATCHED` is now `LEASED`, 5.x `ACKED_BY_DEVICE` is now `DISPATCHED`.
+   - The device acknowledges **after** `SmsManager` returns, and the ack carries the token it was leased with. The lease is 60 s (`LEASE_MS`) precisely because a real send outlasts an 8 s handshake.
+   - Acks are objects (`acks: [{command_id, claim_token}]`) on both transports. A body carrying `ack_command_ids` is refused with `400 bad_request` rather than ignored, so a v5.2.1 phone fails loudly instead of churning leases while it believes it acknowledged.
+   - Worker and handset ship together. There is no shim, by decision: a shim would keep two meanings of `DISPATCHED` alive in one deployment.
 
 ---
 
 ## 3. Cryptographic Contract & Authentication Architecture
 
-### 3.1 Signed Request Protocol (PROTOCOL_CONTRACT_V5 Rev D)
+### 3.1 Signed Request Protocol (PROTOCOL_CONTRACT_V5 Rev E)
 
 Signed device requests to the Worker must carry:
 * `X-Device-Id`: `/^[A-Za-z0-9_-]{8,64}$/`
@@ -139,6 +151,8 @@ METHOD\nPATH\nTS\nNONCE\nBODY_SHA256
 | **A** | `POST` | `/v1/sms/outgoing/poll` | `1776470400000` | `a3f1c0d29b7e4f8a1c6d5e2b9f0a7c34` | `f8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9` |
 | **B** | `GET` | `/v1/device/ws` | `1776470400000` | `0f1e2d3c4b5a69788796a5b4c3d2e1f0` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | **C** | `POST` | `/v1/sms/incoming/batch` | `1776470400000` | `deadbeefcafebabe0123456789abcdef` | `1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6` |
+
+**These vectors pin the SIGNING computation, which Rev E did not change.** The canonical string (§2), the header grammars (§1.1) and the signature encoding (§3) are byte-identical, so an already-written client still signs correctly. Vector A's sample body still reads `ack_command_ids` and is **not** the body to send: the live ack key is `acks`, and a request carrying `ack_command_ids` is refused with `400 bad_request`. The vector is deliberately not regenerated, because regenerating it would churn three independent implementations (Worker, Rust, harness) to prove something no consumer of the vectors depends on.
 
 ### 3.3 The Four Authentication Factors
 
@@ -163,9 +177,13 @@ These protect account creation and sign-in. Neither is something an operator sig
 
 ## 4. Complete Data Models & Storage Contracts
 
-### 4.1 Cloudflare D1 Relational Schema (`worker/migrations/0001_baseline.sql`)
+### 4.1 Cloudflare D1 Relational Schema
 
-All 17 tables produced by the baseline migration:
+Two migrations, applied in order. `0001` is the consolidated baseline (17 tables,
+dumped from production and verified against it); `0002` is the v6 additive layer
+(5 tables, 3 columns), so a v5.2.1 Worker keeps running against the same database.
+
+#### 4.1.1 `worker/migrations/0001_baseline.sql` — all 17 tables
 
 ```sql
 -- 1. Operator Accounts
@@ -382,6 +400,131 @@ CREATE TABLE workflows (
 );
 ```
 
+#### 4.1.2 `worker/migrations/0002_v6_enterprise_and_hardening.sql` — 5 tables, 3 columns
+
+Every statement is `CREATE … IF NOT EXISTS` or `ALTER TABLE … ADD COLUMN`, so
+applying it twice is a no-op and a 5.x Worker that does not know these tables keeps
+working. The Durable Object's SQLite is untouched by it: only D1.
+
+```sql
+-- 18. Webhook endpoints (dual-ring secret, "v2:whsec_…,v1:whsec_…")
+CREATE TABLE IF NOT EXISTS webhooks (
+  id                  TEXT PRIMARY KEY NOT NULL,
+  name                TEXT NOT NULL,
+  vertical            TEXT NOT NULL CHECK (vertical IN ('generic','ecommerce','finance','healthcare','education')),
+  target_url          TEXT NOT NULL,
+  enabled             INTEGER NOT NULL DEFAULT 1,
+  events_json         TEXT NOT NULL,
+  secret_ring         TEXT NOT NULL,
+  custom_headers_json TEXT,
+  timeout_ms          INTEGER NOT NULL DEFAULT 10000,
+  max_attempts        INTEGER NOT NULL DEFAULT 8,
+  device_id           TEXT REFERENCES devices(device_id) ON DELETE SET NULL,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL
+);
+
+-- 19. Webhook delivery ledger (UNIQUE idempotency_key is the retry guard)
+CREATE TABLE IF NOT EXISTS integration_deliveries (
+  id               TEXT PRIMARY KEY NOT NULL,
+  webhook_id       TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+  event_type       TEXT NOT NULL,
+  idempotency_key  TEXT NOT NULL UNIQUE,
+  payload_json     TEXT NOT NULL,
+  state            TEXT NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING','DELIVERED','RETRYING','DEAD_LETTER')),
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at  INTEGER NOT NULL,
+  last_http_status INTEGER,
+  last_error       TEXT,
+  delivered_at     INTEGER,
+  created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_deliveries_dispatch
+  ON integration_deliveries(state, next_attempt_at);
+
+-- 20. Financial ledger (money is integer minor units, never a float)
+CREATE TABLE IF NOT EXISTS financial_transactions (
+  id                  TEXT PRIMARY KEY NOT NULL,
+  device_id           TEXT NOT NULL,
+  message_id          TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  provider            TEXT NOT NULL,
+  trx_id              TEXT NOT NULL,
+  direction           TEXT NOT NULL CHECK (direction IN ('CRDT','DBIT')),
+  amount_minor        INTEGER NOT NULL,
+  currency            TEXT NOT NULL DEFAULT 'BDT',
+  fee_minor           INTEGER NOT NULL DEFAULT 0,
+  balance_after_minor INTEGER,
+  counterparty        TEXT,
+  status              TEXT NOT NULL DEFAULT 'UNCLAIMED' CHECK (status IN ('UNCLAIMED','CLAIMED','DISPUTED')),
+  claimed_by_ref      TEXT,
+  claimed_at          INTEGER,
+  iso20022_json       TEXT NOT NULL,
+  occurred_at         INTEGER NOT NULL,
+  created_at          INTEGER NOT NULL,
+  UNIQUE(provider, trx_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fin_trx_lookup
+  ON financial_transactions(trx_id, status);
+
+-- 21. Interactive sessions (reply correlated by peer + code table)
+CREATE TABLE IF NOT EXISTS interactive_sessions (
+  id                  TEXT PRIMARY KEY NOT NULL,
+  vertical            TEXT NOT NULL CHECK (vertical IN ('ecommerce','healthcare','education')),
+  external_ref        TEXT NOT NULL,
+  peer_e164           TEXT NOT NULL,
+  device_id           TEXT NOT NULL,
+  sim_slot            INTEGER NOT NULL DEFAULT 1,
+  state               TEXT NOT NULL DEFAULT 'AWAITING_REPLY' CHECK (state IN ('AWAITING_REPLY','CONFIRMED','RESCHEDULE_REQUESTED','CANCELLED','EXPIRED')),
+  expected_codes_json TEXT NOT NULL,
+  metadata_json       TEXT NOT NULL,
+  outbound_command_id TEXT,
+  reply_message_id    TEXT,
+  expires_at          INTEGER NOT NULL,
+  resolved_at         INTEGER,
+  created_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interactive_peer_active
+  ON interactive_sessions(peer_e164, state, expires_at);
+
+-- 22. Multi-SIM inventory (fixed-window token bucket per slot)
+CREATE TABLE IF NOT EXISTS device_sims (
+  device_id         TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+  sim_slot          INTEGER NOT NULL CHECK (sim_slot IN (1,2)),
+  subscription_id   INTEGER,
+  carrier_name      TEXT,
+  mcc_mnc           TEXT,
+  msisdn_e164       TEXT,
+  role_affinity     TEXT NOT NULL DEFAULT 'general' CHECK (role_affinity IN ('general','otp_high','bulk_edu','standby_failover')),
+  max_per_hour      INTEGER NOT NULL DEFAULT 120,
+  sent_current_hour INTEGER NOT NULL DEFAULT 0,
+  hour_window_start INTEGER NOT NULL DEFAULT 0,
+  consecutive_fails INTEGER NOT NULL DEFAULT 0,
+  radio_state       TEXT NOT NULL DEFAULT 'READY' CHECK (radio_state IN ('READY','DEGRADED','NO_SERVICE','LOCKED')),
+  updated_at        INTEGER NOT NULL,
+  PRIMARY KEY (device_id, sim_slot)
+);
+
+-- Split-horizon bookkeeping. Defaults keep today's behaviour.
+ALTER TABLE workflows ADD COLUMN execution_policy TEXT NOT NULL DEFAULT 'HYBRID_HANDSET_FIRST';
+ALTER TABLE workflows ADD COLUMN source_kind      TEXT NOT NULL DEFAULT 'canvas';
+ALTER TABLE flow_runs ADD COLUMN checkpoint_json  TEXT;
+```
+
+Two deliberate departures from the blueprint's DDL: money is `amount_minor` /
+`fee_minor` integers with `UNIQUE(provider, trx_id)`, which is the double-credit
+guard; and `source_kind` carries no `CHECK`, because `ALTER TABLE ADD COLUMN` with
+a check is a foot-gun for existing rows and the column is read, not trusted.
+
+`execution_policy` is read by the console and the handset to decide where a graph
+runs. `HYBRID_HANDSET_FIRST` is the default so nobody's matching changes on
+upgrade; a rule compiled from the rules form records `EDGE_ONLY`, because a rule
+is an online feature. Operators change the policy per workflow from the console or
+the app, which is why it is a column and not a build-time constant.
+
+**Production state:** `0002` is applied locally and exercised by the suite, but not
+yet applied to the production database. `dakflare doctor` reports it as the one
+failing check until the manual migrations workflow runs, after a backup.
+
 ### 4.2 Durable Object SQLite Schemas
 
 #### A. `DeviceGateway` DO (One Instance per Device)
@@ -408,9 +551,14 @@ CREATE TABLE IF NOT EXISTS commands (
   state           TEXT NOT NULL DEFAULT 'PENDING',
   created_at      INTEGER NOT NULL,
   expires_at      INTEGER NOT NULL,
-  idempotency_key TEXT
+  idempotency_key TEXT,
+  claim_token     TEXT,
+  lease_until     INTEGER,
+  sim_slot        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_commands_state ON commands(state, priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_commands_dispatch
+  ON commands(state, lease_until, priority, created_at);
 
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
   id       TEXT PRIMARY KEY,
@@ -435,6 +583,15 @@ CREATE TABLE IF NOT EXISTS write_budget (
 );
 ```
 
+`scheduled_tasks.kind` is one of:
+
+| Kind | Timer | What it does |
+|---|---|---|
+| `expire` | `expires_at` | `PENDING`/`LEASED` → `EXPIRED`. |
+| `lease_expiry` | `now + LEASE_MS` (60 s) | Reverts its own lease to `PENDING`, closes the owning socket (1011), sends the wake push. Carries `claim_token`, so a re-leased command is left alone. |
+| `ack_wake` | `now + ACK_TIMEOUT_MS` (8 s) | Closes the socket of a device that has not acked. **Never releases the lease**: releasing a command mid-send is what duplicates an SMS. Armed only when the command was pushed over a socket. |
+| `offline_alert` | `OFFLINE_ALERT_MS` (15 min) | Raises and self-resolves `device_offline`. |
+
 #### B. `AuthGuard` DO (Singleton Global Lockout Authority)
 ```sql
 CREATE TABLE IF NOT EXISTS auth_windows (
@@ -446,6 +603,86 @@ CREATE TABLE IF NOT EXISTS auth_windows (
 CREATE INDEX IF NOT EXISTS idx_auth_windows_expiry
   ON auth_windows(locked_until, window_start);
 ```
+
+
+### 4.3 The Command State Machine (Rev E)
+
+The one behavioural contract every other part of the system reads.
+
+```
+PENDING ──claim──► LEASED ──ack(token)──► DISPATCHED ──SENT receipt──► SENT ──carrier report──► DELIVERED
+   ▲                  │                        │                          │
+   └──lease_expiry────┘                        └──────► FAILED ◄───────────┘
+
+PENDING | LEASED ──expire timer──► EXPIRED
+
+terminal: DELIVERED, FAILED, EXPIRED
+```
+
+| From | To | Trigger |
+|---|---|---|
+| `PENDING` | `LEASED` | atomic claim by a WS push or a poll |
+| `LEASED` | `DISPATCHED` | device ack carrying the matching `claim_token` |
+| `LEASED` | `PENDING` | `lease_expiry`, or a push that never reached the device |
+| `PENDING`, `LEASED` | `EXPIRED` | `expire` timer |
+| `DISPATCHED` | `SENT` | per-part `SENT` receipt |
+| `DISPATCHED`, `SENT` | `FAILED` | send or delivery failure |
+| `SENT` | `DELIVERED` | carrier report |
+
+Terminal: `DELIVERED`, `FAILED`, `EXPIRED`. Everything else is a no-op that
+returns success, because a late or duplicated receipt from Android is normal.
+
+**Why a lease, and why 60 s.** The device acks after `SmsManager` accepts the
+message, not when it writes the row locally. On a congested cell or during a
+handover a send routinely takes longer than 8 s, so an 8 s lease would expire
+mid-send, the command would be re-claimed by another transport, and the late ack
+would be a no-op: a second real SMS. 60 s covers a normal send with room to spare
+and is still short enough that a dead phone does not hold a command for long.
+
+The residual case is stated rather than hidden: a send that somehow exceeds 60 s
+will have its lease reverted and can be claimed again, and its late ack will then
+be refused by the token guard. That is the same duplicate the lease is meant to
+prevent, one order of magnitude rarer. A longer lease trades that for a longer
+stall on a phone that has died mid-send; 60 s is the chosen point on that curve.
+
+**The claim is one statement**, so two transports cannot both win it:
+
+```sql
+UPDATE commands
+   SET state = 'LEASED',
+       claim_token = lower(hex(randomblob(16))),
+       lease_until = ?
+ WHERE command_id IN (
+   SELECT command_id FROM commands
+    WHERE (state = 'PENDING' OR (state = 'LEASED' AND lease_until <= ?))
+      AND expires_at > ?
+    ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at
+    LIMIT ?
+ )
+RETURNING command_id, to_e164, body, priority, expires_at, claim_token, sim_slot;
+```
+
+**The ack is an object, on both transports**, and is the only transition a device
+drives on its own, so it is the only one that requires proof of ownership:
+
+```jsonc
+// POST /v1/sms/outgoing/poll  and  POST /v1/sms/incoming/batch
+{ "acks": [ { "command_id": "…", "claim_token": "…" } ] }
+
+// WebSocket frame
+{ "op": "ack", "acks": [ { "command_id": "…", "claim_token": "…" } ] }
+```
+
+The command payload carries the token it was claimed with:
+
+```jsonc
+{ "command_id": "…", "to": "+8801…", "body": "…", "priority": "normal",
+  "expires_at": 1793000000000, "claim_token": "…", "sim_slot": 0 }
+```
+
+`sim_slot` is `0` for "no preference"; the phone falls back to its own device
+setting, exactly as it did before the column existed. Nothing writes a preference
+yet.
 
 ---
 
@@ -480,8 +717,8 @@ flowchart LR
 1. **`worker`:** `tsc --noEmit` and `npm run check:config`.
 2. **`dashboard`:** `svelte-check` and SvelteKit static asset build.
 3. **`simulator`:** `svelte-check` for mobile UI.
-4. **`rust`:** `cargo test --locked` across `simulator/core` (84 tests) and `simulator/flow` (8 tests).
-5. **`suite`:** Starts local development stack (`wrangler dev --local`) and runs `dakflare_test_harness.mjs pair && suite`.
+4. **`rust`:** `cargo test --locked` across `simulator/core` (86 tests) and `simulator/flow` (8 tests).
+5. **`suite`:** Starts local development stack (`wrangler dev --local`) and runs `dakflare_test_harness.mjs pair && suite`. The stack shortens the timing knobs through `--var` (`LEASE_MS=1500`, `ACK_TIMEOUT_MS=1500`, `OFFLINE_ALERT_MS=5000`), so the run does not wait a real minute for a lease to expire.
 6. **`deploy`:** Only runs on pushes to `main` or manual dispatch. Builds console, runs `cf build` and `cf deploy --prebuilt`, executes `smoke.sh`, and verifies edge health via `dakflare doctor`.
 
 ### 5.3 Manual Migrations Workflow (`.github/workflows/migrations.yml`)
@@ -522,6 +759,22 @@ cd simulator && npx tauri android build --apk --target aarch64
 
 A release APK replaces cleanly because the signing certificate does not change, so pairing and the battery whitelist survive an install.
 
+**Bump the version in two files, and clear the Gradle cache.** `bundle.android.versionCode` and `version` live in `simulator/src-tauri/tauri.conf.json`; `app/build.gradle.kts` reads that file at configuration time **without declaring it an input**, so a cached configuration serves the previous values. The build then reports success and produces an APK with the old `versionCode`, while `gen/android/app/tauri.properties` shows the new one, which is not read by the build. Clear it before rebuilding:
+
+```bash
+rm -rf simulator/src-tauri/gen/android/.gradle/configuration-cache \
+       simulator/src-tauri/gen/android/app/.gradle
+```
+
+Verify the artefact, never the properties file:
+
+```bash
+$(ls ~/Android/Sdk/build-tools/*/aapt2 | tail -1) dump badging \
+  simulator/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk | head -1
+```
+
+An installed APK must satisfy `adb shell dumpsys package dev.dakflare.simulator | grep versionCode`. A versionCode lower than the installed one is a downgrade and Android refuses it.
+
 ---
 
 ## 6. CLI Reference & Discovery Contract (`dakflare`)
@@ -537,7 +790,7 @@ Every command output in `--json` and `--agent` mode adheres to this exact contra
   "command": "devices",
   "context": {
     "profile": "default",
-    "cli_version": "0.2.0",
+    "cli_version": "6.0.0",
     "worker_url": "https://dakflare-worker.example.workers.dev"
   },
   "data": { ... },
@@ -588,7 +841,7 @@ Every command output in `--json` and `--agent` mode adheres to this exact contra
 | `pair` | `--label <txt>`, `--qr`, `--ttl <sec>` | Mints single-use pairing code (default TTL 600s). `--qr` renders terminal ANSI QR. |
 | `devices` | `--json`, `--agent` | Lists paired handsets, SIM slots, last seen contact, and FCM status. |
 | `revoke` | `<device-id>`, `--yes`, `--json`, `--agent` | Irreversibly decommissions a device in D1 and wipes DO state. |
-| `send` | `--to <e164>`, `--body <txt>`, `--device <id>`, `--wait [d]`, `--no-wait`, `--until <s>`, `--idempotency-key <k>` | Enqueues outbound SMS. **Waits up to 10s by default until `sent`** (`--until` defaults to `sent`). `SENT` means accepted by radio, **not** delivered! `verification.passed` is true only on `DELIVERED`. Exit 75 means still in flight. |
+| `send` | `--to <e164>`, `--body <txt>`, `--device <id>`, `--wait [d]`, `--no-wait`, `--until <s>`, `--idempotency-key <k>` | Enqueues outbound SMS. **Waits up to 10s by default until `sent`** (`--until` defaults to `sent`). `--until` accepts `pending`, `dispatched`, `sent`, `delivered`; `acked` was removed in 6.0.0 and is not accepted. `SENT` means accepted by radio, **not** delivered! `verification.passed` is true only on `DELIVERED`. Exit 75 means still in flight. |
 | `status` | `<command-id>`, `--device <id>`, `--wait [d]`, `--until <s>` | Inspects live delivery state from DO SQLite queue. |
 | `auth` | `bootstrap`, `invite`, `invites`, `reset` | Manages operator bootstrap, single-use invite minting, and owner reset. |
 | `audit` | `--tail [n]`, `--actor <lbl>`, `--limit <n>` | Reads operational audit trail from `/v1/admin/audit`. |
@@ -634,6 +887,26 @@ The Web Console is an operator console built with Svelte 5.57 and SvelteKit 3.0.
   - Password: `[Set Password]` form (triggers 210,000 PBKDF2 Web Worker calculation), `[Remove Password]`.
   - Invites: `[+ Mint Invite]` drawer (`InviteMint.svelte`), role selector (`owner`, `admin`, `member`; `owner` only when the actor is an owner), `[Revoke Invite]`.
 
+### 7.2 Command State Vocabulary (`dashboard/src/lib/commands.ts`)
+
+One table, shared by the tracker, the badge and the tooltip. It is the console's copy
+of §4.3, and it must match the Worker or the tracker tells an operator something the
+gateway is not doing.
+
+| State | Progress rank | Badge label | Meaning shown to the operator |
+|---|---|---|---|
+| `PENDING` | 0 | Queued | Queued. The phone collects it when it next checks in. |
+| `LEASED` | 1 | Handed over | Handed to the phone over its live link. It has not confirmed it accepted it yet. |
+| `DISPATCHED` | 2 | Received | The phone confirmed it has it and is sending it now. |
+| `SENT` | 3 | Sent | The phone handed it to the radio. The carrier has not confirmed delivery. |
+| `DELIVERED` | 4 (terminal) | Delivered | The carrier confirmed delivery. |
+| `FAILED` | 4 (terminal) | Failed | The phone could not send it. |
+| `EXPIRED` | 4 (terminal) | Not sent | The phone never collected it. Nothing was sent. |
+
+Progress is tracked separately from the current state, because a lease can fall back
+to `PENDING`: the bar only ever moves forward, while the label always tells the truth
+about where the command is now.
+
 ---
 
 ## 8. Android Mobile App UI & Telephony Stack (`simulator`)
@@ -644,6 +917,15 @@ The Android application is packaged via Tauri v2 with a Rust core (`dakflare-cor
 - **Foreground Service:** [`GatewayService.kt`](file:///home/jony/Projects/dakflare/simulator/src-tauri/gen/android/app/src/main/java/dev/dakflare/simulator/bridge/GatewayService.kt) runs the persistent gateway loop.
 - **Quick Reply Service:** `RespondViaMessageService.kt` handles inline lockscreen replies.
 - **Provider Architecture:** [`SmsProvider.kt`](file:///home/jony/Projects/dakflare/simulator/src-tauri/gen/android/app/src/main/java/dev/dakflare/simulator/bridge/SmsProvider.kt) writes to the system SMS provider because the app holds `android.app.role.SMS`. **The app deliberately does NOT hold `READ_SMS`**; deduplication and reads are handled internally in local libSQL (`simulator.db`).
+
+**The send order is the contract**, and 6.0.0 moved the acknowledgement to the end of it:
+
+1. A command is recorded as a local `queued` row **with the `claim_token`** the edge handed out. Recording is not an ack, and nothing is acknowledged here (`record_commands`, in both the socket and the poll path).
+2. [`SmsSender.resend`](file:///home/jony/Projects/dakflare/simulator/src-tauri/gen/android/app/src/main/java/dev/dakflare/simulator/bridge/SmsSender.kt) hands it to the radio.
+3. **Only after `SmsManager` returns without throwing** does the app ack: `NativeBridge.ackCommandSafely` → JNI `ackCommand` → Rust `carrier::ack_command`, which reads the stored token, POSTs `acks: [{command_id, claim_token}]`, and clears it.
+4. [`SendStatusReceiver.kt`](file:///home/jony/Projects/dakflare/simulator/src-tauri/gen/android/app/src/main/java/dev/dakflare/simulator/bridge/SendStatusReceiver.kt) reports `SENT` / `FAILED` from the per-part receipt, then `DELIVERED` from the delivery report.
+
+A composer message or a flow reply has no claim token, so step 3 is a no-op that sends nothing. The desktop simulator's carrier radio is fake and accepts instantly, so it acks from `carrier_drain` instead.
 
 ### 8.2 Permission Gate Behavior ([`PermissionGate.svelte`](file:///home/jony/Projects/dakflare/simulator/src/lib/components/PermissionGate.svelte))
 
@@ -704,3 +986,11 @@ The conformance battery falsifies:
 - Dual-pepper password rotation rings (`v1` $\to$ `v2,v1` $\to$ `v2`).
 - WebSocket hibernation ping/pong auto-response.
 - Outbound command idempotency and forward-only state machine transitions in SQL.
+- **Lease exclusivity:** a poll leases a command, and a second poll issued while it is `LEASED` does not receive it. This is the race the atomic claim exists for, and it is asserted, not assumed.
+- **Token ownership:** an ack carrying a wrong `claim_token` answers `200` and moves nothing; an ack for a command that is not `LEASED` is a no-op; a stale ack after `DELIVERED` does not regress it.
+- **Lease expiry:** a command that is never acked returns to `PENDING` and its socket closes with `1011`; a command that *was* acked is not reverted, no matter how long the test waits.
+- **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+
+`simulator/core` additionally proves, without a network, that a recorded command keeps its lease token, that the ack body is `{"acks":[{"command_id":…,"claim_token":…}]}`, and that a row with no token (a composer send) sends no request at all.
+
+Two knobs make this fast: `test-support/dev.sh` passes `LEASE_MS=1500` and `ACK_TIMEOUT_MS=1500`, and the harness reads them back through `HARNESS_LEASE_MS` / `HARNESS_ACK_TIMEOUT_MS`. Production defaults are 60 s and 8 s.
