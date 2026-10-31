@@ -406,7 +406,13 @@ export class DeviceGateway extends DurableObject<Env> {
       // `ts` arriving at `now === exp` is inside the window (`|now - ts| <= W`,
       // inclusive), so `exp <= now` deleted the guard exactly one millisecond too
       // early. Pruning and admission must not share an inclusive boundary.
-      sql.exec(`DELETE FROM nonces WHERE exp < ?`, now);
+      //
+      // Pruned lazily, one signed request in twenty, plus every alarm tick. Doing
+      // it on every request wrote the table and its index twice per request for no
+      // security gain: an unpruned expired nonce still blocks its own replay, and
+      // the timestamp window already rejects a stale one. The alarm is the
+      // backstop, so a quiet object still gets cleaned.
+      if (Math.random() < 0.05) sql.exec(`DELETE FROM nonces WHERE exp < ?`, now);
 
       const found = sql.exec(`SELECT 1 AS present FROM nonces WHERE nonce = ?`, nonce).toArray();
       if (found.length > 0) return "nonce_replay" as const;
@@ -1122,6 +1128,10 @@ export class DeviceGateway extends DurableObject<Env> {
       // Retention (S6): terminal commands hold the outbound body and the peer
       // number in DO SQLite. Pruning D1 alone would leave every outbound SMS
       // body and phone number here forever.
+      // The lazy prune in the signed-request path is 1-in-20; this is the
+      // backstop, so a quiet object does not accumulate expired nonces forever.
+      this.ctx.storage.sql.exec(`DELETE FROM nonces WHERE exp < ?`, Date.now());
+
       const cutoff = Date.now() - this.timings.retentionDays * 86_400_000;
       const pruned = this.ctx.storage.sql.exec(
         `DELETE FROM commands WHERE state IN ('DELIVERED','FAILED','EXPIRED') AND created_at < ?`,
