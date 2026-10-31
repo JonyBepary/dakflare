@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '0.1.0';
+const CLI_VERSION = '0.2.0';
 
 const HOME = os.homedir();
 const CONFIG_DIR = path.join(HOME, '.config', 'dakflare');
@@ -140,6 +140,7 @@ const ERROR_RULES = {
   device_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'list the paired devices' },
   command_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'find the command id' },
   unknown_command: { exit: 3, category: 'not_found', remediation: 'dakflare capabilities', fix: 'list the commands' },
+  input_required: { exit: 2, category: 'usage' },
   cf_missing: { exit: 2, category: 'tooling', remediation: 'npm i -g cf', fix: 'install the Cloudflare CLI, then `cf auth login`' },
   cf_not_authenticated: { exit: 4, category: 'permission', remediation: 'cf auth login', fix: 'authenticate cf, then re-run' },
   cf_failed: { exit: 1, category: 'internal' },
@@ -381,7 +382,10 @@ let CURRENT_COMMAND = null;
 
 function baseContext() {
   const { cfg } = readConfig();
-  return { profile: 'default', worker_url: cfg?.url ?? null };
+  // `schema_version` describes the document; this describes the tool that wrote
+  // it. They move for different reasons — `ok` became `status` in 0.2.0 without
+  // the envelope's shape changing.
+  return { profile: 'default', cli_version: CLI_VERSION, worker_url: cfg?.url ?? null };
 }
 
 /**
@@ -431,7 +435,9 @@ function emitJson(payload, mode) {
       schema_version: '1',
       status: 'ok',
       command: CURRENT_COMMAND,
-      ...(summary === undefined ? {} : { summary }),
+      ...((summary ?? summaryFor(CURRENT_COMMAND, data)) === undefined
+        ? {}
+        : { summary: summary ?? summaryFor(CURRENT_COMMAND, data) }),
       context: context ?? baseContext(),
       data,
       verification: verification ?? null,
@@ -515,11 +521,33 @@ function assertFlags(flags, allowed) {
 function stringFlag(flags, name, { required = false } = {}) {
   const value = flags[name];
   if (value === undefined) {
-    if (required) throw usage(`--${name} is required`);
+    if (required) {
+      // Structured, because "which flag did I forget" is the failure an agent
+      // hits most often and the one it should not have to read prose to fix.
+      throw new CliError(`--${name} is required`, 2, {
+        error: 'input_required',
+        missing: [`--${name}`],
+      });
+    }
     return undefined;
   }
   if (value === true || value === '') throw usage(`--${name} needs a value`);
   return String(value);
+}
+
+/**
+ * Throw once for every required flag that is absent.
+ *
+ * `stringFlag(..., { required: true })` reports one flag at a time; a command
+ * that needs three should not make the caller discover them one call at a time.
+ */
+function requireFlags(flags, names) {
+  const missing = names.filter((name) => flags[name] === undefined).map((name) => `--${name}`);
+  if (missing.length === 0) return;
+  throw new CliError(`${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} required`, 2, {
+    error: 'input_required',
+    missing,
+  });
 }
 
 /* ───────────────────────────── config ───────────────────────────── */
@@ -1811,6 +1839,7 @@ async function commandSend(argv) {
   const json = MODE.json;
   const cfg = requireConfig();
 
+  requireFlags(flags, ['to', 'body']);
   const to = stringFlag(flags, 'to', { required: true });
   const body = stringFlag(flags, 'body', { required: true });
   if (!looksLikeE164(to)) throw usage('--to must be an E.164 number, for example +8801540196080');
@@ -2342,6 +2371,45 @@ function commandExamples(argv) {
   }
   for (const example of spec.examples) out(example);
   return 0;
+}
+
+/**
+ * One sentence per command, written once and derived from the payload only where
+ * the payload is the answer.
+ *
+ * A summary that restates `data` wastes the caller's tokens; a summary that says
+ * what happened is what makes a log readable. Commands with nothing interesting
+ * to say get a plain sentence rather than an invented one.
+ */
+const SUMMARY_BUILDERS = {
+  init: (data) => (data.local === true ? 'wrote worker/.dev.vars' : 'deployment configured'),
+  doctor: (data) =>
+    data.counts
+      ? `${data.counts.pass} passed, ${data.counts.fail} failed, ${data.counts.skip} skipped`
+      : 'checked the deployment',
+  pair: () => 'pairing code minted',
+  devices: (data) => `${(data.devices ?? []).length} devices paired`,
+  revoke: (data) => `revoked ${data.device_id ?? 'the device'}`,
+  send: (data) => (data.replayed ? 'already queued for that key' : 'queued for the radio'),
+  status: (data) => `command is ${data.state ?? 'unknown'}`,
+  audit: (data) => `${(data.entries ?? data.events ?? []).length} audit rows`,
+  auth: (data) => (data.link ? 'invite minted' : 'owner account updated'),
+  key: () => 'signing key read',
+  up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
+  capabilities: (data) => `${(data.commands ?? []).length} commands`,
+  describe: (data) => `${data.command ?? 'command'} described`,
+  schema: (data) => `${data.command ?? 'command'} schema`,
+  examples: (data) => `${(data.examples ?? []).length} examples`,
+};
+
+function summaryFor(command, data) {
+  const build = SUMMARY_BUILDERS[command];
+  if (build === undefined) return undefined;
+  try {
+    return build(data ?? {});
+  } catch {
+    return undefined;
+  }
 }
 
 /** The flags a command cannot be called without. */
@@ -2966,6 +3034,11 @@ const COMMANDS = {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
+
+  if (command === '--version' || command === '-v' || command === 'version') {
+    out(`dakflare ${CLI_VERSION}`);
+    return 0;
+  }
 
   if (!command || command === '--help' || command === '-h' || command === 'help') {
     if (command === 'help') {
