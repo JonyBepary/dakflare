@@ -2309,6 +2309,18 @@ async function cmdSuite() {
       ((await admin('GET', '/v1/admin/agent-tokens')).data?.agent_tokens ?? [])
         .some((row) => 'token' in row || 'token_hash' in row), false);
 
+    // "The token appears nowhere in logs" is an exit criterion, so it is proven
+    // rather than asserted: the secret half must not appear in any audit row.
+    const tokenSecret = String(agent.data?.token).split('_').slice(3).join('_');
+    const auditAfterMint = await admin('GET', '/v1/admin/audit?limit=50');
+    rep.checkFn('the token secret never reaches the audit log',
+      () => tokenSecret.length > 0 &&
+        JSON.stringify(auditAfterMint.data ?? {}).includes(tokenSecret) === false);
+    const mintRow = (auditAfterMint.data?.events ?? [])
+      .find((row) => row.action === 'agent_token.minted' && row.subject === agent.data?.id);
+    rep.check('the mint is audited', mintRow !== undefined, true);
+    rep.check('...recording the prefix, never the value', mintRow?.detail?.token_prefix, 'dkf_agt_');
+
     const unknownScope = await mint('bad', ['devices:revoke']);
     rep.check('minting a never-grantable scope -> 400', unknownScope.status, 400);
     rep.check('...and it is named, not dropped',
