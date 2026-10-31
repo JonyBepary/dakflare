@@ -216,6 +216,11 @@ const COMMAND_SPECS = {
     ],
   },
   doctor: {
+    response: {
+      checks: '[{name, status, detail}]',
+      counts: '{pass, fail, skip}',
+      summary: 'the same counts as one line',
+    },
     summary: 'Check config, edge, schema, migrations, bindings and the handset',
     effect: 'read',
     usage: 'dakflare doctor [--max-age <minutes>] [--serial <adb-serial>]',
@@ -237,6 +242,7 @@ const COMMAND_SPECS = {
     examples: ['dakflare pair --qr', 'dakflare pair --label "Mi A3" --ttl 300 --json'],
   },
   devices: {
+    response: { devices: '[{device_id, label, sim_slot, paired_at, last_seen, fcm}]' },
     summary: 'List paired devices and their last contact',
     effect: 'read',
     usage: 'dakflare devices',
@@ -251,6 +257,12 @@ const COMMAND_SPECS = {
     examples: ['dakflare revoke dev_pixel4a --yes'],
   },
   send: {
+    response: {
+      command_id: 'the id `status` takes',
+      replayed: 'true when an idempotency key matched an existing command',
+      state: 'PENDING|DISPATCHED|ACKED_BY_DEVICE|SENT|DELIVERED|FAILED|EXPIRED',
+      verification: '{passed, state, terminal, reason, next_command}',
+    },
     summary: 'Queue one outbound SMS and follow it to the radio',
     effect: 'mutating',
     usage:
@@ -271,6 +283,11 @@ const COMMAND_SPECS = {
     ],
   },
   status: {
+    response: {
+      command: 'the stored command row',
+      state: 'the same vocabulary as send',
+      verification: '{passed, state, terminal, reason, next_command}',
+    },
     summary: "Read one command's state, or follow it",
     effect: 'read',
     usage: 'dakflare status <command-id> [--device <id>] [--wait [duration]] [--until <state>]',
@@ -311,6 +328,14 @@ const COMMAND_SPECS = {
     ],
   },
   up: {
+    response: {
+      url: 'the deployed Worker',
+      database_id: 'the D1 id written into cloudflare.config.ts',
+      kv_namespace_id: 'the KV id',
+      healthy: 'whether the deployment answered',
+      owner: '{state, email, link}',
+      pairing: '{code, expires_in}',
+    },
     summary: 'Provision the deployment: resources, deploy, owner, pairing',
     effect: 'mutating',
     usage: 'dakflare up [--email <address>] [--yes] [--dry-run]',
@@ -915,14 +940,14 @@ async function initLocal(flags, json) {
   }
 
   if (json) {
-    out(emitJson({
+    emitJson({
           ok: true,
           local: true,
           file,
           mode: '600',
           generated: Object.keys(generated),
           widths: Object.fromEntries(Object.entries(generated).map(([key, value]) => [key, value.length])),
-        }, MODE));
+        }, MODE);
     return 0;
   }
 
@@ -994,7 +1019,7 @@ async function commandInit(argv) {
   const healthy = result.data.ok === true;
 
   if (json) {
-    out(emitJson({
+    emitJson({
           ok: healthy,
           url,
           config: { path: CONFIG_FILE, mode: modeString(configMode()) },
@@ -1006,7 +1031,7 @@ async function commandInit(argv) {
             missing_bindings: result.data.missing_bindings ?? findings.missing_required,
             plan: findings.plan,
           },
-        }, MODE));
+        }, MODE);
     return healthy ? 0 : 1;
   }
 
@@ -1380,7 +1405,7 @@ function finishDoctor(checks, json, url, version) {
   const healthy = counts.fail === 0;
 
   if (json) {
-    out(emitJson({
+    emitJson({
           ok: healthy,
           url: url ?? null,
           version: version ?? null,
@@ -1388,7 +1413,7 @@ function finishDoctor(checks, json, url, version) {
           checks,
           summary: `${counts.pass} passed, ${counts.fail} failed, ${counts.skip} skipped`,
           counts,
-        }, MODE));
+        }, MODE);
     if (!healthy) process.exitCode = 1;
     return;
   }
@@ -1457,7 +1482,7 @@ async function commandPair(argv) {
   const qr = flags.qr ? qrText(deepLink) : null;
 
   if (json) {
-    out(emitJson({
+    emitJson({
           ok: true,
           pairing_code: code,
           expires_at: expiresAt,
@@ -1466,7 +1491,7 @@ async function commandPair(argv) {
           deep_link: deepLink,
           label: label ?? null,
           ...(qr ? { qr } : {}),
-        }, MODE));
+        }, MODE);
     return;
   }
 
@@ -1497,7 +1522,7 @@ async function commandDevices(argv) {
 
   const devices = (await listDevices(cfg)).map(publicDevice);
   if (json) {
-    out(emitJson({ ok: true, devices }, MODE));
+    emitJson({ ok: true, devices }, MODE);
     return;
   }
 
@@ -1572,7 +1597,7 @@ async function commandRevoke(argv) {
 
   const d1Deleted = Number(result.data?.d1_deleted ?? 0);
   if (json) {
-    out(emitJson({ ok: true, device_id: deviceId, d1_deleted: d1Deleted }, MODE));
+    emitJson({ ok: true, device_id: deviceId, d1_deleted: d1Deleted }, MODE);
     return;
   }
   out(`revoked ${deviceId} (D1 rows deleted: ${d1Deleted})`);
@@ -1913,18 +1938,23 @@ async function commandSend(argv) {
   const verification = verificationFor(command, { timedOut });
 
   if (json) {
-    out(emitJson({
+    emitJson({
           // `ok` means the Worker answered and the command exists. The outcome is
           // `verification`, and the exit code follows it when --wait was asked for.
           ok: true,
-          device_id: deviceId,
-          device_selection: deviceNote,
+          context: { ...baseContext(), device_id: deviceId },
+          // A fact the caller should notice, not the answer. `device_selection`
+          // used to sit in `data`, where it read like a result.
+          warnings:
+            deviceNote === null
+              ? []
+              : [`device selection: ${deviceNote}; pass --device to choose`],
           to,
           command_id: commandId,
           replayed,
           state: command.state,
           verification,
-        }, MODE));
+        }, MODE);
     process.exitCode = outcomeExitCode(command, timedOut);
     return;
   }
@@ -2348,6 +2378,9 @@ function commandSchema(argv) {
     effect: spec.effect,
     usage: spec.usage,
     flags: { type: 'object', properties, required: requiredFlags(name) },
+    // Only the commands whose `data` carries a decision document it; the rest
+    // rely on the uniform envelope, where `data` is a list or a string.
+    ...(spec.response === undefined ? {} : { response: spec.response }),
     global: ['--json', '--agent', '--help'],
   };
 
@@ -2458,15 +2491,16 @@ async function commandStatus(argv) {
   const verification = verificationFor(command, { timedOut });
 
   if (json) {
-    out(emitJson({
+    emitJson({
           ok: true,
-          device_id: deviceId,
-          device_selection: note,
+          context: { ...baseContext(), device_id: deviceId },
+          warnings:
+            note === null ? [] : [`device selection: ${note}; pass --device to choose`],
           command_id: commandId,
           state: command.state,
           command,
           verification,
-        }, MODE));
+        }, MODE);
     process.exitCode = outcomeExitCode(command, timedOut);
     return;
   }
@@ -2502,7 +2536,7 @@ async function commandAuthReset(argv) {
   });
   if (result.status === 404) {
     const message = 'that address has no account to reset';
-    if (json) out(emitJson({ ok: false, error: 'not_registered' }, MODE));
+    if (json) emitJson({ ok: false, error: 'not_registered' }, MODE);
     else out(message);
     return 1;
   }
@@ -2510,7 +2544,7 @@ async function commandAuthReset(argv) {
 
   const token = result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
-  if (json) out(emitJson({ ok: true, email, link }, MODE));
+  if (json) emitJson({ ok: true, email, link }, MODE);
   else {
     out(`Account reset: ${email}`);
     if (link) {
@@ -2551,7 +2585,7 @@ async function commandAuthBootstrap(argv) {
   const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email, role: 'owner' });
   if (result.status === 409) {
     const reason = result.data?.error === 'already_registered' ? 'that address already has an account' : 'an owner already exists on this deployment';
-    if (json) out(emitJson({ ok: false, error: result.data?.error ?? 'owner_exists' }, MODE));
+    if (json) emitJson({ ok: false, error: result.data?.error ?? 'owner_exists' }, MODE);
     else out(reason);
     return 1;
   }
@@ -2561,7 +2595,7 @@ async function commandAuthBootstrap(argv) {
   // has no way to obtain one once the flag flips. Redeeming creates it.
   const token = result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
-  if (json) out(emitJson({ ok: true, email, role: 'owner', link }, MODE));
+  if (json) emitJson({ ok: true, email, role: 'owner', link }, MODE);
   else {
     out(`Owner invite for ${email}`);
     if (link) {
@@ -2602,7 +2636,7 @@ async function commandAuthInvite(argv) {
   const token = result.data?.invite?.token ?? result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
   if (json) {
-    out(emitJson({ ok: true, email, role, link, expires_in: ttlSeconds }, MODE));
+    emitJson({ ok: true, email, role, link, expires_in: ttlSeconds }, MODE);
   } else {
     out(`Invite for ${email} (${role})`);
     if (link) {
@@ -2624,7 +2658,7 @@ async function commandAuthInvites(argv) {
   if (result.status !== 200) throw requestFailure('invites', result);
   const invites = result.data?.invites ?? [];
   if (json) {
-    out(emitJson({ ok: true, invites }, MODE));
+    emitJson({ ok: true, invites }, MODE);
     return 0;
   }
   if (invites.length === 0) {
@@ -2665,7 +2699,7 @@ async function commandAudit(argv) {
   if (result.status === 404) {
     const message = 'not available on this deployment';
     if (json) {
-      out(emitJson({ ok: true, available: false, reason: 'not_available_on_this_deployment' }, MODE));
+      emitJson({ ok: true, available: false, reason: 'not_available_on_this_deployment' }, MODE);
     } else {
       out(message);
     }
@@ -2688,12 +2722,12 @@ async function commandAudit(argv) {
     null;
 
   if (json) {
-    out(emitJson({ ok: true, available: true, entries: entries ?? result.data }, MODE));
+    emitJson({ ok: true, available: true, entries: entries ?? result.data }, MODE);
     return;
   }
 
   if (!entries) {
-    out(emitJson(result.data, MODE));
+    emitJson(result.data, MODE);
     return;
   }
   if (entries.length === 0) {
@@ -2813,7 +2847,7 @@ async function commandKey(argv) {
   const fingerprint = match[1].toUpperCase();
 
   if (json) {
-    out(emitJson({ ok: true, keystore, alias, sha256: fingerprint }, MODE));
+    emitJson({ ok: true, keystore, alias, sha256: fingerprint }, MODE);
     return;
   }
   out('Release signing certificate');
