@@ -645,6 +645,18 @@ be refused by the token guard. That is the same duplicate the lease is meant to
 prevent, one order of magnitude rarer. A longer lease trades that for a longer
 stall on a phone that has died mid-send; 60 s is the chosen point on that curve.
 
+**Recovery latency is the price of that safety, and it is worth knowing.** A lease
+also absorbs a *lost push*: a frame written to a half-open socket is never seen by
+the phone, and the command cannot be handed out again until `lease_expiry` fires.
+Under 5.x the same event reverted in 8 s because the ack timeout reverted the
+state. The recovery path now is, in order: `lease_expiry` at 60 s, then the next
+`hello` (a reconnect re-claims every `PENDING` command), then the handset's
+5-minute HTTP drain. `ack_wake` closes the silent socket at 8 s, which is what
+provokes the reconnect, but it deliberately does not release the lease. Observed
+on the reference handset: a command pushed into a dead socket was re-claimed 90 s
+later by `hello` and completed correctly, and one pushed just before a cold start
+was claimed by the drain.
+
 **The claim is one statement**, so two transports cannot both win it:
 
 ```sql
@@ -717,7 +729,7 @@ flowchart LR
 1. **`worker`:** `tsc --noEmit` and `npm run check:config`.
 2. **`dashboard`:** `svelte-check` and SvelteKit static asset build.
 3. **`simulator`:** `svelte-check` for mobile UI.
-4. **`rust`:** `cargo test --locked` across `simulator/core` (86 tests) and `simulator/flow` (8 tests).
+4. **`rust`:** `cargo test --locked` across `simulator/core` (89 tests) and `simulator/flow` (8 tests).
 5. **`suite`:** Starts local development stack (`wrangler dev --local`) and runs `dakflare_test_harness.mjs pair && suite`. The stack shortens the timing knobs through `--var` (`LEASE_MS=1500`, `ACK_TIMEOUT_MS=1500`, `OFFLINE_ALERT_MS=5000`), so the run does not wait a real minute for a lease to expire.
 6. **`deploy`:** Only runs on pushes to `main` or manual dispatch. Builds console, runs `cf build` and `cf deploy --prebuilt`, executes `smoke.sh`, and verifies edge health via `dakflare doctor`.
 

@@ -178,6 +178,17 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+/// True when a migration failed because another connection already applied it.
+///
+/// Migration DDL is not `IF NOT EXISTS` for a column (SQLite has no such form),
+/// so the duplicate error is the only signal that the work is already done.
+fn already_applied(error: &libsql::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("duplicate column name")
+        || text.contains("already exists")
+        || text.contains("duplicate column")
+}
+
 /// The one rule for a row retention may delete: the deployment already has it,
 /// it is not waiting on the radio, and it is not waiting on an upload.
 ///
@@ -373,6 +384,24 @@ impl Store {
         Self::open_inner(path, None).await
     }
 
+    /// Open a connection with this store's contention settings.
+    ///
+    /// The Android shell opens a fresh store for every JNI entry, and a cold
+    /// start fires several at once (a send receipt, the gateway tick, a flush).
+    /// SQLite's default busy timeout is zero, so the loser of a write race fails
+    /// immediately and the caller reports `storage` — which is how a send that
+    /// failed on the radio ended up with no recorded state at all, and a command
+    /// that never left `DISPATCHED`.
+    ///
+    /// Waiting is the right answer for a file this small and this short-lived.
+    /// The pragma is best effort: an engine that does not know it keeps the old
+    /// fail-fast behaviour rather than refusing to open.
+    async fn connect(&self) -> Result<libsql::Connection, StoreError> {
+        let conn = self.db.connect()?;
+        let _ = conn.execute("PRAGMA busy_timeout = 5000", ()).await;
+        Ok(conn)
+    }
+
     /// Open the store with the platform's at-rest wrapping key.
     ///
     /// Every plaintext key already in the file is wrapped before the caller
@@ -414,7 +443,7 @@ impl Store {
     }
 
     async fn migrate(&self) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version    INTEGER PRIMARY KEY,
@@ -437,9 +466,18 @@ impl Store {
             if *version <= current {
                 continue;
             }
-            conn.execute(sql, ()).await?;
+            if let Err(error) = conn.execute(sql, ()).await {
+                // Two connections can read the same version and both run the same
+                // ALTER; the loser gets "duplicate column name" or "already
+                // exists". That is the success case: the other one did the work.
+                if !already_applied(&error) {
+                    return Err(error.into());
+                }
+            }
+            // OR REPLACE for the same reason: the winner may have inserted the
+            // version row in between, and a UNIQUE violation is not a failure.
             conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 params![*version, now_ms()?],
             )
             .await?;
@@ -449,7 +487,7 @@ impl Store {
     }
 
     pub async fn schema_version(&self) -> Result<i64, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT COALESCE(MAX(version), 0) FROM schema_migrations", ())
             .await?;
@@ -484,7 +522,7 @@ impl Store {
         };
 
         let now = now_ms()?;
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO devices
                 (device_id, public_key_spki, private_key_pkcs8, platform, platform_id,
@@ -525,7 +563,7 @@ impl Store {
     /// the deployment's socket, so a phone that has answered a poll or a flush is
     /// as live as this app can honestly claim.
     pub async fn touch_device(&self, device_id: &str) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE devices SET updated_at = ? WHERE device_id = ?",
             params![now_ms()?, device_id],
@@ -535,7 +573,7 @@ impl Store {
     }
 
     pub async fn list_devices(&self) -> Result<Vec<Device>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT device_id, public_key_spki, platform, platform_id, label,
@@ -567,7 +605,7 @@ impl Store {
     /// local store holds more than one row — for example a handset that was
     /// paired, revoked and paired again.
     pub async fn latest_device(&self) -> Result<Option<Device>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT device_id, public_key_spki, platform, platform_id, label,
@@ -593,7 +631,7 @@ impl Store {
     }
 
     pub async fn get_device(&self, device_id: &str) -> Result<Option<Device>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT device_id, public_key_spki, platform, platform_id, label,
@@ -672,7 +710,7 @@ impl Store {
             return Ok(0);
         };
 
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT device_id, public_key_spki, private_key_pkcs8 FROM devices",
@@ -708,7 +746,7 @@ impl Store {
 
     /// Read the stored key column and the SPKI it must match.
     async fn stored_key(&self, device_id: &str) -> Result<Option<(String, String)>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT private_key_pkcs8, public_key_spki FROM devices WHERE device_id = ?",
@@ -735,7 +773,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let wrapped = self.wrap_and_prove(cipher, plaintext, spki).await?;
 
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let affected = conn
             .execute(
                 "UPDATE devices SET private_key_pkcs8 = ?
@@ -790,7 +828,7 @@ impl Store {
 
     /// Persist a small key/value setting (target URL, admin token, …).
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -801,7 +839,7 @@ impl Store {
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT value FROM settings WHERE key = ?", params![key])
             .await?;
@@ -867,7 +905,7 @@ impl Store {
     ) -> Result<Message, StoreError> {
         let id = format!("msg{}", random_hex(12)?);
         let now = now_ms()?;
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO messages
                 (id, device_id, direction, peer, body, state, local_id, created_at)
@@ -915,7 +953,7 @@ impl Store {
         to: &str,
         body: &str,
     ) -> Result<String, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         // One transaction so the lookup and the insert cannot interleave with
         // another queue call on a second connection.
         let tx = conn.transaction().await?;
@@ -968,7 +1006,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         let id = format!("run{}", random_hex(12)?);
         let now = now_ms()?;
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT OR IGNORE INTO flow_runs
                 (id, device_id, local_id, flow_id, flow_version, outcome, created_at)
@@ -995,7 +1033,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<FlowRunRow>, StoreError> {
         let limit = limit.clamp(1, 100);
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT local_id, flow_id, flow_version, outcome, created_at
@@ -1026,7 +1064,7 @@ impl Store {
         device_id: &str,
         local_id: &str,
     ) -> Result<Option<Message>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1051,7 +1089,7 @@ impl Store {
     }
 
     pub async fn set_message_state(&self, id: &str, state: &str) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE messages SET state = ? WHERE id = ?",
             params![state, id],
@@ -1073,7 +1111,7 @@ impl Store {
         local_id: &str,
         token: &str,
     ) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE messages SET claim_token = ?
               WHERE device_id = ? AND local_id = ? AND direction = 'out'",
@@ -1092,7 +1130,7 @@ impl Store {
         device_id: &str,
         local_id: &str,
     ) -> Result<Option<String>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT claim_token FROM messages
@@ -1113,7 +1151,7 @@ impl Store {
         device_id: &str,
         local_id: &str,
     ) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE messages SET claim_token = NULL
               WHERE device_id = ? AND local_id = ? AND direction = 'out'",
@@ -1128,7 +1166,7 @@ impl Store {
         device_id: &str,
         limit: i64,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1168,7 +1206,7 @@ impl Store {
         before_id: &str,
         limit: i64,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1204,7 +1242,7 @@ impl Store {
     }
 
     pub async fn clear_messages(&self, device_id: &str) -> Result<u64, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let deleted = conn
             .execute("DELETE FROM messages WHERE device_id = ?", params![device_id])
             .await?;
@@ -1294,7 +1332,7 @@ impl Store {
             return Ok(0);
         }
         let device_ids = self.message_device_ids().await?;
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut deleted: u64 = 0;
 
         for device_id in device_ids {
@@ -1340,7 +1378,7 @@ impl Store {
     }
 
     async fn message_device_ids(&self) -> Result<Vec<String>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT DISTINCT device_id FROM messages", ())
             .await?;
@@ -1383,7 +1421,7 @@ impl Store {
         let pattern = like_pattern(&bounded);
         let limit = limit.clamp(1, MAX_SEARCH_HITS);
 
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1450,7 +1488,7 @@ impl Store {
         device_id: &str,
         limit: i64,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1489,7 +1527,7 @@ impl Store {
         device_id: &str,
         limit: i64,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1542,7 +1580,7 @@ impl Store {
         values.push(device_id.to_string().into());
         values.extend(local_ids.iter().cloned().map(Into::into));
 
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn.query(&sql, values).await?;
 
         let mut out = Vec::new();
@@ -1558,7 +1596,7 @@ impl Store {
     }
 
     pub async fn mark_mirrored(&self, ids: &[String]) -> Result<(), StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         for id in ids {
             conn.execute("UPDATE messages SET mirrored = 1 WHERE id = ?", params![id.as_str()])
                 .await?;
@@ -1608,7 +1646,7 @@ impl Store {
             None
         };
 
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         // Read and write in one transaction: the `delivered` rule depends on
         // the current state, and two reports can race in a broadcast receiver.
         let tx = conn.transaction().await?;
@@ -1692,7 +1730,7 @@ impl Store {
         device_id: &str,
         local_id: &str,
     ) -> Result<bool, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let tx = conn.transaction().await?;
         let mut rows = tx
             .query(
@@ -1770,7 +1808,7 @@ impl Store {
         local_id: &str,
         transient: bool,
     ) -> Result<Option<SendFailureOutcome>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
 
         if !transient {
             let affected = conn
@@ -1875,7 +1913,7 @@ impl Store {
     ) -> Result<Vec<Message>, StoreError> {
         let cutoff = now.saturating_sub(60_000);
         let limit = limit.clamp(1, 100);
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
@@ -1905,7 +1943,7 @@ impl Store {
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let affected = conn
             .execute("DELETE FROM devices WHERE device_id = ?", params![device_id])
             .await?;
@@ -1924,7 +1962,7 @@ impl Store {
     /// leaves the previous set untouched for the next background run.
     pub async fn replace_flows(&self, flows: &[RemoteFlow]) -> Result<(), StoreError> {
         let fetched_at = now_ms()?;
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         // Atomic: a crash between delete and insert must not leave the receiver
         // with no flows at all.
         let tx = conn.transaction().await?;
@@ -1949,7 +1987,7 @@ impl Store {
     /// The flow set the background receiver executes. Empty until the first
     /// successful fetch (see [`Store::replace_flows`]).
     pub async fn load_flows(&self) -> Result<Vec<RemoteFlow>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT id, version, graph FROM flows ORDER BY id, version", ())
             .await?;
@@ -1974,7 +2012,7 @@ impl Store {
     /// still reported, with `node_count` set to `None`, because hiding a cached
     /// flow would be a lie about what this phone holds.
     pub async fn list_cached_flows(&self) -> Result<Vec<CachedFlow>, StoreError> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, version, graph, fetched_at FROM flows ORDER BY id, version",
@@ -2045,6 +2083,83 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("sim.db")).await.unwrap();
         (dir, store)
+    }
+
+    /// A cold start fires several JNI entries at once, and each opens its own
+    /// connection to the same file. SQLite's default busy timeout is zero, so the
+    /// loser of a write race used to fail instantly and the caller reported
+    /// `storage`: a send that failed on the radio recorded nothing, and the
+    /// command stayed `DISPATCHED` forever. The pragma is what makes the loser
+    /// wait instead.
+    #[tokio::test]
+    async fn a_connection_waits_on_a_locked_write_instead_of_failing() {
+        let (_dir, store) = open_temp().await;
+        let conn = store.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let row = rows.next().await.unwrap().expect("busy_timeout has a value");
+        let timeout: i64 = row.get(0).unwrap();
+        assert_eq!(
+            timeout, 5000,
+            "the connection must wait for a competing writer, not fail at once"
+        );
+    }
+
+    /// The same cold start, as the callers see it: many opens at once against one
+    /// already-migrated file must all succeed.
+    #[tokio::test]
+    async fn concurrent_opens_and_writes_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        // Create the file first so every task races on an existing schema rather
+        // than on the migration, which `a_pending_migration_is_idempotent`
+        // covers separately.
+        Store::open(&path).await.unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let path = path.clone();
+            tasks.push(tokio::spawn(async move {
+                let store = Store::open(&path).await?;
+                let device = format!("dev{index:0>13}");
+                store
+                    .record_message(&device, "in", "+15550001111", "concurrent", "received", None)
+                    .await?;
+                Ok::<_, StoreError>(())
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("no task panicked")
+                .expect("every concurrent open and write succeeds");
+        }
+    }
+
+    /// Two connections can read the same migration version and both run the same
+    /// ALTER. The loser gets "duplicate column name", which is the success case.
+    #[tokio::test]
+    async fn a_pending_migration_is_idempotent_across_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.db");
+        // Roll the file back to before the last migration, then open twice.
+        {
+            let store = Store::open(&path).await.unwrap();
+            let conn = store.connect().await.unwrap();
+            let last = MIGRATIONS.last().unwrap().0;
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?", params![last])
+                .await
+                .unwrap();
+            conn.execute("ALTER TABLE messages DROP COLUMN claim_token", ())
+                .await
+                .unwrap();
+        }
+        let (a, b) = tokio::join!(Store::open(&path), Store::open(&path));
+        assert!(a.is_ok(), "first open: {:?}", a.err());
+        assert!(b.is_ok(), "second open: {:?}", b.err());
+        let store = Store::open(&path).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            MIGRATIONS.last().unwrap().0
+        );
     }
 
     #[tokio::test]

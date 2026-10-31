@@ -140,8 +140,12 @@ object SmsSender {
             // The radio accepted the message, so the command may be acknowledged
             // now. A composer row has no lease token and this is a harmless
             // false, but only a command that reached the radio is acked.
-            val acked = NativeBridge.ackCommandSafely(appDir, deviceId, localId)
-            Log.i(TAG, "retry handed to radio to=${mask(row.peer)} parts=$parts acked=$acked")
+            val ackSent = NativeBridge.ackCommandSafely(appDir, deviceId, localId)
+            // "ack_sent", never "acked": the edge answers this with a part of the
+            // same poll, and a late ack whose lease already expired is accepted
+            // and applied to nothing. Saying "acked" here would claim a state the
+            // phone cannot know.
+            Log.i(TAG, "retry handed to radio to=${mask(row.peer)} parts=$parts ack_sent=$ackSent")
             true
         } catch (error: Throwable) {
             // A thrown send has no result code, so it is not known to be

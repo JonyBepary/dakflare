@@ -632,10 +632,12 @@ object NativeBridge {
     /**
      * Acknowledge a command after the radio accepted it.
      *
-     * Returns true when the edge accepted a token-bearing ack. False is normal: a
-     * composer send or a flow reply has no lease token, so there is nothing to
-     * acknowledge. Never throws: a network failure leaves the token in place and
-     * the next send attempt can retry it.
+     * Returns true when a token-bearing ack was SENT and answered. That is not the
+     * same as "the edge applied it": an ack whose lease already expired is
+     * accepted and moves nothing, and the phone cannot tell the two apart, so
+     * neither does this name. False is normal for a composer send or a flow
+     * reply, which have no lease token. Never throws: a network failure leaves
+     * the token in place and the next send attempt retries it.
      */
     fun ackCommandSafely(appDir: String, deviceId: String, localId: String): Boolean {
         if (loadFailure != null) return false
