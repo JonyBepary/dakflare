@@ -67,6 +67,15 @@ export default defineConfig({
 			// Admin auth gate: `legacy` keeps ADMIN_TOKEN; `new` uses Better Auth
 			// sessions via requireRole() (see worker/src/lib/config.ts authMode).
 			AUTH_LOCKOUT_WINDOW_SECONDS: bindings.text("900"),
+			// The free-tier password factor: the browser runs PBKDF2, the Worker
+			// only peppers and compares. Without this var the factor is `off`, so
+			// a cf deploy silently disabled password sign-in that wrangler.toml
+			// had been enabling.
+			AUTH_PASSWORD_MODE: bindings.text("client-derived"),
+			// Magic link is advertised but sends nothing until RESEND_API_KEY is
+			// a Worker secret; the sandbox sender is fine until a domain exists.
+			MAGIC_LINK_FROM: bindings.text("DakFlare <onboarding@resend.dev>"),
+			MAGIC_LINK_TTL_SECONDS: bindings.text("900"),
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),

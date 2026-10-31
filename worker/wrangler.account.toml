@@ -96,11 +96,15 @@ namespace_id = "1007"
 simple = { limit = 20, period = 60 }
 
 [vars]
-# Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
-# what a deployment that has not migrated yet must keep). `new` = Better Auth
-# session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
-# (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
-AUTH_MODE = "legacy"
+# `AUTH_MODE` is retired: one gate, two credentials (Better Auth session, or
+# ADMIN_TOKEN plus X-Dakflare-Client: cli). A leftover `AUTH_MODE` here was read
+# by nothing and only made this file disagree with the other two.
+#
+# Which side runs the password KDF: off | client-derived | server-kdf.
+AUTH_PASSWORD_MODE = "client-derived"
+# Magic-link factor. RESEND_API_KEY is a Worker secret, never a var.
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+MAGIC_LINK_TTL_SECONDS = "900"
 AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
