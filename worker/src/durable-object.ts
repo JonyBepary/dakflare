@@ -43,9 +43,11 @@ import {
   readIntEnv,
   MAX_ACK_IDS,
   MAX_INCOMING_MESSAGES,
+  MAX_OUTBOUND_COMMANDS,
   type TimingConfig,
   MAX_IDEMPOTENCY_KEY_CHARS,
 } from "./lib/config";
+import { carriesRetiredAckKey, parseAcks } from "./lib/acks";
 import { SIGNATURE_BYTES, utf8Bytes } from "./auth/canonical";
 
 interface WsAttachment {
@@ -60,13 +62,22 @@ interface WsAttachment {
   socketId?: string;
 }
 
-/** The command shape sent to the device (§6.1 `PENDING -> DISPATCHED` payload). */
+/**
+ * The command shape sent to the device (Rev E §6.1 `PENDING -> LEASED` payload).
+ *
+ * `claim_token` travels WITH the command because the ack has to echo it back.
+ * Without it the device cannot prove it is the holder of this lease, and the
+ * edge would have to trust any device that names a command id.
+ */
 interface CommandView {
   command_id: string;
   to: string;
   body: string;
   priority: string;
   expires_at: number;
+  claim_token: string;
+  /** 1 or 2, or 0 for "no preference". Chosen by the sender, honoured by the phone. */
+  sim_slot: number;
 }
 
 interface CommandRow {
@@ -79,6 +90,8 @@ interface CommandRow {
   expires_at: number;
   /** Caller-supplied dedupe key, or null for an ordinary send. */
   idempotency_key: string | null;
+  /** 1 or 2, or 0 for "no preference". */
+  sim_slot: number;
 }
 
 interface ScheduledTaskRow {
@@ -93,27 +106,28 @@ interface ScheduledTaskRow {
 type TaskOutcome = "consumed" | "rescheduled";
 
 /**
- * §6.1 allowed transitions, expressed as "allowed predecessors of the target".
+ * Rev E §6.1 allowed transitions, expressed as "allowed predecessors of the
+ * target".
  *
  * §6.2 requires the guard to live IN SQL so it is atomic and cannot be bypassed
  * from a new route. Terminal states (`DELIVERED`, `FAILED`, `EXPIRED`) appear
  * only on the right-hand side, so no transition can ever leave them:
- *   - `SENT -> ACKED_BY_DEVICE` (a stale ack): `ACKED_BY_DEVICE` accepts only
- *     `PENDING`/`DISPATCHED`, so it is a no-op;
- *   - `DELIVERED -> SENT`: `SENT` accepts only `ACKED_BY_DEVICE`, so it is a no-op;
+ *   - `SENT -> DISPATCHED` (a stale ack): `DISPATCHED` accepts only `LEASED`, so
+ *     it is a no-op;
+ *   - `DELIVERED -> SENT`: `SENT` accepts only `DISPATCHED`, so it is a no-op;
  *   - `EXPIRED -> *`: nothing accepts `EXPIRED` as a predecessor.
+ *
+ * `LEASED -> DISPATCHED` additionally requires the matching `claim_token`; see
+ * `transition`. `PENDING` is a target only from a lease that expired.
  */
 const ALLOWED_PREDECESSORS: Readonly<Record<string, readonly string[]>> = {
-  DISPATCHED: ["PENDING"],
-  PENDING: ["DISPATCHED"],
-  // §6.1 lists `DISPATCHED -> ACKED_BY_DEVICE`; §6.2's enforcement snippet is
-  // `state IN ('PENDING','DISPATCHED')`. Accepting `PENDING` as well can only ever
-  // move a command FORWARD, so the frozen document's own SQL is honoured.
-  ACKED_BY_DEVICE: ["PENDING", "DISPATCHED"],
-  SENT: ["ACKED_BY_DEVICE"],
+  LEASED: ["PENDING"],
+  PENDING: ["LEASED"],
+  DISPATCHED: ["LEASED"],
+  SENT: ["DISPATCHED"],
   DELIVERED: ["SENT"],
-  FAILED: ["ACKED_BY_DEVICE", "SENT"],
-  EXPIRED: ["PENDING", "DISPATCHED"],
+  FAILED: ["DISPATCHED", "SENT"],
+  EXPIRED: ["PENDING", "LEASED"],
 };
 
 /** Backoff before a failed alarm task is retried, so a persistent failure cannot spin. */
@@ -159,7 +173,10 @@ export class DeviceGateway extends DurableObject<Env> {
           state      TEXT NOT NULL DEFAULT 'PENDING',
           created_at INTEGER NOT NULL,
           expires_at INTEGER NOT NULL,
-          idempotency_key TEXT
+          idempotency_key TEXT,
+          claim_token TEXT,
+          lease_until INTEGER,
+          sim_slot   INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_commands_state ON commands(state, priority, created_at);
 
@@ -219,6 +236,30 @@ export class DeviceGateway extends DurableObject<Env> {
         // device down over a bookkeeping index.
         console.error(`[do] idempotency index skipped: ${String(error)}`);
       }
+
+      // Rev E lease columns. Objects created before 6.0.0 have a `commands` table
+      // without them, and SQLite has no ADD COLUMN IF NOT EXISTS, so a duplicate
+      // -column error is the success case here too.
+      for (const statement of [
+        `ALTER TABLE commands ADD COLUMN claim_token TEXT`,
+        `ALTER TABLE commands ADD COLUMN lease_until INTEGER`,
+        `ALTER TABLE commands ADD COLUMN sim_slot INTEGER NOT NULL DEFAULT 0`,
+      ]) {
+        try {
+          ctx.storage.sql.exec(statement);
+        } catch {
+          // Column already present.
+        }
+      }
+
+      // The lease scan is `state = ... AND lease_until <= now` ordered by
+      // priority, so the index leads with state and lease_until. Without it every
+      // poll and every push scans the whole command table, which grows with the
+      // retention window.
+      ctx.storage.sql.exec(
+        `CREATE INDEX IF NOT EXISTS idx_commands_dispatch
+           ON commands(state, lease_until, priority, created_at)`
+      );
 
       // Hibernation-safe ping/pong: answered by the edge without waking the DO.
       ctx.setWebSocketAutoResponse(
@@ -571,8 +612,10 @@ export class DeviceGateway extends DurableObject<Env> {
 
     this.insertCommand(command);
 
-    // #9: push ONLY the command just created.
-    if (!this.pushCommands([toView(command)])) {
+    // #9: push ONLY the command just created. The push leases it, so a socket
+    // that vanished between `pickFreshSocket` and `send` releases the lease
+    // instead of stranding the command in `LEASED` for a full lease window.
+    if (!this.pushCommands([command.command_id])) {
       await this.sendWakePush();
     }
     return Response.json({ ok: true, replayed: false, command_id: command.command_id });
@@ -609,7 +652,7 @@ export class DeviceGateway extends DurableObject<Env> {
     for (const command of commands) this.insertCommand(command);
 
     // One push for the whole batch, one wake push if there is no socket.
-    if (!this.pushCommands(commands.map(toView))) {
+    if (!this.pushCommands(commands.map((command) => command.command_id))) {
       await this.sendWakePush();
     }
     return Response.json({ ok: true, enqueued: commands.length });
@@ -619,15 +662,17 @@ export class DeviceGateway extends DurableObject<Env> {
     const now = Date.now();
     this.ctx.storage.sql.exec(
       `INSERT INTO commands
-         (command_id, to_e164, body, priority, state, created_at, expires_at, idempotency_key)
-       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+         (command_id, to_e164, body, priority, state, created_at, expires_at,
+          idempotency_key, sim_slot)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`,
       command.command_id,
       command.to_e164,
       command.body,
       command.priority,
       now,
       command.expires_at,
-      command.idempotency_key
+      command.idempotency_key,
+      command.sim_slot
     );
     this.scheduleTask(
       `exp:${command.command_id}`,
@@ -645,11 +690,16 @@ export class DeviceGateway extends DurableObject<Env> {
     const parsed = await readJson(req);
     if (!parsed) return err("bad_request", 400);
 
-    const ackIds = Array.isArray(parsed.ack_command_ids) ? parsed.ack_command_ids : [];
-    for (const id of ackIds) {
-      if (typeof id !== "string" || id === "") continue;
-      this.cancelAckTimeout(id);
-      this.transition(id, "ACKED_BY_DEVICE");
+    // Rev E: acks are objects carrying the lease token. A v5.2.1 body that still
+    // sends `ack_command_ids` is rejected rather than ignored: silence would let
+    // the phone believe it acknowledged while the lease churns underneath it.
+    if (carriesRetiredAckKey(parsed)) return err("bad_request", 400);
+    const acks = parseAcks(parsed.acks);
+    if (acks === null) return err("bad_request", 400);
+
+    let applied = 0;
+    for (const ack of acks) {
+      if (this.transition(ack.command_id, "DISPATCHED", ack.claim_token)) applied++;
     }
 
     const fcmToken = parsed.fcm_token;
@@ -661,7 +711,7 @@ export class DeviceGateway extends DurableObject<Env> {
       );
     }
 
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, applied });
   }
 
   /**
@@ -690,20 +740,8 @@ export class DeviceGateway extends DurableObject<Env> {
     // scheduled task (and reset the DO alarm) on every request.
     this.ensureOfflineWatch();
 
-    const rows = this.ctx.storage.sql
-      .exec(
-        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
-           FROM commands
-          WHERE state = 'PENDING'
-          ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at`
-      )
-      .toArray() as unknown as CommandRow[];
-
-    const commands = rows.map(toView);
-    // §6.1: returned by poll -> DISPATCHED, with an ack_timeout that reverts it.
-    for (const command of commands) this.markDispatched(command.command_id);
-
-    return Response.json(commands);
+    // §6.1: returned by poll -> LEASED, with a lease that reverts it.
+    return Response.json(this.leaseCommands(MAX_OUTBOUND_COMMANDS));
   }
 
   /**
@@ -773,7 +811,8 @@ export class DeviceGateway extends DurableObject<Env> {
     if (typeof commandId !== "string" || typeof status !== "string") {
       return err("bad_request", 400);
     }
-    const applied = this.transition(commandId, status);
+    const claimToken = typeof parsed.claim_token === "string" ? parsed.claim_token : undefined;
+    const applied = this.transition(commandId, status, claimToken);
     return Response.json({ applied: applied ? 1 : 0, rejected: applied ? 0 : 1 });
   }
 
@@ -795,7 +834,10 @@ export class DeviceGateway extends DurableObject<Env> {
         rejected++;
         continue;
       }
-      if (this.transition(row.command_id, row.status)) applied++;
+      // `DISPATCHED` is reportable here too, and it is the one status that needs
+      // the lease token, so the batch carries it when the device sends it.
+      const claimToken = typeof row.claim_token === "string" ? row.claim_token : undefined;
+      if (this.transition(row.command_id, row.status, claimToken)) applied++;
       else rejected++;
     }
     // §6.1: rejected transitions are successful no-ops, so this is still a 200.
@@ -805,7 +847,7 @@ export class DeviceGateway extends DurableObject<Env> {
   private handleDeviceStatus(): Response {
     const sockets = this.ctx.getWebSockets();
     const row = this.ctx.storage.sql
-      .exec(`SELECT COUNT(*) AS cnt FROM commands WHERE state IN ('PENDING', 'DISPATCHED')`)
+      .exec(`SELECT COUNT(*) AS cnt FROM commands WHERE state IN ('PENDING', 'LEASED')`)
       .toArray() as { cnt: number }[];
     return Response.json({
       ws_connected: sockets.length > 0,
@@ -873,48 +915,166 @@ export class DeviceGateway extends DurableObject<Env> {
   }
 
   /**
-   * §6.2: the guard lives in the SQL, never in application logic. Returns true
-   * when the transition was applied and false for a rejected no-op — both are
-   * successes to the caller (§6.1).
+   * Rev E §6.2: the guard lives in the SQL, never in application logic. Returns
+   * true when the transition was applied and false for a rejected no-op — both
+   * are successes to the caller (§6.1).
+   *
+   * `LEASED -> DISPATCHED` additionally requires the matching lease token. That
+   * is the only transition a device drives on its own, so it is the only one that
+   * needs proof of ownership. A command that was never leased has no token at
+   * all, so an ack for it is refused instead of trusted.
    */
-  private transition(commandId: string, targetStatus: string): boolean {
+  private transition(commandId: string, targetStatus: string, claimToken?: string): boolean {
     const allowed = ALLOWED_PREDECESSORS[targetStatus];
     if (!allowed || allowed.length === 0) return false;
 
-    const placeholders = allowed.map(() => "?").join(", ");
-    const cursor = this.ctx.storage.sql.exec(
-      `UPDATE commands SET state = ? WHERE command_id = ? AND state IN (${placeholders})`,
-      targetStatus,
-      commandId,
-      ...allowed
-    );
+    const guards = ["command_id = ?", `state IN (${allowed.map(() => "?").join(", ")})`];
+    const params: unknown[] = [targetStatus, commandId, ...allowed];
 
+    if (targetStatus === "DISPATCHED") {
+      if (typeof claimToken !== "string" || claimToken === "") return false;
+      guards.push("claim_token = ?");
+      params.push(claimToken);
+    }
+
+    const cursor = this.ctx.storage.sql.exec(
+      `UPDATE commands SET state = ? WHERE ${guards.join(" AND ")}`,
+      ...params
+    );
     if (cursor.rowsWritten === 0) return false;
 
-    // A resolved non-terminal transition no longer needs its ack timer.
-    if (targetStatus !== "DISPATCHED" && targetStatus !== "PENDING") {
-      this.cancelAckTimeout(commandId);
+    // A settled transition no longer needs its timers. `LEASED` is the only state
+    // that keeps them, and `PENDING` is the state a lease was released into.
+    if (targetStatus !== "LEASED" && targetStatus !== "PENDING") {
+      this.cancelLeaseTimers(commandId);
     }
     this.broadcastState(commandId, targetStatus);
     return true;
   }
 
-  /** §6.1 `PENDING -> DISPATCHED` plus the `ack_timeout` that reverts it. */
-  private markDispatched(commandId: string, socketId: string | null = null): boolean {
-    const cursor = this.ctx.storage.sql.exec(
-      `UPDATE commands SET state = 'DISPATCHED' WHERE command_id = ? AND state IN ('PENDING')`,
-      commandId
-    );
-    if (cursor.rowsWritten === 0) return false;
+  /**
+   * Claim up to `limit` claimable commands and return them with their tokens.
+   *
+   * One statement, because the `UPDATE` *is* the claim: two transports racing for
+   * the same command (a WebSocket push and an HTTP poll) cannot both receive it.
+   * The old read-then-mark pair could, which is what the lease exists to stop.
+   *
+   * A command is claimable when it is `PENDING`, or when it is `LEASED` and that
+   * lease has run out. `expires_at` is checked so a dead command is never handed
+   * out; the `expire` task is what moves it to `EXPIRED`.
+   *
+   * `only` narrows the claim to specific ids, which the enqueue push needs so it
+   * cannot drag along unrelated queued commands the way a bare scan would.
+   */
+  private leaseCommands(
+    limit: number,
+    only?: readonly string[],
+    socketId: string | null = null
+  ): CommandView[] {
+    if (limit <= 0) return [];
+    if (only !== undefined && only.length === 0) return [];
 
+    const now = Date.now();
+    const params: unknown[] = [now + this.timings.leaseMs, now, now];
+
+    let idFilter = "";
+    if (only !== undefined) {
+      idFilter = ` AND command_id IN (${only.map(() => "?").join(", ")})`;
+      params.push(...only);
+    }
+    params.push(limit);
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        `UPDATE commands
+            SET state = 'LEASED',
+                claim_token = lower(hex(randomblob(16))),
+                lease_until = ?
+          WHERE command_id IN (
+            SELECT command_id FROM commands
+             WHERE (state = 'PENDING'
+                    OR (state = 'LEASED' AND lease_until <= ?))
+               AND expires_at > ?${idFilter}
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                      created_at
+             LIMIT ?
+          )
+          RETURNING command_id, to_e164, body, priority, expires_at, claim_token, sim_slot`,
+        ...params
+      )
+      .toArray() as unknown as {
+      command_id: string;
+      to_e164: string;
+      body: string;
+      priority: string;
+      expires_at: number;
+      claim_token: string;
+      sim_slot: number;
+    }[];
+
+    const commands: CommandView[] = rows.map((row) => ({
+      command_id: row.command_id,
+      to: row.to_e164,
+      body: row.body,
+      priority: row.priority,
+      expires_at: row.expires_at,
+      claim_token: row.claim_token,
+      sim_slot: Number(row.sim_slot ?? 0),
+    }));
+
+    for (const command of commands) {
+      this.scheduleTask(
+        `lease:${command.command_id}`,
+        now + this.timings.leaseMs,
+        "lease_expiry",
+        JSON.stringify({
+          command_id: command.command_id,
+          claim_token: command.claim_token,
+          // The socket this lease was delivered over, when there was one. A lease
+          // that expires closes exactly that socket, which is how a wedged device
+          // learns to reconnect. A poll-only device has none to close.
+          socket_id: socketId,
+        })
+      );
+    }
+    return commands;
+  }
+
+  /**
+   * Hand leases back because the frame carrying them never reached the device.
+   *
+   * Guarded on the token so a lease that was re-granted in the meantime is left
+   * alone: this releases OUR lease, not whatever currently holds the command.
+   */
+  private releaseLeases(commands: readonly CommandView[]): void {
+    for (const command of commands) {
+      this.ctx.storage.sql.exec(
+        `UPDATE commands
+            SET state = 'PENDING', claim_token = NULL, lease_until = NULL
+          WHERE command_id = ? AND state = 'LEASED' AND claim_token = ?`,
+        command.command_id,
+        command.claim_token
+      );
+      this.cancelLeaseTimers(command.command_id);
+    }
+    for (const command of commands) this.broadcastState(command.command_id, "PENDING");
+  }
+
+  /**
+   * Arm the "the phone has gone quiet" close for one leased command.
+   *
+   * This is the only thing `ACK_TIMEOUT_MS` still governs. It never releases the
+   * lease, because a `SmsManager` send can legitimately outlast it and releasing
+   * the command mid-send is what produces a duplicate SMS. Closing the socket
+   * makes a dead or wedged device reconnect and re-`hello`.
+   */
+  private armWakeTimer(commandId: string, claimToken: string, socketId: string): void {
     this.scheduleTask(
-      `ack:${commandId}`,
+      `wake:${commandId}`,
       Date.now() + this.timings.ackTimeoutMs,
-      "ack_timeout",
-      JSON.stringify({ command_id: commandId, socket_id: socketId })
+      "ack_wake",
+      JSON.stringify({ command_id: commandId, claim_token: claimToken, socket_id: socketId })
     );
-    this.broadcastState(commandId, "DISPATCHED");
-    return true;
   }
 
   /** Fire-and-forget fan-out so an already-open socket sees another client's ack. */
@@ -959,13 +1119,16 @@ export class DeviceGateway extends DurableObject<Env> {
       return;
     }
 
-    if (data.op === "ack" && Array.isArray(data.command_ids)) {
-      // The HTTP path caps this list; the socket path must too, or the cap is a
-      // suggestion.
-      for (const id of data.command_ids.slice(0, MAX_ACK_IDS)) {
-        if (typeof id !== "string" || id === "") continue;
-        this.cancelAckTimeout(id);
-        this.transition(id, "ACKED_BY_DEVICE");
+    if (data.op === "ack") {
+      // Rev E: acks are objects carrying the lease token, on every transport.
+      // The slice cap applies here too, or the HTTP cap is only a suggestion.
+      const acks = Array.isArray(data.acks) ? data.acks.slice(0, MAX_ACK_IDS) : [];
+      for (const entry of acks) {
+        if (!entry || typeof entry !== "object") continue;
+        const row = entry as Record<string, unknown>;
+        if (typeof row.command_id !== "string" || row.command_id === "") continue;
+        if (typeof row.claim_token !== "string" || row.claim_token === "") continue;
+        this.transition(row.command_id, "DISPATCHED", row.claim_token);
       }
     }
   }
@@ -988,58 +1151,73 @@ export class DeviceGateway extends DurableObject<Env> {
   /* ====================================================================== */
 
   /**
-   * #9: the enqueue/recovery push. Sends EXACTLY the commands it is given, so a
-   * new command can never re-push (and re-timer) the ones already in flight.
+   * #9: the enqueue/recovery push. Leases and sends EXACTLY the commands it is
+   * given, so a new command can never re-push the ones already in flight.
    * Returns false when there is no usable socket, so the caller can wake the
    * device over FCM instead.
    */
-  private pushCommands(commands: CommandView[]): boolean {
-    if (commands.length === 0) return true;
+  private pushCommands(commandIds: readonly string[]): boolean {
+    if (commandIds.length === 0) return true;
     const ws = this.pickFreshSocket();
     if (!ws) return false;
 
+    const leased = this.leaseCommands(
+      commandIds.length,
+      commandIds,
+      readAttachment(ws).socketId ?? null
+    );
+    // Nothing claimable: every id was already claimed, had expired, or is gone.
+    // That is not a failure; whatever is still PENDING is picked up by the poll.
+    if (leased.length === 0) return true;
+
+    return this.deliver(ws, leased);
+  }
+
+  /**
+   * Send an already-leased batch over `ws`.
+   *
+   * A frame that never reached the device releases its leases immediately. The
+   * alternative is waiting out the whole lease window on a command nobody can
+   * possibly be working on, which on a 60 s lease is a minute of needless delay
+   * for the operator and one wasted wake push.
+   */
+  private deliver(ws: WebSocket, leased: readonly CommandView[]): boolean {
     try {
-      ws.send(JSON.stringify({ op: "commands", commands }));
+      ws.send(JSON.stringify({ op: "commands", commands: leased }));
     } catch {
       try {
         ws.close(1011, "send_failed");
       } catch {
         // Already closed.
       }
+      this.releaseLeases(leased);
       return false;
     }
 
-    const socketId = readAttachment(ws).socketId ?? null;
-    for (const command of commands) this.markDispatched(command.command_id, socketId);
+    const socketId = readAttachment(ws).socketId;
+    if (socketId !== undefined) {
+      for (const command of leased) {
+        this.armWakeTimer(command.command_id, command.claim_token, socketId);
+      }
+    }
     return true;
   }
 
   /**
-   * `hello`/reconnect recovery: `PENDING` ONLY.
+   * `hello`/reconnect recovery.
    *
-   * `DISPATCHED` commands are deliberately excluded — an `ack_timeout` already
-   * reverts them to `PENDING` (§6.1), so re-pushing them here would restart their
-   * timers on every reconnect and duplicate work the device is already doing.
+   * Leases only what is claimable, which now includes a command whose previous
+   * lease has run out. That is the whole point of the lease: a command is
+   * recoverable by whoever claims it first, and only one transport can win.
    */
   private pushPendingToSocket(ws: WebSocket): void {
-    const rows = this.ctx.storage.sql
-      .exec(
-        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
-           FROM commands
-          WHERE state = 'PENDING'
-          ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at`
-      )
-      .toArray() as unknown as CommandRow[];
-
-    if (rows.length === 0) return;
-    const commands = rows.map(toView);
-
-    try {
-      ws.send(JSON.stringify({ op: "commands", commands }));
-    } catch {
-      return;
-    }
-    for (const command of commands) this.markDispatched(command.command_id);
+    const commands = this.leaseCommands(
+      MAX_OUTBOUND_COMMANDS,
+      undefined,
+      readAttachment(ws).socketId ?? null
+    );
+    if (commands.length === 0) return;
+    this.deliver(ws, commands);
   }
 
   /** #22: never let an FCM outage break command enqueue. */
@@ -1206,28 +1384,74 @@ export class DeviceGateway extends DurableObject<Env> {
       return "consumed";
     }
 
-    if (task.kind === "ack_timeout") {
+    if (task.kind === "lease_expiry") {
       const commandId = payload.command_id;
-      if (typeof commandId === "string") {
-        // §6.1: `DISPATCHED -> PENDING`, guarded in SQL, so an acked or delivered
-        // command is left exactly as it is.
-        const reverted = this.transition(commandId, "PENDING");
+      const claimToken = payload.claim_token;
+      if (typeof commandId === "string" && typeof claimToken === "string") {
+        // Revert ONLY the lease this task granted. A command that was re-leased
+        // carries a different token, and reverting it would hand a live lease to
+        // a second transport: exactly the duplicate send the lease prevents.
+        const reverted =
+          this.ctx.storage.sql.exec(
+            `UPDATE commands
+                SET state = 'PENDING', claim_token = NULL, lease_until = NULL
+              WHERE command_id = ? AND state = 'LEASED' AND claim_token = ?`,
+            commandId,
+            claimToken
+          ).rowsWritten > 0;
         if (reverted) {
-          // Close only the socket the command was pushed to. A command delivered
-          // over an HTTP poll has no owning socket, and one slow ack must not
-          // tear down a device's other connections.
+          this.cancelLeaseTimers(commandId);
+          this.broadcastState(commandId, "PENDING");
+          // Close only the socket this lease was pushed to. A command collected
+          // over an HTTP poll has no owning socket, and one expired lease must
+          // not tear down a device's other connections.
           const socketId = typeof payload.socket_id === "string" ? payload.socket_id : null;
           if (socketId !== null) {
             for (const ws of this.ctx.getWebSockets()) {
               if (readAttachment(ws).socketId !== socketId) continue;
               try {
-                ws.close(1011, "ack_timeout");
+                ws.close(1011, "lease_expiry");
               } catch {
                 // Already closed.
               }
             }
           }
           await this.sendWakePush();
+        }
+      }
+      return "consumed";
+    }
+
+    if (task.kind === "ack_wake") {
+      // The lease is deliberately NOT released here. `ACK_TIMEOUT_MS` is the
+      // dead-phone signal, not the claim window: a send that takes 20 s is
+      // normal, and releasing the command mid-send is what duplicates an SMS.
+      // Closing the socket makes a wedged or vanished device reconnect.
+      const commandId = payload.command_id;
+      const claimToken = payload.claim_token;
+      const socketId = typeof payload.socket_id === "string" ? payload.socket_id : null;
+      if (
+        typeof commandId === "string" &&
+        typeof claimToken === "string" &&
+        socketId !== null
+      ) {
+        const stillLeased = this.ctx.storage.sql
+          .exec(
+            `SELECT 1 AS present FROM commands
+              WHERE command_id = ? AND state = 'LEASED' AND claim_token = ?`,
+            commandId,
+            claimToken
+          )
+          .toArray();
+        if (stillLeased.length > 0) {
+          for (const ws of this.ctx.getWebSockets()) {
+            if (readAttachment(ws).socketId !== socketId) continue;
+            try {
+              ws.close(1011, "ack_timeout");
+            } catch {
+              // Already closed.
+            }
+          }
         }
       }
       return "consumed";
@@ -1357,10 +1581,11 @@ export class DeviceGateway extends DurableObject<Env> {
     this.syncNextAlarm();
   }
 
-  private cancelAckTimeout(commandId: string): void {
+  private cancelLeaseTimers(commandId: string): void {
     const cursor = this.ctx.storage.sql.exec(
-      `DELETE FROM scheduled_tasks WHERE id = ?`,
-      `ack:${commandId}`
+      `DELETE FROM scheduled_tasks WHERE id IN (?, ?)`,
+      `lease:${commandId}`,
+      `wake:${commandId}`
     );
     if (cursor.rowsWritten > 0) this.syncNextAlarm();
   }
@@ -1433,6 +1658,13 @@ function parseCommandInput(entry: unknown): CommandRow | null {
     }
   }
 
+  // 0 means "no preference". A slot that is out of range is dropped rather than
+  // refusing the send: a wrong slot hint must never stop an SMS, and the phone
+  // falls back to the platform default exactly as it does today.
+  const rawSlot = row.sim_slot;
+  const simSlot =
+    rawSlot === 1 || rawSlot === 2 ? rawSlot : 0;
+
   return {
     command_id: commandId,
     to_e164: to,
@@ -1442,16 +1674,7 @@ function parseCommandInput(entry: unknown): CommandRow | null {
     created_at: Date.now(),
     expires_at: expiresAt,
     idempotency_key: typeof key === "string" ? key : null,
-  };
-}
-
-function toView(command: CommandRow): CommandView {
-  return {
-    command_id: command.command_id,
-    to: command.to_e164,
-    body: command.body,
-    priority: command.priority,
-    expires_at: command.expires_at,
+    sim_slot: simSlot,
   };
 }
 

@@ -13,7 +13,7 @@ use dakflare_flow::Action;
 
 use crate::db::{Message, Store, StoreError};
 use crate::flowrun::{RemoteFlow, run_flows};
-use crate::protocol::{DeviceClient, InboundMessage, OutboundReport, ProtocolError};
+use crate::protocol::{Ack, DeviceClient, InboundMessage, OutboundReport, ProtocolError};
 
 /// The JNI surface caps these before calling in; the core repeats the check so a
 /// future caller cannot bypass them.
@@ -42,8 +42,9 @@ pub struct Injected {
     pub duplicates: u64,
     /// Commands the upload response already delivered. The incoming handler ends
     /// by reading the pending queue, so a freshly enqueued auto-reply comes back
-    /// in the same response and is marked DISPATCHED by the DO. A later poll
-    /// would not see it — this is the intended low-latency path.
+    /// in the same response. A later poll would not see it — this is the intended
+    /// low-latency path. These rows are recorded, not acknowledged: the ack waits
+    /// until the radio accepts the send.
     pub captured: Vec<Message>,
     /// Messages the DEVICE produced by running its own flows.
     pub device_sent: usize,
@@ -374,12 +375,18 @@ pub async fn inject_inbound(
     })
 }
 
-/// Record each command as an outbound message and return the ids to acknowledge.
+/// Record each command as an outbound message and return its local id.
 ///
-/// Split from the acknowledgement so both transports can share one recording
-/// rule: the HTTP poll acks with a second `poll`, and the device socket acks
-/// with its own `{"op":"ack"}` frame. Neither path is allowed to claim the row
-/// was sent.
+/// Both transports share this one recording rule. The row keeps the command's
+/// `claim_token`, so the ack can be sent later — after the radio has accepted the
+/// send — without re-reading the poll response. Recording is never an ack: the
+/// row stays `queued` until the send path marks it from its own SENT/DELIVERED
+/// receipt.
+///
+/// The returned ids are the rows this call recorded; a caller that acknowledges
+/// (the desktop simulator, whose radio is fake and accepts instantly) passes them
+/// to [`ack_command`]. The device socket still uses them for its own frame, which
+/// a v6 edge treats as a no-op until the token-bearing ack arrives.
 pub async fn record_commands(
     store: &Store,
     device_id: &str,
@@ -387,7 +394,7 @@ pub async fn record_commands(
 ) -> Result<(Vec<Message>, Vec<String>), CarrierError> {
     let entries = commands.as_array().cloned().unwrap_or_default();
     let mut captured = Vec::new();
-    let mut ack_ids: Vec<String> = Vec::new();
+    let mut recorded_ids: Vec<String> = Vec::new();
 
     for entry in entries {
         let command_id = entry
@@ -406,6 +413,16 @@ pub async fn record_commands(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        let claim_token = entry
+            .get("claim_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // The edge may express a per-command SIM preference (0 = none). There is
+        // no per-row column for it yet; the send path still resolves the tray
+        // from the device setting. Read it here so the field is not silently
+        // mistaken for one the device accepts today.
+        let _sim_slot = entry.get("sim_slot").and_then(|v| v.as_i64()).unwrap_or(0);
 
         if command_id.is_empty() {
             continue;
@@ -414,50 +431,70 @@ pub async fn record_commands(
         // The row's local id is the command id. That keeps one identity for the
         // command from the moment it is collected until its receipt is
         // reported, which is what lets `report_command_state` address the
-        // Worker's state machine without a second column.
+        // Worker's state machine without a second column, and lets the ack name
+        // the same row the radio later sends.
         let message = store
             .record_message(device_id, "out", &to, &body, "queued", Some(&command_id))
             .await?;
-        ack_ids.push(command_id);
+        if !claim_token.is_empty() {
+            store
+                .set_message_claim_token(device_id, &command_id, &claim_token)
+                .await?;
+        }
+        recorded_ids.push(command_id);
         captured.push(message);
     }
 
-    Ok((captured, ack_ids))
+    Ok((captured, recorded_ids))
 }
 
-/// Record each command as an outbound message, then acknowledge it so the
-/// Worker stops redelivering it.
+/// Record each command as an outbound message. It never acknowledges here: the
+/// ack belongs after the radio accepts the send, not after local durability.
 async fn capture_commands(
     store: &Store,
     client: &DeviceClient,
     device_id: &str,
     commands: &serde_json::Value,
 ) -> Result<Vec<Message>, CarrierError> {
-    let (captured, ack_ids) = record_commands(store, device_id, commands).await?;
+    let (captured, _) = record_commands(store, device_id, commands).await?;
 
-    if !ack_ids.is_empty() {
-        client.poll(&ack_ids).await?;
-        // Deliberately NOT `set_message_state(..., "sent")`. Acknowledging a
-        // command says the phone holds it, not that the radio transmitted it;
-        // the row stays `queued` until the send path marks it from its own
-        // SENT/DELIVERED receipt. Claiming `sent` here made every Worker-queued
-        // message look delivered while nothing had touched the radio.
-        //
-        // Mirror what the device now holds. Best effort: an unsent row keeps
-        // `mirrored = 0` and is retried on the next sync, and the state change
-        // when the radio reports re-opens it for mirroring.
-        if let Err(error) = mirror_pending(store, client, device_id).await {
-            eprintln!("[carrier] outbound mirror failed: {error}");
-        }
+    // Mirror what the device now holds. Best effort: an unsent row keeps
+    // `mirrored = 0` and is retried on the next sync, and the state change when
+    // the radio reports re-opens it for mirroring.
+    if let Err(error) = mirror_pending(store, client, device_id).await {
+        eprintln!("[carrier] outbound mirror failed: {error}");
     }
 
     Ok(captured)
 }
 
-/// `poll` → capture every queued command as an outbound message → ack them.
+/// Acknowledge one recorded command after the radio has accepted the send.
 ///
-/// Acknowledgement happens in a second poll, exactly as a device would do, so the
-/// command leaves `PENDING`/`DISPATCHED` and stops being redelivered.
+/// The stored `claim_token` is the proof the edge requires; a row without one is
+/// not a command (a composer send or a flow reply), so this returns
+/// `Ok(false)` without touching the network. The token is cleared only after the
+/// edge answers, so a failed ack leaves it in place and a later attempt can
+/// retry with the same lease.
+pub async fn ack_command(
+    client: &DeviceClient,
+    store: &Store,
+    device_id: &str,
+    local_id: &str,
+) -> Result<bool, CarrierError> {
+    let Some(claim_token) = store.claim_token_for(device_id, local_id).await? else {
+        return Ok(false);
+    };
+
+    client
+        .poll(&[Ack {
+            command_id: local_id.to_string(),
+            claim_token,
+        }])
+        .await?;
+    store.clear_message_claim_token(device_id, local_id).await?;
+    Ok(true)
+}
+
 /// Report a command's terminal state to the deployment.
 ///
 /// The Worker's command state machine is keyed by `command_id`, and a row this
@@ -503,6 +540,12 @@ fn looks_like_command_id(value: &str) -> bool {
         })
 }
 
+/// `poll` → record every queued command as an outbound message.
+///
+/// This never acknowledges. The ack belongs after the radio accepts the send, so
+/// it is the send path's job: `SmsSender.resend` on Android, and
+/// `carrier_drain`'s own loop on the desktop, whose carrier radio is fake and
+/// accepts instantly.
 pub async fn drain_outbox(
     store: &Store,
     client: &DeviceClient,
@@ -1124,6 +1167,123 @@ mod tests {
 
         assert!(store.list_cached_flows().await.unwrap().is_empty());
         assert!(store.load_flows().await.unwrap().is_empty());
+    }
+
+    /// A one-shot poll endpoint that captures the request body and answers with
+    /// no commands. This observes the wire, so the test can prove what an ack
+    /// actually sends.
+    fn serve_one_poll() -> (String, std::thread::JoinHandle<serde_json::Value>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..header_end]);
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let total = header_end + 4 + length;
+                while raw.len() < total {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+                }
+                let body = serde_json::from_slice(&raw[header_end + 4..]).unwrap();
+                let reply = "{\"commands\":[]}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                return body;
+            }
+            serde_json::Value::Null
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn commands_keep_their_lease_and_ack_only_with_that_token() {
+        let (_dir, store, device) = paired_store().await;
+        let identity = crate::generate_identity().unwrap();
+        let commands = serde_json::json!([{
+            "command_id": "123e4567-e89b-12d3-a456-426614174000",
+            "to": "+15550001111",
+            "body": "from the queue",
+            "priority": 0,
+            "expires_at": 1_793_000_000_000i64,
+            "claim_token": "deadbeef",
+            "sim_slot": 0,
+        }]);
+
+        let (captured, ids) = record_commands(&store, &device.device_id, &commands)
+            .await
+            .unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            store
+                .claim_token_for(&device.device_id, &ids[0])
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("deadbeef"),
+            "the lease travels with the recorded row"
+        );
+
+        // Acking sends the token, then clears it so a stale token cannot replay.
+        let (base_url, server) = serve_one_poll();
+        let client = DeviceClient::new(
+            Target::new(base_url, None).unwrap(),
+            device.device_id.clone(),
+            identity.private_key_pkcs8_pem.clone(),
+        );
+        assert!(ack_command(&client, &store, &device.device_id, &ids[0])
+            .await
+            .unwrap());
+        let body = server.join().unwrap();
+        assert_eq!(
+            body["acks"],
+            serde_json::json!([{
+                "command_id": ids[0],
+                "claim_token": "deadbeef",
+            }])
+        );
+        assert!(body.get("ack_command_ids").is_none());
+        assert_eq!(
+            store
+                .claim_token_for(&device.device_id, &ids[0])
+                .await
+                .unwrap(),
+            None
+        );
+
+        // A composer row has no token: no ack, no request.
+        assert!(
+            !ack_command(&client, &store, &device.device_id, "compose-abc")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

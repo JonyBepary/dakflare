@@ -55,7 +55,7 @@ for (const size of INCOMING_SIZES) {
 
   const t0 = Date.now();
   const r = await device(identity, 'POST', '/v1/sms/incoming/batch', {
-    messages, ack_command_ids: [],
+    messages, acks: [],
   });
   const ms = Date.now() - t0;
 
@@ -66,7 +66,7 @@ for (const size of INCOMING_SIZES) {
   // Idempotency at scale: the same batch again must be all duplicates, not errors.
   const t1 = Date.now();
   const again = await device(identity, 'POST', '/v1/sms/incoming/batch', {
-    messages, ack_command_ids: [],
+    messages, acks: [],
   });
   check(`${size}-message replay counted as duplicates`,
     again.status === 200 && again.data?.duplicates === size,
@@ -98,11 +98,14 @@ for (const size of OUTBOUND_SIZES) {
 /* ── 3. clean up: poll, then ack everything so nothing is left PENDING ─────── */
 console.log('\n-- cleanup --');
 {
-  const poll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
-  const got = (poll.data?.commands ?? []).map((c) => c.command_id);
+  const poll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+  const gotCommands = poll.data?.commands ?? [];
+  const got = gotCommands.map((c) => c.command_id);
   note('commands returned by the poll', String(got.length));
   if (got.length) {
-    const ack = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: got });
+    const ack = await device(identity, 'POST', '/v1/sms/outgoing/poll', {
+      acks: gotCommands.map((c) => ({ command_id: c.command_id, claim_token: c.claim_token })),
+    });
     check('cleanup ack accepted', ack.status === 200);
     await sleep(300);
   }

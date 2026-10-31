@@ -10,8 +10,8 @@
  *      keepalive works, which is the part that matters operationally.
  *
  * IMPORTANT — a real device acks promptly. This gate does too. An older version of this
- * script idled without acking, so `hello`'s push of leftover PENDING commands tripped the
- * 8 s ack_timeout, which closed every socket with 1011 *before* the idle period ended. The
+ * script idled without acking, so `hello`'s push of leftover PENDING commands took a lease
+ * that expired, which closed every socket with 1011 *before* the idle period ended. The
  * gate was then measuring a dead socket. Draining and acking during idle is what makes the
  * hibernation assertion mean anything.
  *
@@ -52,7 +52,10 @@ function drain(ws, acked) {
     for (const c of j.commands) {
       if (!c?.command_id || acked.has(c.command_id)) continue;
       acked.add(c.command_id);
-      ws.sendText(JSON.stringify({ op: 'ack', command_ids: [c.command_id] }));
+      ws.sendText(JSON.stringify({
+        op: 'ack',
+        acks: [{ command_id: c.command_id, claim_token: c.claim_token }],
+      }));
       n++;
     }
   }
@@ -75,7 +78,7 @@ console.log('-- A. hibernation survival (~40 s) --');
   ws.sendText(JSON.stringify({ op: 'hello' }));
   await sleep(400);
 
-  // Drain + ack for the whole idle window, so ack_timeout cannot fire and close us.
+  // Drain + ack for the whole idle window, so lease expiry cannot fire and close us.
   const acked = new Set();
   console.log(`  idling ${IDLE_MS / 1000} s (acking anything pushed)...`);
   const until = Date.now() + IDLE_MS;
@@ -99,10 +102,23 @@ console.log('-- A. hibernation survival (~40 s) --');
   check('command pushed over the surviving socket after hibernation', delivered);
 
   if (delivered) {
-    ws.sendText(JSON.stringify({ op: 'ack', command_ids: [cmdId] }));
+    let claimToken = null;
+    for (const x of seen) {
+      try {
+        const j = JSON.parse(x.text);
+        if (j.op !== 'commands') continue;
+        const c = j.commands.find((c) => c.command_id === cmdId);
+        if (c) claimToken = c.claim_token;
+      } catch { /* not JSON */ }
+    }
+    ws.sendText(JSON.stringify({
+      op: 'ack',
+      acks: [{ command_id: cmdId, claim_token: claimToken }],
+    }));
     await sleep(700);
     const st = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
-    check('woken DO advanced the command to ACKED_BY_DEVICE', st.data?.command?.state, 'ACKED_BY_DEVICE');
+    check('the woken DO handed the command to the phone and it acknowledged',
+      st.data?.command?.state, 'DISPATCHED');
   }
   ws.close();
 }
@@ -172,7 +188,7 @@ console.log(`\n-- D. staleness vs the 45 s ping (~140 s) --`);
   quiet.sendText(JSON.stringify({ op: 'hello', fcm_token: 'stub-fcm-token-0001' }));
   await sleep(400);
 
-  // Drain leftovers first so ack_timeout cannot interfere with the measurement.
+  // Drain leftovers first so lease expiry cannot interfere with the measurement.
   const acked = new Set();
   for (let i = 0; i < 10; i++) { drain(quiet, acked); await sleep(120); }
   note('leftover commands acked before the staleness window', String(acked.size));
@@ -199,8 +215,8 @@ console.log(`\n-- D. staleness vs the 45 s ping (~140 s) --`);
   await sleep(1_000);
   const st = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
   const state = st.data?.command?.state;
-  check('the command is not lost (PENDING or DISPATCHED, never dropped)',
-    state === 'PENDING' || state === 'DISPATCHED', `state: ${state}`);
+  check('the command is not lost (PENDING, LEASED or DISPATCHED, never dropped)',
+    state === 'PENDING' || state === 'LEASED' || state === 'DISPATCHED', `state: ${state}`);
   note('conclusion',
     'the 45 s ping IS necessary — not for connection survival but to keep the auto-response ' +
     'timestamp fresh so a healthy, quiet socket is not aged out at STALE_SOCKET_MS');

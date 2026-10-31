@@ -127,6 +127,13 @@ export interface Env {
   FCM_BASE_URL: string;
   GOOGLE_TOKEN_URL: string;
   /** Optional timing overrides, clamped in lib/config.ts. */
+  /**
+   * How long a device may hold a command before another transport may claim it.
+   * Default 60000. Do not shorten this to the ack timeout: a send that outlasts
+   * its lease is re-claimed and delivered twice.
+   */
+  LEASE_MS?: string;
+  /** How long before an unacked socket is closed. Default 8000. */
   ACK_TIMEOUT_MS?: string;
   OFFLINE_ALERT_MS?: string;
   STALE_SOCKET_MS?: string;

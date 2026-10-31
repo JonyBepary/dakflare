@@ -160,6 +160,16 @@ object NativeBridge {
     ): String
 
     /**
+     * Acknowledge one recorded command after the radio accepted the send.
+     *
+     * Returns `{"ok":true,"acked":true|false}` or
+     * `{"ok":false,"error":"bad_input"|"unpaired"|"storage"|"network"|"protocol"}`.
+     * The lease token is read from the stored row, never passed in; `acked:false`
+     * only means the row was not a command.
+     */
+    external fun ackCommand(appDir: String, deviceId: String, localId: String): String
+
+    /**
      * Replace the cached flow set with this deployment's current set.
      *
      * Returns `{"ok":true,"flows":<count>}` or
@@ -615,6 +625,35 @@ object NativeBridge {
             false
         } catch (error: Throwable) {
             Log.e(TAG, "reportStatus failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Acknowledge a command after the radio accepted it.
+     *
+     * Returns true when the edge accepted a token-bearing ack. False is normal: a
+     * composer send or a flow reply has no lease token, so there is nothing to
+     * acknowledge. Never throws: a network failure leaves the token in place and
+     * the next send attempt can retry it.
+     */
+    fun ackCommandSafely(appDir: String, deviceId: String, localId: String): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || deviceId.isEmpty() || localId.isEmpty()) return false
+
+        return try {
+            val parsed = JSONObject(ackCommand(appDir, deviceId, localId))
+            if (!parsed.optBoolean("ok")) {
+                Log.w(TAG, "ackCommand refused: ${parsed.optString("error")}")
+                false
+            } else {
+                parsed.optBoolean("acked")
+            }
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "ackCommand symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "ackCommand failed: ${error.javaClass.simpleName}")
             false
         }
     }

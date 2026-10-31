@@ -1,8 +1,8 @@
 /**
  * Outbound command state — PROTOCOL_CONTRACT_V5 Rev C §6.
  *
- * The happy path is linear, but `DISPATCHED` may fall back to `PENDING` on an
- * ack timeout. The UI therefore tracks the furthest stage reached separately
+ * The happy path is linear, but `LEASED` may fall back to `PENDING` when its
+ * 60 s lease expires. The UI therefore tracks the furthest stage reached separately
  * from the current state: progress only ever moves forward, while the label
  * always tells the truth about where the command is now.
  *
@@ -13,8 +13,8 @@
 
 export const COMMAND_STEPS = [
 	'PENDING',
+	'LEASED',
 	'DISPATCHED',
-	'ACKED_BY_DEVICE',
 	'SENT',
 	'DELIVERED'
 ] as const;
@@ -24,16 +24,16 @@ export type CommandStep = (typeof COMMAND_STEPS)[number];
 /** Stage names in operator words: each step reads differently from its neighbour. */
 export const COMMAND_STEP_LABELS: Record<CommandStep, string> = {
 	PENDING: 'Queued',
-	DISPATCHED: 'Handed over',
-	ACKED_BY_DEVICE: 'Received',
+	LEASED: 'Handed over',
+	DISPATCHED: 'Received',
 	SENT: 'Sent',
 	DELIVERED: 'Delivered'
 };
 
 const STATE_LABELS = {
 	PENDING: 'Queued',
-	DISPATCHED: 'Queued',
-	ACKED_BY_DEVICE: 'Received',
+	LEASED: 'Handed over',
+	DISPATCHED: 'Received',
 	SENT: 'Sent',
 	DELIVERED: 'Delivered',
 	FAILED: 'Failed',
@@ -42,8 +42,8 @@ const STATE_LABELS = {
 
 const STATE_NOTES = {
 	PENDING: 'Queued. The phone collects it when it next checks in.',
-	DISPATCHED: 'Queued. Handed to the phone over its live link; waiting for it to accept.',
-	ACKED_BY_DEVICE: 'The phone has it and is sending it now.',
+	LEASED: 'Handed to the phone over its live link. It has not confirmed it accepted it yet.',
+	DISPATCHED: 'The phone confirmed it has it and is sending it now.',
 	SENT: 'The phone handed it to the radio. The carrier has not confirmed delivery.',
 	DELIVERED: 'The carrier confirmed delivery.',
 	FAILED: 'The phone could not send it.',
@@ -87,14 +87,14 @@ export function commandStateTone(
 		case 'DELIVERED':
 		case 'SENT':
 			return 'ok';
-		case 'ACKED_BY_DEVICE':
+		case 'DISPATCHED':
 			return 'accent';
 		case 'FAILED':
 			return 'danger';
 		case 'EXPIRED':
 			return 'warn';
 		case 'PENDING':
-		case 'DISPATCHED':
+		case 'LEASED':
 			return 'muted';
 		default:
 			return 'muted';

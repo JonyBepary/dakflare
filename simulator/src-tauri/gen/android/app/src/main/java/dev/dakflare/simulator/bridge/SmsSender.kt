@@ -14,9 +14,11 @@ import android.util.Log
  *
  * The order is the contract: refuse what must never be sent (permission, mask,
  * shortcode, oversize body), then write the `queued` row through the Rust core,
- * then touch the radio. The row therefore exists before `SmsManager` is called,
- * and [SendStatusReceiver] finishes it from the `SENT` broadcast rather than
- * this call claiming delivery.
+ * then touch the radio, then acknowledge the command. The row therefore exists
+ * before `SmsManager` is called, and [SendStatusReceiver] finishes it from the
+ * `SENT` broadcast rather than this call claiming delivery. A command is never
+ * acknowledged before `SmsManager` returns without throwing: that is the
+ * radio's acceptance, not local durability.
  *
  * Logging rule, same as the inbound receiver: counts, ids and a masked
  * recipient only. No body is ever logged, and no number is logged whole.
@@ -135,7 +137,11 @@ object SmsSender {
 
         return try {
             val parts = handToRadio(context, deviceId, localId, row.peer, row.body, manager)
-            Log.i(TAG, "retry handed to radio to=${mask(row.peer)} parts=$parts")
+            // The radio accepted the message, so the command may be acknowledged
+            // now. A composer row has no lease token and this is a harmless
+            // false, but only a command that reached the radio is acked.
+            val acked = NativeBridge.ackCommandSafely(appDir, deviceId, localId)
+            Log.i(TAG, "retry handed to radio to=${mask(row.peer)} parts=$parts acked=$acked")
             true
         } catch (error: Throwable) {
             // A thrown send has no result code, so it is not known to be

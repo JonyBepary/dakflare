@@ -312,47 +312,107 @@ admission must not share an inclusive boundary.
 
 ## 6. Command state machine
 
-Rev B's §4 declares this machine but §5 never enforces it: `/__http_ack`, the WS `ack` handler, and
-`/__status` all issue unguarded `UPDATE commands SET state=?`. A stale ack retry therefore regresses
-`DELIVERED` back to `ACKED_BY_DEVICE`, and an out-of-order `SENT` broadcast regresses `DELIVERED` to
-`SENT`.
+Rev B's §4 declared this machine but §5 never enforced it: `/__http_ack`, the WS `ack` handler, and
+`/__status` all issued unguarded `UPDATE commands SET state=?`, so a stale ack retry regressed
+`DELIVERED`.
+
+Rev E replaces the read-then-mark pair with a **lease**. A command is handed out under an exclusive,
+time-bounded claim carrying an opaque `claim_token`, and the ack must echo that token. Two transports
+racing for the same command (a WebSocket push and an HTTP poll) can no longer both receive it, and an
+ack from a device that has lost its lease is a no-op instead of a claim.
 
 ### 6.1 Allowed transitions
 
 | From | To | Trigger |
 |---|---|---|
-| `PENDING` | `DISPATCHED` | pushed over WS, or returned by poll |
-| `DISPATCHED` | `ACKED_BY_DEVICE` | device ack (WS or HTTP) |
-| `DISPATCHED` | `PENDING` | `ack_timeout` (8 s) |
-| `PENDING`, `DISPATCHED` | `EXPIRED` | `expire` alarm |
-| `ACKED_BY_DEVICE` | `SENT` | per-part `SENT` receipt |
-| `ACKED_BY_DEVICE` | `FAILED` | send failure |
+| `PENDING` | `LEASED` | claimed atomically by a WS push or a poll |
+| `LEASED` | `DISPATCHED` | device ack carrying the matching `claim_token` |
+| `LEASED` | `PENDING` | `lease_expiry` (60 s) or a push that never reached the device |
+| `PENDING`, `LEASED` | `EXPIRED` | `expire` alarm |
+| `DISPATCHED` | `SENT` | per-part `SENT` receipt |
+| `DISPATCHED` | `FAILED` | send failure |
 | `SENT` | `DELIVERED` | delivery receipt |
 | `SENT` | `FAILED` | delivery failure |
 
 **Terminal (no outgoing transitions):** `DELIVERED`, `FAILED`, `EXPIRED`.
 
-**Explicitly rejected:** anything out of a terminal state; `SENT → ACKED_BY_DEVICE`;
-`DELIVERED → SENT`; `EXPIRED → *`. A rejected transition is a **no-op that returns success** — it is
-not an error, because a late or duplicated receipt from Android is normal and must not be surfaced as
-a failure.
+**Explicitly rejected:** anything out of a terminal state; `SENT → DISPATCHED`; `DELIVERED → SENT`;
+`EXPIRED → *`; and any `→ DISPATCHED` whose `claim_token` does not match the row's current lease. A
+rejected transition is a **no-op that returns success** — it is not an error, because a late or
+duplicated receipt from Android is normal and must not be surfaced as a failure.
+
+### 6.1.1 Why the lease is 60 s and the ack comes after the radio
+
+The device acknowledges **after** `SmsManager` accepts the message, not when it writes the row
+locally. That is the only point at which it has evidence the command will be attempted, and acking
+earlier made a stuck radio indistinguishable from a delivered command.
+
+A `SmsManager` send on a congested cell or during a handover routinely takes longer than 8 s. With an
+8 s lease the lease would expire mid-send, the command would return to `PENDING`, another transport
+would claim it, and the device's late ack would be a no-op: a second real SMS for the same command.
+The lease is therefore a fixed **60 s** (`LEASE_MS`), independent of `ACK_TIMEOUT_MS`.
+
+`ACK_TIMEOUT_MS` (8 s) governs a separate timer: it closes the socket of a device that has not acked,
+so a vanished or wedged phone is noticed quickly. It never releases the lease, because releasing a
+command mid-send is the duplicate this section exists to prevent.
 
 ### 6.2 Enforcement
 
-Guard in SQL, not in application logic, so it is atomic:
+Guard in SQL, not in application logic, so it is atomic. The **claim** is a single
+`UPDATE … RETURNING`, so reading and marking cannot be split:
 
 ```sql
--- ack
-UPDATE commands SET state = 'ACKED_BY_DEVICE'
- WHERE command_id = ? AND state IN ('PENDING','DISPATCHED');
+-- claim (the only way a command is handed out)
+UPDATE commands
+   SET state = 'LEASED',
+       claim_token = lower(hex(randomblob(16))),
+       lease_until = ?
+ WHERE command_id IN (
+   SELECT command_id FROM commands
+    WHERE (state = 'PENDING' OR (state = 'LEASED' AND lease_until <= ?))
+      AND expires_at > ?
+    ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at
+    LIMIT ?
+ )
+RETURNING command_id, to_e164, body, priority, expires_at, claim_token, sim_slot;
+
+-- ack: the token is proof of ownership, not a hint
+UPDATE commands SET state = 'DISPATCHED'
+ WHERE command_id = ? AND state IN ('LEASED') AND claim_token = ?;
 
 -- status
 UPDATE commands SET state = ?
  WHERE command_id = ? AND state IN (<allowed predecessors of ? for this target>);
+
+-- lease expiry: revert only the lease this timer granted
+UPDATE commands
+   SET state = 'PENDING', claim_token = NULL, lease_until = NULL
+ WHERE command_id = ? AND state = 'LEASED' AND claim_token = ?;
 ```
 
 The caller compares `cursor.rowsWritten`: `1` = applied, `0` = rejected-as-no-op. Both are `200`.
 This makes the machine enforced by the storage layer and impossible to bypass from a new route.
+
+### 6.3 Ack wire shape
+
+Acks are objects, on both transports. The retired `ack_command_ids` array is rejected with
+`400 bad_request` rather than ignored, so a v5.2.1 client fails loudly instead of silently churning
+leases on its own handset.
+
+```json
+{ "acks": [ { "command_id": "…", "claim_token": "…" } ] }
+```
+
+```json
+{ "op": "ack", "acks": [ { "command_id": "…", "claim_token": "…" } ] }
+```
+
+The command payload carries the token it is claimed with:
+
+```json
+{ "command_id": "…", "to": "+8801…", "body": "…", "priority": "normal",
+  "expires_at": 1793000000000, "claim_token": "…", "sim_slot": 0 }
+```
 
 ---
 

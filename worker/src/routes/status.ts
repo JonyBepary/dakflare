@@ -1,12 +1,15 @@
 /**
- * Delivery-status batch — PROTOCOL_CONTRACT_V5 Rev C §6 and §8.
- * Port of master plan §5.4 with §6's enforcement added.
+ * Delivery-status batch — PROTOCOL_CONTRACT_V5 Rev E §6 and §8.
  *
  * Rev B declared the state machine in §4 and then issued unguarded
  * `UPDATE commands SET state = ?` from three places, so a duplicated or late
- * receipt regressed `DELIVERED` back to `ACKED_BY_DEVICE` or to `SENT`. The
- * transition is now guarded in SQL inside the Durable Object (§6.2) and this
- * route only reports what the storage layer accepted.
+ * receipt regressed `DELIVERED` back to an earlier state. The transition is now
+ * guarded in SQL inside the Durable Object (§6.2) and this route only reports
+ * what the storage layer accepted.
+ *
+ * Rev E: `DISPATCHED` is reportable here as well as through `acks`, and it is
+ * the one status that requires the lease token. Both paths reach the same
+ * guarded `transition`, so the token rule cannot be bypassed by choosing one.
  *
  * §6.1: a rejected transition is a NO-OP THAT RETURNS SUCCESS, not an error —
  * a late receipt from Android is normal and must not be surfaced as a failure.
@@ -16,9 +19,15 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { MAX_STATUS_UPDATES } from "../lib/config";
 
-/** §6.1 status targets the device may report. `PENDING` and `DISPATCHED` are edge-owned. */
+/**
+ * §6.1 status targets the device may report.
+ *
+ * `PENDING` and `LEASED` are edge-owned: a device can never put a command back
+ * in the queue or grant itself a lease. `DISPATCHED` is the device's own
+ * confirmation and is accepted only with the matching `claim_token`.
+ */
 const DEVICE_REPORTABLE_STATUSES = new Set([
-  "ACKED_BY_DEVICE",
+  "DISPATCHED",
   "SENT",
   "DELIVERED",
   "FAILED",
@@ -28,6 +37,8 @@ const DEVICE_REPORTABLE_STATUSES = new Set([
 interface StatusUpdate {
   command_id: string;
   status: string;
+  /** Required by the Durable Object for `DISPATCHED`, ignored for the rest. */
+  claim_token?: string;
 }
 
 export async function handleStatusBatch(
@@ -69,7 +80,12 @@ export async function handleStatusBatch(
       ignored++;
       continue;
     }
-    accepted.push({ command_id: commandId, status });
+    const claimToken = row.claim_token;
+    accepted.push({
+      command_id: commandId,
+      status,
+      claim_token: typeof claimToken === "string" && claimToken !== "" ? claimToken : undefined,
+    });
   }
 
   if (accepted.length === 0) {

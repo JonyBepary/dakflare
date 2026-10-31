@@ -64,9 +64,9 @@ class SendStatusReceiver : BroadcastReceiver() {
                             )
                             Log.i(TAG, "send status id=$localId result=$result state=sent stored=$stored")
                             // Tell the deployment, not just the local store: a
-                            // command collected from the outbound poll only
-                            // leaves ACKED_BY_DEVICE when its terminal state is
-                            // reported here.
+                            // command collected from the outbound poll was
+                            // acknowledged after the radio accepted it, and its
+                            // terminal state is reported here.
                             report(appDir, deviceId, localId, "sent")
 
                             // Same worker that marked the row, after the mark: the

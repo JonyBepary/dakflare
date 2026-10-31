@@ -79,8 +79,8 @@ export interface DeviceStatus {
 
 export type CommandState =
 	| 'PENDING'
+	| 'LEASED'
 	| 'DISPATCHED'
-	| 'ACKED_BY_DEVICE'
 	| 'SENT'
 	| 'DELIVERED'
 	| 'FAILED'

@@ -129,8 +129,8 @@ class GatewayService : Service() {
 
                     // The socket is the delivery path: this parks the thread
                     // until a command arrives or the wait ends. A command is
-                    // already recorded and acknowledged by the time it returns,
-                    // so all that is left is the radio.
+                    // recorded by the time it returns; the radio, and then the
+                    // acknowledgement, are what is left.
                     val awaited = NativeBridge.awaitCommandSafely(appDir, deviceId, AWAIT_MS)
                     socketLive = awaited.live
                     var handed = 0

@@ -168,6 +168,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // recorded", never an invented default.
         "ALTER TABLE messages ADD COLUMN last_error TEXT",
     ),
+    (
+        11,
+        // Rev E lease: the edge hands a command with an opaque claim token and
+        // only accepts the ack that echoes it. The row keeps the token until the
+        // radio has accepted the send and the ack has been applied; NULL means
+        // this row is not a command, or its lease was never captured.
+        "ALTER TABLE messages ADD COLUMN claim_token TEXT",
+    ),
 ];
 
 /// The one rule for a row retention may delete: the deployment already has it,
@@ -1047,6 +1055,69 @@ impl Store {
         conn.execute(
             "UPDATE messages SET state = ? WHERE id = ?",
             params![state, id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Store the lease token a poll handed out for one command row.
+    ///
+    /// The token is the only proof the edge accepts when the device
+    /// acknowledges after the radio accepts the send. It is written once, when
+    /// the command is recorded, and cleared by [`Store::clear_message_claim_token`]
+    /// once the ack has been applied. A row that is not a command (a composer
+    /// send or a flow reply) simply has no token.
+    pub async fn set_message_claim_token(
+        &self,
+        device_id: &str,
+        local_id: &str,
+        token: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "UPDATE messages SET claim_token = ?
+              WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+            params![token, device_id, local_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The lease token stored for one outbound row, if it is a command.
+    ///
+    /// `None` is the normal answer for a composer send or a flow reply, and for
+    /// a command whose lease was already acknowledged and cleared.
+    pub async fn claim_token_for(
+        &self,
+        device_id: &str,
+        local_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.db.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT claim_token FROM messages
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+                params![device_id, local_id],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Clear the lease token once the edge has accepted the ack, so a stale
+    /// token cannot be replayed by a later send of the same row.
+    pub async fn clear_message_claim_token(
+        &self,
+        device_id: &str,
+        local_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "UPDATE messages SET claim_token = NULL
+              WHERE device_id = ? AND local_id = ? AND direction = 'out'",
+            params![device_id, local_id],
         )
         .await?;
         Ok(())
@@ -2340,6 +2411,65 @@ mod tests {
         );
     }
 
+
+    #[tokio::test]
+    async fn claim_token_round_trips_and_is_cleared() {
+        let (_dir, store) = open_temp().await;
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "lease",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_message(
+                &device.device_id,
+                "out",
+                "+1555",
+                "command",
+                "queued",
+                Some("cmd-1"),
+            )
+            .await
+            .unwrap();
+
+        // A composer row and a command row are told apart by the token alone.
+        assert_eq!(
+            store
+                .claim_token_for(&device.device_id, "cmd-1")
+                .await
+                .unwrap(),
+            None
+        );
+        store
+            .set_message_claim_token(&device.device_id, "cmd-1", "abc123")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_token_for(&device.device_id, "cmd-1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("abc123")
+        );
+        store
+            .clear_message_claim_token(&device.device_id, "cmd-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_token_for(&device.device_id, "cmd-1")
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn outbound_rows_start_unmirrored_and_can_be_marked() {

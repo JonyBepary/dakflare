@@ -6,7 +6,7 @@
  * Rev B defects fixed here:
  *   - `JSON.parse` sat outside any try/catch, so a malformed body threw a
  *     `SyntaxError` and the isolate answered 500 instead of `400 bad_request`.
- *   - `ack_command_ids.length` was read without an `Array.isArray` guard, so a
+ *   - the ack list's length was read without an `Array.isArray` guard, so a
  *     JSON `null` or a string crashed the handler.
  *   - rows were inserted one `await` at a time in a loop and the loop could
  *     `return 400` mid-flight, leaving a partially committed batch (the first
@@ -35,8 +35,8 @@ import {
   type RuleRecord,
 } from "../lib/rule-graph";
 import { RE_WORKFLOW_ID } from "../lib/workflow";
+import { parseAcks } from "../lib/acks";
 import {
-  MAX_ACK_IDS,
   MAX_BODY_CHARS,
   MAX_FCM_TOKEN_CHARS,
   MAX_ID_CHARS,
@@ -153,14 +153,12 @@ export async function handleIncomingBatch(
   if (!Array.isArray(outbound)) return err("bad_request", 400);
   if (messages.length + outbound.length > MAX_INCOMING_MESSAGES) return err("bad_request", 400);
 
-  const ackCommandIds: string[] = [];
-  if (data.ack_command_ids !== undefined) {
-    if (!Array.isArray(data.ack_command_ids)) return err("bad_request", 400);
-    if (data.ack_command_ids.length > MAX_ACK_IDS) return err("bad_request", 400);
-    for (const id of data.ack_command_ids) {
-      if (typeof id === "string" && id !== "") ackCommandIds.push(id);
-    }
-  }
+  // Rev E: acks are `{command_id, claim_token}` objects. A body still carrying
+  // the retired v5.2.1 key is refused, not ignored: silence would leave the
+  // phone believing it acknowledged while the lease churns underneath it.
+  if (data.ack_command_ids !== undefined) return err("bad_request", 400);
+  const acks = parseAcks(data.acks);
+  if (acks === null) return err("bad_request", 400);
 
   const fcmToken =
     typeof data.fcm_token === "string" &&
@@ -492,11 +490,11 @@ export async function handleIncomingBatch(
     }
   }
 
-  if (ackCommandIds.length > 0 || fcmToken) {
+  if (acks.length > 0 || fcmToken) {
     await stub.fetch("https://do/__http_ack", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Device-Id": deviceId },
-      body: JSON.stringify({ ack_command_ids: ackCommandIds, fcm_token: fcmToken }),
+      body: JSON.stringify({ acks, fcm_token: fcmToken }),
     });
   }
 

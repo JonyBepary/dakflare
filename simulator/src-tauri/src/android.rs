@@ -15,7 +15,7 @@ use std::path::Path;
 use dakflare_core::{
     Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
     StoreError, Target,
-    carrier::{drain_outbox, flush_pending},
+    carrier::{ack_command, drain_outbox, flush_pending},
     is_device_fact_key, receive_and_reply, reply_local_id, report_command_state, sync_flows,
 };
 use jni::JNIEnv;
@@ -534,8 +534,8 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
 /// — `live` is whether the socket was connected when the wait ended, which is
 /// what the gateway notification reports.
 ///
-/// The commands are already recorded as `queued` rows and acknowledged to the
-/// deployment by the time this returns; the caller's job is the radio.
+/// The commands are already recorded as `queued` rows by the time this returns;
+/// the caller's job is the radio, then the acknowledgement.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_awaitCommand(
     mut env: JNIEnv,
@@ -617,6 +617,54 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] reportStatus panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.ackCommand`
+///
+/// Acknowledges one recorded command after the radio accepted the send. Returns
+/// `{"ok":true,"acked":true|false}` — `false` means the row carried no lease
+/// token, so it was not a command (a composer send or a flow reply) and nothing
+/// was sent.
+///
+/// The lease token is read from the stored row, never passed in. A failed ack
+/// leaves it in place, so a later retry can use the same lease; an ack the edge
+/// rejects is a successful no-op there and simply clears the local token.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_ackCommand(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_local_id_inputs(&mut env, &app_dir, &device_id, &local_id) {
+            Ok((app_dir, device_id, local_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ack_blocking(&app_dir, &device_id, &local_id)
+                })) {
+                    Ok(Ok(acked)) => serde_json::json!({
+                        "ok": true,
+                        "acked": acked,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] ackCommand panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] ackCommand panicked before storage");
             error_json("storage")
         }
     };
@@ -1330,12 +1378,6 @@ fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static st
     Ok(flushed)
 }
 
-/// Collect every command the deployment has queued for this device.
-///
-/// `drain_outbox` records each one as a local `queued` row and acknowledges it,
-/// so the Worker stops redelivering it; it does not touch the radio. The caller
-/// hands the returned local ids to `SmsSender`, which is the only path allowed
-/// to mark a row `sent`.
 /// Report one command's terminal state. The client signs with the device key,
 /// so the Worker can trust the claim without a session.
 fn report_status_blocking(
@@ -1347,6 +1389,16 @@ fn report_status_blocking(
     let store = open_store_blocking(app_dir)?;
     let client = signed_client_blocking(&store, device_id)?;
     tauri::async_runtime::block_on(report_command_state(&client, local_id, state))
+        .map_err(map_network_error)
+}
+
+/// Acknowledge one command after the radio accepted it. A row with no stored
+/// lease token is not a command, so `Ok(false)` is an honest no-op and never a
+/// network failure.
+fn ack_blocking(app_dir: &str, device_id: &str, local_id: &str) -> Result<bool, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+    tauri::async_runtime::block_on(ack_command(&client, &store, device_id, local_id))
         .map_err(map_network_error)
 }
 
@@ -1365,6 +1417,13 @@ fn read_status_inputs(
     Ok((app_dir, device_id, local_id, state))
 }
 
+/// Collect every command the deployment has queued for this device.
+///
+/// `drain_outbox` records each one as a local `queued` row, keeping the lease
+/// token, and never acknowledges: it does not touch the radio, so it cannot know
+/// the send was accepted. The caller hands the returned local ids to
+/// `SmsSender`, which acks once the radio accepts and is the only path allowed
+/// to mark a row `sent`.
 fn drain_blocking(app_dir: &str, device_id: &str) -> Result<Vec<String>, &'static str> {
     let store = open_store_blocking(app_dir)?;
     let client = signed_client_blocking(&store, device_id)?;

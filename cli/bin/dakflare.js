@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '0.2.0';
+const CLI_VERSION = '6.0.0';
 
 const HOME = os.homedir();
 const CONFIG_DIR = path.join(HOME, '.config', 'dakflare');
@@ -260,7 +260,7 @@ const COMMAND_SPECS = {
     response: {
       command_id: 'the id `status` takes',
       replayed: 'true when an idempotency key matched an existing command',
-      state: 'PENDING|DISPATCHED|ACKED_BY_DEVICE|SENT|DELIVERED|FAILED|EXPIRED',
+      state: 'PENDING|LEASED|DISPATCHED|SENT|DELIVERED|FAILED|EXPIRED',
       verification: '{passed, state, terminal, reason, next_command}',
     },
     summary: 'Queue one outbound SMS and follow it to the radio',
@@ -273,7 +273,7 @@ const COMMAND_SPECS = {
       device: { type: 'string', note: 'send through this device; default is the freshest' },
       'no-wait': { type: 'boolean', note: 'queue and return immediately' },
       wait: { type: 'duration', note: 'how long to follow it, default 10s, max 5m' },
-      until: { type: 'state', note: 'pending|dispatched|acked|sent|delivered, default sent' },
+      until: { type: 'state', note: 'pending|dispatched|sent|delivered, default sent' },
       'idempotency-key': { type: 'string', note: 'a retry with the same key returns the same command' },
     },
     examples: [
@@ -294,7 +294,7 @@ const COMMAND_SPECS = {
     flags: {
       device: { type: 'string', note: 'the phone that owns the command' },
       wait: { type: 'duration', note: 'follow it, default 30s' },
-      until: { type: 'state', note: 'pending|dispatched|acked|sent|delivered, default delivered' },
+      until: { type: 'state', note: 'pending|dispatched|sent|delivered, default delivered' },
     },
     examples: [
       'dakflare status 6cb13963-f33c-49d0-b87f-2cc72844a426',
@@ -1638,8 +1638,8 @@ async function commandRevoke(argv) {
  */
 const COMMAND_STATES = {
   PENDING: { rank: 0, terminal: false, meaning: 'waiting for the phone to collect it' },
-  DISPATCHED: { rank: 1, terminal: false, meaning: 'handed to the phone, no acknowledgement yet' },
-  ACKED_BY_DEVICE: { rank: 2, terminal: false, meaning: 'the phone acknowledged it and is sending' },
+  LEASED: { rank: 1, terminal: false, meaning: 'the phone was handed it and has 60 s to confirm' },
+  DISPATCHED: { rank: 2, terminal: false, meaning: 'the phone confirmed it has it and is sending' },
   SENT: { rank: 3, terminal: false, meaning: 'the radio accepted it; delivery is not claimed' },
   DELIVERED: { rank: 4, terminal: true, meaning: 'a carrier report confirmed delivery' },
   FAILED: { rank: 4, terminal: true, meaning: 'the radio or the carrier refused it' },
@@ -1654,8 +1654,6 @@ const stateMeta = (state) => COMMAND_STATES[state] ?? UNKNOWN_STATE;
 const UNTIL_ALIASES = {
   pending: 'PENDING',
   dispatched: 'DISPATCHED',
-  acked: 'ACKED_BY_DEVICE',
-  acknowledged: 'ACKED_BY_DEVICE',
   sent: 'SENT',
   delivered: 'DELIVERED',
 };
@@ -2968,7 +2966,7 @@ Queues one outbound SMS and prints the command id and its state.
   --no-wait       queue and return immediately instead of following the command
   --wait [d]      how long to follow it (default 10s, max 5m)
   --until <s>     stop at this state instead of waiting for delivery:
-                  pending, dispatched, acked, sent, delivered (default: sent)
+                  pending, dispatched, sent, delivered (default: sent)
   --idempotency-key <k>
                   retry-safe: the same key returns the command it already created
                   instead of sending a second SMS. The reply carries replayed:true
@@ -2990,7 +2988,7 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
 
   --device <id>   the phone that owns the command; omitted when exactly one is paired
   --wait [d]      poll until the command settles (default 30s, max 5m)
-  --until <s>     stop at pending, dispatched, acked, sent or delivered`,
+  --until <s>     stop at pending, dispatched, sent or delivered`,
 
   auth: `Usage: dakflare auth <bootstrap|invite|invites|reset> [options]
 

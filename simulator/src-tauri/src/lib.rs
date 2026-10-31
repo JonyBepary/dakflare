@@ -520,6 +520,22 @@ async fn carrier_drain(
     let captured = drain_outbox(state.store.as_ref(), &client, &device_id)
         .await
         .map_err(|e| e.to_string())?;
+    // The desktop carrier's radio is fake and accepts every send instantly, so
+    // acknowledging here is the honest equivalent of `SmsManager` returning
+    // without throwing. On Android the gateway acks from `SmsSender.resend`
+    // instead, after the real radio answers. A failed ack keeps the row's token,
+    // so the next send retries it.
+    for message in &captured {
+        if let Some(local_id) = &message.local_id {
+            let _ = dakflare_core::carrier::ack_command(
+                &client,
+                state.store.as_ref(),
+                &device_id,
+                local_id,
+            )
+            .await;
+        }
+    }
     // `drain_outbox` polls the deployment with this identity's key; the answer
     // is contact even when it carried no commands.
     record_contact(&state, &device_id).await;

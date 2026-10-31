@@ -1,6 +1,6 @@
 [package]
 name = "dakflare-core"
-version = "0.1.0"
+version = "6.0.0"
 description = "Device identity, local libSQL store and protocol core for the DakFlare simulator"
 edition = "2024"
 license = "AGPL-3.0-only"

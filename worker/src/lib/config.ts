@@ -10,7 +10,22 @@
  */
 
 export interface TimingConfig {
-  /** §6.1 `DISPATCHED -> PENDING` after this long without a device ack. */
+  /**
+   * How long a device may hold a command before another transport may claim it.
+   *
+   * 60 s, and deliberately NOT tied to `ackTimeoutMs`. The device acknowledges
+   * AFTER its radio accepts the message, and a `SmsManager` send on a congested
+   * cell or during a handover routinely takes longer than 8 s. With an 8 s lease
+   * the lease would expire mid-send, the command would return to `PENDING`,
+   * another transport would lease it, and the late ack would be a no-op: a
+   * duplicate SMS, which is the exact failure the lease exists to prevent.
+   */
+  leaseMs: number;
+  /**
+   * How long before a socket that has not acked is closed so the device
+   * reconnects. This is the dead-phone signal and nothing else: it never
+   * releases the lease, because releasing it early is what duplicates sends.
+   */
   ackTimeoutMs: number;
   /** Emit `[offline_alert]` after this long with no sign of life from the device. */
   offlineAlertMs: number;
@@ -23,6 +38,7 @@ export interface TimingConfig {
 }
 
 export const DEFAULT_TIMINGS: Readonly<TimingConfig> = {
+  leaseMs: 60_000,
   ackTimeoutMs: 8_000,
   offlineAlertMs: 900_000,
   staleSocketMs: 120_000,
@@ -59,6 +75,7 @@ export function readIntEnv(
 export function timingConfig(env: Record<string, unknown> | undefined): TimingConfig {
   const source = env ?? {};
   return {
+    leaseMs: readIntEnv(source.LEASE_MS, DEFAULT_TIMINGS.leaseMs, 100, 3_600_000),
     ackTimeoutMs: readIntEnv(source.ACK_TIMEOUT_MS, DEFAULT_TIMINGS.ackTimeoutMs, 100, 3_600_000),
     offlineAlertMs: readIntEnv(
       source.OFFLINE_ALERT_MS,

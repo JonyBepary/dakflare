@@ -39,7 +39,7 @@
  *
  * Env: WORKER_URL (http://127.0.0.1:8787), ADMIN_TOKEN (dev-admin-token),
  *      STUB_URL (http://127.0.0.1:8790), HARNESS_ACK_TIMEOUT_MS (1500),
- *      PROXY_PORT (8788).
+ *      HARNESS_LEASE_MS (1500), PROXY_PORT (8788).
  */
 
 import crypto from 'node:crypto';
@@ -55,6 +55,7 @@ const WORKER_URL = process.env.WORKER_URL ?? 'http://127.0.0.1:8787';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token';
 const STUB_URL = process.env.STUB_URL ?? 'http://127.0.0.1:8790';
 const ACK_TIMEOUT_MS = Number(process.env.HARNESS_ACK_TIMEOUT_MS ?? 1500);
+const LEASE_MS = Number(process.env.HARNESS_LEASE_MS ?? 1500);
 const PROXY_PORT = Number(process.env.PROXY_PORT ?? 8788);
 const WORKER_HOST = new URL(WORKER_URL);
 
@@ -954,7 +955,7 @@ async function pairRequest(identity, pairingCode) {
  * first symptom is a 401 from the admin mint, which reads like an auth bug.
  *
  * A local stack is the default. A deployed Worker needs HARNESS_REMOTE=1, which
- * the ack-timeout section already understands.
+ * the lease-expiry section already understands.
  */
 function refuseNonLocal(command) {
   let host;
@@ -1007,7 +1008,7 @@ async function cmdPair() {
   // The load-bearing check: a signed request must now succeed, which proves the
   // Durable Object actually registered the key (not just D1).
   const live = { ...identity, privateKey: priv(identity) };
-  const probe = await device(live, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+  const probe = await device(live, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
   console.log(`post-pair signed request -> ${probe.status} (want 200)`);
   if (probe.status !== 200) {
     throw new Error(`D1/DO divergence: pairing returned 200 but signed requests fail: ${JSON.stringify(probe.data)}`);
@@ -1028,7 +1029,7 @@ function priv(identity) {
 async function cmdSuite() {
   refuseNonLocal('suite');
   const identity = loadIdentity();
-  console.log(`== suite ==\nworker: ${WORKER_URL}\ndevice: ${identity.deviceId}\nack timeout: ${ACK_TIMEOUT_MS} ms\n`);
+  console.log(`== suite ==\nworker: ${WORKER_URL}\ndevice: ${identity.deviceId}\nack timeout: ${ACK_TIMEOUT_MS} ms\nlease: ${LEASE_MS} ms\n`);
 
   let allOk = true;
   const run = (rep) => { allOk = rep.print() && allOk; console.log(); };
@@ -1058,7 +1059,7 @@ async function cmdSuite() {
     // D1 and the device's Durable Object agree rather than one half-registering.
     const live = { ...fresh, privateKey: crypto.createPrivateKey(fresh.privateKeyPem) };
     rep.check('signed request after pairing -> 200 (D1/DO agree)',
-      (await device(live, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] })).status, 200);
+      (await device(live, 'POST', '/v1/sms/outgoing/poll', { acks: [] })).status, 200);
 
     await admin('DELETE', `/v1/admin/devices/${fresh.deviceId}`);
     await admin('DELETE', `/v1/admin/devices/${neg.deviceId}`);
@@ -1069,7 +1070,7 @@ async function cmdSuite() {
   // stored fcm_token before pushing, so without this the wake path has no target
   // and correctly declines to call FCM at all.
   await device(identity, 'POST', '/v1/sms/outgoing/poll', {
-    ack_command_ids: [], fcm_token: 'stub-fcm-token-0001',
+    acks: [], fcm_token: 'stub-fcm-token-0001',
   });
 
   /* ── admin surface ─────────────────────────────────────────────────────── */
@@ -1220,7 +1221,7 @@ async function cmdSuite() {
         body: 'archive history probe',
         received_at: new Date().toISOString(),
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('the original device relays one message -> 200', posted.status, 200);
 
@@ -1257,7 +1258,7 @@ async function cmdSuite() {
     await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
     rep.check('re-archive for the poll case',
       (await fleet()).some((d) => d.device_id === old.deviceId), false);
-    const polled = await device(oldKey, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+    const polled = await device(oldKey, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
     rep.check('an archived device can still poll -> 200', polled.status, 200);
     const back = await waitFor(async () =>
       (await fleet()).find((d) => d.device_id === old.deviceId && d.archived_at === null) ?? null);
@@ -1318,7 +1319,7 @@ async function cmdSuite() {
 
     const sent = await device(identity, 'POST', '/v1/sms/incoming/batch', {
       outbound: [entry({ state: 'sent' })],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('outbound[] sent -> 200', sent.status, 200);
     const sentRow = (await readRows(localId))[0];
@@ -1331,7 +1332,7 @@ async function cmdSuite() {
     /* 2. Re-upload with `delivered` updates the same row ------------------- */
     const delivered = await device(identity, 'POST', '/v1/sms/incoming/batch', {
       outbound: [entry({ state: 'delivered' })],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('re-upload as delivered -> 200', delivered.status, 200);
     const deliveredRows = await readRows(localId);
@@ -1347,7 +1348,7 @@ async function cmdSuite() {
         ...entry({ state: 'failed', error: longError }),
         local_id: failedId,
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('failed outbound -> 200', failed.status, 200);
     const failedRow = (await readRows(failedId))[0];
@@ -1360,7 +1361,7 @@ async function cmdSuite() {
     /* 4. An unknown state is rejected, never stored ------------------------ */
     const badState = await device(identity, 'POST', '/v1/sms/incoming/batch', {
       outbound: [entry({ state: 'exploded' })],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('unknown state -> 400', badState.status, 400);
     rep.check('...error is bad_request', badState.data?.error, 'bad_request');
@@ -1375,7 +1376,7 @@ async function cmdSuite() {
         body: 'reply state probe, no rule matches this',
         received_at: new Date().toISOString(),
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     const failedReplyId = `state_${crypto.randomBytes(6).toString('hex')}`;
     await device(identity, 'POST', '/v1/sms/incoming/batch', {
@@ -1383,7 +1384,7 @@ async function cmdSuite() {
         ...entry({ state: 'failed', error: 'radio refused' }),
         local_id: failedReplyId,
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     const inboundRow = (await readRows(inboundId))[0];
     rep.check('inbound row still reads reply_state null', inboundRow?.reply_state, null);
@@ -1402,7 +1403,7 @@ async function cmdSuite() {
         direction: 'out',
         state: 'sent',
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('direction:"out" + state -> 200', legacy.status, 200);
     rep.check('...reply_state=sent', (await readRows(legacyId))[0]?.reply_state, 'sent');
@@ -1423,7 +1424,7 @@ async function cmdSuite() {
       ['33 chars', 'a'.repeat(33)],
       ['non-hex', 'z'.repeat(32)],
     ]) {
-      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { nonce });
+      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { nonce });
       rep.check(`X-Nonce ${label} -> malformed_header`, r.data?.error, 'malformed_header');
     }
 
@@ -1433,23 +1434,23 @@ async function cmdSuite() {
       ['exponent', '1.7e12'],
       ['12 digits', '177647040000'],
     ]) {
-      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { ts });
+      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { ts });
       rep.check(`X-Timestamp ${label} -> malformed_header`, r.data?.error, 'malformed_header');
     }
     // §1.2.1: leading whitespace is stripped by the HTTP parser, so the padded
     // form is asserted in `selftest` as a validator unit test, not here.
 
-    const tamper = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] },
+    const tamper = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] },
       {
-        signBodyStr: JSON.stringify({ ack_command_ids: [] }),
-        sendBodyStr: JSON.stringify({ ack_command_ids: ['tampered'] }),
+        signBodyStr: JSON.stringify({ acks: [] }),
+        sendBodyStr: JSON.stringify({ acks: [{ command_id: 'tampered', claim_token: 'tampered' }] }),
       });
     rep.check('body tamper -> invalid_signature', tamper.data?.error, 'invalid_signature');
 
-    const shortSig = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { sigB64: 'AAAA' });
+    const shortSig = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { sigB64: 'AAAA' });
     rep.check('3-byte signature -> bad_signature_length', shortSig.data?.error, 'bad_signature_length');
 
-    const query = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { query: '?x=1', sigB64: 'AAAA' });
+    const query = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { query: '?x=1', sigB64: 'AAAA' });
     rep.check('query string -> 400 unexpected_query (before crypto)', query.data?.error, 'unexpected_query');
     rep.check('query string status is 400 not 401', query.status, 400);
     run(rep);
@@ -1459,31 +1460,31 @@ async function cmdSuite() {
   console.log('-- replay guard (§5) --');
   {
     const rep = new Report('replay');
-    const first = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+    const first = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
     rep.check('fresh nonce -> 200', first.status, 200);
-    const replay = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] },
+    const replay = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] },
       { ts: first.signed.ts, nonce: first.signed.nonce, sigB64: first.signed.sigB64 });
     rep.check('same nonce again -> nonce_replay', replay.data?.error, 'nonce_replay');
 
     // same millisecond, different nonce: must succeed
     const ms = String(Date.now());
-    const a = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { ts: ms });
-    const b = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }, { ts: ms });
+    const a = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { ts: ms });
+    const b = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }, { ts: ms });
     rep.check('two fresh nonces in the SAME millisecond -> both 200', a.status === 200 && b.status === 200, true);
 
     // The withdrawn evicted_max_ts design fails at 33; assert 40.
     let burstOk = 0;
     const failures = [];
     for (let i = 0; i < 40; i++) {
-      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+      const r = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
       if (r.status === 200) burstOk++; else failures.push(`${i}:${r.status}:${r.data?.error}`);
     }
     rep.check('40 consecutive in-window requests all 200 (kills evicted_max_ts)', burstOk, 40);
     if (failures.length) console.log(`        failures: ${failures.slice(0, 5).join(', ')}`);
 
     const [c1, c2] = await Promise.all([
-      device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }),
-      device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] }),
+      device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }),
+      device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] }),
     ]);
     rep.check('two concurrent signed requests -> both 200', c1.status === 200 && c2.status === 200, true);
     run(rep);
@@ -1644,7 +1645,7 @@ async function cmdSuite() {
         body: ruleBody,
         received_at: new Date().toISOString(),
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('matching inbound -> 200', firstBatch.status, 200);
     rep.check('accepted 1', firstBatch.data?.accepted, 1);
@@ -1681,7 +1682,7 @@ async function cmdSuite() {
         body: 'second keyword message',
         received_at: new Date().toISOString(),
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('second matching inbound inside cooldown -> 200', secondBatch.status, 200);
     rep.check('accepted 1', secondBatch.data?.accepted, 1);
@@ -1701,7 +1702,7 @@ async function cmdSuite() {
         body: 'nothing to see here',
         received_at: new Date().toISOString(),
       }],
-      ack_command_ids: [],
+      acks: [],
     });
     rep.check('non-matching inbound -> 200', thirdBatch.status, 200);
     rep.check('accepted 1', thirdBatch.data?.accepted, 1);
@@ -1780,7 +1781,7 @@ async function cmdSuite() {
     rep.check('revoke the device -> 200',
       (await admin('DELETE', `/v1/admin/devices/${consoleDevice.deviceId}`)).status, 200);
     rep.check('revoked device can no longer sign -> 401',
-      (await device(consoleKey, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] })).status,
+      (await device(consoleKey, 'POST', '/v1/sms/outgoing/poll', { acks: [] })).status,
       401);
 
     const rulesAfter = ((await admin('GET', '/v1/admin/rules')).data?.rules ?? []).length;
@@ -1801,20 +1802,20 @@ async function cmdSuite() {
     const localId = 'suite_' + crypto.randomBytes(6).toString('hex');
     const msg = { local_id: localId, sender: '+8801712345678', body: 'hello', received_at: new Date().toISOString() };
 
-    const first = await device(identity, 'POST', '/v1/sms/incoming/batch', { messages: [msg], ack_command_ids: [] });
+    const first = await device(identity, 'POST', '/v1/sms/incoming/batch', { messages: [msg], acks: [] });
     rep.check('first insert -> 200', first.status, 200);
     rep.check('accepted 1', first.data?.accepted, 1);
 
-    const dup = await device(identity, 'POST', '/v1/sms/incoming/batch', { messages: [msg], ack_command_ids: [] });
+    const dup = await device(identity, 'POST', '/v1/sms/incoming/batch', { messages: [msg], acks: [] });
     rep.check('same (device_id, local_id) -> duplicates 1', dup.data?.duplicates, 1);
 
     const badDate = await device(identity, 'POST', '/v1/sms/incoming/batch', {
-      messages: [{ ...msg, local_id: localId + '_b', received_at: '9999-12-31T00:00:00.000Z' }], ack_command_ids: [],
+      messages: [{ ...msg, local_id: localId + '_b', received_at: '9999-12-31T00:00:00.000Z' }], acks: [],
     });
     rep.check('received_at year 9999 -> 400', badDate.status, 400);
 
     const ancient = await device(identity, 'POST', '/v1/sms/incoming/batch', {
-      messages: [{ ...msg, local_id: localId + '_c', received_at: '1970-01-01T00:00:00.000Z' }], ack_command_ids: [],
+      messages: [{ ...msg, local_id: localId + '_c', received_at: '1970-01-01T00:00:00.000Z' }], acks: [],
     });
     rep.check('received_at 1970 -> 400 (bounded)', ancient.status, 400);
 
@@ -1822,7 +1823,7 @@ async function cmdSuite() {
     rep.check('malformed JSON -> 400 not 500', malformed.status, 400);
 
     const missingLocal = await device(identity, 'POST', '/v1/sms/incoming/batch', {
-      messages: [{ sender: '+8801712345678', body: 'x', received_at: new Date().toISOString() }], ack_command_ids: [],
+      messages: [{ sender: '+8801712345678', body: 'x', received_at: new Date().toISOString() }], acks: [],
     });
     rep.check('missing local_id -> 400', missingLocal.status, 400);
     run(rep);
@@ -1839,8 +1840,8 @@ async function cmdSuite() {
     const cmdId = send.data?.command_id;
     rep.check('returns a command_id', typeof cmdId, 'string');
 
-    const readState = async () => {
-      const r = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+    const readState = async (id = cmdId) => {
+      const r = await admin('GET', `/v1/sms/commands/${id}?device_id=${identity.deviceId}`);
       return { status: r.status, state: r.data?.command?.state };
     };
 
@@ -1860,13 +1861,24 @@ async function cmdSuite() {
     rep.check('outbound row persisted with direction=out',
       (msgs.data?.messages ?? []).some((m) => m.direction === 'out' && m.body === 'suite lifecycle'), true);
 
-    const poll1 = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
-    rep.check('poll returns the pending command', (poll1.data?.commands ?? []).some((c) => c.command_id === cmdId), true);
-    rep.check('poll moved it to DISPATCHED', (await readState()).state, 'DISPATCHED');
+    const poll1 = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+    const polledCmd = (poll1.data?.commands ?? []).find((c) => c.command_id === cmdId);
+    rep.check('poll returns the pending command', Boolean(polledCmd), true);
+    rep.check('poll took a lease', (await readState()).state, 'LEASED');
+    const claimToken = polledCmd?.claim_token;
+    rep.check('the polled command carries a claim_token', typeof claimToken, 'string');
 
-    const ack = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [cmdId] });
+    // The lease is EXCLUSIVE. A second transport asking at the same moment must
+    // not receive the command that is already LEASED: this is the race the atomic
+    // claim exists for, and the reason read-then-mark was replaced.
+    const concurrentPoll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+    rep.check('a LEASED command is NOT handed to a second poll',
+      (concurrentPoll.data?.commands ?? []).some((c) => c.command_id === cmdId), false);
+
+    const ack = await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { acks: [{ command_id: cmdId, claim_token: claimToken }] });
     rep.check('ack -> 200', ack.status, 200);
-    rep.check('ack moved it to ACKED_BY_DEVICE', (await readState()).state, 'ACKED_BY_DEVICE');
+    rep.check('ack moved it to DISPATCHED', (await readState()).state, 'DISPATCHED');
     rep.check('acked command not re-returned', (ack.data?.commands ?? []).some((c) => c.command_id === cmdId), false);
 
     await device(identity, 'POST', '/v1/sms/status/batch', { updates: [{ command_id: cmdId, status: 'SENT' }] });
@@ -1874,9 +1886,27 @@ async function cmdSuite() {
     await device(identity, 'POST', '/v1/sms/status/batch', { updates: [{ command_id: cmdId, status: 'DELIVERED' }] });
     rep.check('DELIVERED applied', (await readState()).state, 'DELIVERED');
 
-    const staleAck = await device(identity, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [cmdId] });
+    const staleAck = await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { acks: [{ command_id: cmdId, claim_token: claimToken }] });
     rep.check('stale ack returns 200 (no-op, not an error)', staleAck.status, 200);
     rep.check('stale ack did NOT regress DELIVERED', (await readState()).state, 'DELIVERED');
+
+    // A wrong claim_token must be accepted (200) and do nothing: the command is
+    // still LEASED and stays claimable by its real token holder.
+    const wrongTokened = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'wrong token probe',
+    });
+    const wrongId = wrongTokened.data?.command_id;
+    const wrongPoll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+    const wrongCmd = (wrongPoll.data?.commands ?? []).find((c) => c.command_id === wrongId);
+    rep.check('a fresh command is LEASED by the poll', (await readState(wrongId)).state, 'LEASED');
+    const wrongAck = await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { acks: [{ command_id: wrongId, claim_token: 'deadbeefdeadbeefdeadbeefdeadbeef' }] });
+    rep.check('ack with a wrong claim_token -> 200', wrongAck.status, 200);
+    rep.check('...but it did NOT move the LEASED command', (await readState(wrongId)).state, 'LEASED');
+    // Drain it with the real token so it is not left behind for later sections.
+    await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { acks: [{ command_id: wrongId, claim_token: wrongCmd?.claim_token }] });
 
     const regress = await device(identity, 'POST', '/v1/sms/status/batch', { updates: [{ command_id: cmdId, status: 'SENT' }] });
     rep.check('DELIVERED->SENT returns 200', regress.status, 200);
@@ -1930,30 +1960,39 @@ async function cmdSuite() {
     await sleep(900);
 
     const delivered = [];
+    const tokens = new Map();
     for (const m of ws.messages.slice(before)) {
       try {
         const j = JSON.parse(m.text);
-        if (j.op === 'commands') for (const c of j.commands) delivered.push(c.command_id);
+        if (j.op === 'commands') {
+          for (const c of j.commands) {
+            delivered.push(c.command_id);
+            tokens.set(c.command_id, c.claim_token);
+          }
+        }
       } catch { /* not JSON */ }
     }
     const unique = new Set(delivered);
     rep.check('every batch command delivered over WS', unique.size, 5);
     rep.check('no command delivered twice (kills the O(N^2) re-push)', delivered.length, unique.size);
 
-    // ack them so the ack_timeout path is not the subject of the next assertion
-    ws.sendText(JSON.stringify({ op: 'ack', command_ids: [...unique] }));
+    // ack them so the lease-expiry path is not the subject of the next assertion
+    ws.sendText(JSON.stringify({
+      op: 'ack',
+      acks: [...unique].map((id) => ({ command_id: id, claim_token: tokens.get(id) })),
+    }));
     await sleep(400);
     const acked = await admin('GET', `/v1/sms/commands/${[...unique][0]}?device_id=${identity.deviceId}`);
-    rep.check('WS ack advanced a command', acked.data?.command?.state, 'ACKED_BY_DEVICE');
+    rep.check('WS ack advanced a command', acked.data?.command?.state, 'DISPATCHED');
 
     ws.close();
     run(rep);
   }
 
-  /* ── ack timeout + FCM wake (§5.5 alarm) ───────────────────────────────── */
-  console.log(`-- ack timeout (${ACK_TIMEOUT_MS} ms) + FCM wake --`);
+  /* ── lease expiry + FCM wake (§5.5 alarm) ──────────────────────────────── */
+  console.log(`-- lease expiry (${LEASE_MS} ms) + FCM wake --`);
   {
-    const rep = new Report('ack timeout');
+    const rep = new Report('lease expiry');
     // Against a deployed Worker the local FCM stub is unreachable and a real send
     // needs a real service account, so that single assertion is skipped, not faked.
     const REMOTE = process.env.HARNESS_REMOTE === '1';
@@ -1982,13 +2021,24 @@ async function cmdSuite() {
       const cmdId = send.data?.command_id;
       await sleep(400);
       const dispatched = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
-      rep.check('command pushed and DISPATCHED', dispatched.data?.command?.state, 'DISPATCHED');
+      rep.check('command pushed and LEASED', dispatched.data?.command?.state, 'LEASED');
 
-      // A real deployment's alarm scheduling adds latency; allow for it.
-      const closeCode = await ws.waitForClose(ACK_TIMEOUT_MS + (REMOTE ? 20_000 : 4_000));
-      const reverted = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
-      rep.check('ack_timeout reverted it to PENDING', reverted.data?.command?.state, 'PENDING');
-      rep.check('ack_timeout closed the socket with 1011', closeCode, 1011);
+      // A real deployment's alarm scheduling adds latency; allow for it. The
+      // lease expires at LEASE_MS, independent of ACK_TIMEOUT_MS, and the two
+      // timers are separate: in production the socket closes at 8 s while the
+      // lease still has 52 s to run, so the state is polled, not inferred from
+      // the close.
+      const revertDeadline = Date.now() + LEASE_MS + (REMOTE ? 25_000 : 5_000);
+      let revertedState = null;
+      while (Date.now() < revertDeadline) {
+        const r = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+        revertedState = r.data?.command?.state ?? null;
+        if (revertedState === 'PENDING') break;
+        await sleep(200);
+      }
+      rep.check('lease expiry reverted it to PENDING', revertedState, 'PENDING');
+      const closeCode = await ws.waitForClose(REMOTE ? 20_000 : 4_000);
+      rep.check('lease expiry closed the socket with 1011', closeCode, 1011);
 
       if (REMOTE) {
         rep.rows.push({
@@ -2002,11 +2052,43 @@ async function cmdSuite() {
           if ((fcmAfter?.sendCalls ?? 0) > sendsBefore) break;
           await sleep(100);
         }
-        rep.check('ack_timeout triggered an FCM wake push', (fcmAfter?.sendCalls ?? 0) > sendsBefore, true);
+        rep.check('lease expiry triggered an FCM wake push', (fcmAfter?.sendCalls ?? 0) > sendsBefore, true);
         rep.check('FCM assertion was structurally valid (no validation errors)',
           (fcmAfter?.validationErrors ?? []).length, 0);
       }
       ws.close();
+
+      // A command that IS acked must NOT be reverted: lease expiry only returns
+      // still-LEASED commands to PENDING.
+      const ackSigned = signWith(identity, 'GET', '/v1/device/ws', '');
+      const ackWs = new RawWs({ pathname: '/v1/device/ws', headers: ackSigned.headers });
+      await ackWs.connect();
+      ackWs.sendText(JSON.stringify({ op: 'hello', fcm_token: 'stub-fcm-token-0001' }));
+      await sleep(200);
+      const ackSend = await admin('POST', '/v1/sms/send', {
+        device_id: identity.deviceId, to: '+8801712345678', body: 'acked before lease expiry',
+      });
+      const ackId = ackSend.data?.command_id;
+      const ackFrame = await ackWs.waitFor((m) => m.some((x) => x.text.includes(ackId)), 10_000);
+      let ackToken = null;
+      for (const x of ackFrame) {
+        try {
+          const j = JSON.parse(x.text);
+          if (j.op === 'commands') {
+            const c = j.commands.find((c) => c.command_id === ackId);
+            if (c) ackToken = c.claim_token;
+          }
+        } catch { /* not JSON */ }
+      }
+      ackWs.sendText(JSON.stringify({ op: 'ack', acks: [{ command_id: ackId, claim_token: ackToken }] }));
+      await sleep(250);
+      const ackedState = await admin('GET', `/v1/sms/commands/${ackId}?device_id=${identity.deviceId}`);
+      rep.check('acked command moved to DISPATCHED', ackedState.data?.command?.state, 'DISPATCHED');
+      await sleep(LEASE_MS + 500);
+      const stillAcked = await admin('GET', `/v1/sms/commands/${ackId}?device_id=${identity.deviceId}`);
+      rep.check('an acked command is NOT reverted by lease expiry',
+        stillAcked.data?.command?.state, 'DISPATCHED');
+      ackWs.close();
     }
     run(rep);
   }
@@ -2027,7 +2109,7 @@ async function cmdSuite() {
 
     // Idempotency (CLI slice 2b). Lives here, at the end, because the commands
     // these checks enqueue are deliberately left PENDING and would otherwise
-    // show up in the poll and ack-timeout assertions above.
+    // show up in the poll and lease-expiry assertions above.
     const key = `suite-idem-${Date.now()}`;
     const first = await admin('POST', '/v1/sms/send', {
       device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent', idempotency_key: key,
@@ -2345,7 +2427,7 @@ async function cmdMultiDevice() {
           local_id: `md_${dev.label}`, sender: "+8801712345678",
           body: `from ${dev.label}`, received_at: new Date().toISOString(),
         }],
-        ack_command_ids: [],
+        acks: [],
       });
       rep.check(`${dev.label} accepts its own batch`, r.status === 200 && r.data?.accepted === 1, true);
     }
@@ -2360,22 +2442,25 @@ async function cmdMultiDevice() {
     });
     const cmdId = sent.data?.command_id;
 
-    const pollA = await device(A, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    const pollA = await device(A, "POST", "/v1/sms/outgoing/poll", { acks: [] });
     rep.check("A receives the command", (pollA.data?.commands ?? []).some((c) => c.command_id === cmdId), true);
 
-    const pollB = await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
-    const pollC = await device(C, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    const pollB = await device(B, "POST", "/v1/sms/outgoing/poll", { acks: [] });
+    const pollC = await device(C, "POST", "/v1/sms/outgoing/poll", { acks: [] });
     rep.check("B receives nothing", (pollB.data?.commands ?? []).length, 0);
     rep.check("C receives nothing", (pollC.data?.commands ?? []).length, 0);
 
-    // B cannot ack a command that belongs to A's object.
-    const crossAck = await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [cmdId] });
+    // B cannot ack a command that belongs to A's object. It never held the lease,
+    // so it sends a syntactically valid but wrong claim_token.
+    const crossAck = await device(B, "POST", "/v1/sms/outgoing/poll", {
+      acks: [{ command_id: cmdId, claim_token: "deadbeefdeadbeefdeadbeefdeadbeef" }],
+    });
     rep.check("B acking A's command is accepted-but-ignored", crossAck.status, 200);
     const stateA = await admin("GET", `/v1/sms/commands/${cmdId}?device_id=${A.deviceId}`);
-    // Not asserting DISPATCHED exactly: the 8 s ack_timeout may legitimately have
-    // reverted it to PENDING by now. The point is that B's ack did not advance it.
-    rep.check("B's ack did not advance A's command to ACKED_BY_DEVICE",
-      stateA.data?.command?.state !== "ACKED_BY_DEVICE", true);
+    // Not asserting LEASED exactly: the lease may have expired back to PENDING by
+    // now. The point is that B's ack did not advance it to DISPATCHED.
+    rep.check("B's ack did not advance A's command to DISPATCHED",
+      stateA.data?.command?.state !== "DISPATCHED", true);
     run(rep);
   }
 
@@ -2422,11 +2507,11 @@ async function cmdMultiDevice() {
 
     rep.check("revoke B -> 200", (await admin("DELETE", `/v1/admin/devices/${B.deviceId}`)).status, 200);
     rep.check("B is now rejected -> 401",
-      (await device(B, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 401);
+      (await device(B, "POST", "/v1/sms/outgoing/poll", { acks: [] })).status, 401);
     rep.check("A still works -> 200",
-      (await device(A, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+      (await device(A, "POST", "/v1/sms/outgoing/poll", { acks: [] })).status, 200);
     rep.check("C still works -> 200",
-      (await device(C, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+      (await device(C, "POST", "/v1/sms/outgoing/poll", { acks: [] })).status, 200);
     run(rep);
   }
 
@@ -2461,10 +2546,10 @@ async function cmdMultiDevice() {
 
     const newKeyIdentity = { ...rotated, privateKey: crypto.createPrivateKey(rotated.privateKeyPem) };
     rep.check("the NEW key works -> 200",
-      (await device(newKeyIdentity, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+      (await device(newKeyIdentity, "POST", "/v1/sms/outgoing/poll", { acks: [] })).status, 200);
 
     const staleIdentity = { deviceId: A.deviceId, privateKey: oldKey, publicKeySpki: A.publicKeySpki };
-    const stale = await device(staleIdentity, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    const stale = await device(staleIdentity, "POST", "/v1/sms/outgoing/poll", { acks: [] });
     rep.check("the OLD key is rejected -> 401", stale.status, 401);
     rep.check("...as invalid_signature", stale.data?.error, "invalid_signature");
 
@@ -2530,7 +2615,7 @@ async function cmdHardening() {
 
     rep.check("501-row incoming batch -> 400",
       (await device(identity, "POST", "/v1/sms/incoming/batch",
-        { messages: Array.from({ length: 501 }, (_, i) => msg(i)), ack_command_ids: [] })).status, 400);
+        { messages: Array.from({ length: 501 }, (_, i) => msg(i)), acks: [] })).status, 400);
 
     rep.check("201-command send batch -> 400",
       (await admin("POST", "/v1/sms/send/batch", {
@@ -2542,13 +2627,13 @@ async function cmdHardening() {
       (await device(identity, "POST", "/v1/sms/status/batch",
         { updates: Array.from({ length: 501 }, () => ({ command_id: "x", status: "SENT" })) })).status, 400);
 
-    rep.check("201 ack ids -> 400",
+    rep.check("201 acks -> 400",
       (await device(identity, "POST", "/v1/sms/outgoing/poll",
-        { ack_command_ids: Array.from({ length: 201 }, () => "x") })).status, 400);
+        { acks: Array.from({ length: 201 }, () => ({ command_id: "x", claim_token: "y" })) })).status, 400);
 
     rep.check("5000-char message body -> 400",
       (await device(identity, "POST", "/v1/sms/incoming/batch",
-        { messages: [{ ...msg(999), body: "y".repeat(5000) }], ack_command_ids: [] })).status, 400);
+        { messages: [{ ...msg(999), body: "y".repeat(5000) }], acks: [] })).status, 400);
 
     rep.check("oversized admin body -> 413 (not a 500)",
       (await admin("POST", "/v1/sms/send",
@@ -2604,13 +2689,13 @@ async function cmdHardening() {
 
     const victimKey = { ...victim, privateKey: crypto.createPrivateKey(victim.privateKeyPem) };
     rep.check("throwaway device can sign -> 200",
-      (await device(victimKey, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] })).status, 200);
+      (await device(victimKey, "POST", "/v1/sms/outgoing/poll", { acks: [] })).status, 200);
 
     const revoked = await admin("DELETE", `/v1/admin/devices/${victim.deviceId}`);
     rep.check("DELETE /v1/admin/devices/:id -> 200", revoked.status, 200);
 
     // Proves revocation reaches the DO: D1 is not what verifies signatures.
-    const afterRevoke = await device(victimKey, "POST", "/v1/sms/outgoing/poll", { ack_command_ids: [] });
+    const afterRevoke = await device(victimKey, "POST", "/v1/sms/outgoing/poll", { acks: [] });
     rep.check("revoked device can no longer sign -> 401", afterRevoke.status, 401);
     rep.check("...and it reports device_unknown", afterRevoke.data?.error, "device_unknown");
     run(rep);
@@ -2637,7 +2722,12 @@ async function cmdWs() {
       console.log(`<- ${m.text}`);
       try {
         const j = JSON.parse(m.text);
-        if (j.op === 'commands') ws.sendText(JSON.stringify({ op: 'ack', command_ids: j.commands.map((c) => c.command_id) }));
+        if (j.op === 'commands') {
+          ws.sendText(JSON.stringify({
+            op: 'ack',
+            acks: j.commands.map((c) => ({ command_id: c.command_id, claim_token: c.claim_token })),
+          }));
+        }
       } catch { /* ignore */ }
     }
     if (ws.closeCode !== null) { console.log(`closed: ${ws.closeCode} ${ws.closeReason}`); break; }

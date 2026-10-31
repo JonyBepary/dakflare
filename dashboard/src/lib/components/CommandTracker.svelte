@@ -94,7 +94,7 @@
 				command = next;
 				error = null;
 				const index = commandStepIndex(next?.state);
-				// FAILED can only follow ACKED_BY_DEVICE or SENT. When the first
+				// FAILED can only follow DISPATCHED or SENT. When the first
 				// response already says FAILED, mark the earliest possible failure
 				// stage rather than pretending PENDING failed.
 				const reached = next?.state === 'FAILED' ? Math.max(index, 2) : index;

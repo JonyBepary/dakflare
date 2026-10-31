@@ -7,9 +7,9 @@
 //!
 //! Three rules from the design, and where each lives:
 //!
-//! - **Ack on receipt.** A command is recorded as a `queued` row and acknowledged
-//!   over the socket. That says the phone holds it, never that the radio sent it;
-//!   the send path marks the row from its own receipt. Same rule as the HTTP
+//! - **No ack on receipt.** A command is recorded as a `queued` row with the
+//!   lease token the edge handed out. The ack is sent by the send path, after the
+//!   radio accepts the message, and carries that token. Same rule as the HTTP
 //!   poll, which is why both call `record_commands`.
 //! - **A missed pong is a dead socket.** The edge answers `{"op":"ping"}` without
 //!   waking the Durable Object, so a pong is real liveness evidence. One read
@@ -166,7 +166,7 @@ fn session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 awaiting_pong = false;
-                if let Some(ids) = handle_text(&store, device_id, &text, &mut socket) {
+                if let Some(ids) = handle_text(&store, device_id, &text) {
                     let _ = tx.send(ids);
                 }
             }
@@ -197,7 +197,6 @@ fn handle_text(
     store: &dakflare_core::Store,
     device_id: &str,
     text: &str,
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
 ) -> Option<Vec<String>> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     if value.get("op").and_then(|v| v.as_str()) != Some("commands") {
@@ -208,16 +207,13 @@ fn handle_text(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let (captured, ack_ids) =
+    let (captured, _) =
         tauri::async_runtime::block_on(record_commands(store, device_id, &commands)).ok()?;
 
-    if !ack_ids.is_empty() {
-        // Acknowledge over the socket rather than a second HTTP poll: the
-        // command is held, and the send path owns everything after that.
-        let ack = serde_json::json!({ "op": "ack", "command_ids": ack_ids });
-        let _ = socket.send(Message::text(ack.to_string()));
-    }
-
+    // Deliberately NO ack here. Rev E acknowledges after the radio accepts the
+    // send, because acking on receipt is what let a stuck radio look like a
+    // delivered command and what left the edge unable to tell a lost push from a
+    // slow one. The send path owns the ack.
     let ids: Vec<String> = captured
         .into_iter()
         .filter_map(|message| message.local_id)

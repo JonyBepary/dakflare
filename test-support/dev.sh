@@ -14,7 +14,7 @@
 # database: the suite writes rules and messages, and those must not land in the
 # database a real phone will pair against.
 #
-# Overridable: WORKER_PORT, STUB_PORT, ACK_TIMEOUT_MS, OFFLINE_ALERT_MS,
+# Overridable: WORKER_PORT, STUB_PORT, ACK_TIMEOUT_MS, LEASE_MS, OFFLINE_ALERT_MS,
 # STALE_SOCKET_MS.
 #
 #   ./test-support/dev.sh
@@ -35,6 +35,7 @@ WORKER_DIR="$ROOT/worker"
 WORKER_PORT="${WORKER_PORT:-8787}"
 STUB_PORT="${STUB_PORT:-8790}"
 ACK_TIMEOUT_MS="${ACK_TIMEOUT_MS:-1500}"
+LEASE_MS="${LEASE_MS:-1500}"
 OFFLINE_ALERT_MS="${OFFLINE_ALERT_MS:-5000}"
 STALE_SOCKET_MS="${STALE_SOCKET_MS:-2000}"
 
@@ -80,12 +81,14 @@ SA_JSON="$(node -e '
 echo "[dev.sh] applying D1 migration ($MIGRATE_DB $MIGRATE_FLAG)"
 ( cd "$WORKER_DIR" && npx wrangler d1 migrations apply "$MIGRATE_DB" "$MIGRATE_FLAG" >/dev/null 2>&1 ) || true
 
-echo "[dev.sh] starting Worker on :$WORKER_PORT ($MODE_LABEL, ACK_TIMEOUT_MS=$ACK_TIMEOUT_MS)"
+echo "[dev.sh] starting Worker on :$WORKER_PORT ($MODE_LABEL, ACK_TIMEOUT_MS=$ACK_TIMEOUT_MS, LEASE_MS=$LEASE_MS)"
 export HARNESS_ACK_TIMEOUT_MS="$ACK_TIMEOUT_MS"
+export HARNESS_LEASE_MS="$LEASE_MS"
 (
   cd "$WORKER_DIR"
   exec npx wrangler dev "${MODE_ARGS[@]}" --port "$WORKER_PORT" \
     --var "ACK_TIMEOUT_MS:$ACK_TIMEOUT_MS" \
+    --var "LEASE_MS:$LEASE_MS" \
     --var "OFFLINE_ALERT_MS:$OFFLINE_ALERT_MS" \
     --var "STALE_SOCKET_MS:$STALE_SOCKET_MS" \
     --var "FCM_BASE_URL:http://127.0.0.1:$STUB_PORT" \

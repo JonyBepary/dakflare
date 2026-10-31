@@ -506,12 +506,13 @@ impl DeviceClient {
     }
 
     /// `POST /v1/sms/outgoing/poll` — returns the `commands` array.
-    pub async fn poll(&self, ack_command_ids: &[String]) -> Result<Value, ProtocolError> {
+    ///
+    /// Acks travel as objects carrying the lease token the edge handed out. A
+    /// body that still uses the retired `ack_command_ids` key is rejected with
+    /// `400 bad_request`, so there is exactly one ack vocabulary on the wire.
+    pub async fn poll(&self, acks: &[Ack]) -> Result<Value, ProtocolError> {
         let value = self
-            .signed_post(
-                "/v1/sms/outgoing/poll",
-                json!({ "ack_command_ids": ack_command_ids }),
-            )
+            .signed_post("/v1/sms/outgoing/poll", json!({ "acks": acks }))
             .await?;
         Ok(value.get("commands").cloned().unwrap_or(Value::Array(vec![])))
     }
@@ -537,9 +538,9 @@ impl DeviceClient {
     pub async fn upload_inbound(
         &self,
         messages: &[InboundMessage],
-        ack_command_ids: &[String],
+        acks: &[Ack],
     ) -> Result<Value, ProtocolError> {
-        self.upload_inbound_with_runs(messages, ack_command_ids, &[]).await
+        self.upload_inbound_with_runs(messages, acks, &[]).await
     }
 
     /// Upload with the device's own flow runs attached, so the Worker fallback
@@ -547,10 +548,10 @@ impl DeviceClient {
     pub async fn upload_inbound_with_runs(
         &self,
         messages: &[InboundMessage],
-        ack_command_ids: &[String],
+        acks: &[Ack],
         runs: &[crate::flowrun::FlowRunReport],
     ) -> Result<Value, ProtocolError> {
-        self.upload_batch(messages, ack_command_ids, runs, &[]).await
+        self.upload_batch(messages, acks, runs, &[]).await
     }
 
     /// One request carrying inbound messages, device flow runs and outbound rows
@@ -558,7 +559,7 @@ impl DeviceClient {
     pub async fn upload_batch(
         &self,
         messages: &[InboundMessage],
-        ack_command_ids: &[String],
+        acks: &[Ack],
         runs: &[crate::flowrun::FlowRunReport],
         outbound: &[OutboundReport],
     ) -> Result<Value, ProtocolError> {
@@ -591,7 +592,7 @@ impl DeviceClient {
 
         let mut body = json!({
             "messages": payload,
-            "ack_command_ids": ack_command_ids,
+            "acks": acks,
             "outbound": outbound_payload,
         });
         if let Some(map) = body.as_object_mut() {
@@ -789,7 +790,7 @@ mod tests {
 
     #[test]
     fn canonical_string_has_five_lines() {
-        let body = b"{\"ack_command_ids\":[]}";
+        let body = b"{\"acks\":[]}";
         let canonical = canonical_string(
             "post",
             "/v1/sms/outgoing/poll",
@@ -863,7 +864,7 @@ mod tests {
     #[test]
     fn signed_headers_verify_with_the_public_key() {
         let identity = generate_identity().unwrap();
-        let body = br#"{"ack_command_ids":[]}"#;
+        let body = br#"{"acks":[]}"#;
         let signed = sign_request(
             &identity.device_id,
             &identity.private_key_pkcs8_pem,
@@ -1037,6 +1038,18 @@ mod tests {
     }
 }
 
+/// One command acknowledgement (Rev E §6).
+///
+/// The `claim_token` is the lease the edge granted when it handed the command
+/// over. It is echoed back verbatim so the edge can prove the ack comes from the
+/// device that holds that exact lease; an ack without a matching token is a
+/// no-op. The device sends this only after the radio has accepted the send.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ack {
+    pub command_id: String,
+    pub claim_token: String,
+}
+
 /// One SMS the device sent locally, to be mirrored into the deployment log.
 #[derive(Debug, Clone)]
 pub struct OutboundReport {
@@ -1089,7 +1102,7 @@ impl DeviceClient {
 
         self.signed_post(
             "/v1/sms/incoming/batch",
-            json!({ "messages": [], "ack_command_ids": [], "outbound": payload }),
+            json!({ "messages": [], "acks": [], "outbound": payload }),
         )
         .await
     }

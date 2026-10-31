@@ -11,10 +11,16 @@ ADMIN_TOKEN="dev-admin-token"
 
 # ---------------------------------------------------------------------------
 # Timing overrides (optional). All are Number-parsed and clamped; the defaults
-# are ACK_TIMEOUT_MS=8000, OFFLINE_ALERT_MS=900000, STALE_SOCKET_MS=120000,
-# NONCE_WINDOW_MS=300000. The conformance suite shrinks these so it does not have
-# to wait 8 s for an ack_timeout or 15 min for an offline alert.
+# are LEASE_MS=60000, ACK_TIMEOUT_MS=8000, OFFLINE_ALERT_MS=900000,
+# STALE_SOCKET_MS=120000, NONCE_WINDOW_MS=300000. The conformance suite shrinks
+# these so it does not have to wait a minute for a lease to expire or 15 min for
+# an offline alert.
+#
+# LEASE_MS is NOT the ack timeout. It is how long one device may hold a command
+# exclusively; the ack timeout only closes a socket that has gone quiet. A lease
+# shorter than a real send duplicates SMS, so leave it at 60 s in production.
 # ---------------------------------------------------------------------------
+# LEASE_MS="1500"
 # ACK_TIMEOUT_MS="500"
 # OFFLINE_ALERT_MS="5000"
 # STALE_SOCKET_MS="2000"
