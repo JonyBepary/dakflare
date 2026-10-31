@@ -948,7 +948,31 @@ async function pairRequest(identity, pairingCode) {
   return { status: res.status, data: await res.json().catch(() => null) };
 }
 
+/**
+ * `pair` and `suite` write: they create devices, rules and messages. Pointed at
+ * a deployed Worker by a stray WORKER_URL they would pollute production, and the
+ * first symptom is a 401 from the admin mint, which reads like an auth bug.
+ *
+ * A local stack is the default. A deployed Worker needs HARNESS_REMOTE=1, which
+ * the ack-timeout section already understands.
+ */
+function refuseNonLocal(command) {
+  let host;
+  try {
+    host = new URL(WORKER_URL).hostname;
+  } catch {
+    console.error(`refusing ${command}: WORKER_URL is not a URL: ${WORKER_URL}`);
+    process.exit(2);
+  }
+  const local = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (local || process.env.HARNESS_REMOTE === '1') return;
+  console.error(`refusing ${command} against ${WORKER_URL}: it creates devices, rules and messages.`);
+  console.error('Start a local stack (test-support/dev.sh), or set HARNESS_REMOTE=1 to mean it.');
+  process.exit(2);
+}
+
 async function cmdPair() {
+  refuseNonLocal('pair');
   console.log('== pair ==\n');
   const identity = newIdentity();
   console.log(`device_id: ${identity.deviceId}`);
@@ -1002,6 +1026,7 @@ function priv(identity) {
 /* ─────────────────────────────────── suite ───────────────────────────────── */
 
 async function cmdSuite() {
+  refuseNonLocal('suite');
   const identity = loadIdentity();
   console.log(`== suite ==\nworker: ${WORKER_URL}\ndevice: ${identity.deviceId}\nack timeout: ${ACK_TIMEOUT_MS} ms\n`);
 

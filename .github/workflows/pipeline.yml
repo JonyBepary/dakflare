@@ -30,8 +30,6 @@ env:
   CF_SEND_TELEMETRY: "false"
   DO_NOT_TRACK: "1"
   NODE_VERSION: "22.18"
-  # Set once here: doctor and the smoke test both read it.
-  WORKER_URL: https://dakflare-worker.sohelahmedjony.workers.dev
 
 jobs:
   worker:
@@ -104,6 +102,12 @@ jobs:
     needs: worker
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Pinned to the local stack on purpose. The harness reads WORKER_URL, and a
+      # production URL here would run the whole suite against production: it
+      # creates devices, rules and messages.
+      WORKER_URL: http://127.0.0.1:8787
+      STUB_URL: http://127.0.0.1:8790
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -166,6 +170,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       # Optional: without it the doctor step is skipped, not failed.
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      WORKER_URL: https://dakflare-worker.sohelahmedjony.workers.dev
     defaults:
       run:
         working-directory: worker
