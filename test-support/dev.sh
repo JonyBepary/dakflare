@@ -35,7 +35,11 @@ WORKER_DIR="$ROOT/worker"
 WORKER_PORT="${WORKER_PORT:-8787}"
 STUB_PORT="${STUB_PORT:-8790}"
 ACK_TIMEOUT_MS="${ACK_TIMEOUT_MS:-1500}"
-LEASE_MS="${LEASE_MS:-1500}"
+# The lease must be LONGER than the ack timeout, as it is in production
+# (60 s vs 8 s), or the two timers cannot be told apart: `ack_wake` would close
+# the socket at the same instant `lease_expiry` reverts the command, and the
+# re-delivery path would never be exercised.
+LEASE_MS="${LEASE_MS:-6000}"
 OFFLINE_ALERT_MS="${OFFLINE_ALERT_MS:-5000}"
 STALE_SOCKET_MS="${STALE_SOCKET_MS:-2000}"
 

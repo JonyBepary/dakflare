@@ -645,17 +645,21 @@ be refused by the token guard. That is the same duplicate the lease is meant to
 prevent, one order of magnitude rarer. A longer lease trades that for a longer
 stall on a phone that has died mid-send; 60 s is the chosen point on that curve.
 
-**Recovery latency is the price of that safety, and it is worth knowing.** A lease
-also absorbs a *lost push*: a frame written to a half-open socket is never seen by
-the phone, and the command cannot be handed out again until `lease_expiry` fires.
-Under 5.x the same event reverted in 8 s because the ack timeout reverted the
-state. The recovery path now is, in order: `lease_expiry` at 60 s, then the next
-`hello` (a reconnect re-claims every `PENDING` command), then the handset's
-5-minute HTTP drain. `ack_wake` closes the silent socket at 8 s, which is what
-provokes the reconnect, but it deliberately does not release the lease. Observed
-on the reference handset: a command pushed into a dead socket was re-claimed 90 s
-later by `hello` and completed correctly, and one pushed just before a cold start
-was claimed by the drain.
+**A lost push recovers at lease expiry, not at the drain.** A frame written to a
+half-open socket is never seen by the phone, and the edge cannot tell that from a
+slow send. So the recovery is deliberately two-staged: `ack_wake` closes the
+silent socket at 8 s (which provokes a reconnect) and does **not** release the
+lease, and when `lease_expiry` fires at 60 s it reverts the command **and hands it
+back to the device immediately**, with a fresh `claim_token` so the previous
+holder's late ack cannot apply.
+
+That re-delivery is safe for the same reason the 60 s figure is: the lease is the
+bet that no send outlives it, so at expiry the first attempt is over or never
+started. Without it the command waited for the handset's five-minute drain, which
+is what an end-to-end run actually measured (90 s through a reconnect, and one
+command that waited out the full drain). `pushCommands` also tries every socket
+that is not already CLOSING or CLOSED, because the socket a frame was written to
+is not always the one the device is reading.
 
 **The claim is one statement**, so two transports cannot both win it:
 
@@ -1000,7 +1004,10 @@ The conformance battery falsifies:
 - Outbound command idempotency and forward-only state machine transitions in SQL.
 - **Lease exclusivity:** a poll leases a command, and a second poll issued while it is `LEASED` does not receive it. This is the race the atomic claim exists for, and it is asserted, not assumed.
 - **Token ownership:** an ack carrying a wrong `claim_token` answers `200` and moves nothing; an ack for a command that is not `LEASED` is a no-op; a stale ack after `DELIVERED` does not regress it.
-- **Lease expiry:** a command that is never acked returns to `PENDING` and its socket closes with `1011`; a command that *was* acked is not reverted, no matter how long the test waits.
+- **Lease expiry:** a command that is never acked returns to `PENDING`; a command that *was* acked is not reverted, no matter how long the test waits.
+- **The two timers are distinct:** `ack_wake` closes the unacked socket at `ACK_TIMEOUT_MS` and the command is still `LEASED` afterwards, so a close cannot release a lease.
+- **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
+- **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
 
 `simulator/core` additionally proves, without a network, that a recorded command keeps its lease token, that the ack body is `{"acks":[{"command_id":…,"claim_token":…}]}`, and that a row with no token (a composer send) sends no request at all.

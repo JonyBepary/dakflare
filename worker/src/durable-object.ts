@@ -740,8 +740,11 @@ export class DeviceGateway extends DurableObject<Env> {
     // scheduled task (and reset the DO alarm) on every request.
     this.ensureOfflineWatch();
 
-    // §6.1: returned by poll -> LEASED, with a lease that reverts it.
-    return Response.json(this.leaseCommands(MAX_OUTBOUND_COMMANDS));
+    // §6.1: returned by poll -> LEASED, with a lease that reverts it. A poll has
+    // no socket, so there is none to close when the lease expires.
+    const commands = this.leaseCommands(MAX_OUTBOUND_COMMANDS);
+    for (const command of commands) this.armLeaseExpiry(command, null);
+    return Response.json(commands);
   }
 
   /**
@@ -966,11 +969,7 @@ export class DeviceGateway extends DurableObject<Env> {
    * `only` narrows the claim to specific ids, which the enqueue push needs so it
    * cannot drag along unrelated queued commands the way a bare scan would.
    */
-  private leaseCommands(
-    limit: number,
-    only?: readonly string[],
-    socketId: string | null = null
-  ): CommandView[] {
+  private leaseCommands(limit: number, only?: readonly string[]): CommandView[] {
     if (limit <= 0) return [];
     if (only !== undefined && only.length === 0) return [];
 
@@ -1022,22 +1021,28 @@ export class DeviceGateway extends DurableObject<Env> {
       sim_slot: Number(row.sim_slot ?? 0),
     }));
 
-    for (const command of commands) {
-      this.scheduleTask(
-        `lease:${command.command_id}`,
-        now + this.timings.leaseMs,
-        "lease_expiry",
-        JSON.stringify({
-          command_id: command.command_id,
-          claim_token: command.claim_token,
-          // The socket this lease was delivered over, when there was one. A lease
-          // that expires closes exactly that socket, which is how a wedged device
-          // learns to reconnect. A poll-only device has none to close.
-          socket_id: socketId,
-        })
-      );
-    }
     return commands;
+  }
+
+  /**
+   * Arm the expiry for a lease that has actually been handed over.
+   *
+   * Scheduled by the caller and not by `leaseCommands`, because the timer needs
+   * the id of the socket the frame really went to: a lease that expires closes
+   * exactly that socket, which is how a wedged device learns to reconnect. A
+   * command collected over an HTTP poll has no socket to close.
+   */
+  private armLeaseExpiry(command: CommandView, socketId: string | null): void {
+    this.scheduleTask(
+      `lease:${command.command_id}`,
+      Date.now() + this.timings.leaseMs,
+      "lease_expiry",
+      JSON.stringify({
+        command_id: command.command_id,
+        claim_token: command.claim_token,
+        socket_id: socketId,
+      })
+    );
   }
 
   /**
@@ -1158,29 +1163,40 @@ export class DeviceGateway extends DurableObject<Env> {
    */
   private pushCommands(commandIds: readonly string[]): boolean {
     if (commandIds.length === 0) return true;
-    const ws = this.pickFreshSocket();
-    if (!ws) return false;
+    const sockets = this.freshSockets();
+    if (sockets.length === 0) return false;
 
-    const leased = this.leaseCommands(
-      commandIds.length,
-      commandIds,
-      readAttachment(ws).socketId ?? null
-    );
+    const leased = this.leaseCommands(commandIds.length, commandIds);
     // Nothing claimable: every id was already claimed, had expired, or is gone.
     // That is not a failure; whatever is still PENDING is picked up by the poll.
     if (leased.length === 0) return true;
 
-    return this.deliver(ws, leased);
+    return this.deliverToAny(sockets, leased);
   }
 
   /**
-   * Send an already-leased batch over `ws`.
+   * Deliver to the first socket that accepts the frame.
    *
-   * A frame that never reached the device releases its leases immediately. The
-   * alternative is waiting out the whole lease window on a command nobody can
-   * possibly be working on, which on a 60 s lease is a minute of needless delay
-   * for the operator and one wasted wake push.
+   * A dead socket is not always detectable before the write: a connection the
+   * client destroyed a moment ago still appears in `getWebSockets()` and its
+   * `send` may even resolve. Trying the next candidate is the only evidence
+   * available, and it is much cheaper than the alternative, which is losing the
+   * push and waiting out a lease.
+   *
+   * Every candidate is tried before the leases are released, so a lost frame is
+   * only given up on when there is nowhere left to send it.
    */
+  private deliverToAny(sockets: readonly WebSocket[], leased: readonly CommandView[]): boolean {
+    for (const ws of sockets) {
+      if (this.deliver(ws, leased)) return true;
+    }
+    // Nowhere to put it. Hand the leases back immediately rather than waiting out
+    // the whole window on a command nobody can be working on.
+    this.releaseLeases(leased);
+    return false;
+  }
+
+  /** One send attempt. Returns false only when the frame certainly did not leave. */
   private deliver(ws: WebSocket, leased: readonly CommandView[]): boolean {
     try {
       ws.send(JSON.stringify({ op: "commands", commands: leased }));
@@ -1190,13 +1206,13 @@ export class DeviceGateway extends DurableObject<Env> {
       } catch {
         // Already closed.
       }
-      this.releaseLeases(leased);
       return false;
     }
 
-    const socketId = readAttachment(ws).socketId;
-    if (socketId !== undefined) {
-      for (const command of leased) {
+    const socketId = readAttachment(ws).socketId ?? null;
+    for (const command of leased) {
+      this.armLeaseExpiry(command, socketId);
+      if (socketId !== null) {
         this.armWakeTimer(command.command_id, command.claim_token, socketId);
       }
     }
@@ -1211,13 +1227,12 @@ export class DeviceGateway extends DurableObject<Env> {
    * recoverable by whoever claims it first, and only one transport can win.
    */
   private pushPendingToSocket(ws: WebSocket): void {
-    const commands = this.leaseCommands(
-      MAX_OUTBOUND_COMMANDS,
-      undefined,
-      readAttachment(ws).socketId ?? null
-    );
+    // The socket that just said hello goes first, then the others, so a
+    // reconnect is served by the connection the device is actually reading.
+    const ordered = [ws, ...this.freshSockets().filter((candidate) => candidate !== ws)];
+    const commands = this.leaseCommands(MAX_OUTBOUND_COMMANDS);
     if (commands.length === 0) return;
-    this.deliver(ws, commands);
+    this.deliverToAny(ordered, commands);
   }
 
   /** #22: never let an FCM outage break command enqueue. */
@@ -1235,18 +1250,41 @@ export class DeviceGateway extends DurableObject<Env> {
    * is treated as fresh: see `socketLastSeen`.
    */
   private pickFreshSocket(): WebSocket | null {
-    const sockets = this.ctx.getWebSockets();
-    for (const ws of sockets) {
+    return this.freshSockets()[0] ?? null;
+  }
+
+  /**
+   * Every socket worth writing to, best first.
+   *
+   * Sockets that are already CLOSING or CLOSED are skipped: a client that hung up
+   * a moment ago can still be listed, and a push written to it is the lost frame
+   * this whole path exists to avoid. A socket with no trustworthy liveness
+   * evidence is kept, because `socketLastSeen` only returns null when the runtime
+   * cannot tell us anything, and guessing "dead" there would drop pushes to a
+   * healthy device.
+   */
+  private freshSockets(): WebSocket[] {
+    const fresh: WebSocket[] = [];
+    for (const ws of this.ctx.getWebSockets()) {
+      const readyState = (ws as unknown as { readyState?: number }).readyState;
+      if (readyState === 2 || readyState === 3) continue;
+
       const lastSeen = this.socketLastSeen(ws, readAttachment(ws));
-      if (lastSeen === null) return ws; // unknown liveness -> never close on null
-      if (Date.now() - lastSeen <= this.timings.staleSocketMs) return ws;
+      if (lastSeen === null) {
+        fresh.push(ws); // unknown liveness -> never close on null
+        continue;
+      }
+      if (Date.now() - lastSeen <= this.timings.staleSocketMs) {
+        fresh.push(ws);
+        continue;
+      }
       try {
         ws.close(1001, "stale_connection");
       } catch {
         // Already closed.
       }
     }
-    return null;
+    return fresh;
   }
 
   /**
@@ -1402,9 +1440,30 @@ export class DeviceGateway extends DurableObject<Env> {
         if (reverted) {
           this.cancelLeaseTimers(commandId);
           this.broadcastState(commandId, "PENDING");
-          // Close only the socket this lease was pushed to. A command collected
-          // over an HTTP poll has no owning socket, and one expired lease must
-          // not tear down a device's other connections.
+
+          // Hand it to the device again, now, instead of hoping it notices.
+          //
+          // An expired lease means one of two things: the frame never reached the
+          // phone (a write to a half-open socket succeeds and is lost), or the
+          // send failed silently. Either way the device owes this command a
+          // second try, and `pushCommands` re-leases it with a FRESH token so the
+          // previous holder's late ack is refused by the token guard: the new
+          // lease is the authoritative one.
+          //
+          // Without this the command waits for the handset's five-minute drain.
+          // Measured before the fix: a lost push took 90 s to recover through a
+          // reconnect, and a second one waited out the full drain.
+          if (this.pushCommands([commandId])) {
+            // Re-delivered, and `pushCommands` has already replaced this row with
+            // a new `lease:` task. "rescheduled" is what keeps the alarm from
+            // deleting the timer it just created.
+            return "rescheduled";
+          }
+
+          // No socket to hand it to. Close the one this lease was pushed to, so a
+          // wedged device reconnects, and wake it out of band. A command
+          // collected over an HTTP poll has no owning socket, and one expired
+          // lease must not tear down a device's other connections.
           const socketId = typeof payload.socket_id === "string" ? payload.socket_id : null;
           if (socketId !== null) {
             for (const ws of this.ctx.getWebSockets()) {

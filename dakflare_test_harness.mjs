@@ -39,7 +39,10 @@
  *
  * Env: WORKER_URL (http://127.0.0.1:8787), ADMIN_TOKEN (dev-admin-token),
  *      STUB_URL (http://127.0.0.1:8790), HARNESS_ACK_TIMEOUT_MS (1500),
- *      HARNESS_LEASE_MS (1500), PROXY_PORT (8788).
+ *      HARNESS_LEASE_MS (6000), PROXY_PORT (8788). These two MUST match the
+ *      Worker's ACK_TIMEOUT_MS and LEASE_MS; `test-support/dev.sh` sets both
+ *      sides, and the lease-expiry section now fails loudly when they differ
+ *      instead of quietly testing the wrong window.
  */
 
 import crypto from 'node:crypto';
@@ -55,7 +58,11 @@ const WORKER_URL = process.env.WORKER_URL ?? 'http://127.0.0.1:8787';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token';
 const STUB_URL = process.env.STUB_URL ?? 'http://127.0.0.1:8790';
 const ACK_TIMEOUT_MS = Number(process.env.HARNESS_ACK_TIMEOUT_MS ?? 1500);
-const LEASE_MS = Number(process.env.HARNESS_LEASE_MS ?? 1500);
+// Must equal the Worker's LEASE_MS. `dev.sh` passes both through `--var` and
+// exports this one, but a harness started from another shell inherits nothing,
+// so the default mirrors dev.sh and the lease-expiry section asserts the measured
+// window against this value: a mismatch fails instead of passing by luck.
+const LEASE_MS = Number(process.env.HARNESS_LEASE_MS ?? 6000);
 const PROXY_PORT = Number(process.env.PROXY_PORT ?? 8788);
 const WORKER_HOST = new URL(WORKER_URL);
 
@@ -2037,17 +2044,37 @@ async function cmdSuite() {
       // timers are separate: in production the socket closes at 8 s while the
       // lease still has 52 s to run, so the state is polled, not inferred from
       // the close.
-      const revertDeadline = Date.now() + LEASE_MS + (REMOTE ? 25_000 : 5_000);
+      // The two timers are separate and in that order: `ack_wake` closes the
+      // socket at ACK_TIMEOUT_MS without touching the lease, and only
+      // `lease_expiry` reverts at LEASE_MS. Assert the close first, then that the
+      // command is STILL leased: a close that released the lease would be the
+      // duplicate send this machine exists to prevent.
+      const closeCode = await ws.waitForClose(ACK_TIMEOUT_MS + (REMOTE ? 20_000 : 4_000));
+      rep.check('the unacked socket is closed with 1011', closeCode, 1011);
+      const afterClose = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+      rep.check('closing the socket does NOT release the lease',
+        afterClose.data?.command?.state, 'LEASED');
+
+      const leaseStartedAt = Date.now();
+      const revertDeadline = leaseStartedAt + LEASE_MS + (REMOTE ? 25_000 : 5_000);
       let revertedState = null;
       while (Date.now() < revertDeadline) {
         const r = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
         revertedState = r.data?.command?.state ?? null;
-        if (revertedState === 'PENDING') break;
+        if (revertedState !== 'LEASED') break;
         await sleep(200);
       }
-      rep.check('lease expiry reverted it to PENDING', revertedState, 'PENDING');
-      const closeCode = await ws.waitForClose(REMOTE ? 20_000 : 4_000);
-      rep.check('lease expiry closed the socket with 1011', closeCode, 1011);
+      // The window the Worker actually used, not the one this process assumed.
+      // A harness started from another shell does not inherit dev.sh's exports,
+      // and a silent mismatch here makes every timing assertion below test the
+      // wrong duration while still passing.
+      const observedLeaseMs = Date.now() - leaseStartedAt;
+      rep.checkFn('the lease window matches LEASE_MS (harness and Worker agree)', () =>
+        (observedLeaseMs >= LEASE_MS * 0.75 && observedLeaseMs <= LEASE_MS * 1.6 + 2_000)
+        || `${observedLeaseMs} ms observed, ${LEASE_MS} ms expected`);
+      // The lease expires with no socket left to hand it to, so it reverts and
+      // falls back to the wake push. (The re-delivery path is its own section.)
+      rep.check('lease expiry returned it to the queue', revertedState === 'PENDING', true);
 
       if (REMOTE) {
         rep.rows.push({
@@ -2099,6 +2126,85 @@ async function cmdSuite() {
         stillAcked.data?.command?.state, 'DISPATCHED');
       ackWs.close();
     }
+    run(rep);
+  }
+
+  /* ── a lost push is re-delivered at lease expiry, not at the drain ─────── */
+  console.log('-- lease recovery (re-delivery after expiry) --');
+  {
+    const rep = new Report('lease recovery');
+
+    // Socket 1 carries the frame, then goes away before the ack. That is the
+    // half-open case that made a command wait 90 s in production: the write
+    // succeeds, the phone never reads it, and nothing else claims the command.
+    const first = signWith(identity, 'GET', '/v1/device/ws', '');
+    const ws1 = new RawWs({ pathname: '/v1/device/ws', headers: first.headers });
+    await ws1.connect();
+    ws1.sendText(JSON.stringify({ op: 'hello', fcm_token: 'stub-fcm-token-0001' }));
+    await sleep(200);
+
+    const send = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'lost push recovery',
+    });
+    const cmdId = send.data?.command_id;
+
+    const tokenFrom = (msgs) => {
+      for (const x of msgs) {
+        try {
+          const j = JSON.parse(x.text);
+          if (j.op !== 'commands') continue;
+          const c = j.commands.find((c) => c.command_id === cmdId);
+          if (c) return c.claim_token;
+        } catch { /* not JSON */ }
+      }
+      return null;
+    };
+
+    await ws1.waitFor((m) => tokenFrom(m) !== null, 10_000);
+    const token1 = tokenFrom(ws1.messages);
+    rep.check('the command is pushed and leased', typeof token1, 'string');
+
+    // The device never acks. The edge closes the socket it wrote to, and the
+    // lease is deliberately NOT released: the send may still be in flight.
+    const closed = await ws1.waitForClose(ACK_TIMEOUT_MS + 4_000);
+    rep.check('the silent socket is closed with 1011', closed, 1011);
+    const stillLeased = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+    rep.check('the lease survives the close', stillLeased.data?.command?.state, 'LEASED');
+
+    // The device reconnects while the lease is still held. `hello` must not steal
+    // it: re-delivering a live lease is the duplicate this machine prevents.
+    const second = signWith(identity, 'GET', '/v1/device/ws', '');
+    const ws2 = new RawWs({ pathname: '/v1/device/ws', headers: second.headers });
+    await ws2.connect();
+    ws2.sendText(JSON.stringify({ op: 'hello', fcm_token: 'stub-fcm-token-0001' }));
+    await sleep(600);
+    rep.check('a reconnect does NOT steal a live lease', tokenFrom(ws2.messages), null);
+
+    // At expiry the edge hands it over again, with a fresh token, so the first
+    // holder's late ack cannot apply to the new lease.
+    const deadline = Date.now() + LEASE_MS + 5_000;
+    let token2 = null;
+    while (Date.now() < deadline && token2 === null) {
+      await sleep(200);
+      token2 = tokenFrom(ws2.messages.splice(0));
+    }
+    rep.check('the expired lease is re-delivered to the live socket', typeof token2, 'string');
+    rep.check('the re-delivery carries a fresh claim_token', token2 !== token1, true);
+
+    ws2.sendText(JSON.stringify({ op: 'ack', acks: [{ command_id: cmdId, claim_token: token2 }] }));
+    await sleep(300);
+    const recovered = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+    rep.check('the re-delivered command acks to DISPATCHED',
+      recovered.data?.command?.state, 'DISPATCHED');
+
+    // And the token from the lease that expired must stay dead.
+    ws2.sendText(JSON.stringify({ op: 'ack', acks: [{ command_id: cmdId, claim_token: token1 }] }));
+    await sleep(300);
+    const afterStale = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
+    rep.check('the expired lease\'s token stays rejected',
+      afterStale.data?.command?.state, 'DISPATCHED');
+
+    ws2.close();
     run(rep);
   }
 
