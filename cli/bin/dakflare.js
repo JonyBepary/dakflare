@@ -139,6 +139,7 @@ const ERROR_RULES = {
 
   device_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'list the paired devices' },
   command_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'find the command id' },
+  unknown_command: { exit: 3, category: 'not_found', remediation: 'dakflare capabilities', fix: 'list the commands' },
   not_registered: { exit: 3, category: 'not_found', remediation: 'dakflare auth bootstrap --email you@example.com', fix: 'create the owner account' },
   keystore_missing: { exit: 3, category: 'not_found' },
   fingerprint_missing: { exit: 3, category: 'not_found' },
@@ -177,6 +178,182 @@ const exitCodeFor = (code) => ruleFor(code).exit;
 function outputMode(flags) {
   const agent = flags.agent === true;
   return { agent, json: agent || flags.json === true };
+}
+
+/* ───────────────────────── command surface ───────────────────────── */
+
+/**
+ * What every command accepts, in data rather than in prose.
+ *
+ * `assertFlags` reads this, so a flag cannot be accepted by one path and absent
+ * from `capabilities`; `capabilities`, `describe`, `schema` and `examples` read
+ * the same entries. Help text stays prose, because a person reads it.
+ *
+ * `effect` is what an agent needs before it calls anything: `read` changes
+ * nothing, `mutating` changes local or deployment state, `destructive` cannot be
+ * undone.
+ */
+const COMMAND_SPECS = {
+  init: {
+    summary: 'Verify a Worker and save its admin token',
+    effect: 'mutating',
+    usage: 'dakflare init [--url <url>] [--token <token> | --token-file <path>] [--local] [--force]',
+    flags: {
+      url: { type: 'string', note: 'Worker base URL' },
+      token: { type: 'string', note: 'admin token; prefer --token-file' },
+      'token-file': { type: 'string', note: 'read the admin token from a file' },
+      local: { type: 'boolean', note: 'write worker/.dev.vars instead of contacting a Worker' },
+      force: { type: 'boolean', note: 'with --local, replace an existing .dev.vars' },
+    },
+    examples: [
+      'dakflare init --url https://dakflare-worker.example.workers.dev --token-file ~/.token',
+      'dakflare init --local',
+    ],
+  },
+  doctor: {
+    summary: 'Check config, edge, schema, migrations, bindings and the handset',
+    effect: 'read',
+    usage: 'dakflare doctor [--max-age <minutes>] [--serial <adb-serial>]',
+    flags: {
+      'max-age': { type: 'number', note: 'how stale a phone contact may be, default 60' },
+      serial: { type: 'string', note: 'adb serial for the phone checks' },
+    },
+    examples: ['dakflare doctor --json', 'dakflare doctor --serial 100.110.66.88:5555'],
+  },
+  pair: {
+    summary: 'Mint a pairing code for a handset',
+    effect: 'mutating',
+    usage: 'dakflare pair [--label <text>] [--qr] [--ttl <seconds>]',
+    flags: {
+      label: { type: 'string', note: 'name the device in the fleet list' },
+      qr: { type: 'boolean', note: 'render the code as a terminal QR' },
+      ttl: { type: 'number', note: 'code lifetime in seconds, default 600' },
+    },
+    examples: ['dakflare pair --qr', 'dakflare pair --label "Mi A3" --ttl 300 --json'],
+  },
+  devices: {
+    summary: 'List paired devices and their last contact',
+    effect: 'read',
+    usage: 'dakflare devices',
+    flags: {},
+    examples: ['dakflare devices', 'dakflare devices --agent'],
+  },
+  revoke: {
+    summary: 'Revoke one device; the phone must pair again',
+    effect: 'destructive',
+    usage: 'dakflare revoke <device-id> [--yes]',
+    flags: { yes: { type: 'boolean', note: 'skip the confirmation prompt' } },
+    examples: ['dakflare revoke dev_pixel4a --yes'],
+  },
+  send: {
+    summary: 'Queue one outbound SMS and follow it to the radio',
+    effect: 'mutating',
+    usage:
+      'dakflare send --to <e164> --body <text> [--device <id>] [--no-wait] [--wait [duration]] [--until <state>] [--idempotency-key <k>]',
+    flags: {
+      to: { type: 'string', required: true, note: 'E.164 recipient' },
+      body: { type: 'string', required: true, note: 'message text, max 4096 characters' },
+      device: { type: 'string', note: 'send through this device; default is the freshest' },
+      'no-wait': { type: 'boolean', note: 'queue and return immediately' },
+      wait: { type: 'duration', note: 'how long to follow it, default 10s, max 5m' },
+      until: { type: 'state', note: 'pending|dispatched|acked|sent|delivered, default sent' },
+      'idempotency-key': { type: 'string', note: 'a retry with the same key returns the same command' },
+    },
+    examples: [
+      'dakflare send --to +8801540196080 --body "deploy ack"',
+      'dakflare send --to +8801540196080 --body "ack" --idempotency-key ci-1234 --agent',
+      'dakflare send --to +8801540196080 --body "ack" --no-wait',
+    ],
+  },
+  status: {
+    summary: "Read one command's state, or follow it",
+    effect: 'read',
+    usage: 'dakflare status <command-id> [--device <id>] [--wait [duration]] [--until <state>]',
+    flags: {
+      device: { type: 'string', note: 'the phone that owns the command' },
+      wait: { type: 'duration', note: 'follow it, default 30s' },
+      until: { type: 'state', note: 'pending|dispatched|acked|sent|delivered, default delivered' },
+    },
+    examples: [
+      'dakflare status 6cb13963-f33c-49d0-b87f-2cc72844a426',
+      'dakflare status <id> --wait 60s --until delivered --agent',
+    ],
+  },
+  audit: {
+    summary: 'Read the audit log',
+    effect: 'read',
+    usage: 'dakflare audit [--tail [n]] [--actor <label>] [--limit <n>]',
+    flags: {
+      tail: { type: 'number', note: 'tail mode; the optional value is the row count' },
+      actor: { type: 'string', note: 'filter by actor label' },
+      limit: { type: 'number', note: 'rows, 1-1000, default 50' },
+    },
+    examples: ['dakflare audit --tail 5', 'dakflare audit --limit 100 --actor owner --json'],
+  },
+  auth: {
+    summary: 'Owner bootstrap, invites and recovery (bootstrap|invite|invites|reset)',
+    effect: 'mutating',
+    usage: 'dakflare auth <bootstrap|invite|invites|reset> [options]',
+    flags: {
+      email: { type: 'string', note: 'the account address' },
+      role: { type: 'string', note: 'owner|admin|member, invite only' },
+      ttl: { type: 'number', note: 'invite lifetime in seconds' },
+      yes: { type: 'boolean', note: 'reset: skip the confirmation' },
+    },
+    examples: [
+      'dakflare auth bootstrap --email you@example.com',
+      'dakflare auth invite --email teammate@example.com --role member',
+    ],
+  },
+  capabilities: {
+    summary: 'List every command with its effect and flags',
+    effect: 'read',
+    usage: 'dakflare capabilities',
+    flags: {},
+    examples: ['dakflare capabilities --agent'],
+  },
+  describe: {
+    summary: 'Purpose, usage and flags for one command',
+    effect: 'read',
+    usage: 'dakflare describe <command>',
+    flags: {},
+    examples: ['dakflare describe send'],
+  },
+  schema: {
+    summary: 'The flag contract for one command, with types',
+    effect: 'read',
+    usage: 'dakflare schema <command>',
+    flags: {},
+    examples: ['dakflare schema send --agent'],
+  },
+  examples: {
+    summary: 'Real invocations for one command, including a failing one',
+    effect: 'read',
+    usage: 'dakflare examples <command>',
+    flags: {},
+    examples: ['dakflare examples send'],
+  },
+  key: {
+    summary: "Print the release signing key's SHA-256 fingerprint",
+    effect: 'read',
+    usage: 'dakflare key fingerprint [--keystore <path>] [--alias <name>]',
+    flags: {
+      keystore: { type: 'string', note: 'path to the keystore' },
+      alias: { type: 'string', note: 'key alias, default dakflare' },
+    },
+    examples: ['dakflare key fingerprint', 'dakflare key fingerprint --json'],
+  },
+};
+
+/** The flags a command accepts, in the order it declares them. */
+const flagNames = (command) => Object.keys(COMMAND_SPECS[command]?.flags ?? {});
+
+/** `assertFlags`, but the allowed list comes from the spec. */
+function assertCommandFlags(flags, command) {
+  const known = new Set(['json', 'agent', 'help', ...flagNames(command)]);
+  for (const key of Object.keys(flags)) {
+    if (!known.has(key)) throw usage(`unknown option --${key}`);
+  }
 }
 
 /* ───────────────────────────── envelope ───────────────────────────── */
@@ -715,7 +892,7 @@ async function initLocal(flags, json) {
 async function commandInit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('init');
-  assertFlags(flags, ['url', 'token', 'token-file', 'local', 'force']);
+  assertCommandFlags(flags, 'init');
   const json = MODE.json;
 
   if (flags.local) return initLocal(flags, json);
@@ -961,7 +1138,7 @@ function probePhone(checks, serialFlag, json) {
 async function commandDoctor(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('doctor');
-  assertFlags(flags, ['max-age', 'serial']);
+  assertCommandFlags(flags, 'doctor');
   const json = MODE.json;
   const serialFlag = stringFlag(flags, 'serial');
   const maxAgeFlag = stringFlag(flags, 'max-age');
@@ -1207,7 +1384,7 @@ function qrText(text) {
 async function commandPair(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('pair');
-  assertFlags(flags, ['label', 'qr', 'ttl']);
+  assertCommandFlags(flags, 'pair');
   const json = MODE.json;
   const cfg = requireConfig();
   const label = stringFlag(flags, 'label');
@@ -1268,7 +1445,7 @@ async function commandPair(argv) {
 async function commandDevices(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('devices');
-  assertFlags(flags, []);
+  assertCommandFlags(flags, 'devices');
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -1305,7 +1482,7 @@ async function commandDevices(argv) {
 async function commandRevoke(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('revoke');
-  assertFlags(flags, ['yes']);
+  assertCommandFlags(flags, 'revoke');
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -1612,7 +1789,7 @@ function looksLikeE164(value) {
 async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
-  assertFlags(flags, ['to', 'body', 'device', 'wait', 'until', 'idempotency-key', 'no-wait']);
+  assertCommandFlags(flags, 'send');
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -1718,6 +1895,137 @@ async function commandSend(argv) {
   return outcomeExitCode(command, timedOut);
 }
 
+/* ───────────────────────────── discovery ───────────────────────────── */
+
+/**
+ * `capabilities` — every command in one screen, with what it does to the world.
+ *
+ * An agent should be able to pick a command from this without loading any help
+ * text, so the effect is stated here rather than left to be inferred from prose.
+ */
+function commandCapabilities(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('capabilities');
+  assertCommandFlags(flags, 'capabilities');
+
+  const entries = Object.entries(COMMAND_SPECS).map(([name, spec]) => ({
+    name,
+    effect: spec.effect,
+    summary: spec.summary,
+    flags: flagNames(name),
+  }));
+
+  if (MODE.json) {
+    emitJson({ ok: true, summary: `${entries.length} commands`, commands: entries }, MODE);
+    return 0;
+  }
+  for (const entry of entries) {
+    out(`${pad(entry.name, 13)} ${pad(entry.effect, 12)} ${entry.summary}`);
+  }
+  return 0;
+}
+
+/** Resolve the command a discovery subcommand was asked about. */
+function specFor(rest) {
+  const name = rest[0];
+  if (!name) throw usage('which command? pass a name, for example `dakflare describe send`');
+  const spec = COMMAND_SPECS[name];
+  if (!spec) {
+    throw new CliError(`no command "${name}".`, 3, {
+      error: 'unknown_command',
+      command: name,
+    });
+  }
+  return { name, spec };
+}
+
+function commandDescribe(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('describe');
+  assertCommandFlags(flags, 'describe');
+  const { name, spec } = specFor(rest);
+
+  if (MODE.json) {
+    emitJson(
+      {
+        ok: true,
+        command: name,
+        effect: spec.effect,
+        usage: spec.usage,
+        flags: Object.fromEntries(
+          Object.entries(spec.flags).map(([flag, meta]) => [flag, meta.note ?? ''])
+        ),
+      },
+      MODE
+    );
+    return 0;
+  }
+  out(spec.summary);
+  out('');
+  out(spec.usage);
+  const names = Object.keys(spec.flags);
+  if (names.length > 0) {
+    out('');
+    for (const flag of names) {
+      out(`  --${pad(flag, 16)} ${spec.flags[flag].note ?? ''}`);
+    }
+  }
+  return 0;
+}
+
+function commandSchema(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('schema');
+  assertCommandFlags(flags, 'schema');
+  const { name, spec } = specFor(rest);
+
+  const properties = Object.fromEntries(
+    Object.entries(spec.flags).map(([flag, meta]) => [
+      flag,
+      {
+        type: meta.type,
+        ...(meta.required === true ? { required: true } : {}),
+        description: meta.note ?? '',
+      },
+    ])
+  );
+  const schema = {
+    command: name,
+    effect: spec.effect,
+    usage: spec.usage,
+    flags: { type: 'object', properties, required: requiredFlags(name) },
+    global: ['--json', '--agent', '--help'],
+  };
+
+  if (MODE.json) {
+    emitJson({ ok: true, ...schema }, MODE);
+    return 0;
+  }
+  out(JSON.stringify(schema, null, 2));
+  return 0;
+}
+
+function commandExamples(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('examples');
+  assertCommandFlags(flags, 'examples');
+  const { name, spec } = specFor(rest);
+
+  if (MODE.json) {
+    emitJson({ ok: true, command: name, examples: spec.examples }, MODE);
+    return 0;
+  }
+  for (const example of spec.examples) out(example);
+  return 0;
+}
+
+/** The flags a command cannot be called without. */
+function requiredFlags(command) {
+  return Object.entries(COMMAND_SPECS[command]?.flags ?? {})
+    .filter(([, meta]) => meta.required === true)
+    .map(([flag]) => `--${flag}`);
+}
+
 /* ───────────────────────────── status ───────────────────────────── */
 
 /**
@@ -1730,7 +2038,7 @@ async function commandSend(argv) {
 async function commandStatus(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('status');
-  assertFlags(flags, ['device', 'wait', 'until']);
+  assertCommandFlags(flags, 'status');
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -1941,7 +2249,7 @@ async function commandAuthInvites(argv) {
 async function commandAudit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('audit');
-  assertFlags(flags, ['tail', 'actor', 'limit']);
+  assertCommandFlags(flags, 'audit');
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -2048,7 +2356,7 @@ async function commandKey(argv) {
   if (flags.help || rest.length === 0) return printHelp('key');
   const action = rest[0];
   if (action !== 'fingerprint') throw usage(`unknown key command "${action}"; try \`dakflare key fingerprint\``);
-  assertFlags(flags, ['keystore', 'alias']);
+  assertCommandFlags(flags, 'key');
   const json = MODE.json;
 
   const props = readProperties(KEYSTORE_PROPS);
@@ -2128,15 +2436,19 @@ const HELP = {
 
 Usage: dakflare <command> [options]
 
-  init        verify a Worker and save its admin token; --local writes .dev.vars
-  doctor      checklist: config, health, schema, migrations, bindings, phone
-  pair        mint a pairing code; --qr renders a terminal QR
-  devices     list paired devices
-  revoke      revoke one device (asks first; --yes to skip)
-  send        queue an outbound SMS through a paired phone
-  status      read one command's state; --wait follows it to the end
-  audit       tail the audit log (phase 2; says so when the endpoint is absent)
-  key         signing-key helpers: \`key fingerprint\`
+  init          verify a Worker and save its admin token; --local writes .dev.vars
+  doctor        checklist: config, health, schema, migrations, bindings, phone
+  pair          mint a pairing code; --qr renders a terminal QR
+  devices       list paired devices
+  revoke        revoke one device (asks first; --yes to skip)
+  send          queue an outbound SMS through a paired phone
+  status        read one command's state; --wait follows it to the end
+  capabilities  every command, its effect and its flags
+  describe      purpose, usage and flags for one command
+  schema        the flag contract for one command, with types
+  examples      real invocations for one command
+  audit         tail the audit log (phase 2; says so when the endpoint is absent)
+  key           signing-key helpers: \`key fingerprint\`
 
 Every command accepts --json. Each has its own --help.
 
@@ -2239,6 +2551,28 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
   reset --email <address> --yes          recovery: delete the account and mint a fresh owner invite
 
 Roles: owner, admin, member. The invite link is shown once; only its hash is stored.`,
+  capabilities: `Usage: dakflare capabilities [--agent]
+
+Every command on one screen: its name, what it does to the world (read,
+mutating, destructive), one line of purpose, and the flags it accepts.
+
+This is the command to read first. \`--agent\` makes it one compact JSON
+document; nothing here needs a second call to understand.
+`,
+  describe: `Usage: dakflare describe <command> [--agent]
+
+Purpose, usage line and every flag for one command, in the words that command
+uses. \`dakflare describe send\` is the two-line version of \`send --help\`.
+`,
+  schema: `Usage: dakflare schema <command> [--agent]
+
+The flag contract as data: name, type, whether it is required, and what it means.
+Use this when you need to build a call rather than read about one.
+`,
+  examples: `Usage: dakflare examples <command> [--agent]
+
+Real invocations, including one that shows the common mistake for that command.
+`,
   audit: `Usage: dakflare audit --tail [n] [--actor <label>] [--limit <n>] [--json]
 
 Reads /v1/admin/audit. When the deployment has no audit endpoint (the phase 2
@@ -2275,6 +2609,10 @@ const COMMANDS = {
   revoke: commandRevoke,
   send: commandSend,
   status: commandStatus,
+  capabilities: commandCapabilities,
+  describe: commandDescribe,
+  schema: commandSchema,
+  examples: commandExamples,
   audit: commandAudit,
   auth: commandAuth,
   key: commandKey,
