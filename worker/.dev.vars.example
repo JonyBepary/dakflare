@@ -21,11 +21,8 @@ ADMIN_TOKEN="dev-admin-token"
 # NONCE_WINDOW_MS="300000"
 
 # ---------------------------------------------------------------------------
-# Auth (docs/AUTH_PLAN.md). Phase 2a: accounts exist behind AUTH_MODE, and the
-# admin routes keep using ADMIN_TOKEN until it is set to "new".
-#
-# AUTH_MODE lives in wrangler.toml [vars] (default "legacy"). Flip it there, not
-# here, so the account-backed and local configs cannot disagree.
+# Auth (docs/AUTH_PLAN.md). `AUTH_MODE` is retired: one gate, two credentials
+# (a Better Auth session, or ADMIN_TOKEN plus `X-Dakflare-Client: cli`).
 #
 # BETTER_AUTH_SECRET signs session cookies and encrypts TOTP secrets. Generate
 # one with: openssl rand -base64 32

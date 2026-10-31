@@ -41,8 +41,8 @@ jobs:
       run:
         working-directory: worker
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -58,8 +58,8 @@ jobs:
       run:
         working-directory: dashboard
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -75,8 +75,8 @@ jobs:
       run:
         working-directory: simulator
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -95,7 +95,7 @@ jobs:
       run:
         working-directory: ${{ matrix.crate }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
 
@@ -105,8 +105,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -114,6 +114,16 @@ jobs:
       - name: Install the Worker's tooling
         working-directory: worker
         run: npm ci
+      # `wrangler dev` reads `.dev.vars`. ADMIN_TOKEN is deliberately not a var,
+      # so without this file every admin route fails closed with 401 and `pair`
+      # cannot mint a code.
+      - name: Local dev secrets
+        working-directory: worker
+        run: |
+          cp .dev.vars.example .dev.vars
+          # A random per-run signing secret, never committed. Without it the auth
+          # layer answers 503 and the suite's 401 checks fail for the wrong reason.
+          echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" >> .dev.vars
       - name: Start the local stack
         run: |
           ./test-support/dev.sh > "$RUNNER_TEMP/dev.log" 2>&1 &
@@ -160,8 +170,8 @@ jobs:
       run:
         working-directory: worker
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
