@@ -22,6 +22,13 @@
         cannot open a push. Requested once at runtime on Android 13+.
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- The gateway has to be awake to collect a command and answer an SMS, and
+         Doze defers a foreground service for hours. This is the permission that
+         lets the app ask for the exemption with one system dialog; without it a
+         send is bounded by when the phone happens to wake, measured between 3.5
+         seconds and several minutes. The first-run gate requires it. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!--
         M5.3: the gateway's offline drain is a foreground service. The type is
         `remoteMessaging` (an SMS gateway is that category), which is one of the
