@@ -48,8 +48,15 @@ npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
 npx wrangler secret put AUTH_PEPPER --name dakflare-worker      # v1:<base64 32 bytes>
 
 # 3. deploy (builds the console into worker/public/admin first)
-npm run deploy                                  # cf deploy; `npx wrangler deploy` also works
+npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
 ```
+
+`cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`,
+because `cf` cannot set one secret or stream logs yet.
+
+CI runs the same checks on every pull request and deploys `main` when they pass. Migrations
+are applied by hand, never by the pipeline. `docs/OPS_DEPLOY.md` has the jobs, the secrets,
+the order of operations and the rollback.
 
 Then, from anywhere:
 

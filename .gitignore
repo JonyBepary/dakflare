@@ -5,6 +5,9 @@
 .wrangler/
 worker/.wrangler/
 
+# Database exports (docs/OPS_BACKUP.md). They contain personal data.
+*.sql
+
 # Local secrets
 .dev.vars
 worker/.dev.vars
