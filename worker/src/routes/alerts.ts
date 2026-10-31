@@ -19,11 +19,15 @@ import { err } from "../lib/errors";
  */
 export async function handleAlertsList(env: Env, requestUrl: URL): Promise<Response> {
   const includeAcknowledged = requestUrl.searchParams.get("all") === "1";
-  const where = includeAcknowledged ? "" : "WHERE a.acknowledged_at IS NULL";
+  // "Open" is unresolved *and* unacknowledged. A device that came back online
+  // resolves its alert automatically, so it must not keep showing here.
+  const where = includeAcknowledged
+    ? ""
+    : "WHERE a.acknowledged_at IS NULL AND a.resolved_at IS NULL";
 
   const rows = await env.DB.prepare(
     `SELECT a.id, a.device_id, d.label AS label, a.kind, a.raised_at,
-            a.acknowledged_at, a.detail
+            a.acknowledged_at, a.resolved_at, a.detail
        FROM alerts a
        LEFT JOIN devices d ON d.device_id = a.device_id
        ${where}

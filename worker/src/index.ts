@@ -332,6 +332,14 @@ function recordDeviceContact(ctx: ExecutionContext, env: Env, deviceId: string):
           env.DB.prepare(
             `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
           ).bind(now, deviceId, now - 60_000),
+          // The device answering is the condition clearing. Resolving here rather
+          // than in the alert task means it happens on the first contact, not at
+          // the next scheduled check — and a resolved alert frees the unique
+          // index slot so a later outage raises a new one.
+          env.DB.prepare(
+            `UPDATE alerts SET resolved_at = ?
+              WHERE device_id = ? AND kind = 'device_offline' AND resolved_at IS NULL`
+          ).bind(now, deviceId),
         ]);
 
         if (Number(unarchived.meta?.changes ?? 0) > 0) {
