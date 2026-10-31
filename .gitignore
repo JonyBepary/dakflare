@@ -7,6 +7,8 @@ worker/.wrangler/
 
 # Database exports (docs/OPS_BACKUP.md). They contain personal data.
 *.sql
+# ...but migrations are source, and a new one must never be silently ignored.
+!worker/migrations/*.sql
 
 # Local secrets
 .dev.vars
