@@ -105,6 +105,25 @@ const SHORTCODE_PATTERN = "[A-Za-z]|^[^0-9]*" + "[0-9][^0-9]*".repeat(10);
 type CompileResult = { ok: true; graph: Graph } | { ok: false; reason: string };
 
 /**
+ * Compiled graphs, keyed by the rule row object itself.
+ *
+ * `routes/incoming.ts` evaluates one rule list against every message in a batch
+ * and hands the same objects to each call, so a `WeakMap` turns the compile into
+ * once per rule per batch instead of once per rule per message. Object identity
+ * is the correctness argument: a row object is never mutated, so a hit cannot be
+ * stale. A `WeakMap` also means the entries go away with the rows.
+ */
+const compiled = new WeakMap<RuleRecord, CompileResult>();
+
+function compileCached(rule: RuleRecord): CompileResult {
+  const hit = compiled.get(rule);
+  if (hit !== undefined) return hit;
+  const result = compileRule(rule);
+  compiled.set(rule, result);
+  return result;
+}
+
+/**
  * Turn one stored rule into a flow graph.
  *
  * The graph is deliberately tiny and travels through the ordinary workflow
@@ -332,16 +351,16 @@ export async function evaluateRules(
       continue;
     }
 
-    const compiled = compileRule(rule);
-    if (!compiled.ok) {
+    const built = compileCached(rule);
+    if (!built.ok) {
       // Unreachable for rows saved after this change (save compiles them), but one
       // bad legacy row must not 500 an entire inbound batch.
-      console.error(`[rules] rule ${rule.id} cannot compile: ${compiled.reason}`);
+      console.error(`[rules] rule ${rule.id} cannot compile: ${built.reason}`);
       evaluations.push(evaluation(rule, false, "sender_mismatch", "", ""));
       continue;
     }
 
-    const result = await runFlow(compiled.graph, {
+    const result = await runFlow(built.graph, {
       sender: input.peer,
       body: input.body,
       received_at: opts.now,

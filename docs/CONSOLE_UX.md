@@ -33,6 +33,11 @@ Consequences, stated in the UI rather than discovered:
 - Rules are an online feature; workflows are device-primary. The console says so.
 - `reply_source` / `reply_ref` on the message row make "what answered this?" answerable.
 
+Rules are not a second engine. Each row compiles to a flow graph on save and runs
+through the same interpreter workflows use, so "what does this matcher mean?" has one answer
+on the phone, in the Worker and in the simulator. A rule that will not produce a valid graph
+is refused at save with `rule_rejected`, rather than stored and failing at inbound time.
+
 **Rejected alternatives.** Retiring Rules would delete rate limiting, which flows do not have.
 Retiring Workflows would delete the only device-primary path. Implementing a third, device-side
 rule engine duplicates the flow interpreter. The two-form pipeline is the smallest model that
