@@ -11,6 +11,7 @@
  */
 
 import { DeviceGateway } from "./durable-object";
+import { AuthGuard } from "./auth-guard";
 import { verifyDeviceSignature } from "./auth/ecdsa";
 import { handleAdminPairingCode, handleDevicePair, handleDevicesList } from "./routes/pair";
 import { handleSend, handleSendBatch } from "./routes/send";
@@ -28,17 +29,40 @@ import {
 } from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
+  handleDeviceArchive,
   handleDeviceCommands,
   handleDeviceRevoke,
+  handleDeviceUnarchive,
   handleRuleDelete,
   handleRulesListAdmin,
 } from "./routes/admin";
 import { handleAlertAck, handleAlertsList } from "./routes/alerts";
+import { requireRole, type AuthUser, type Permission } from "./auth";
+import {
+  handleAuthRequest,
+  handleMagicLinkConsume,
+  handleMagicLinkRequest,
+  handlePasswordRemove,
+  handlePasswordSalt,
+  handlePasswordSet,
+  handlePasswordSignIn,
+  handleRotatePepper,
+  handleTotpDisable,
+  handleTotpEnable,
+  handleTotpRegenerate,
+  handleTotpStatus,
+} from "./auth";
+import { requestMeta, writeAudit, type AdminActor } from "./audit";
+import { handleRedeemInvite, handleAuthMe, handleAuthMode } from "./routes/auth";
+import { handleBootstrap } from "./routes/bootstrap";
+import { handleResetUser } from "./routes/reset-user";
+import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
+import { handleAuditList } from "./routes/audit";
 import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
-export { DeviceGateway };
+export { DeviceGateway, AuthGuard };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -46,6 +70,12 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export interface Env {
   DEVICE: DurableObjectNamespace<DeviceGateway>;
+  /**
+   * One globally named AuthGuard object owns the failed-auth windows. Optional
+   * so an older deployment without the binding still type-checks and runs; the
+   * limiter then falls back to its isolate counters (see lib/auth-limits.ts).
+   */
+  AUTH_GUARD?: DurableObjectNamespace<AuthGuard>;
   DB: D1Database;
   /** Load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token here. */
   KV: KVNamespace;
@@ -57,6 +87,42 @@ export interface Env {
   ADMIN_TOKEN?: string;
   /** FCM HTTP v1 service-account JSON. Absent is a normal local-dev state. */
   FCM_SERVICE_ACCOUNT_JSON?: string;
+  /**
+   * `legacy` (the default) keeps ADMIN_TOKEN; `new` moves them to
+   * `requireRole()` with ADMIN_TOKEN demoted to the CLI path. Read per request
+   * from `env`, so flipping it is a `[vars]` change plus a deploy.
+   */
+  /** Public origin of this Worker, e.g. https://…workers.dev. Used for rpId/cookies. */
+  AUTH_BASE_URL?: string;
+  /** Comma-separated extra origins allowed by Better Auth's CSRF check. */
+  AUTH_TRUSTED_ORIGINS?: string;
+  /** WebAuthn rpId. Defaults to AUTH_BASE_URL's hostname, then the pinned workers.dev value. */
+  AUTH_RP_ID?: string;
+  /** 32-byte base64. Signs sessions and encrypts TOTP secrets. Absent disables /api/auth. */
+  BETTER_AUTH_SECRET?: string;
+  /**
+   * The pepper ring, `v2:<b64-32>,v1:<b64-32>` (AUTH_PLAN §2, §8). A Worker
+   * Encrypted Secret, never `[vars]`. First entry signs new hashes, all verify.
+   * Missing or malformed => password routes answer 503 naming the secret.
+   */
+  AUTH_PEPPER?: string;
+  /**
+   * Which side runs the password KDF: `off` (default), `client-derived` (free
+   * tier) or `server-kdf` (paid). Read per request; see lib/config.ts.
+   */
+  AUTH_PASSWORD_MODE?: string;
+  /**
+   * Resend API key for magic-link delivery. A Worker secret, never `[vars]`.
+   * Absent => the factor is advertised as unavailable (`magic_link:false`) and
+   * the no-op sender logs `[mail] mail disabled`; requests still answer 202.
+   */
+  RESEND_API_KEY?: string;
+  /** Redirectable Resend API base (default https://api.resend.com), for a local capture. */
+  RESEND_BASE_URL?: string;
+  /** From address for magic links. Defaults to Resend's sandbox sender. */
+  MAGIC_LINK_FROM?: string;
+  /** Magic-link lifetime in seconds. Default 900; clamped in lib/config.ts. */
+  MAGIC_LINK_TTL_SECONDS?: string;
   /** Redirectable so the harness can point FCM at a local stub. */
   FCM_BASE_URL: string;
   GOOGLE_TOKEN_URL: string;
@@ -165,26 +231,122 @@ async function withAdmin(
 }
 
 /**
- * Advance `devices.last_seen` after an authenticated device request.
+ * Admin gate. Two credentials, and only two:
+ *
+ *   a Better Auth session with role owner/admin, for a person;
+ *   ADMIN_TOKEN with `X-Dakflare-Client: cli`, for a machine (AUTH_PLAN §8).
+ *
+ * There is no third path. `AUTH_MODE=legacy` used to make ADMIN_TOKEN alone a
+ * full admin credential; it is gone, because a bearer token that never expires
+ * and needs no client header is the weakest credential the system had.
+ *
+ * Every admin route resolves an actor here so the audited ones can log who acted
+ * without re-reading the credential anywhere else.
+ */
+async function withAdminAccess(
+  req: Request,
+  env: Env,
+  permission: Permission,
+  action: string,
+  handler: (actor: AdminActor) => Promise<Response>
+): Promise<Response> {
+  if (req.headers.get("X-Dakflare-Client") === "cli") {
+    return withAdmin(req, env, () => handler(machineActor()));
+  }
+  const guard = await requireRole(req, env, permission, { action });
+  if (!guard.ok) return guard.response;
+  return handler(actorFromUser(guard.user));
+}
+
+/**
+ * `withAdminToken` — the bootstrap path: Bearer ADMIN_TOKEN only, never a
+ * session cookie, because it has to work before any user exists (AUTH_PLAN §4).
+ */
+async function withAdminToken(
+  req: Request,
+  env: Env,
+  handler: () => Promise<Response>
+): Promise<Response> {
+  const expected = env.ADMIN_TOKEN;
+  if (!expected) return unauthorized();
+
+  const authHeader = req.headers.get("Authorization");
+  if (authHeader === null) return unauthorized();
+
+  const providedDigest = await sha256(authHeader);
+  const expectedDigest = await sha256(`Bearer ${expected}`);
+  if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: "admin" });
+    if (!success) return err("rate_limited", 429);
+  }
+  return handler();
+}
+
+function machineActor(): AdminActor {
+  return { userId: null, label: "admin-token", role: "machine", canGrantOwner: true };
+}
+
+function actorFromUser(user: AuthUser): AdminActor {
+  return {
+    userId: user.id,
+    label: user.email,
+    role: user.role,
+    canGrantOwner: user.role === "owner",
+  };
+}
+
+/**
+ * Advance `devices.last_seen` after an authenticated device request, and clear
+ * an archive if the device came back.
  *
  * §11.12: this is authenticated contact, not pairing time. It is deliberately
  * fire-and-forget (`ctx.waitUntil`) and conditional on being at least 60 s stale,
  * so it never delays a response and cannot turn a D1 hiccup into a device failure.
  * Every failure mode is swallowed; a stale liveness value is worse than a failed
  * request only if the request itself fails.
+ *
+ * The archive clear rides along in the same batch. "A phone that comes back is
+ * not archived": the operator archived it because it was gone, and the first
+ * authenticated request proves it is not. It is a separate statement because the
+ * 60 s staleness guard would otherwise hide the transition on a device archived
+ * moments after its last contact. Audited as `device.unarchived` with
+ * `automatic: true`, so it is distinguishable from the admin endpoint.
  */
 function recordDeviceContact(ctx: ExecutionContext, env: Env, deviceId: string): void {
   ctx.waitUntil(
     (async () => {
       try {
         const now = Date.now();
-        await env.DB.prepare(
-          `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
-        )
-          .bind(now, deviceId, now - 60_000)
-          .run();
+        const [unarchived] = await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL`
+          ).bind(deviceId),
+          env.DB.prepare(
+            `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
+          ).bind(now, deviceId, now - 60_000),
+          // The device answering is the condition clearing. Resolving here rather
+          // than in the alert task means it happens on the first contact, not at
+          // the next scheduled check — and a resolved alert frees the unique
+          // index slot so a later outage raises a new one.
+          env.DB.prepare(
+            `UPDATE alerts SET resolved_at = ?
+              WHERE device_id = ? AND kind = 'device_offline' AND resolved_at IS NULL`
+          ).bind(now, deviceId),
+        ]);
+
+        if (Number(unarchived.meta?.changes ?? 0) > 0) {
+          await writeAudit(env, {
+            action: "device.unarchived",
+            actor: { userId: null, label: "device" },
+            subject: deviceId,
+            detail: { automatic: true },
+          });
+        }
       } catch {
-        // Presence is diagnostic. Never surface it.
+        // Presence is diagnostic. Never surface it. A failed unarchive retries on
+        // the next authenticated request.
       }
     })()
   );
@@ -261,90 +423,244 @@ export default {
       return handleDevicePair(req, env);
     }
 
+    /* ---- Better Auth: /api/auth/* ------------------------------------- */
+    // Delegated whole: passkey registration/sign-in, TOTP. Better Auth owns the
+    // routes, cookies and error envelopes under this prefix.
+    if (pathname === "/api/auth" || pathname.startsWith("/api/auth/")) {
+      return handleAuthRequest(req, env);
+    }
+
+    // Our account-creation policy (AUTH_PLAN §4). Not under /api/auth: these are
+    // ours, not the library's.
+    if (method === "POST" && pathname === "/v1/auth/redeem") {
+      return handleRedeemInvite(req, env);
+    }
+    if (method === "GET" && pathname === "/v1/auth/me") {
+      return handleAuthMe(req, env);
+    }
+    // Pre-auth configuration probe. Deliberately before any session check: the
+    // login page must be able to choose a factor before it has one.
+    if (method === "GET" && pathname === "/v1/auth/mode") {
+      return handleAuthMode(req, env);
+    }
+
+    // Magic-link factor (AUTH_PLAN §1, factor 2). The request route answers the
+    // same 202 for known, unknown and malformed addresses; the consume route is
+    // the only thing that spends a token.
+    if (method === "POST" && pathname === "/v1/auth/magic-link") {
+      return handleMagicLinkRequest(req, env, ctx);
+    }
+    if (method === "POST" && pathname === "/v1/auth/magic-link/consume") {
+      return handleMagicLinkConsume(req, env);
+    }
+
+    // Password factor (AUTH_PLAN §2). These are ours, not Better Auth's:
+    // `/api/auth/sign-in/email` stays disabled so AUTH_PASSWORD_MODE cannot be
+    // bypassed by a library route that always runs the KDF on the Worker.
+    if (method === "POST" && pathname === "/v1/auth/salt") {
+      return handlePasswordSalt(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/sign-in/password") {
+      return handlePasswordSignIn(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/password") {
+      return handlePasswordSet(req, env);
+    }
+    if (method === "DELETE" && pathname === "/v1/auth/password") {
+      return handlePasswordRemove(req, env);
+    }
+
+    // TOTP management that does not need the account password. The plugin's own
+    // enable/disable/generate-backup-codes endpoints are password-gated once a
+    // credential row exists (see `auth/totp-routes.ts`); these do the same work
+    // behind a passkey re-assertion or a current code.
+    if (method === "GET" && pathname === "/v1/auth/totp") {
+      return handleTotpStatus(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/enable") {
+      return handleTotpEnable(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/disable") {
+      return handleTotpDisable(req, env);
+    }
+    if (method === "POST" && pathname === "/v1/auth/totp/regenerate") {
+      return handleTotpRegenerate(req, env);
+    }
+
     /* ---- admin -------------------------------------------------------- */
+    // First owner, for `dakflare init`. ADMIN_TOKEN only and never a cookie.
+    if (method === "POST" && pathname === "/v1/admin/bootstrap") {
+      return withAdminToken(req, env, () => handleBootstrap(req, env));
+    }
+    if (method === "POST" && pathname === "/v1/admin/auth/reset-user") {
+      return withAdminToken(req, env, () => handleResetUser(req, env));
+    }
+
+    // Pepper rotation is ADMIN_TOKEN only: it changes how every password row is
+    // sealed, so a human session is not enough (AUTH_PLAN §8 demotes the token to
+    // exactly this kind of machine operation).
+    if (method === "POST" && pathname === "/v1/admin/auth/rotate-pepper") {
+      return withAdminToken(req, env, () => handleRotatePepper(req, env));
+    }
+
+    if (method === "POST" && pathname === "/v1/admin/invites") {
+      return withAdminAccess(req, env, "write", "create invites", (actor) =>
+        handleCreateInvite(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/invites") {
+      return withAdminAccess(req, env, "read", "list invites", (_actor) =>
+        handleListInvites(env)
+      );
+    }
+    const inviteDeleteMatch = pathname.match(/^\/v1\/admin\/invites\/([^/]+)$/);
+    if (method === "DELETE" && inviteDeleteMatch) {
+      return withAdminAccess(req, env, "write", "revoke invites", (actor) =>
+        handleDeleteInvite(env, decodeURIComponent(inviteDeleteMatch[1]), actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/audit") {
+      // A read: a member may see who did what, including their own actions.
+      return withAdminAccess(req, env, "read", "read the audit log", (_actor) =>
+        handleAuditList(env, url)
+      );
+    }
     if (method === "POST" && pathname === "/v1/admin/pairing-code") {
-      return withAdmin(req, env, () => handleAdminPairingCode(req, env));
+      return withAdminAccess(req, env, "write", "pair devices", (_actor) =>
+        handleAdminPairingCode(req, env)
+      );
     }
 
     if (method === "GET" && pathname === "/v1/admin/health") {
-      return withAdmin(req, env, () => handleHealth(env));
+      return withAdminAccess(req, env, "read", "read health", (_actor) => handleHealth(env));
     }
 
     // S10: revocation must reach the Durable Object, not just D1.
     const revokeMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/);
     if (method === "DELETE" && revokeMatch) {
       const target = decodeURIComponent(revokeMatch[1]);
-      return withAdmin(req, env, () => handleDeviceRevoke(env, target));
+      return withAdminAccess(req, env, "write", "revoke devices", (actor) =>
+        handleDeviceRevoke(env, target, actor)
+      );
+    }
+
+    // Archive is the non-destructive alternative to revoke: the row, its key and
+    // its messages stay, and only the fleet view hides it.
+    const deviceArchiveMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/archive$/);
+    if (method === "POST" && deviceArchiveMatch) {
+      const target = decodeURIComponent(deviceArchiveMatch[1]);
+      return withAdminAccess(req, env, "write", "archive devices", (actor) =>
+        handleDeviceArchive(env, target, actor)
+      );
+    }
+    const deviceUnarchiveMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/unarchive$/);
+    if (method === "POST" && deviceUnarchiveMatch) {
+      const target = decodeURIComponent(deviceUnarchiveMatch[1]);
+      return withAdminAccess(req, env, "write", "unarchive devices", (actor) =>
+        handleDeviceUnarchive(env, target, actor)
+      );
     }
 
     const deviceCommandsMatch = pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/commands$/);
     if (method === "GET" && deviceCommandsMatch) {
       // Decoding happens INSIDE `withAdmin`, so a malformed escape is an
       // authenticated caller's error, not an unauthenticated throw.
-      return withAdmin(req, env, () =>
+      return withAdminAccess(req, env, "read", "read device commands", (_actor) =>
         handleDeviceCommands(env, decodeURIComponent(deviceCommandsMatch[1]), url)
       );
     }
 
     if (method === "GET" && pathname === "/v1/admin/alerts") {
-      return withAdmin(req, env, () => handleAlertsList(env, url));
+      return withAdminAccess(req, env, "read", "read alerts", (_actor) =>
+        handleAlertsList(env, url)
+      );
     }
     const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
     if (method === "POST" && alertAckMatch) {
-      return withAdmin(req, env, () => handleAlertAck(env, decodeURIComponent(alertAckMatch[1])));
+      return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
+        handleAlertAck(env, decodeURIComponent(alertAckMatch[1]))
+      );
     }
 
     if (method === "GET" && pathname === "/v1/admin/rules") {
-      return withAdmin(req, env, () => handleRulesListAdmin(env));
+      return withAdminAccess(req, env, "read", "read rules", (_actor) =>
+        handleRulesListAdmin(env)
+      );
     }
     if (method === "POST" && pathname === "/v1/admin/rules/test") {
-      return withAdmin(req, env, () => handleRulesTest(req, env));
+      // Ambiguous: evaluating a rule against a sample has no side effects, but
+      // it is a POST that can run arbitrary stored regexes, so it stays a write.
+      return withAdminAccess(req, env, "write", "test rules", (_actor) =>
+        handleRulesTest(req, env)
+      );
     }
     const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
     if (method === "DELETE" && ruleDeleteMatch) {
       const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
-      return withAdmin(req, env, () => handleRuleDelete(env, ruleId));
+      return withAdminAccess(req, env, "write", "delete rules", (_actor) =>
+        handleRuleDelete(env, ruleId)
+      );
     }
 
     // Workflow graphs. The id segment is passed to the handler RAW and decoded
     // there, after `withAdmin`, so a malformed escape cannot throw on an
     // unauthenticated path. The list route has no segment and is matched first.
     if (method === "GET" && pathname === "/v1/admin/workflows") {
-      return withAdmin(req, env, () => handleWorkflowsList(env));
+      return withAdminAccess(req, env, "read", "read workflows", (_actor) =>
+        handleWorkflowsList(env)
+      );
     }
     const workflowMatch = pathname.match(/^\/v1\/admin\/workflows\/([^/]+)$/);
     if (method === "GET" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowGet(env, workflowMatch[1]));
+      return withAdminAccess(req, env, "read", "read workflows", (_actor) =>
+        handleWorkflowGet(env, workflowMatch[1])
+      );
     }
     if (method === "PUT" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowPut(req, env, workflowMatch[1]));
+      return withAdminAccess(req, env, "write", "save workflows", (_actor) =>
+        handleWorkflowPut(req, env, workflowMatch[1])
+      );
     }
     if (method === "DELETE" && workflowMatch) {
-      return withAdmin(req, env, () => handleWorkflowDelete(env, workflowMatch[1]));
+      return withAdminAccess(req, env, "write", "delete workflows", (_actor) =>
+        handleWorkflowDelete(env, workflowMatch[1])
+      );
     }
     if (method === "GET" && pathname === "/v1/devices") {
-      return withAdmin(req, env, () => handleDevicesList(env));
+      return withAdminAccess(req, env, "read", "list devices", (_actor) =>
+        handleDevicesList(env, url)
+      );
     }
     if (method === "GET" && pathname === "/v1/messages") {
-      return withAdmin(req, env, () => handleMessagesList(env, url));
+      return withAdminAccess(req, env, "read", "read messages", (_actor) =>
+        handleMessagesList(env, url)
+      );
     }
     if (method === "DELETE" && pathname === "/v1/messages") {
-      return withAdmin(req, env, () => handleMessagesPurge(env, url));
+      return withAdminAccess(req, env, "write", "purge messages", (_actor) =>
+        handleMessagesPurge(env, url)
+      );
     }
     if (method === "POST" && pathname === "/v1/rules") {
-      return withAdmin(req, env, () => handleRulesPost(req, env));
+      return withAdminAccess(req, env, "write", "save rules", (actor) =>
+        handleRulesPost(req, env, actor)
+      );
     }
     if (method === "POST" && pathname === "/v1/sms/send") {
-      return withAdmin(req, env, () => handleSend(req, env));
+      return withAdminAccess(req, env, "write", "send SMS", (actor) =>
+        handleSend(req, env, actor)
+      );
     }
     if (method === "POST" && pathname === "/v1/sms/send/batch") {
-      return withAdmin(req, env, () => handleSendBatch(req, env));
+      return withAdminAccess(req, env, "write", "send SMS", (actor) =>
+        handleSendBatch(req, env, actor)
+      );
     }
 
     const commandMatch = pathname.match(/^\/v1\/sms\/commands\/([^/]+)$/);
     if (method === "GET" && commandMatch) {
       const commandId = decodeURIComponent(commandMatch[1]);
-      return withAdmin(req, env, () =>
+      return withAdminAccess(req, env, "read", "read command status", (_actor) =>
         handleCommandStatus(env, url.searchParams.get("device_id") ?? "", commandId)
       );
     }
@@ -352,7 +668,7 @@ export default {
     const deviceStatusMatch = pathname.match(/^\/v1\/device\/([^/]+)\/status$/);
     if (method === "GET" && deviceStatusMatch) {
       const target = deviceStatusMatch[1];
-      return withAdmin(req, env, async () => {
+      return withAdminAccess(req, env, "read", "read device status", async (_actor) => {
         const stub = env.DEVICE.get(env.DEVICE.idFromName(target));
         return stub.fetch("https://do/__device_status", { method: "GET" });
       });
@@ -435,6 +751,13 @@ async function runRetention(env: Env): Promise<void> {
     .bind(Date.now())
     .run();
 
+  // Magic-link rows are single use and short lived. Removing them at expiry
+  // keeps an attacker who knows a valid address from growing the table (the
+  // request route is rate-limited, but the rows would otherwise never go away).
+  const magicLinks = await env.DB.prepare(`DELETE FROM magic_link WHERE expires_at <= ?`)
+    .bind(Date.now())
+    .run();
+
   // `rule_hits` is what enforces each rule's cooldown and hourly cap. It grows one
   // row per automated reply, so it needs the same retention as the log — but the
   // horizon must never be shorter than a cooldown that is still configured, or a
@@ -475,7 +798,9 @@ async function runRetention(env: Env): Promise<void> {
   console.log(
     `[retention] days=${days} messages=${deleted} pairing_codes=${Number(
       codes.meta?.changes ?? 0
-    )} rule_hits=${hitsDeleted} alerts=${Number(alerts.meta?.changes ?? 0)}`
+    )} magic_links=${Number(magicLinks.meta?.changes ?? 0)} rule_hits=${hitsDeleted} alerts=${Number(
+      alerts.meta?.changes ?? 0
+    )}`
   );
 }
 
@@ -590,6 +915,16 @@ async function handleSessionCreate(req: Request, env: Env): Promise<Response> {
   const providedDigest = await sha256(token);
   const expectedDigest = await sha256(expected);
   if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+
+  // The only place ADMIN_TOKEN becomes a session. Rotation itself happens via
+  // `wrangler secret put` (a Worker cannot set its own secret), so this is the
+  // auditable event: the machine credential was used (AUTH_PLAN §5, §8).
+  await writeAudit(env, {
+    action: "token.used",
+    actor: { userId: null, label: "admin-token" },
+    detail: { route: "/admin/session" },
+    ...requestMeta(req),
+  });
 
   const { value, exp } = await mintSession(expected);
   const secure = new URL(req.url).protocol === "https:";

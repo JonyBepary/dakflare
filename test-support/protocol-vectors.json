@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "source": [
+    "PROTOCOL_CONTRACT_V5.md \u00a74.2 \u2014 the five-line canonical string",
+    "RFC 6238 Appendix B \u2014 TOTP, HMAC-SHA1, 30 s step, ASCII secret 12345678901234567890"
+  ],
+  "empty_body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "canonical": [
+    {
+      "id": "A",
+      "method": "POST",
+      "pathname": "/v1/sms/outgoing/poll",
+      "timestamp": "1776470400000",
+      "nonce": "a3f1c0d29b7e4f8a1c6d5e2b9f0a7c34",
+      "body": "{\"ack_command_ids\":[],\"fcm_token\":\"fcm-test-token-0001\"}",
+      "body_bytes": 56,
+      "body_sha256": "f8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9",
+      "canonical": "POST\n/v1/sms/outgoing/poll\n1776470400000\na3f1c0d29b7e4f8a1c6d5e2b9f0a7c34\nf8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9"
+    },
+    {
+      "id": "B",
+      "method": "GET",
+      "pathname": "/v1/device/ws",
+      "timestamp": "1776470400000",
+      "nonce": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "body": "",
+      "body_bytes": 0,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "canonical": "GET\n/v1/device/ws\n1776470400000\n0f1e2d3c4b5a69788796a5b4c3d2e1f0\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "C",
+      "method": "POST",
+      "pathname": "/v1/sms/incoming/batch",
+      "timestamp": "1776470400000",
+      "nonce": "deadbeefcafebabe0123456789abcdef",
+      "body": "{\"messages\":[{\"local_id\":\"m_0001\",\"sender\":\"+8801712345678\",\"body\":\"\u0986\u09b8\u09b8\u09be\u09b2\u09be\u09ae\u09c1 \u0986\u09b2\u09be\u0987\u0995\u09c1\u09ae\",\"received_at\":\"2026-04-18T09:15:00.000Z\"}]}",
+      "body_bytes": 159,
+      "body_sha256": "1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6",
+      "canonical": "POST\n/v1/sms/incoming/batch\n1776470400000\ndeadbeefcafebabe0123456789abcdef\n1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6"
+    }
+  ],
+  "totp": {
+    "secret_ascii": "12345678901234567890",
+    "secret_base32": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+    "step_seconds": 30,
+    "vectors": [
+      {
+        "time": 59,
+        "digits8": "94287082",
+        "digits6": "287082"
+      },
+      {
+        "time": 1111111109,
+        "digits8": "07081804",
+        "digits6": "081804"
+      },
+      {
+        "time": 1111111111,
+        "digits8": "14050471",
+        "digits6": "050471"
+      },
+      {
+        "time": 1234567890,
+        "digits8": "89005924",
+        "digits6": "005924"
+      },
+      {
+        "time": 2000000000,
+        "digits8": "69279037",
+        "digits6": "279037"
+      },
+      {
+        "time": 20000000000,
+        "digits8": "65353130",
+        "digits6": "353130"
+      }
+    ]
+  }
+}

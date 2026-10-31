@@ -12,6 +12,26 @@
  *   verify-vectors  assert only the §4.2 canonical vectors byte-for-byte.
  *   pair            mint a code, pair a fresh device, persist identity.
  *   suite           the full conformance battery.
+ *   auth            auth cases: invite-only sign-up, single use, requireRole
+ *                   401/403/200, machine-token path, audit rows. The legacy
+ *                   selects the assertions (legacy|new); point WORKER_URL at a
+ *                   Worker started with the matching mode.
+ *   password        AUTH_PLAN §2 cases: salt shape/determinism, construction
+ *                   parity, mode rules, sign-in, deletion. Reads the mode from
+ *                   /v1/admin/health.
+ *   lockout-global  the failed-auth window is in the AuthGuard Durable Object,
+ *                   not isolate memory: three failures on one Worker process and
+ *                   two on a restarted process still make the fifth 429, and the
+ *                   lock survives another restart. Owns its `wrangler dev` and
+ *                   isolated D1/DO state under /tmp/opencode.
+ *   password-rotate pepper rotation end to end. Starts its own wrangler dev
+ *                   (ring v1 -> v2,v1 -> v2) on PASSWORD_ROTATE_PORT, isolated
+ *                   D1 state under /tmp/opencode.
+ *   magic           AUTH_PLAN §1 factor 2: 202 for known/unknown/malformed,
+ *                   single-use and expiry 410s, TOTP challenge, and the
+ *                   no-sender deployment. Starts its own wrangler dev with a
+ *                   local Resend capture on MAGIC_PORT, isolated D1 state under
+ *                   /tmp/opencode.
  *   proxy           start the :8788 signing proxy for Hoppscotch.
  *   ws              connect a virtual device and hold a session open.
  *   stub            run the FCM/OAuth2 stub.
@@ -49,32 +69,350 @@ const STATE_FILE = path.join(HERE, `.harness-state.${TARGET_KEY}.json`);
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
+/* ──────────────── password construction (AUTH_PLAN §2), independent ─────────
+ *
+ * Deliberately NOT imported from worker/src: the harness must be able to
+ * disagree with the server about the stored value. It re-implements the four
+ * lines of the contract:
+ *
+ *   material = PBKDF2-SHA256(password, salt, iterations)
+ *   peppered = HMAC-SHA256(pepper_v, salt ‖ material)
+ *   stored   = SHA-256(peppered)
+ *   row      = v1$p=<v>$k=<k>$m=<c|s>$<salt-b64>$<sha256-b64>
+ */
+const PW_ITERATIONS = 210_000;
+
+const b64Of = (buf) => Buffer.from(buf).toString('base64');
+
+function pwMaterial(password, salt, iterations = PW_ITERATIONS) {
+  return crypto.pbkdf2Sync(Buffer.from(password, 'utf8'), salt, iterations, 32, 'sha256');
+}
+
+function pwDigest(pepper, salt, material) {
+  const peppered = crypto.createHmac('sha256', pepper).update(Buffer.concat([salt, material])).digest();
+  return crypto.createHash('sha256').update(peppered).digest();
+}
+
+function pwRow({ pepper, version, iterations, mode, salt, material }) {
+  return `v1$p=${version}$k=${iterations}$m=${mode}$${b64Of(salt)}$${b64Of(pwDigest(pepper, salt, material))}`;
+}
+
+function sessionCookieOf(cookies) {
+  return (cookies ?? []).map((c) => c.split(';')[0]).find((c) => c.includes('session_token')) ?? null;
+}
+
+/** RFC 4648 base32, for a TOTP secret taken out of an otpauth:// URI. */
+function base32Decode(value) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = String(value ?? '').replace(/=+$/, '').toUpperCase();
+  let bits = 0;
+  let acc = 0;
+  const out = [];
+  for (const char of clean) {
+    const index = alphabet.indexOf(char);
+    if (index < 0) throw new Error(`bad base32 character ${char}`);
+    acc = (acc << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((acc >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+
+/**
+ * One TOTP code, RFC 6238 (HMAC-SHA1, 30 s), at a given instant.
+ *
+ * The instant is a parameter so the published RFC vectors can be asserted
+ * against it; `totpNow` is the only caller that wants "now".
+ */
+function totpAt(secretBase32, nowMs, digits = 6) {
+  const counter = Math.floor(nowMs / 30_000);
+  const message = Buffer.alloc(8);
+  message.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
+  message.writeUInt32BE(counter >>> 0, 4);
+  const mac = crypto.createHmac('sha1', base32Decode(secretBase32)).update(message).digest();
+  const offset = mac[mac.length - 1] & 0x0f;
+  const binary =
+    ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3];
+  return String(binary % 10 ** digits).padStart(digits, '0');
+}
+
+function totpNow(secretBase32) {
+  return totpAt(secretBase32, Date.now());
+}
+
+/* ────────────── a software WebAuthn authenticator (passkey step-up) ─────────
+ *
+ * The TOTP enable route re-authenticates with a passkey assertion, and this
+ * harness has no browser. It therefore plays the authenticator: ES256, "none"
+ * attestation, a counter, and a 50-line CBOR encoder for the two structures
+ * WebAuthn needs. Everything that decides whether the assertion is valid — the
+ * challenge, rpId, origin, public key, counter — comes from the Worker; this is
+ * a real ceremony, not a bypass.
+ */
+
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest();
+
+function cborHead(major, n) {
+  if (n < 24) return Buffer.from([(major << 5) | n]);
+  if (n < 0x100) return Buffer.from([(major << 5) | 24, n]);
+  if (n < 0x10000) return Buffer.from([(major << 5) | 25, n >> 8, n & 0xff]);
+  return Buffer.from([
+    (major << 5) | 26,
+    (n >>> 24) & 0xff,
+    (n >>> 16) & 0xff,
+    (n >>> 8) & 0xff,
+    n & 0xff,
+  ]);
+}
+
+/** Definite-length CBOR: ints, text, bytes, arrays, Maps and plain objects. */
+function cbor(value) {
+  if (typeof value === 'number') {
+    return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
+  }
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([cborHead(3, bytes.length), bytes]);
+  }
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    const bytes = Buffer.from(value);
+    return Buffer.concat([cborHead(2, bytes.length), bytes]);
+  }
+  if (Array.isArray(value)) {
+    return Buffer.concat([cborHead(4, value.length), ...value.map(cbor)]);
+  }
+  if (value instanceof Map) {
+    const parts = [cborHead(5, value.size)];
+    for (const [key, entry] of value) parts.push(cbor(key), cbor(entry));
+    return Buffer.concat(parts);
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value);
+    const parts = [cborHead(5, entries.length)];
+    for (const [key, entry] of entries) parts.push(cbor(key), cbor(entry));
+    return Buffer.concat(parts);
+  }
+  throw new Error(`cbor: unsupported value ${String(value)}`);
+}
+
+function cookieJar(cookie) {
+  const jar = new Map();
+  for (const part of String(cookie ?? '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) jar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+  }
+  return jar;
+}
+
+function jarString(jar) {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function absorbCookies(jar, setCookies) {
+  for (const raw of setCookies ?? []) {
+    const pair = raw.split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq);
+    const value = pair.slice(eq + 1);
+    if (value === '') jar.delete(name);
+    else jar.set(name, value);
+  }
+}
+
+/** One call to Better Auth's mount, carrying and absorbing the cookie jar. */
+async function authCall(method, pathname, body, jar, base = WORKER_URL) {
+  const headers = { Accept: 'application/json', Origin: base };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (jar && jar.size > 0) headers.Cookie = jarString(jar);
+  const res = await fetch(base + pathname, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  return { status: res.status, data: await res.json().catch(() => null), cookies };
+}
+
+/** Enrol a real ES256 passkey for `sessionCookie` (one registration ceremony). */
+async function createPasskey(sessionCookie, base = WORKER_URL) {
+  const jar = cookieJar(sessionCookie);
+  const options = await authCall('GET', '/api/auth/passkey/generate-register-options', undefined, jar, base);
+  absorbCookies(jar, options.cookies);
+  if (options.status !== 200) return { status: options.status, data: options.data, jar };
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const credentialId = crypto.randomBytes(16);
+  const clientDataJSON = Buffer.from(
+    JSON.stringify({
+      type: 'webauthn.create',
+      challenge: options.data.challenge,
+      origin: base,
+      crossOrigin: false,
+    }),
+    'utf8'
+  );
+  const coseKey = new Map([
+    [1, 2],
+    [3, -7],
+    [-1, 1],
+    [-2, Buffer.from(jwk.x, 'base64url')],
+    [-3, Buffer.from(jwk.y, 'base64url')],
+  ]);
+  const authData = Buffer.concat([
+    sha256(Buffer.from(options.data.rp.id, 'utf8')),
+    Buffer.from([0x41]), // user present + attested credential data
+    Buffer.from([0, 0, 0, 0]), // sign counter
+    Buffer.alloc(16), // aaguid
+    Buffer.from([(credentialId.length >> 8) & 0xff, credentialId.length & 0xff]),
+    credentialId,
+    cbor(coseKey),
+  ]);
+  const attestationObject = cbor(
+    new Map([
+      ['fmt', 'none'],
+      ['attStmt', new Map()],
+      ['authData', authData],
+    ])
+  );
+
+  const verified = await authCall(
+    'POST',
+    '/api/auth/passkey/verify-registration',
+    {
+      response: {
+        id: credentialId.toString('base64url'),
+        rawId: credentialId.toString('base64url'),
+        type: 'public-key',
+        response: {
+          clientDataJSON: clientDataJSON.toString('base64url'),
+          attestationObject: attestationObject.toString('base64url'),
+        },
+        clientExtensionResults: {},
+      },
+      name: 'harness step-up',
+    },
+    jar,
+    base
+  );
+  absorbCookies(jar, verified.cookies);
+  return {
+    status: verified.status,
+    data: verified.data,
+    jar,
+    privateKey,
+    credentialId,
+    rpId: options.data.rp.id,
+    counter: 0,
+    base,
+  };
+}
+
+/**
+ * Assert `passkey` and return the cookie jar of the session it created. The
+ * Worker mints the step-up grant on this response; both cookies travel together
+ * to `/v1/auth/totp/enable`.
+ */
+async function assertPasskey(passkey, base = passkey.base ?? WORKER_URL) {
+  const jar = new Map(passkey.jar);
+  const options = await authCall('GET', '/api/auth/passkey/generate-authenticate-options', undefined, jar, base);
+  absorbCookies(jar, options.cookies);
+  if (options.status !== 200) return { status: options.status, data: options.data, jar };
+
+  const clientDataJSON = Buffer.from(
+    JSON.stringify({
+      type: 'webauthn.get',
+      challenge: options.data.challenge,
+      origin: base,
+      crossOrigin: false,
+    }),
+    'utf8'
+  );
+  passkey.counter += 1;
+  const counter = passkey.counter;
+  const authData = Buffer.concat([
+    sha256(Buffer.from(options.data.rpId ?? passkey.rpId, 'utf8')),
+    Buffer.from([0x01]), // user present
+    Buffer.from([
+      (counter >>> 24) & 0xff,
+      (counter >>> 16) & 0xff,
+      (counter >>> 8) & 0xff,
+      counter & 0xff,
+    ]),
+  ]);
+  // WebAuthn EC2 signatures are ASN.1 DER; the verifier unwraps r/s itself.
+  const signature = crypto.sign('sha256', Buffer.concat([authData, sha256(clientDataJSON)]), {
+    key: passkey.privateKey,
+  });
+
+  const verified = await authCall(
+    'POST',
+    '/api/auth/passkey/verify-authentication',
+    {
+      response: {
+        id: passkey.credentialId.toString('base64url'),
+        rawId: passkey.credentialId.toString('base64url'),
+        type: 'public-key',
+        response: {
+          clientDataJSON: clientDataJSON.toString('base64url'),
+          authenticatorData: authData.toString('base64url'),
+          signature: signature.toString('base64url'),
+          userHandle: null,
+        },
+        clientExtensionResults: {},
+      },
+    },
+    jar,
+    base
+  );
+  absorbCookies(jar, verified.cookies);
+  return { status: verified.status, data: verified.data, jar, cookies: verified.cookies };
+}
+
+
+/** A tiny JSON-over-fetch helper scoped to an arbitrary base URL. */
+async function api(base, method, pathname, { body, cookie, headers } = {}) {
+  const res = await fetch(base + pathname, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(cookie ? { Cookie: cookie } : {}),
+      ...(headers ?? {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    redirect: 'manual',
+  });
+  const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
+}
+
 /* ────────────────────────────── contract §4 vectors ───────────────────────── */
 
-const VECTORS = [
-  {
-    id: 'A', method: 'POST', pathname: '/v1/sms/outgoing/poll',
-    timestamp: '1776470400000', nonce: 'a3f1c0d29b7e4f8a1c6d5e2b9f0a7c34',
-    body: '{"ack_command_ids":[],"fcm_token":"fcm-test-token-0001"}',
-    len: 56,
-    sha: 'f8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9',
-    canonical: 'POST\n/v1/sms/outgoing/poll\n1776470400000\na3f1c0d29b7e4f8a1c6d5e2b9f0a7c34\nf8c6ca3e8d50126cc59e541a6644ef1db7c3eec01b155a8310dea13143b9f0a9',
-  },
-  {
-    id: 'B', method: 'GET', pathname: '/v1/device/ws',
-    timestamp: '1776470400000', nonce: '0f1e2d3c4b5a69788796a5b4c3d2e1f0',
-    body: '', len: 0, sha: EMPTY_SHA256,
-    canonical: `GET\n/v1/device/ws\n1776470400000\n0f1e2d3c4b5a69788796a5b4c3d2e1f0\n${EMPTY_SHA256}`,
-  },
-  {
-    id: 'C', method: 'POST', pathname: '/v1/sms/incoming/batch',
-    timestamp: '1776470400000', nonce: 'deadbeefcafebabe0123456789abcdef',
-    body: '{"messages":[{"local_id":"m_0001","sender":"+8801712345678","body":"\u0986\u09b8\u09b8\u09be\u09b2\u09be\u09ae\u09c1 \u0986\u09b2\u09be\u0987\u0995\u09c1\u09ae","received_at":"2026-04-18T09:15:00.000Z"}]}',
-    len: 159,
-    sha: '1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6',
-    canonical: 'POST\n/v1/sms/incoming/batch\n1776470400000\ndeadbeefcafebabe0123456789abcdef\n1459860ca2b1d0a6e64d93d02246fb1f6c04d574b75bcdd485881d5830486fc6',
-  },
-];
+/**
+ * §4.2 vectors live in one file, `test-support/protocol-vectors.json`, so the
+ * Worker, the phone (Rust) and this harness cannot drift apart. The Python
+ * checker in `test-support/` keeps its own transcription on purpose and asserts
+ * it against the same file; that is what makes it a third opinion rather than a
+ * second copy.
+ */
+const VECTORS_FILE = path.join(HERE, 'test-support', 'protocol-vectors.json');
+const CONTRACT = JSON.parse(fs.readFileSync(VECTORS_FILE, 'utf8'));
+
+const VECTORS = CONTRACT.canonical.map((vector) => ({
+  id: vector.id,
+  method: vector.method,
+  pathname: vector.pathname,
+  timestamp: vector.timestamp,
+  nonce: vector.nonce,
+  body: vector.body,
+  len: vector.body_bytes,
+  sha: vector.body_sha256,
+  canonical: vector.canonical,
+}));
 
 /* ─────────────────────────────── contract §1/§2 ───────────────────────────── */
 
@@ -218,7 +556,13 @@ export function signWith(identity, method, pathname, bodyStr, { ts, nonce } = {}
 export async function admin(method, pathname, body) {
   const res = await fetch(WORKER_URL + pathname, {
     method,
-    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${ADMIN_TOKEN}`,
+      // Machine-credential marker (AUTH_PLAN §8). Harmless in legacy mode; in
+      // AUTH_MODE=new it is what separates the CLI path from a human session.
+      'X-Dakflare-Client': 'cli',
+      'Content-Type': 'application/json',
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: res.status, data: await res.json().catch(() => null) };
@@ -476,6 +820,15 @@ function cmdVerifyVectors() {
   rep.check('method is uppercased', buildCanonicalString({
     method: 'post', pathname: '/x', timestampHeader: '1'.repeat(13), nonce: '0'.repeat(32), bodyBytes: Buffer.alloc(0),
   }).split('\n')[0], 'POST');
+
+  // RFC 6238 Appendix B. A TOTP that is wrong by a digit is indistinguishable
+  // from a wrong code at sign-in, so the published vectors are asserted here
+  // instead of only being exercised end to end against a live Worker.
+  for (const vector of CONTRACT.totp.vectors) {
+    const at = vector.time * 1000;
+    rep.check(`TOTP t=${vector.time} 8-digit`, totpAt(CONTRACT.totp.secret_base32, at, 8), vector.digits8);
+    rep.check(`TOTP t=${vector.time} 6-digit`, totpAt(CONTRACT.totp.secret_base32, at, 6), vector.digits6);
+  }
   return rep;
 }
 
@@ -595,7 +948,31 @@ async function pairRequest(identity, pairingCode) {
   return { status: res.status, data: await res.json().catch(() => null) };
 }
 
+/**
+ * `pair` and `suite` write: they create devices, rules and messages. Pointed at
+ * a deployed Worker by a stray WORKER_URL they would pollute production, and the
+ * first symptom is a 401 from the admin mint, which reads like an auth bug.
+ *
+ * A local stack is the default. A deployed Worker needs HARNESS_REMOTE=1, which
+ * the ack-timeout section already understands.
+ */
+function refuseNonLocal(command) {
+  let host;
+  try {
+    host = new URL(WORKER_URL).hostname;
+  } catch {
+    console.error(`refusing ${command}: WORKER_URL is not a URL: ${WORKER_URL}`);
+    process.exit(2);
+  }
+  const local = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (local || process.env.HARNESS_REMOTE === '1') return;
+  console.error(`refusing ${command} against ${WORKER_URL}: it creates devices, rules and messages.`);
+  console.error('Start a local stack (test-support/dev.sh), or set HARNESS_REMOTE=1 to mean it.');
+  process.exit(2);
+}
+
 async function cmdPair() {
+  refuseNonLocal('pair');
   console.log('== pair ==\n');
   const identity = newIdentity();
   console.log(`device_id: ${identity.deviceId}`);
@@ -649,6 +1026,7 @@ function priv(identity) {
 /* ─────────────────────────────────── suite ───────────────────────────────── */
 
 async function cmdSuite() {
+  refuseNonLocal('suite');
   const identity = loadIdentity();
   console.log(`== suite ==\nworker: ${WORKER_URL}\ndevice: ${identity.deviceId}\nack timeout: ${ACK_TIMEOUT_MS} ms\n`);
 
@@ -708,6 +1086,327 @@ async function cmdSuite() {
     const st = await admin('GET', `/v1/device/${identity.deviceId}/status`);
     rep.check('status exposes ws_connected', typeof st.data?.ws_connected, 'boolean');
     rep.check('status exposes queue_depth', typeof st.data?.queue_depth, 'number');
+    run(rep);
+  }
+
+  /* ── re-pair inheritance + device archive (2026-10-30 cutover) ─────────── */
+  console.log('-- re-pair inheritance + device archive --');
+  {
+    const rep = new Report('re-pair inheritance');
+    const label = `Harness Reinstall ${crypto.randomBytes(3).toString('hex')}`;
+
+    /** Mint a code (optionally scoped/rotate) and pair `idn` with it. */
+    const pairWith = async (idn, { label: reported, mint } = {}) => {
+      const minted = await admin('POST', '/v1/admin/pairing-code', {
+        ttl_ms: 60_000, ...(mint ?? {}),
+      });
+      const res = await fetch(`${WORKER_URL}/v1/device/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pairing_code: minted.data?.pairing_code,
+          device_id: idn.deviceId,
+          public_key_spki: idn.publicKeySpki,
+          ...(reported === undefined ? {} : { label: reported }),
+        }),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const workflows = async () =>
+      (await admin('GET', '/v1/admin/workflows')).data?.workflows ?? [];
+    const flowsFor = async (deviceId) =>
+      (await workflows()).filter((w) => w.device_id === deviceId);
+    const fleet = async (query = '') =>
+      (await admin('GET', `/v1/devices${query}`)).data?.devices ?? [];
+    const waitFor = async (fn, tries = 40) => {
+      for (let i = 0; i < tries; i++) {
+        const value = await fn();
+        if (value) return value;
+        await sleep(100);
+      }
+      return null;
+    };
+
+    /* 1. The old phone: pair with a label, then build two flows. ---------- */
+    const old = newIdentity();
+    const oldKey = { ...old, privateKey: crypto.createPrivateKey(old.privateKeyPem) };
+    const firstPair = await pairWith(old, { label });
+    rep.check('pair the original device with a label -> 200', firstPair.status, 200);
+    rep.check('...a first pair copies nothing', firstPair.data?.copied_workflows, 0);
+
+    const graph = (to) => ({
+      nodes: [
+        { id: 'trigger_1', type: 'trigger', position: { x: 0, y: 0 }, data: { kind: 'incoming' } },
+        { id: 'send_1', type: 'send_sms', position: { x: 0, y: 100 }, data: { to, body: 'ack {{body}}' } },
+        { id: 'stop_1', type: 'stop', position: { x: 0, y: 200 }, data: { reason: 'done' } },
+      ],
+      edges: [
+        { id: 'edge_1', source: 'trigger_1', target: 'send_1' },
+        { id: 'edge_2', source: 'send_1', target: 'stop_1' },
+      ],
+    });
+    const originals = [
+      { id: `harness_flow_a_${crypto.randomBytes(4).toString('hex')}`,
+        name: 'Harness flow A', graph: graph('{{sender}}') },
+      { id: `harness_flow_b_${crypto.randomBytes(4).toString('hex')}`,
+        name: 'Harness flow B', graph: graph('+8801700000002') },
+    ];
+    for (const flow of originals) {
+      const saved = await admin('PUT', `/v1/admin/workflows/${flow.id}`, {
+        name: flow.name, device_id: old.deviceId, graph: flow.graph,
+      });
+      rep.check(`save ${flow.name} for the original device -> 200`, saved.status, 200);
+    }
+    rep.check('the original device owns both flows', (await flowsFor(old.deviceId)).length, 2);
+
+    /* 2. The reinstalled phone: a NEW device_id, the same label. ---------- */
+    const fresh = newIdentity();
+    const secondPair = await pairWith(fresh, { label });
+    rep.check('pair a NEW device with the same label -> 200', secondPair.status, 200);
+    rep.check('...the pair response reports copied_workflows: 2',
+      secondPair.data?.copied_workflows, 2);
+
+    const copied = await flowsFor(fresh.deviceId);
+    rep.check('the new device now owns two flows', copied.length, 2);
+    rep.check('...every copied id is a fresh wf_ id',
+      copied.every((w) => /^wf_[0-9a-f]{16}$/.test(w.id)), true);
+    rep.check('...each name says where it came from',
+      copied.every((w) => w.name.endsWith(` (copied from ${old.deviceId})`)), true);
+
+    const sourceDocs = [];
+    for (const flow of originals) {
+      sourceDocs.push((await admin('GET', `/v1/admin/workflows/${flow.id}`)).data?.workflow);
+    }
+    let copiesMatch = true;
+    const copiedVersions = [];
+    for (const row of copied) {
+      const doc = (await admin('GET', `/v1/admin/workflows/${row.id}`)).data?.workflow;
+      copiedVersions.push(doc?.version);
+      const base = String(doc?.name ?? '').replace(/ \(copied from .*\)$/, '');
+      const source = sourceDocs.find((s) => s?.name === base);
+      if (!source || JSON.stringify(doc?.graph) !== JSON.stringify(source.graph)) copiesMatch = false;
+    }
+    rep.check('...each copy starts at version 1', copiedVersions, [1, 1]);
+    rep.check('...each copy carries the original graph', copiesMatch, true);
+
+    /* 3. The originals are untouched. ------------------------------------ */
+    const after = await flowsFor(old.deviceId);
+    rep.check('the original device still owns both flows', after.length, 2);
+    rep.check('...with the same ids',
+      after.map((w) => w.id).sort(), originals.map((f) => f.id).sort());
+    const originalVersions = [];
+    for (const flow of originals) {
+      originalVersions.push((await admin('GET', `/v1/admin/workflows/${flow.id}`)).data?.workflow?.version);
+    }
+    rep.check('...and version 1 (never re-saved)', originalVersions, [1, 1]);
+
+    /* 4. Re-pairing the new device does not duplicate or overwrite. ------ */
+    const again = await pairWith(fresh, {
+      label,
+      mint: { device_id: fresh.deviceId, purpose: 'rotate' },
+    });
+    rep.check('re-pair the new device with the same label -> 200', again.status, 200);
+    rep.check('...it copies nothing a second time', again.data?.copied_workflows, 0);
+    rep.check('...and the new device still owns exactly two flows',
+      (await flowsFor(fresh.deviceId)).length, 2);
+
+    /* 5. Archive keeps the history and hides the row. -------------------- */
+    const historyId = `arch_${crypto.randomBytes(6).toString('hex')}`;
+    const posted = await device(oldKey, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: historyId,
+        sender: '+8801700000003',
+        body: 'archive history probe',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('the original device relays one message -> 200', posted.status, 200);
+
+    const archived = await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('archive -> 200', archived.status, 200);
+    rep.check('...archived_at is set', typeof archived.data?.archived_at, 'number');
+    rep.check('...changed is true', archived.data?.changed, true);
+    rep.check('an archived device is hidden from GET /v1/devices',
+      (await fleet()).some((d) => d.device_id === old.deviceId), false);
+    const listed = (await fleet('?include_archived=1')).find((d) => d.device_id === old.deviceId);
+    rep.check('...but ?include_archived=1 still lists it', Boolean(listed), true);
+    rep.check('...with archived_at exposed', typeof listed?.archived_at, 'number');
+
+    const history = await admin('GET', `/v1/messages?device_id=${old.deviceId}&limit=200`);
+    rep.check('an archived device still answers /v1/messages -> 200', history.status, 200);
+    rep.check('...its history is intact',
+      (history.data?.messages ?? []).some((m) => m.local_id === historyId), true);
+
+    const rearchived = await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('archiving twice is a no-op 200', rearchived.status, 200);
+    rep.check('...it does not move the timestamp',
+      rearchived.data?.archived_at, archived.data?.archived_at);
+    rep.check('...and reports changed: false', rearchived.data?.changed, false);
+
+    /* 6. Unarchive restores it. ------------------------------------------ */
+    const unarchived = await admin('POST', `/v1/admin/devices/${old.deviceId}/unarchive`);
+    rep.check('unarchive -> 200', unarchived.status, 200);
+    rep.check('...archived_at is null', unarchived.data?.archived_at, null);
+    const visible = (await fleet()).find((d) => d.device_id === old.deviceId);
+    rep.check('...the device is back in GET /v1/devices', Boolean(visible), true);
+    rep.check('...with archived_at null', visible?.archived_at, null);
+
+    /* 7. A poll from an archived device un-archives it automatically. ---- */
+    await admin('POST', `/v1/admin/devices/${old.deviceId}/archive`);
+    rep.check('re-archive for the poll case',
+      (await fleet()).some((d) => d.device_id === old.deviceId), false);
+    const polled = await device(oldKey, 'POST', '/v1/sms/outgoing/poll', { ack_command_ids: [] });
+    rep.check('an archived device can still poll -> 200', polled.status, 200);
+    const back = await waitFor(async () =>
+      (await fleet()).find((d) => d.device_id === old.deviceId && d.archived_at === null) ?? null);
+    rep.check('a poll from an archived device un-archives it', Boolean(back), true);
+
+    /* 8. Audit: both new events are recorded. ---------------------------- */
+    const copyEvents = ((await admin('GET', '/v1/admin/audit?action=workflows.copied&limit=50'))
+      .data?.events ?? []).filter((e) => e.subject === fresh.deviceId);
+    const copyEvent = copyEvents.find((e) => e.detail?.count === 2);
+    rep.check('audit has workflows.copied for the new device', Boolean(copyEvent), true);
+    rep.check('...detail names both devices',
+      [copyEvent?.detail?.from, copyEvent?.detail?.to], [old.deviceId, fresh.deviceId]);
+    rep.check('...detail carries the count', copyEvent?.detail?.count, 2);
+    rep.check('...the repeat pair is audited as count 0 with the skip counted',
+      copyEvents.some((e) => e.detail?.count === 0 && e.detail?.skipped === 2), true);
+
+    const autoEvent = ((await admin('GET', '/v1/admin/audit?action=device.unarchived&limit=50'))
+      .data?.events ?? []).find((e) => e.subject === old.deviceId && e.detail?.automatic === true);
+    rep.check('audit has the automatic device.unarchived', Boolean(autoEvent), true);
+
+    rep.check('audit has device.archived for the device',
+      ((await admin('GET', '/v1/admin/audit?action=device.archived&limit=50'))
+        .data?.events ?? []).some((e) => e.subject === old.deviceId), true);
+
+    /* 9. Teardown: delete every flow created here, then revoke both. ----- */
+    for (const row of [...(await flowsFor(old.deviceId)), ...(await flowsFor(fresh.deviceId))]) {
+      await admin('DELETE', `/v1/admin/workflows/${row.id}`);
+    }
+    rep.check('every flow created here is gone',
+      (await flowsFor(old.deviceId)).length + (await flowsFor(fresh.deviceId)).length, 0);
+    await admin('DELETE', `/v1/admin/devices/${old.deviceId}`);
+    await admin('DELETE', `/v1/admin/devices/${fresh.deviceId}`);
+    rep.check('both harness devices are revoked',
+      (await fleet('?include_archived=1')).filter(
+        (d) => d.device_id === old.deviceId || d.device_id === fresh.deviceId).length, 0);
+
+    run(rep);
+  }
+
+  /* ── outbound reply state ──────────────────────────────────────────────── */
+  console.log('-- outbound reply state --');
+  {
+    const rep = new Report('reply state');
+    const readLog = async () =>
+      (await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=200`)).data?.messages ?? [];
+    const readRows = async (localId) => (await readLog()).filter((m) => m.local_id === localId);
+
+    /* 1. A `sent` report is stored and returned. -------------------------- */
+    const localId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const sentAt = new Date().toISOString();
+    const entry = (extra = {}) => ({
+      local_id: localId,
+      to: '+15550001111',
+      body: 'reply state probe',
+      sent_at: sentAt,
+      ...extra,
+    });
+
+    const sent = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'sent' })],
+      ack_command_ids: [],
+    });
+    rep.check('outbound[] sent -> 200', sent.status, 200);
+    const sentRow = (await readRows(localId))[0];
+    rep.check('outbound row is visible in /v1/messages', Boolean(sentRow), true);
+    rep.check('...direction=out', sentRow?.direction, 'out');
+    rep.check('...reply_state=sent', sentRow?.reply_state, 'sent');
+    rep.check('...reply_error is null', sentRow?.reply_error, null);
+    const firstId = sentRow?.id;
+
+    /* 2. Re-upload with `delivered` updates the same row ------------------- */
+    const delivered = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'delivered' })],
+      ack_command_ids: [],
+    });
+    rep.check('re-upload as delivered -> 200', delivered.status, 200);
+    const deliveredRows = await readRows(localId);
+    rep.check('...still exactly one row (dedupe key intact)', deliveredRows.length, 1);
+    rep.check('...row id did not change', deliveredRows[0]?.id, firstId);
+    rep.check('...reply_state updated to delivered', deliveredRows[0]?.reply_state, 'delivered');
+
+    /* 3. A failed reply is visible with its capped error ------------------- */
+    const failedId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const longError = `radio refused ${'x'.repeat(240)}`;
+    const failed = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [{
+        ...entry({ state: 'failed', error: longError }),
+        local_id: failedId,
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('failed outbound -> 200', failed.status, 200);
+    const failedRow = (await readRows(failedId))[0];
+    rep.check('failed row is visible (not silently dropped)', Boolean(failedRow), true);
+    rep.check('...reply_state=failed', failedRow?.reply_state, 'failed');
+    rep.check('...reply_error capped at 200 chars', failedRow?.reply_error?.length, 200);
+    rep.check('...error text preserved up to the cap',
+      failedRow?.reply_error, longError.slice(0, 200));
+
+    /* 4. An unknown state is rejected, never stored ------------------------ */
+    const badState = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [entry({ state: 'exploded' })],
+      ack_command_ids: [],
+    });
+    rep.check('unknown state -> 400', badState.status, 400);
+    rep.check('...error is bad_request', badState.data?.error, 'bad_request');
+    rep.check('...no row was written', (await readRows(localId)).length, 1);
+
+    /* 5. A failed outbound never marks an inbound message answered --------- */
+    const inboundId = `state_in_${crypto.randomBytes(6).toString('hex')}`;
+    await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: inboundId,
+        sender: '+8801999999998',
+        body: 'reply state probe, no rule matches this',
+        received_at: new Date().toISOString(),
+      }],
+      ack_command_ids: [],
+    });
+    const failedReplyId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      outbound: [{
+        ...entry({ state: 'failed', error: 'radio refused' }),
+        local_id: failedReplyId,
+      }],
+      ack_command_ids: [],
+    });
+    const inboundRow = (await readRows(inboundId))[0];
+    rep.check('inbound row still reads reply_state null', inboundRow?.reply_state, null);
+    rep.check('a failed outbound did not set auto_reply on the inbound row',
+      inboundRow?.auto_reply, 0);
+    rep.check('...and did not claim a rule replied', inboundRow?.reply_source, null);
+
+    /* 6. Older clients: direction:"out" entries still carry state ---------- */
+    const legacyId = `state_${crypto.randomBytes(6).toString('hex')}`;
+    const legacy = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+      messages: [{
+        local_id: legacyId,
+        sender_e164: '+15550001112',
+        body: 'legacy outbound shape',
+        received_at: new Date().toISOString(),
+        direction: 'out',
+        state: 'sent',
+      }],
+      ack_command_ids: [],
+    });
+    rep.check('direction:"out" + state -> 200', legacy.status, 200);
+    rep.check('...reply_state=sent', (await readRows(legacyId))[0]?.reply_state, 'sent');
+
     run(rep);
   }
 
@@ -1325,10 +2024,277 @@ async function cmdSuite() {
     rep.check('batch send to an unregistered device -> 404', bogusBatch.status, 404);
     const noRoute = await fetch(`${WORKER_URL}/v1/nope`);
     rep.check('unknown route -> 404', noRoute.status, 404);
+
+    // Idempotency (CLI slice 2b). Lives here, at the end, because the commands
+    // these checks enqueue are deliberately left PENDING and would otherwise
+    // show up in the poll and ack-timeout assertions above.
+    const key = `suite-idem-${Date.now()}`;
+    const first = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent', idempotency_key: key,
+    });
+    rep.check('send with an idempotency key -> 200', first.status, 200);
+    rep.check('...reports replayed false', first.data?.replayed, false);
+
+    const replay = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent', idempotency_key: key,
+    });
+    rep.check('replay with the same key -> 200', replay.status, 200);
+    rep.check('...returns the original command id', replay.data?.command_id, first.data?.command_id);
+    rep.check('...reports replayed true', replay.data?.replayed, true);
+
+    const other = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'idempotent',
+      idempotency_key: `${key}-b`,
+    });
+    rep.check('a different key creates a new command',
+      other.data?.command_id !== first.data?.command_id, true);
+
+    const tooLong = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'x', idempotency_key: 'k'.repeat(129),
+    });
+    rep.check('over-long key -> 400', tooLong.status, 400);
+
+    const batchKey = await admin('POST', '/v1/sms/send/batch', {
+      device_id: identity.deviceId,
+      commands: [{ to: '+8801712345678', body: 'x', idempotency_key: 'nope' }],
+    });
+    rep.check('batch with a key -> 400', batchKey.status, 400);
+    rep.check('...names the reason', batchKey.data?.error, 'idempotency_key_not_supported_in_batch');
+
     run(rep);
   }
 
   console.log(allOk ? 'SUITE PASSED' : 'SUITE FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
+
+/* ───────────────────────────── auth command ──────────────────────────────── */
+
+/**
+ * Auth cases (AUTH_PLAN §3–§5). Run against a Worker started with the mode you
+ * want to prove:
+ *
+ *   WORKER_URL=http://127.0.0.1:8787 node dakflare_test_harness.mjs auth
+ *
+ * The invite/redeem/audit cases are mode-independent; the admin-gate cases
+ * differ by mode (403 vs 401 for a member session) and are asserted accordingly.
+ */
+async function cmdAuth() {
+  // One mode now: the legacy ADMIN_TOKEN-only path is gone.
+  const mode = 'new';
+  console.log(`== auth (mode=${mode}) ==\nworker: ${WORKER_URL}\n`);
+  const rep = new Report('auth');
+
+  const raw = async (method, pathname, { body, cookie } = {}) => {
+    const res = await fetch(WORKER_URL + pathname, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: 'manual',
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies };
+  };
+
+  const email = `auth-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+
+  // 0. Pre-auth mode probe: public, exact keys, configuration only.
+  const modeProbe = await raw('GET', '/v1/auth/mode');
+  rep.check('GET /v1/auth/mode is unauthenticated -> 200', modeProbe.status, 200);
+  rep.check(
+    'mode payload has exactly the documented keys',
+    Object.keys(modeProbe.data ?? {}).sort(),
+    ['auth_configured', 'auth_mode', 'magic_link', 'magic_link_ttl_s', 'password_configured', 'password_mode']
+  );
+  rep.check("health reports the one auth mode", modeProbe.data?.auth_mode, mode);
+  rep.check('auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
+  rep.check('password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
+  rep.check('magic_link is a boolean', typeof modeProbe.data?.magic_link, 'boolean');
+  rep.check(
+    'password_mode is one of the three documented values',
+    ['off', 'client-derived', 'server-kdf'].includes(modeProbe.data?.password_mode),
+    true
+  );
+  if (process.env.AUTH_PASSWORD_MODE) {
+    rep.check(
+      'mode reports the deployed AUTH_PASSWORD_MODE',
+      modeProbe.data?.password_mode,
+      process.env.AUTH_PASSWORD_MODE
+    );
+  }
+
+  // 1. No public registration: Better Auth's email sign-up is disabled.
+  const signup = await raw('POST', '/api/auth/sign-up/email', {
+    body: { email, password: 'not-a-real-password', name: 'probe' },
+  });
+  rep.check('public email sign-up is refused', signup.status >= 400, true);
+
+  // 2. Redeem without a live invite is refused.
+  const unknown = await raw('POST', '/v1/auth/redeem', {
+    body: { token: 'dki_' + 'A'.repeat(43) },
+  });
+  rep.check('redeem without a valid invite -> 403', unknown.status, 403);
+
+  // 3. Invite creation (admin/machine gate).
+  const created = await admin('POST', '/v1/admin/invites', {
+    email,
+    role: 'member',
+    expires_in_s: 300,
+  });
+  rep.check('invite created -> 200', created.status, 200);
+  rep.check('invite answer carries a one-time token', typeof created.data?.token, 'string');
+  const inviteId = created.data?.id;
+  const inviteToken = created.data?.token;
+
+  // 4. Redeem it: creates the account and a session cookie.
+  const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: inviteToken } });
+  rep.check('redeem with a live invite -> 200', redeemed.status, 200);
+  rep.check('redeemed account has the invited role', redeemed.data?.user?.role, 'member');
+  const sessionCookie = redeemed.cookies
+    .map((c) => c.split(';')[0])
+    .find((c) => c.includes('session_token')) ?? null;
+  rep.check('redeem sets a session cookie', typeof sessionCookie, 'string');
+
+  // 5. Single use: the same token cannot create a second account.
+  const again = await raw('POST', '/v1/auth/redeem', { body: { token: inviteToken } });
+  rep.check('invite is single use -> 403 on the second redeem', again.status, 403);
+
+  // 6. requireRole: 401 without a session, 200 with one.
+  const anonMe = await raw('GET', '/v1/auth/me');
+  rep.check('requireRole without a session -> 401', anonMe.status, 401);
+  const me = await raw('GET', '/v1/auth/me', { cookie: sessionCookie });
+  rep.check('requireRole with a session -> 200', me.status, 200);
+  rep.check('session resolves the member role', me.data?.user?.role, 'member');
+
+  // 7. Role permissions differ by mode. In `new`, a member reads every
+  //    operational surface and is refused every mutation with a sentence; an
+  //    admin does both. The legacy token path must stay intact.
+  const memberOnAdmin = await raw('GET', '/v1/admin/health', { cookie: sessionCookie });
+  {
+    rep.check('member session reads health -> 200 (AUTH_MODE=new)', memberOnAdmin.status, 200);
+    const adminNoCred = await fetch(`${WORKER_URL}/v1/admin/health`);
+    rep.check('no credential on an admin route -> 401', adminNoCred.status, 401);
+    const cli = await admin('GET', '/v1/admin/health');
+    rep.check('ADMIN_TOKEN + X-Dakflare-Client: cli still works', cli.status, 200);
+
+    // Reads: everything operational, including the audit log.
+    for (const pathname of [
+      '/v1/devices',
+      '/v1/messages?device_id=dev-none',
+      '/v1/admin/rules',
+      '/v1/admin/audit',
+    ]) {
+      const read = await raw('GET', pathname, { cookie: sessionCookie });
+      rep.check(`member reads ${pathname} -> 200`, read.status, 200);
+    }
+
+    // Writes: refused, with a sentence that names the action.
+    const memberSend = await raw('POST', '/v1/sms/send', {
+      cookie: sessionCookie,
+      body: { device_id: 'dev-none', to: '+15555550100', body: 'hi' },
+    });
+    rep.check('member send SMS -> 403', memberSend.status, 403);
+    rep.check(
+      'member send 403 names the refused action',
+      typeof memberSend.data?.message === 'string' && memberSend.data.message.includes('send SMS'),
+      true
+    );
+
+    const memberRevoke = await raw('DELETE', '/v1/admin/devices/dev-none', { cookie: sessionCookie });
+    rep.check('member revoke device -> 403', memberRevoke.status, 403);
+    rep.check(
+      'member revoke 403 is a sentence naming the action',
+      /cannot revoke devices/.test(memberRevoke.data?.message ?? ''),
+      true
+    );
+
+    const memberInvite = await raw('POST', '/v1/admin/invites', {
+      cookie: sessionCookie,
+      body: { email: `member-cannot-${Date.now()}@example.test`, role: 'member', expires_in_s: 300 },
+    });
+    rep.check('member create invite -> 403', memberInvite.status, 403);
+    rep.check(
+      'member invite 403 is a sentence naming the action',
+      /cannot create invites/.test(memberInvite.data?.message ?? ''),
+      true
+    );
+
+    const memberRule = await raw('POST', '/v1/rules', {
+      cookie: sessionCookie,
+      body: { name: 'member-rule', match: 'contains', value: 'x', reply: 'y' },
+    });
+    rep.check('member save rule -> 403', memberRule.status, 403);
+    rep.check(
+      'member rule 403 is a sentence naming the action',
+      /cannot save rules/.test(memberRule.data?.message ?? ''),
+      true
+    );
+
+    // A member manages their own factors: AUTH_PLAN §6 says the second factor is
+    // optional for every role, which is only true if every role can enrol it.
+    // `self` covers exactly /v1/auth/password and /v1/auth/totp/*.
+    const memberFactor = await raw('POST', '/v1/auth/totp/enable', { cookie: sessionCookie });
+    rep.check(
+      'member may manage their own factor (reauth, not role refusal)',
+      memberFactor.status !== 403 || !/cannot change authentication factors/.test(memberFactor.data?.message ?? ''),
+      true
+    );
+    const memberInviteWrite = await raw('POST', '/v1/admin/invites', {
+      cookie: sessionCookie,
+      body: { email: 'x@example.test', role: 'member', expires_in_s: 600 },
+    });
+    rep.check('member cannot create invites', memberInviteWrite.status, 403);
+
+    // An admin does both.
+    const adminEmail = `auth-admin-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const adminInvite = await admin('POST', '/v1/admin/invites', {
+      email: adminEmail,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    rep.check('admin invite created for the role test', adminInvite.status, 200);
+    const adminRedeem = await raw('POST', '/v1/auth/redeem', { body: { token: adminInvite.data?.token } });
+    rep.check('admin account redeemed', adminRedeem.status, 200);
+    const adminCookie = sessionCookieOf(adminRedeem.cookies);
+    rep.check('admin session cookie present', typeof adminCookie, 'string');
+    const adminRead = await raw('GET', '/v1/admin/health', { cookie: adminCookie });
+    rep.check('admin session reads health -> 200', adminRead.status, 200);
+    const adminWrite = await raw('POST', '/v1/admin/invites', {
+      cookie: adminCookie,
+      body: { email: `admin-wrote-${Date.now()}@example.test`, role: 'member', expires_in_s: 300 },
+    });
+    rep.check('admin session creates an invite -> 200', adminWrite.status, 200);
+    if (adminWrite.data?.id) await admin('DELETE', `/v1/admin/invites/${adminWrite.data.id}`);
+  }
+
+  // 8. Audit rows: invite created/redeemed and a sign-in.
+  const auditInvite = await admin('GET', '/v1/admin/audit?limit=200&action=invite.created');
+  rep.check(
+    'audit_log has invite.created for this invite',
+    (auditInvite.data?.events ?? []).some((e) => e.subject === inviteId),
+    true
+  );
+  const auditRedeem = await admin('GET', '/v1/admin/audit?limit=200&action=invite.redeemed');
+  rep.check(
+    'audit_log has invite.redeemed for this invite',
+    (auditRedeem.data?.events ?? []).some((e) => e.subject === inviteId),
+    true
+  );
+  const auditSignIn = await admin('GET', '/v1/admin/audit?limit=200&action=sign_in.success');
+  rep.check(
+    'audit_log has sign_in.success for this account',
+    (auditSignIn.data?.events ?? []).some((e) => e.actor_user === redeemed.data?.user?.id),
+    true
+  );
+
+  // 9. Cleanup: the synthetic invite is spent; the account is left in place so
+  //    repeated runs show real history rather than a wiped table.
+  const allOk = rep.print();
+  console.log(allOk ? 'AUTH CASES PASSED' : 'AUTH CASES FAILED');
   process.exit(allOk ? 0 : 1);
 }
 
@@ -1718,6 +2684,1347 @@ async function cmdProxy() {
   });
 }
 
+/* ─────────────────────────── password command ─────────────────────────────── */
+
+/**
+ * AUTH_PLAN §2, phase 4.
+ *
+ * Reads the mode from `/v1/admin/health` rather than the environment, so the
+ * assertion set always describes the Worker actually under test. Start the
+ * Worker with AUTH_PEPPER set (a Worker secret locally, `--var` is fine) and
+ * AUTH_PASSWORD_MODE to one of off|client-derived|server-kdf.
+ *
+ * TOTP-challenge-on-password-sign-in is exercised by construction in
+ * `auth/handler.ts` (`startSecondFactorChallenge` is the same function the
+ * passkey path calls); enrolling a real TOTP secret is phase 3's test.
+ */
+async function cmdPassword() {
+  const health = await admin('GET', '/v1/admin/health');
+  if (health.status !== 200) {
+    console.error(`cannot read /v1/admin/health (${health.status}); check ADMIN_TOKEN and the Worker`);
+    process.exit(1);
+  }
+  const mode = health.data?.password_mode ?? 'off';
+  console.log(`== password (AUTH_PASSWORD_MODE=${mode}) ==\nworker: ${WORKER_URL}\n`);
+  const rep = new Report('password');
+
+  // The pre-auth probe the login page uses must be public and agree with health.
+  const modeProbe = await api(WORKER_URL, 'GET', '/v1/auth/mode');
+  rep.check('GET /v1/auth/mode is unauthenticated -> 200', modeProbe.status, 200);
+  rep.check(
+    'mode payload has exactly the documented keys',
+    Object.keys(modeProbe.data ?? {}).sort(),
+    ['auth_configured', 'auth_mode', 'magic_link', 'magic_link_ttl_s', 'password_configured', 'password_mode']
+  );
+  rep.check('mode agrees with health on password_mode', modeProbe.data?.password_mode, mode);
+  rep.check('mode password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
+  rep.check('mode auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
+  rep.check('mode magic_link is a boolean', typeof modeProbe.data?.magic_link, 'boolean');
+
+  const email = `pw-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+  const unknown = `pw-nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+  const password = 'correct horse battery staple';
+  const raw = (method, pathname, opts) => api(WORKER_URL, method, pathname, opts);
+  // Better Auth's CSRF check wants an Origin on state-changing POSTs. `api()`
+  // does not set one, so wrap the calls that reach /api/auth/* explicitly.
+  const betterAuth = async (pathname, body, cookie, headers = {}) => {
+    const res = await fetch(WORKER_URL + pathname, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: WORKER_URL,
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
+  };
+
+  // ---------------------------------------------------------------- salt shape
+  const miss1 = await raw('POST', '/v1/auth/salt', { body: { email: unknown } });
+  const miss2 = await raw('POST', '/v1/auth/salt', { body: { email: unknown } });
+  rep.check('salt for an unknown address -> 200', miss1.status, 200);
+  rep.check(
+    'salt shape is exactly {salt,iterations,mode,pepper_version}',
+    Object.keys(miss1.data ?? {}).sort(),
+    ['iterations', 'mode', 'pepper_version', 'salt']
+  );
+  rep.check('fake salt is deterministic', miss1.data?.salt, miss2.data?.salt);
+  rep.check('fake iterations are the contract 210000', miss1.data?.iterations, PW_ITERATIONS);
+  rep.check('fake mode is c', miss1.data?.mode, 'c');
+  rep.checkFn('fake salt decodes to 16 bytes', () => {
+    const bytes = Buffer.from(miss1.data?.salt ?? '', 'base64');
+    return bytes.length === 16 || `got ${bytes.length} bytes`;
+  });
+
+  // ------------------------------------------------- construction parity (pure)
+  // Same password, same salt, same iterations: the digest must not depend on
+  // who ran the inner KDF. Only the m= tag may differ.
+  {
+    const pepper = crypto.createHash('sha256').update('harness-parity-pepper').digest();
+    const salt = crypto.createHash('sha256').update('harness-parity-salt').digest().subarray(0, 16);
+    const asClient = pwRow({
+      pepper, version: 2, iterations: PW_ITERATIONS, mode: 'c', salt,
+      material: pwMaterial(password, salt),
+    });
+    const asWorker = pwRow({
+      pepper, version: 2, iterations: PW_ITERATIONS, mode: 's', salt,
+      material: pwMaterial(password, salt),
+    });
+    const withoutMode = (row) => row.split('$').filter((_, i) => i !== 3).join('$');
+    rep.check('client and Worker material are byte-identical', b64Of(pwMaterial(password, salt)), b64Of(pwMaterial(password, salt)));
+    rep.check('stored digest is identical in both modes (only m= differs)', withoutMode(asClient), withoutMode(asWorker));
+    rep.check('row matches the contract shape', /^v1\$p=\d+\$k=\d+\$m=[cs]\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/.test(asClient), true);
+  }
+
+  // ---------------------------------------------------------------- an account
+  const created = await admin('POST', '/v1/admin/invites', { email, role: 'admin', expires_in_s: 300 });
+  rep.check('invite created', created.status, 200);
+  const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: created.data?.token } });
+  rep.check('invite redeemed -> 200', redeemed.status, 200);
+  const session = sessionCookieOf(redeemed.cookies);
+  rep.check('redeem sets a session cookie', typeof session, 'string');
+
+  // A real account with NO password must look exactly like an unknown address:
+  // same fields, same iteration count, same deterministic salt for the address.
+  const noPassword = await raw('POST', '/v1/auth/salt', { body: { email } });
+  const noPasswordAgain = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check(
+    'an account without a password has the same salt shape as unknown',
+    Object.keys(noPassword.data ?? {}).sort(),
+    Object.keys(miss1.data ?? {}).sort()
+  );
+  rep.check('it gets the same fake iteration count', noPassword.data?.iterations, PW_ITERATIONS);
+  rep.check('it gets fake mode c', noPassword.data?.mode, 'c');
+  rep.check('its fake salt is deterministic', noPassword.data?.salt, noPasswordAgain.data?.salt);
+
+  // ------------------------------------------------------------------ set
+  const preSalt = Buffer.from(noPassword.data.salt, 'base64');
+  const preIterations = noPassword.data.iterations;
+  const material = pwMaterial(password, preSalt, preIterations);
+
+  if (mode === 'off') {
+    const set = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('mode off refuses a set -> 403 password_disabled', [set.status, set.data?.error], [403, 'password_disabled']);
+    const sign = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('mode off refuses password sign-in -> 403 password_disabled', [sign.status, sign.data?.error], [403, 'password_disabled']);
+    const matSign = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(material) },
+    });
+    rep.check('mode off refuses material sign-in too', matSign.status, 403);
+    const allOk = rep.print();
+    console.log(allOk ? 'PASSWORD CASES PASSED' : 'PASSWORD CASES FAILED');
+    process.exit(allOk ? 0 : 1);
+  }
+
+  if (mode === 'client-derived') {
+    const plaintext = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('client-derived refuses a plaintext set -> 403', [plaintext.status, plaintext.data?.error], [403, 'password_mode_mismatch']);
+    const set = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material), salt: b64Of(preSalt), iterations: preIterations },
+    });
+    rep.check('client-derived set with {material} -> 200', set.status, 200);
+    rep.check('set reports m=c provenance via the row', (await raw('POST', '/v1/auth/salt', { body: { email } })).data?.mode, 'c');
+  } else {
+    const set = await raw('POST', '/v1/auth/password', { cookie: session, body: { password } });
+    rep.check('server-kdf set with {password} -> 200', set.status, 200);
+    rep.check('set reports m=s provenance via the row', (await raw('POST', '/v1/auth/salt', { body: { email } })).data?.mode, 's');
+  }
+
+  const stored = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check('salt after set is no longer the fake salt', stored.data?.salt === miss1.data?.salt, false);
+  rep.check('salt after set reports 210000 iterations', stored.data?.iterations, PW_ITERATIONS);
+
+  // ------------------------------------------------------- sign-in, both paths
+  const rowSalt = Buffer.from(stored.data.salt, 'base64');
+  const rowMaterial = pwMaterial(password, rowSalt, stored.data.iterations);
+
+  const wrongBody = mode === 'server-kdf' ? { password: 'definitely-not-the-password' } : { material: b64Of(crypto.randomBytes(32)) };
+  const wrong = await raw('POST', '/v1/auth/sign-in/password', { body: { email, ...wrongBody } });
+  const nobodysBody = mode === 'server-kdf' ? { password: 'definitely-not-the-password' } : { material: b64Of(crypto.randomBytes(32)) };
+  const nobodys = await raw('POST', '/v1/auth/sign-in/password', { body: { email: unknown, ...nobodysBody } });
+  rep.check('wrong secret -> 401', wrong.status, 401);
+  rep.check('unknown address -> 401', nobodys.status, 401);
+  rep.check('wrong secret and unknown address are byte-identical', wrong.data, nobodys.data);
+
+  if (mode === 'client-derived') {
+    const plaintext = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('client-derived refuses a plaintext sign-in -> 403', [plaintext.status, plaintext.data?.error], [403, 'password_mode_mismatch']);
+  }
+
+  const signInStarted = performance.now();
+  const signedIn = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  const signInMs = performance.now() - signInStarted;
+  rep.check('sign-in -> 200', signedIn.status, 200);
+  rep.check('sign-in returns the same account', signedIn.data?.user?.email, email);
+  const signedCookie = sessionCookieOf(signedIn.cookies);
+  rep.check('sign-in sets a session cookie', typeof signedCookie, 'string');
+  if (signedCookie) {
+    const me = await raw('GET', '/v1/auth/me', { cookie: signedCookie });
+    rep.check('the session minted by sign-in resolves via requireRole', me.status, 200);
+    rep.check('it is the same user', me.data?.user?.email, email);
+  }
+
+  // ---------------------------------------------------- cross-mode parity, live
+  // A row written from client material must verify with the plaintext, and a row
+  // written from the plaintext must verify with material. Same stored value,
+  // whoever ran PBKDF2 — this is the upgrade promise of AUTH_PLAN §2.
+  if (mode === 'server-kdf') {
+    const salt2 = crypto.randomBytes(16);
+    const material2 = pwMaterial(password, salt2);
+    const byMaterial = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material2), salt: b64Of(salt2), iterations: PW_ITERATIONS },
+    });
+    rep.check('server-kdf accepts a client-derived set', byMaterial.status, 200);
+    const withPassword = await raw('POST', '/v1/auth/sign-in/password', { body: { email, password } });
+    rep.check('a row set from material verifies with {password}', withPassword.status, 200);
+    const withMaterial = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(material2) },
+    });
+    rep.check('…and with {material} too', withMaterial.status, 200);
+  }
+
+  // ---------------------------------------------- TOTP changes need re-authentication
+  // This account has a password in BOTH modes — the case the plugin's own
+  // enable/disable/generate-backup-codes endpoints answer with INVALID_PASSWORD.
+  // First prove a password is NOT a proof, then enrol with a passkey assertion.
+  const passkey = await createPasskey(session);
+  rep.check('a passkey is enrolled for the step-up', passkey.status, 200);
+
+  const passwordProof = await raw('POST', '/v1/auth/totp/enable', { cookie: session, body: { password } });
+  rep.check(
+    'enable with a password instead of a passkey -> 400 password_not_accepted',
+    [passwordProof.status, passwordProof.data?.error],
+    [400, 'password_not_accepted']
+  );
+  const noGrant = await raw('POST', '/v1/auth/totp/enable', { cookie: session });
+  rep.check(
+    'enable without a passkey assertion -> 403 reauth_required',
+    [noGrant.status, noGrant.data?.error],
+    [403, 'reauth_required']
+  );
+
+  const stepUp = await assertPasskey(passkey);
+  rep.check('passkey assertion for the step-up -> 200', stepUp.status, 200);
+  const enableStarted = performance.now();
+  const enable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp.jar) });
+  const enableMs = performance.now() - enableStarted;
+  rep.check('enable with a passkey assertion -> 200', enable.status, 200);
+  console.log(
+    `  timing: TOTP enable ${enableMs.toFixed(1)} ms; ` +
+      `password sign-in (${mode}) ${signInMs.toFixed(1)} ms`
+  );
+  const totpURI = enable.data?.totpURI;
+  const totpSecret = totpURI ? new URL(totpURI).searchParams.get('secret') : null;
+  rep.check('enable returns an otpauth URI with a secret', typeof totpSecret, 'string');
+  rep.check(
+    'enable returns ten recovery codes',
+    Array.isArray(enable.data?.backupCodes) ? enable.data.backupCodes.length : -1,
+    10
+  );
+  const verified = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(totpSecret) },
+    jarString(stepUp.jar)
+  );
+  rep.check('the first TOTP code verifies -> 200', verified.status, 200);
+  // The plugin rotates the session when it flips twoFactorEnabled on.
+  let totpCookie = sessionCookieOf(verified.cookies) ?? jarString(stepUp.jar);
+
+  // The recovery-code row must be the plugin's own format, not just a plausible
+  // array: the plugin's verifier reads and consumes one of them here.
+  const backupCode = Array.isArray(enable.data?.backupCodes) ? enable.data.backupCodes[0] : null;
+  const backupVerified = await betterAuth(
+    '/api/auth/two-factor/verify-backup-code',
+    { code: backupCode },
+    totpCookie
+  );
+  rep.check(
+    'a recovery code from the Worker-generated set verifies through the plugin -> 200',
+    backupVerified.status,
+    200
+  );
+
+  const challenged = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  rep.check(
+    'password sign-in for a TOTP account returns the challenge',
+    [challenged.status, challenged.data?.twoFactorRedirect, challenged.data?.twoFactorMethods],
+    [200, true, ['totp']]
+  );
+  const challengeSessionCookies = challenged.cookies.filter((c) => c.includes('session_token='));
+  rep.check(
+    '…and no usable session cookie',
+    challengeSessionCookies.some((c) => c.split(';')[0].split('=')[1] !== ''),
+    false
+  );
+  rep.check(
+    '…any session cookie is explicitly expired',
+    challengeSessionCookies.every((c) => /Max-Age=0/.test(c)),
+    true
+  );
+  rep.check(
+    '…but a two_factor cookie',
+    challenged.cookies.some((c) => c.includes('two_factor=')),
+    true
+  );
+
+  const wrongCode = String((Number(totpNow(totpSecret)) + 1) % 1_000_000).padStart(6, '0');
+  const disableNoCode = await raw('POST', '/v1/auth/totp/disable', { cookie: totpCookie, body: {} });
+  rep.check('disable without a code -> 401', disableNoCode.status, 401);
+  if (mode === 'client-derived') {
+    const disableWithPassword = await raw('POST', '/v1/auth/totp/disable', {
+      cookie: totpCookie,
+      body: { password },
+    });
+    rep.check(
+      'client-derived: a password does not authorise disable -> 400 password_not_accepted',
+      [disableWithPassword.status, disableWithPassword.data?.error],
+      [400, 'password_not_accepted']
+    );
+  }
+  const disableWrong = await raw('POST', '/v1/auth/totp/disable', {
+    cookie: totpCookie,
+    body: { code: wrongCode },
+  });
+  rep.check('disable with a wrong code -> 401', disableWrong.status, 401);
+  const disable = await raw('POST', '/v1/auth/totp/disable', {
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret) },
+  });
+  rep.check('disable with a current code -> 200', disable.status, 200);
+  const statusOff = await raw('GET', '/v1/auth/totp', { cookie: totpCookie });
+  rep.check(
+    'status after disable says off',
+    [statusOff.data?.enabled, statusOff.data?.verified],
+    [false, false]
+  );
+
+  // Re-enrol so regenerate (and the password-delete code path below) has a live
+  // factor. A second assertion is required: the grant is single-use.
+  const stepUp2 = await assertPasskey(passkey);
+  rep.check('a second passkey assertion -> 200', stepUp2.status, 200);
+  const enable2 = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp2.jar) });
+  rep.check('re-enable with a passkey assertion -> 200', enable2.status, 200);
+  const totpSecret2 = enable2.data?.totpURI
+    ? new URL(enable2.data.totpURI).searchParams.get('secret')
+    : null;
+  const verified2 = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(totpSecret2) },
+    jarString(stepUp2.jar)
+  );
+  rep.check('the re-enrolment code verifies -> 200', verified2.status, 200);
+  totpCookie = sessionCookieOf(verified2.cookies) ?? jarString(stepUp2.jar);
+
+  const regenNoCode = await raw('POST', '/v1/auth/totp/regenerate', { cookie: totpCookie, body: {} });
+  rep.check('regenerate without a code -> 401', regenNoCode.status, 401);
+  const regen = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret2) },
+  });
+  rep.check('regenerate with a current code -> 200', regen.status, 200);
+  rep.check(
+    'regenerate returns ten codes',
+    Array.isArray(regen.data?.backupCodes) ? regen.data.backupCodes.length : -1,
+    10
+  );
+
+  const delNoCode = await raw('DELETE', '/v1/auth/password', { cookie: totpCookie, body: { code: wrongCode } });
+  rep.check('delete with a wrong TOTP code -> 401', delNoCode.status, 401);
+  const del = await raw('DELETE', '/v1/auth/password', {
+    cookie: totpCookie,
+    body: { code: totpNow(totpSecret2) },
+  });
+  rep.check('delete with a fresh TOTP code -> 200', del.status, 200);
+
+  const afterDelete = await raw('POST', '/v1/auth/salt', { body: { email } });
+  rep.check('after delete the address falls back to its fake salt', afterDelete.data?.salt, noPasswordAgain.data?.salt);
+  const afterSignIn = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email, ...(mode === 'server-kdf' ? { password } : { material: b64Of(rowMaterial) }) },
+  });
+  rep.check('after delete the old secret no longer signs in -> 401', afterSignIn.status, 401);
+
+  // ------------------------------------------------------- lockout (AUTH_PLAN §3)
+  // The account above has no password and no TOTP by now, so use a fresh one.
+  // The Worker is expected to be started with a short
+  // AUTH_LOCKOUT_WINDOW_SECONDS for this command; the wait below is taken from
+  // the 429's own `retry_after`, so the assertion still describes the Worker
+  // under test rather than a harness constant.
+  const lockEmail = `lock-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+  const lockPassword = 'correct horse battery staple';
+  // TEST-NET addresses, unique per run: the IP window lives in the Worker
+  // isolate, so a fixed address would inherit a previous run's failures.
+  const lockIpTag = crypto.randomBytes(2);
+  const lockIpPassword = `198.51.100.${(lockIpTag[0] % 200) + 10}`;
+  const lockIpTotp = `203.0.113.${(lockIpTag[1] % 200) + 10}`;
+  const lockIpUnknown = `192.0.2.${((lockIpTag[0] + lockIpTag[1]) % 200) + 10}`;
+  const lockInvite = await admin('POST', '/v1/admin/invites', {
+    email: lockEmail,
+    role: 'admin',
+    expires_in_s: 300,
+  });
+  rep.check('lockout: invite created', lockInvite.status, 200);
+  const lockRedeemed = await raw('POST', '/v1/auth/redeem', { body: { token: lockInvite.data?.token } });
+  rep.check('lockout: invite redeemed', lockRedeemed.status, 200);
+  const lockSession = sessionCookieOf(lockRedeemed.cookies);
+  const lockSaltRes = await raw('POST', '/v1/auth/salt', { body: { email: lockEmail } });
+  const lockSalt = Buffer.from(lockSaltRes.data?.salt ?? '', 'base64');
+  const lockIterations = lockSaltRes.data?.iterations ?? PW_ITERATIONS;
+  const lockMaterial = pwMaterial(lockPassword, lockSalt, lockIterations);
+  const lockSet = await raw('POST', '/v1/auth/password', {
+    cookie: lockSession,
+    body: { material: b64Of(lockMaterial), salt: b64Of(lockSalt), iterations: lockIterations },
+  });
+  rep.check('lockout: password set', lockSet.status, 200);
+
+  const wrongLockMaterial = crypto.randomBytes(32);
+  const lockSignIn = (material, ip) =>
+    raw('POST', '/v1/auth/sign-in/password', {
+      body: { email: lockEmail, material: b64Of(material) },
+      headers: { 'CF-Connecting-IP': ip },
+    });
+
+  const knownStatuses = [];
+  let knownFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await lockSignIn(wrongLockMaterial, lockIpPassword);
+    knownStatuses.push(r.status);
+    if (i === 4) knownFifth = r;
+  }
+  rep.check('lockout: four wrong passwords -> 401', knownStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong password -> 429', knownFifth?.status, 429);
+  rep.check(
+    'lockout: 429 Retry-After header matches retry_after',
+    Number(knownFifth?.headers?.get?.('retry-after')),
+    knownFifth?.data?.retry_after
+  );
+  rep.check('lockout: 429 carries a console sentence', typeof knownFifth?.data?.message, 'string');
+  const lockWindow = Number(knownFifth?.data?.retry_after ?? 1);
+  rep.check('lockout: retry_after is a positive whole number of seconds', Number.isInteger(lockWindow) && lockWindow > 0, true);
+
+  const knownCorrectDuring = await lockSignIn(lockMaterial, lockIpPassword);
+  rep.check('lockout: correct password during the lockout is still 429', knownCorrectDuring.status, 429);
+
+  const knownSpray = [];
+  for (let i = 0; i < 3; i += 1) knownSpray.push(await lockSignIn(wrongLockMaterial, lockIpPassword));
+  rep.check('lockout: spraying while locked stays 429', knownSpray.map((r) => r.status), [429, 429, 429]);
+  rep.check(
+    'lockout: spraying does not extend the password lockout',
+    knownSpray[knownSpray.length - 1].data?.retry_after <= lockWindow,
+    true
+  );
+
+  await sleep((lockWindow + 1) * 1000);
+  const knownAfter = await lockSignIn(lockMaterial, lockIpPassword);
+  rep.check('lockout: correct password after the window -> 200', knownAfter.status, 200);
+  const knownCleared = await lockSignIn(wrongLockMaterial, lockIpPassword);
+  rep.check('lockout: the success cleared the account counter (next wrong is 401)', knownCleared.status, 401);
+
+  // An unknown address must produce the same sequence. The account counter is
+  // keyed by the normalized email, so it costs the same as a real account and
+  // the 429 body does not say whether the address exists.
+  const unknownLockEmail = `nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+  const unknownStatuses = [];
+  let unknownFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await raw('POST', '/v1/auth/sign-in/password', {
+      body: { email: unknownLockEmail, material: b64Of(wrongLockMaterial) },
+      headers: { 'CF-Connecting-IP': lockIpUnknown },
+    });
+    unknownStatuses.push(r.status);
+    if (i === 4) unknownFifth = r;
+  }
+  rep.check('lockout: an unknown address has the same status sequence as a known one', unknownStatuses, knownStatuses);
+  rep.check(
+    'lockout: the unknown-address 429 has the same shape',
+    [unknownFifth?.status, typeof unknownFifth?.data?.retry_after],
+    [429, 'number']
+  );
+
+  // Enrol TOTP on the lockout account, then count wrong codes on the sign-in
+  // challenge and on the live-session regenerate route.
+  const lockPasskey = await createPasskey(lockSession);
+  rep.check('lockout: passkey enrolled for the step-up', lockPasskey.status, 200);
+  const lockStepUp = await assertPasskey(lockPasskey);
+  rep.check('lockout: passkey assertion -> 200', lockStepUp.status, 200);
+  const lockEnable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(lockStepUp.jar) });
+  rep.check('lockout: TOTP enabled', lockEnable.status, 200);
+  const lockSecret = lockEnable.data?.totpURI
+    ? new URL(lockEnable.data.totpURI).searchParams.get('secret')
+    : null;
+  rep.check('lockout: enable returns a TOTP secret', typeof lockSecret, 'string');
+  const lockVerified = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    jarString(lockStepUp.jar)
+  );
+  rep.check('lockout: the first TOTP code verifies', lockVerified.status, 200);
+  const lockTotpCookie = sessionCookieOf(lockVerified.cookies) ?? jarString(lockStepUp.jar);
+
+  const lockChallenge = await raw('POST', '/v1/auth/sign-in/password', {
+    body: { email: lockEmail, material: b64Of(lockMaterial) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check(
+    'lockout: password sign-in for the TOTP account returns the challenge',
+    [lockChallenge.status, lockChallenge.data?.twoFactorRedirect],
+    [200, true]
+  );
+  const challengeJar = new Map();
+  absorbCookies(challengeJar, lockChallenge.cookies);
+  const challengeCookie = jarString(challengeJar);
+  // A fixed code that is not the current one and stays wrong across the wait
+  // (a `current + 1` code can become current when the 30-second step rolls).
+  const wrongLockCode = totpNow(lockSecret) === '000000' ? '000001' : '000000';
+
+  const codeStatuses = [];
+  let codeFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await betterAuth(
+      '/api/auth/two-factor/verify-totp',
+      { code: wrongLockCode },
+      challengeCookie,
+      { 'CF-Connecting-IP': lockIpTotp }
+    );
+    codeStatuses.push(r.status);
+    if (i === 4) codeFifth = r;
+  }
+  rep.check('lockout: four wrong sign-in codes -> 401', codeStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong sign-in code -> 429', codeFifth?.status, 429);
+  rep.check(
+    'lockout: sign-in 429 carries Retry-After',
+    Number(codeFifth?.headers?.get?.('retry-after')),
+    codeFifth?.data?.retry_after
+  );
+
+  const codeCorrectDuring = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    challengeCookie,
+    { 'CF-Connecting-IP': lockIpTotp }
+  );
+  rep.check('lockout: correct code during the lockout is still 429', codeCorrectDuring.status, 429);
+
+  const codeSpray = [];
+  for (let i = 0; i < 3; i += 1) {
+    codeSpray.push(
+      await betterAuth(
+        '/api/auth/two-factor/verify-totp',
+        { code: wrongLockCode },
+        challengeCookie,
+        { 'CF-Connecting-IP': lockIpTotp }
+      )
+    );
+  }
+  rep.check('lockout: spraying codes while locked stays 429', codeSpray.map((r) => r.status), [429, 429, 429]);
+  rep.check(
+    'lockout: spraying does not extend the code lockout',
+    codeSpray[codeSpray.length - 1].data?.retry_after <= Number(codeFifth?.data?.retry_after ?? 0),
+    true
+  );
+
+  const codeWindow = Number(codeFifth?.data?.retry_after ?? 1);
+  await sleep((codeWindow + 1) * 1000);
+  const codeAfter = await betterAuth(
+    '/api/auth/two-factor/verify-totp',
+    { code: totpNow(lockSecret) },
+    challengeCookie,
+    { 'CF-Connecting-IP': lockIpTotp }
+  );
+  rep.check('lockout: correct code after the window -> 200', codeAfter.status, 200);
+  const codeSession = sessionCookieOf(codeAfter.cookies);
+  rep.check('lockout: ...and it mints a session', typeof codeSession, 'string');
+
+  const liveCookie = codeSession ?? lockTotpCookie;
+  const regenStatuses = [];
+  let regenFifth = null;
+  for (let i = 0; i < 5; i += 1) {
+    const r = await raw('POST', '/v1/auth/totp/regenerate', {
+      cookie: liveCookie,
+      body: { code: wrongLockCode },
+      headers: { 'CF-Connecting-IP': lockIpTotp },
+    });
+    regenStatuses.push(r.status);
+    if (i === 4) regenFifth = r;
+  }
+  rep.check('lockout: four wrong regenerate codes -> 401', regenStatuses.slice(0, 4), [401, 401, 401, 401]);
+  rep.check('lockout: fifth wrong regenerate code -> 429', regenFifth?.status, 429);
+
+  const regenCorrectDuring = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: liveCookie,
+    body: { code: totpNow(lockSecret) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check('lockout: correct regenerate during the lockout is still 429', regenCorrectDuring.status, 429);
+
+  const regenWindow = Number(regenFifth?.data?.retry_after ?? 1);
+  await sleep((regenWindow + 1) * 1000);
+  const regenAfter = await raw('POST', '/v1/auth/totp/regenerate', {
+    cookie: liveCookie,
+    body: { code: totpNow(lockSecret) },
+    headers: { 'CF-Connecting-IP': lockIpTotp },
+  });
+  rep.check('lockout: correct regenerate after the window -> 200', regenAfter.status, 200);
+
+  const allOk = rep.print();
+  console.log(allOk ? 'PASSWORD CASES PASSED' : 'PASSWORD CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
+/* ───────────────────────────── magic-link command ─────────────────────────── */
+
+const MAGIC_PORT = Number(process.env.MAGIC_PORT ?? 8798);
+
+/**
+ * AUTH_PLAN §1 factor 2, end to end.
+ *
+ * The command owns its Worker because two of the assertions are about
+ * deployment state that cannot be changed on a running `wrangler dev`:
+ *
+ *   - expiry needs a short MAGIC_LINK_TTL_SECONDS (the contract's 15 minutes
+ *     would make the command take a quarter of an hour);
+ *   - "no sender configured" needs a Worker without RESEND_API_KEY, and the
+ *     mode endpoint must then say magic_link:false.
+ *
+ * A local HTTP server stands in for Resend (`RESEND_BASE_URL`), so the command
+ * can assert the exact message and prove that an unknown address produces no
+ * mail at all. D1 state is isolated under /tmp/opencode, like password-rotate.
+ */
+async function cmdMagic() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-magic-${Date.now()}`);
+  const base = `http://127.0.0.1:${MAGIC_PORT}`;
+  const rep = new Report('magic');
+  const servers = [];
+  const mail = [];
+
+  const secret = crypto.randomBytes(32).toString('base64');
+
+  // A minimal Resend stand-in: records the JSON body of POST /emails and
+  // answers the way Resend does. It never sees a real provider key.
+  const capture = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/emails') {
+        try { mail.push(JSON.parse(body)); } catch { mail.push({ raw: body }); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: `capture-${mail.length}` }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((resolve) => capture.listen(0, '127.0.0.1', resolve));
+  const captureBase = `http://127.0.0.1:${capture.address().port}`;
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const startWorker = async ({ sender, ttl, label }) => {
+    const args = [
+      'wrangler', 'dev', '--local',
+      '--port', String(MAGIC_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_TRUSTED_ORIGINS:${base}`,
+      '--var', `BETTER_AUTH_SECRET:${secret}`,
+      '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+      '--var', 'AUTH_PASSWORD_MODE:off',
+    ];
+    if (ttl !== undefined) args.push('--var', `MAGIC_LINK_TTL_SECONDS:${ttl}`);
+    if (sender) {
+      args.push('--var', 'RESEND_API_KEY:harness-resend-key');
+      args.push('--var', `RESEND_BASE_URL:${captureBase}`);
+      args.push('--var', 'MAGIC_LINK_FROM:DakFlare <onboarding@resend.dev>');
+    }
+
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, {
+      cwd: workerDir,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) {
+        throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      }
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const raw = async (method, pathname, { body, cookie, headers } = {}) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(headers ?? {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: 'manual',
+    });
+    const cookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return { status: res.status, data: await res.json().catch(() => null), cookies, headers: res.headers };
+  };
+
+  const adminAt = async (method, pathname, body) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+        'Content-Type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+
+  const makeAccount = async (label) => {
+    const email = `magic-${label}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const invite = await adminAt('POST', '/v1/admin/invites', {
+      email,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    if (invite.status !== 200) throw new Error(`invite for ${label} failed: ${invite.status}`);
+    const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: invite.data?.token } });
+    return { email, session: sessionCookieOf(redeemed.cookies), redeemed };
+  };
+
+  /**
+   * Request a link. The Worker answers 202 before it writes the row or calls
+   * the provider (`ctx.waitUntil`), so a positive expectation polls the local
+   * capture; a negative one gives a late message a chance to show up before the
+   * "nothing was sent" assertion.
+   */
+  const requestAndCapture = async (email, expectMail = true) => {
+    const before = mail.length;
+    const res = await raw('POST', '/v1/auth/magic-link', { body: { email } });
+    if (expectMail) {
+      const deadline = Date.now() + 5_000;
+      while (mail.length === before && Date.now() < deadline) await sleep(25);
+    } else {
+      await sleep(250);
+    }
+    return { res, before };
+  };
+
+  const tokenFrom = (message) => {
+    const text = String(message?.text ?? '');
+    const line = text.split('\n').find((entry) => entry.startsWith('http'));
+    if (!line) return null;
+    const url = new URL(line);
+    return {
+      url,
+      token: url.searchParams.get('token'),
+      email: url.searchParams.get('email'),
+      next: url.searchParams.get('next'),
+      text,
+    };
+  };
+
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    // ---- 1. a sender is configured: the factor is advertised ----------------
+    let server = await startWorker({ sender: true, ttl: 3, label: 'sender configured' });
+
+    const mode = await raw('GET', '/v1/auth/mode');
+    rep.check('mode with a sender -> 200', mode.status, 200);
+    rep.check('mode advertises the magic-link factor', mode.data?.magic_link, true);
+    rep.check('mode reports the configured TTL', mode.data?.magic_link_ttl_s, 3);
+
+    const known = await makeAccount('known');
+    rep.check('known account created', known.redeemed.status, 200);
+
+    // ---- 2. known and unknown addresses answer the same 202 -----------------
+    const knownReq = await requestAndCapture(known.email);
+    rep.check('request for a known address -> 202', knownReq.res.status, 202);
+    rep.check('request body is exactly {ok:true}', knownReq.res.data, { ok: true });
+    rep.check('a message was sent for the known address', mail.length, knownReq.before + 1);
+
+    const unknownEmail = `magic-nobody-${crypto.randomBytes(4).toString('hex')}@example.test`;
+    const unknownReq = await requestAndCapture(unknownEmail, false);
+    rep.check('request for an unknown address -> 202', unknownReq.res.status, 202);
+    rep.check('unknown body is byte-identical to known', unknownReq.res.data, knownReq.res.data);
+    rep.check('no message was sent for the unknown address', mail.length, knownReq.before + 1);
+
+    const malformed = await requestAndCapture('not-an-address', false);
+    rep.check('malformed address -> 202, same body', [malformed.res.status, malformed.res.data], [202, { ok: true }]);
+    rep.check('malformed address sent no message', mail.length, knownReq.before + 1);
+
+    // ---- 3. the exact message ----------------------------------------------
+    const message = mail[mail.length - 1];
+    const link = tokenFrom(message);
+    rep.check('the message is addressed to the known account', message?.to, [known.email]);
+    rep.check('the link is /admin/magic', link?.url?.pathname, '/admin/magic');
+    rep.check('the link carries the account address', link?.email, known.email);
+    rep.check('the link defaults next to the console overview', link?.next, '/admin');
+    rep.check('the token is 32 random bytes in base64url', /^[A-Za-z0-9_-]{43}$/.test(link?.token ?? ''), true);
+    rep.check('the token is not the stored form', link?.token?.includes('$') ?? true, false);
+
+    console.log('\n--- captured magic-link mail (text/plain) ---');
+    console.log(link?.text ?? '(none)');
+    console.log('--- end captured mail ---\n');
+
+    const bodyText = String(message?.text ?? '') + String(message?.html ?? '');
+    rep.check('the mail does not contain ADMIN_TOKEN', bodyText.includes(ADMIN_TOKEN), false);
+    rep.check('the mail does not contain BETTER_AUTH_SECRET', bodyText.includes(secret), false);
+    rep.check('the mail does not contain AUTH_PEPPER', bodyText.includes('AUTH_PEPPER'), false);
+
+    // ---- 4. consume once, then not again -----------------------------------
+    const consumed = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: link?.token },
+    });
+    rep.check('first consume -> 200', consumed.status, 200);
+    rep.check('first consume body is {ok:true}', consumed.data, { ok: true });
+    const session = sessionCookieOf(consumed.cookies);
+    rep.check('first consume sets a session cookie', typeof session, 'string');
+    if (session) {
+      const me = await raw('GET', '/v1/auth/me', { cookie: session });
+      rep.check('the magic-link session resolves via requireRole', me.status, 200);
+      rep.check('it is the account the link was sent to', me.data?.user?.email, known.email);
+    }
+
+    const second = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: link?.token },
+    });
+    rep.check('second consume -> 410 used', [second.status, second.data?.error], [410, 'used']);
+
+    // ---- 5. expiry ----------------------------------------------------------
+    const expiringReq = await requestAndCapture(known.email);
+    const expiringLink = tokenFrom(mail[mail.length - 1]);
+    rep.check('a second link was sent', mail.length, expiringReq.before + 1);
+    await sleep(4_000);
+    const expired = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: expiringLink?.token },
+    });
+    rep.check('an expired link -> 410 expired', [expired.status, expired.data?.error], [410, 'expired']);
+
+    // ---- 6. a TOTP account gets the challenge, never a session -------------
+    const totpAccount = await makeAccount('totp');
+    rep.check('TOTP account created', totpAccount.redeemed.status, 200);
+    const passkey = await createPasskey(totpAccount.session, base);
+    rep.check('passkey enrolled for the step-up', passkey.status, 200);
+    const stepUp = await assertPasskey(passkey, base);
+    rep.check('passkey assertion -> 200', stepUp.status, 200);
+    const enable = await raw('POST', '/v1/auth/totp/enable', { cookie: jarString(stepUp.jar) });
+    rep.check('TOTP enabled', enable.status, 200);
+    const totpSecret = enable.data?.totpURI
+      ? new URL(enable.data.totpURI).searchParams.get('secret')
+      : null;
+    rep.check('enable returns a TOTP secret', typeof totpSecret, 'string');
+    const verified = await authCall(
+      'POST',
+      '/api/auth/two-factor/verify-totp',
+      { code: totpNow(totpSecret) },
+      stepUp.jar,
+      base
+    );
+    rep.check('the first TOTP code verifies', verified.status, 200);
+
+    const totpReq = await requestAndCapture(totpAccount.email);
+    rep.check('request for the TOTP account -> 202', totpReq.res.status, 202);
+    const totpLink = tokenFrom(mail[mail.length - 1]);
+    const totpConsume = await raw('POST', '/v1/auth/magic-link/consume', {
+      body: { token: totpLink?.token },
+    });
+    rep.check(
+      'TOTP consume returns the same challenge shape as a passkey',
+      [totpConsume.status, totpConsume.data?.twoFactorRedirect, totpConsume.data?.twoFactorMethods],
+      [200, true, ['totp']]
+    );
+    const sessionCookies = totpConsume.cookies.filter((cookie) => cookie.includes('session_token='));
+    rep.check(
+      'TOTP consume leaves no usable session cookie',
+      sessionCookies.some((cookie) => cookie.split(';')[0].split('=')[1] !== ''),
+      false
+    );
+    rep.check(
+      'any session cookie on the challenge is explicitly expired',
+      sessionCookies.every((cookie) => /Max-Age=0/.test(cookie)),
+      true
+    );
+    rep.check(
+      'TOTP consume sets a two_factor cookie',
+      totpConsume.cookies.some((cookie) => cookie.includes('two_factor=')),
+      true
+    );
+    const challengeJar = new Map();
+    absorbCookies(challengeJar, totpConsume.cookies);
+    const codeVerified = await authCall(
+      'POST',
+      '/api/auth/two-factor/verify-totp',
+      { code: totpNow(totpSecret) },
+      challengeJar,
+      base
+    );
+    rep.check('the challenge code completes the sign-in -> 200', codeVerified.status, 200);
+    rep.check('…and mints a session', typeof sessionCookieOf(codeVerified.cookies), 'string');
+
+    // ---- 7. no sender: mode says false, request still 202, no mail ---------
+    await stopWorker(server);
+    server = await startWorker({ sender: false, label: 'no sender' });
+
+    const offMode = await raw('GET', '/v1/auth/mode');
+    rep.check('mode without a sender -> 200', offMode.status, 200);
+    rep.check('mode says magic_link:false', offMode.data?.magic_link, false);
+    rep.check('mode still reports the default TTL', offMode.data?.magic_link_ttl_s, 900);
+
+    const beforeOff = mail.length;
+    const offReq = await requestAndCapture(known.email, false);
+    rep.check('a request without a sender still answers 202', offReq.res.status, 202);
+    rep.check('…with the same body', offReq.res.data, { ok: true });
+    rep.check('…and sends nothing', mail.length, beforeOff);
+    const logDeadline = Date.now() + 2_000;
+    while (!server.log().includes('[mail] mail disabled') && Date.now() < logDeadline) {
+      await sleep(25);
+    }
+    rep.check('the no-op sender logs "mail disabled"', server.log().includes('[mail] mail disabled'), true);
+
+    await stopWorker(server);
+  } finally {
+    for (const server of servers) {
+      await stopWorker(server).catch(() => {});
+    }
+    await new Promise((resolve) => capture.close(resolve));
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'MAGIC CASES PASSED' : 'MAGIC CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
+/* ──────────────────────── pepper rotation command ─────────────────────────── */
+
+const ROTATE_PORT = Number(process.env.PASSWORD_ROTATE_PORT ?? 8799);
+
+/**
+ * Pepper rotation, end to end, with its own `wrangler dev` lifecycle.
+ *
+ * A pepper version only changes meaning when the SECRET changes, so a live
+ * Worker cannot exercise "v1 row, v2 ring" in place. This command therefore:
+ *
+ *   1. starts a Worker with a v1-only ring and sets a password (row p=1);
+ *   2. restarts it with v2,v1 — the row still verifies through the v1 entry:
+ *      that is the rotation window, and the old pepper is still doing its job;
+ *   3. calls /v1/admin/auth/rotate-pepper with v2 (installed -> confirmed) and
+ *      with a v3 that is not installed (returns the ring to install, writes
+ *      nothing);
+ *   4. signs in again: the row re-wraps to p=2 at sign-in (AUTH_PLAN §8), and
+ *      /salt then reports pepper_version 2;
+ *   5. restarts with the v2-only ring and signs in once more, proving the old
+ *      pepper can be dropped.
+ *
+ * It needs BETTER_AUTH_SECRET and ADMIN_TOKEN in worker/.dev.vars, and a free
+ * port (PASSWORD_ROTATE_PORT, default 8799). D1 state is isolated under
+ * /tmp/opencode so a running dev server is untouched.
+ */
+async function cmdPasswordRotate() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-rotate-${Date.now()}`);
+  const base = `http://127.0.0.1:${ROTATE_PORT}`;
+  const rep = new Report('pepper-rotation');
+  const servers = [];
+
+  const startWorker = async (pepper, label) => {
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'dev', '--local',
+      '--port', String(ROTATE_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_PEPPER:${pepper}`,
+      '--var', 'AUTH_PASSWORD_MODE:client-derived',
+      '--var', 'AUTH_TRUSTED_ORIGINS:' + base,
+    ], { cwd: workerDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const pepperA = crypto.randomBytes(32);
+  const pepperB = crypto.randomBytes(32);
+  const pepperC = crypto.randomBytes(32);
+  const ringV1 = `v1:${b64Of(pepperA)}`;
+  const ringV2 = `v2:${b64Of(pepperB)},v1:${b64Of(pepperA)}`;
+
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    // ---- 1. a row sealed with v1 -----------------------------------------
+    let server = await startWorker(ringV1, 'ring v1');
+    const email = `rotate-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const password = 'rotation test password';
+
+    const inviteRes = await fetch(`${base}/v1/admin/invites`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+      },
+      body: JSON.stringify({ email, role: 'admin', expires_in_s: 300 }),
+    });
+    const invite = await inviteRes.json().catch(() => null);
+    rep.check('invite created on the v1 ring', inviteRes.status, 200);
+
+    const redeemRes = await fetch(`${base}/v1/auth/redeem`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: invite?.token }),
+    });
+    const redeemCookies = redeemRes.headers.getSetCookie?.() ?? [];
+    const redeem = await redeemRes.json().catch(() => null);
+    const session = sessionCookieOf(redeemCookies);
+    rep.check('account created on the v1 ring', redeemRes.status, 200);
+    rep.check('redeem session cookie present', typeof session, 'string');
+
+    const salt1 = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('v1 salt is reported as pepper_version 1', salt1?.pepper_version, 1);
+    const material = pwMaterial(password, Buffer.from(salt1.salt, 'base64'), salt1.iterations);
+    const setRes = await fetch(`${base}/v1/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: session },
+      body: JSON.stringify({ material: b64Of(material), salt: salt1.salt, iterations: salt1.iterations }),
+    });
+    rep.check('password set on the v1 ring', setRes.status, 200);
+
+    await stopWorker(server);
+
+    // ---- 2. install v2, keep v1: the rotation window ----------------------
+    server = await startWorker(ringV2, 'ring v2,v1');
+    const signIn = async () => await fetch(`${base}/v1/auth/sign-in/password`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, material: b64Of(material) }),
+    });
+
+    // Nothing has signed in since the restart, so the row is still sealed with v1.
+    const saltWindow = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('after installing v2 the untouched row is still p=1', saltWindow?.pepper_version, 1);
+
+    const adminCall = async (pathname, body) => {
+      const res = await fetch(base + pathname, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ADMIN_TOKEN}`,
+          'X-Dakflare-Client': 'cli',
+        },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const confirmed = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperB) });
+    rep.check('rotate with the installed active pepper -> 200', confirmed.status, 200);
+    rep.check('rotate confirms it is installed', confirmed.data?.installed, true);
+    rep.check('rotate reports the pending p=1 row', confirmed.data?.pending, 1);
+    rep.check('rotate does not rewrite rows eagerly', confirmed.data?.migrated, 0);
+
+    const proposed = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperC) });
+    rep.check('rotate with an uninstalled pepper -> 200 (proposal)', proposed.status, 200);
+    rep.check('…reports installed=false', proposed.data?.installed, false);
+    rep.check('…returns the ring to install', proposed.data?.ring,
+      `v3:${b64Of(pepperC)},v2:${b64Of(pepperB)},v1:${b64Of(pepperA)}`);
+
+    // ---- 3. sign in: the row re-wraps to v2 ------------------------------
+    // This is the rotation window: v1 is no longer active but is still in the
+    // ring, so the p=1 row verifies; success re-derives the outer layer with v2.
+    const inWindow = await signIn();
+    rep.check('a p=1 row still verifies while v1 is in the ring', inWindow.status, 200);
+    const saltAfter = await (await fetch(`${base}/v1/auth/salt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+    })).json();
+    rep.check('sign-in re-wrapped the row to pepper_version 2', saltAfter?.pepper_version, 2);
+
+    const settled = await adminCall('/v1/admin/auth/rotate-pepper', { pepper: b64Of(pepperB) });
+    rep.check('rotate now reports no pending rows', settled.data?.pending, 0);
+
+    await stopWorker(server);
+
+    // ---- 4. drop v1: the row is fully migrated ---------------------------
+    server = await startWorker(`v2:${b64Of(pepperB)}`, 'ring v2 only');
+    const finalSignIn = await signIn();
+    rep.check('sign-in still works with the old pepper removed', finalSignIn.status, 200);
+
+    await stopWorker(server);
+  } finally {
+    for (const server of servers) {
+      await stopWorker(server).catch(() => {});
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'PEPPER ROTATION CASES PASSED' : 'PEPPER ROTATION CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
+/* ─────────────────────── global lockout command ──────────────────────────── */
+
+const LOCKOUT_GLOBAL_PORT = Number(process.env.LOCKOUT_GLOBAL_PORT ?? 8797);
+
+/**
+ * The failed-auth window used to be isolate memory, so an attacker rotating
+ * Cloudflare locations got a fresh 5-failure budget at each. It now lives in one
+ * globally named AuthGuard Durable Object.
+ *
+ * Local `wrangler dev` runs one isolate per process. This command therefore
+ * starts a Worker, records three failures, stops it (which discards the isolate
+ * cache), starts a second process on the same persisted D1/DO state, and records
+ * two more: the fifth is still 429. A third restart then shows the lock itself
+ * survives, and a success clears it in the object, not just in one process's
+ * memory.
+ *
+ * Two simultaneous `wrangler dev` processes are deliberately not used: each
+ * owns its own Miniflare and they would contend on the same local DO SQLite file.
+ * The restart exercises exactly the property that matters — the counter is not
+ * in the isolate — without that flake.
+ */
+async function cmdLockoutGlobal() {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const workerDir = path.join(HERE, 'worker');
+  const stateDir = path.join('/tmp/opencode', `dakflare-lockout-${Date.now()}`);
+  const base = `http://127.0.0.1:${LOCKOUT_GLOBAL_PORT}`;
+  const rep = new Report('lockout-global');
+  const servers = [];
+
+  const pepper = 'v1:' + crypto.createHash('sha256').update('lockout-global-pepper').digest('base64');
+  const secret = crypto.randomBytes(32).toString('base64');
+
+  const startWorker = async (label) => {
+    const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'dev', '--local',
+      '--port', String(LOCKOUT_GLOBAL_PORT),
+      '--persist-to', stateDir,
+      '--var', `AUTH_BASE_URL:${base}`,
+      '--var', `AUTH_TRUSTED_ORIGINS:${base}`,
+      '--var', `BETTER_AUTH_SECRET:${secret}`,
+      '--var', `AUTH_PEPPER:${pepper}`,
+      '--var', 'AUTH_PASSWORD_MODE:client-derived',
+      '--var', 'AUTH_LOCKOUT_WINDOW_SECONDS:20',
+      '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+    ], { cwd: workerDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let log = '';
+    proc.stdout.on('data', (chunk) => { log += chunk; });
+    proc.stderr.on('data', (chunk) => { log += chunk; });
+    const server = { proc, label, log: () => log };
+    servers.push(server);
+
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) {
+        throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
+      }
+      try {
+        const res = await fetch(`${base}/v1/admin/health`, {
+          headers: {
+            Authorization: `Bearer ${ADMIN_TOKEN}`,
+            'X-Dakflare-Client': 'cli',
+          },
+        });
+        if (res.ok) return server;
+      } catch { /* not listening yet */ }
+      await sleep(400);
+    }
+    throw new Error(`${label}: wrangler dev did not become ready\n${log.slice(-4000)}`);
+  };
+
+  const stopWorker = async (server) => {
+    if (server.proc.exitCode !== null) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { server.proc.kill('SIGKILL'); } catch { /* gone */ }
+        resolve();
+      }, 10_000);
+      server.proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      server.proc.kill('SIGTERM');
+    });
+    await sleep(500);
+  };
+
+  const adminAt = async (method, pathname, body) => {
+    const res = await fetch(base + pathname, {
+      method,
+      headers: {
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+        'X-Dakflare-Client': 'cli',
+        'Content-Type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+
+  const raw = (method, pathname, opts) => api(base, method, pathname, opts);
+
+  let server = null;
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const migrate = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
+      'wrangler', 'd1', 'migrations', 'apply', 'sms_gateway', '--local', '--persist-to', stateDir,
+    ], { cwd: workerDir, encoding: 'utf8' });
+    if (migrate.status !== 0) {
+      throw new Error(`wrangler d1 migrations apply failed:\n${migrate.stderr ?? ''}${migrate.stdout ?? ''}`);
+    }
+
+    const email = `global-lock-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const password = 'correct horse battery staple';
+    const wrongMaterial = crypto.randomBytes(32);
+
+    server = await startWorker('first isolate');
+    const invite = await adminAt('POST', '/v1/admin/invites', {
+      email,
+      role: 'admin',
+      expires_in_s: 300,
+    });
+    rep.check('lockout-global: invite created', invite.status, 200);
+    const redeemed = await raw('POST', '/v1/auth/redeem', { body: { token: invite.data?.token } });
+    rep.check('lockout-global: invite redeemed', redeemed.status, 200);
+    const session = sessionCookieOf(redeemed.cookies);
+    const saltRes = await raw('POST', '/v1/auth/salt', { body: { email } });
+    const salt = Buffer.from(saltRes.data?.salt ?? '', 'base64');
+    const iterations = saltRes.data?.iterations ?? PW_ITERATIONS;
+    const material = pwMaterial(password, salt, iterations);
+    const set = await raw('POST', '/v1/auth/password', {
+      cookie: session,
+      body: { material: b64Of(material), salt: b64Of(salt), iterations },
+    });
+    rep.check('lockout-global: password set', set.status, 200);
+
+    const signIn = (candidate, ip) => raw('POST', '/v1/auth/sign-in/password', {
+      body: { email, material: b64Of(candidate) },
+      headers: { 'CF-Connecting-IP': ip },
+    });
+
+    const ipA = `198.51.100.${(crypto.randomBytes(1)[0] % 200) + 10}`;
+    const first = [];
+    for (let i = 0; i < 3; i += 1) first.push(await signIn(wrongMaterial, ipA));
+    rep.check('lockout-global: three failures on the first process -> 401', first.map((r) => r.status), [401, 401, 401]);
+
+    // Stopping wrangler dev discards the isolate-local cache. A second process
+    // reads the same persisted Durable Object.
+    await stopWorker(server);
+    server = await startWorker('second isolate');
+    const ipB = `203.0.113.${(crypto.randomBytes(1)[0] % 200) + 10}`;
+    const fourth = await signIn(wrongMaterial, ipB);
+    const fifth = await signIn(wrongMaterial, ipB);
+    rep.check('lockout-global: the fourth failure overall -> 401', fourth.status, 401);
+    rep.check('lockout-global: the fifth failure overall, on a new process -> 429', fifth.status, 429);
+    rep.check(
+      'lockout-global: the 429 carries Retry-After',
+      Number(fifth.headers?.get?.('retry-after')),
+      fifth.data?.retry_after
+    );
+    const lockWindow = Number(fifth.data?.retry_after ?? 1);
+
+    // A third process has an empty cache: the lock must come from the object.
+    await stopWorker(server);
+    server = await startWorker('third isolate');
+    const correctDuring = await signIn(material, ipB);
+    rep.check('lockout-global: the lock survives a third process (correct password still 429)', correctDuring.status, 429);
+
+    await sleep((lockWindow + 1) * 1000);
+    const correctAfter = await signIn(material, ipB);
+    rep.check('lockout-global: correct password after the window -> 200', correctAfter.status, 200);
+    const afterClear = await signIn(wrongMaterial, ipB);
+    rep.check('lockout-global: the success cleared the account in the object (next wrong -> 401)', afterClear.status, 401);
+
+    await stopWorker(server);
+  } finally {
+    for (const running of servers) {
+      await stopWorker(running).catch(() => {});
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'GLOBAL LOCKOUT CASES PASSED' : 'GLOBAL LOCKOUT CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ───────────────────────────────── stub command ──────────────────────────── */
 
 async function cmdStub() {
@@ -1737,6 +4044,11 @@ const COMMANDS = {
   suite: cmdSuite,
   hardening: cmdHardening,
   multidevice: cmdMultiDevice,
+  auth: cmdAuth,
+  password: cmdPassword,
+  'lockout-global': cmdLockoutGlobal,
+  'password-rotate': cmdPasswordRotate,
+  magic: cmdMagic,
   proxy: cmdProxy,
   ws: cmdWs,
   stub: cmdStub,

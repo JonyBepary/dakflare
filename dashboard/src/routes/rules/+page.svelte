@@ -31,6 +31,15 @@
 		allow_shortcode: boolean;
 	}
 
+	/** The fields a rule sentence is built from — a saved rule or the open form. */
+	interface SentenceSource {
+		matcher_type: MatcherType | string;
+		matcher_value: string;
+		body_type: BodyType | string;
+		body_value: string;
+		reply_template: string;
+	}
+
 	const MATCHERS: { value: MatcherType; label: string; hint: string; placeholder: string }[] = [
 		{
 			value: 'exact',
@@ -126,13 +135,68 @@
 	const limitSummary = $derived(
 		[
 			form.enabled ? null : 'Paused',
-			`prio ${Number.isFinite(form.priority) ? Math.trunc(form.priority) : 0}`,
+			`priority ${Number.isFinite(form.priority) ? Math.trunc(form.priority) : 0}`,
 			form.cooldown_s === 0 ? 'no cooldown' : `1 reply / ${Math.trunc(form.cooldown_s)} s`,
-			`max ${Number.isFinite(form.max_per_hour) ? Math.trunc(form.max_per_hour) : 0} / h`
+			form.max_per_hour === 0
+				? 'no replies'
+				: `max ${Number.isFinite(form.max_per_hour) ? Math.trunc(form.max_per_hour) : 0} / hour`,
+			form.sim_slot > 0 ? `SIM ${Math.trunc(form.sim_slot)}` : 'default SIM'
 		]
 			.filter(Boolean)
 			.join(' · ')
 	);
+
+	const enabledCount = $derived(rules.filter((rule) => rule.enabled).length);
+
+	/* ------------------------------------------------------------- sentence */
+
+	/**
+	 * A rule is one sentence: who it is from, what the message says, and what goes
+	 * back. The same wording is used in the list and in the editor's preview, so
+	 * the form and the stored rule never describe themselves differently.
+	 */
+	function senderLead(rule: SentenceSource): string {
+		switch (rule.matcher_type) {
+			case 'prefix':
+				return 'numbers starting';
+			case 'suffix':
+				return 'numbers ending';
+			case 'glob':
+				return 'numbers matching';
+			case 'regex':
+				return 'numbers matching';
+			default:
+				return '';
+		}
+	}
+
+	function senderToken(rule: SentenceSource): string {
+		const value = rule.matcher_value.trim();
+		if (!value) return '…';
+		return rule.matcher_type === 'regex' ? `/${value}/` : value;
+	}
+
+	function bodyLead(rule: SentenceSource): string {
+		return rule.body_type === 'regex' ? 'matching' : 'containing';
+	}
+
+	function bodyToken(rule: SentenceSource): string {
+		const value = rule.body_value.trim();
+		if (!value) return '…';
+		return rule.body_type === 'regex' ? `/${value}/` : `“${value}”`;
+	}
+
+	function limitsLine(rule: Rule): string {
+		return [
+			`priority ${rule.priority}`,
+			rule.cooldown_s === 0 ? 'no cooldown' : `1 reply / ${rule.cooldown_s} s`,
+			rule.max_per_hour === 0 ? 'no replies' : `max ${rule.max_per_hour} / hour`,
+			rule.sim_slot > 0 ? `SIM ${rule.sim_slot}` : 'default SIM',
+			rule.allow_shortcode ? 'shortcodes allowed' : null
+		]
+			.filter(Boolean)
+			.join(' · ');
+	}
 
 	function findDevice(id: string | null): Device | null {
 		if (!id) return null;
@@ -305,6 +369,25 @@
 	});
 </script>
 
+{#snippet ruleSentence(rule: SentenceSource)}
+	<p class="sentence">
+		<span class="lead">From</span>
+		{#if senderLead(rule)}<span class="lead">{senderLead(rule)}</span>{/if}
+		<span class="tok mono">{senderToken(rule)}</span>
+		<span class="lead">{bodyLead(rule)}</span>
+		<span class="tok mono">{bodyToken(rule)}</span>
+		<span class="arrow" aria-hidden="true">→</span><span class="sr-only">then </span>
+		{#if rule.reply_template.trim()}
+			<span class="lead">reply</span>
+			<span class="tok mono reply" class:is-long={rule.reply_template.trim().length > 80}
+				>{rule.reply_template.trim()}</span
+			>
+		{:else}
+			<span class="no-reply">no reply</span>
+		{/if}
+	</p>
+{/snippet}
+
 <svelte:head>
 	<title>Rules · DakFlare</title>
 </svelte:head>
@@ -312,8 +395,8 @@
 <div class="page">
 	<PageHeader
 		eyebrow="Automation"
-		title="Auto-reply rules"
-		description="Rules are evaluated by the gateway as messages sync, so they need connectivity. Use one rule for a single rate-limited reply."
+		title="Rules"
+		description="One reply, rate-limited per rule and device. Evaluated on the gateway as messages sync."
 	>
 		<button
 			type="button"
@@ -333,644 +416,540 @@
 			aria-controls="rule-form"
 		>
 			<Icon name={formOpen ? 'x' : 'plus'} size={14} />
-			{formOpen ? 'Close form' : 'New rule'}
+			{formOpen ? 'Close editor' : 'New rule'}
 		</button>
 	</PageHeader>
 
 	<AutomationHeader active="rules" />
 
-	<div class="stack">
+	<div class="grid-stack">
 		{#if flash}
-			<div aria-live="polite">
+			<div class="flash" aria-live="polite">
 				<Notice tone="ok">{flash}</Notice>
 			</div>
 		{/if}
 
-		{#if listTestOpen}
-			<div id="rule-test-panel">
-				<RuleTestPanel
-					rules={rules}
-					devices={devices}
-					scope={listTestScope}
-					startOpen
-					onclose={() => (listTestOpen = false)}
-				/>
-			</div>
-		{/if}
-
 		{#if formOpen}
-			<section class="panel form-panel" id="rule-form" aria-labelledby="rule-form-heading">
-				<div class="panel-head">
-					<h2 id="rule-form-heading" class="panel-title">
-						<Icon name="filter" size={14} /> New rule
-					</h2>
-					<div class="head-actions">
-						<span class="panel-meta">matcher → reply</span>
-						<button
-							type="submit"
-							form="rule-form-body"
-							class="btn btn-primary btn-sm"
-							disabled={submitting}
-							aria-busy={submitting}
-						>
-							{#if submitting}<Spinner />{:else}<Icon name="check" size={12} />{/if}
-							Save rule
-						</button>
-						<button
-							type="button"
-							class="btn btn-sm"
-							onclick={() => (formOpen = false)}
-							disabled={submitting}
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-				<div class="panel-body">
-					<form
-						id="rule-form-body"
-						class="rule-form"
-						onsubmit={(event) => {
-							event.preventDefault();
-							void submitRule();
-						}}
-						novalidate
-					>
-						<section class="rule-section" aria-labelledby="rule-match-heading">
-							<div class="rule-section-head">
-								<h3 class="eyebrow" id="rule-match-heading">Match</h3>
-								<p class="hint">Who the message is from and what it says.</p>
-							</div>
-
-							<div class="form-grid">
-								<div class="field span-2">
-									<label class="label" for="rule-name">Name</label>
-									<input
-										id="rule-name"
-										class="input"
-										bind:value={form.name}
-										placeholder="Stop requests"
-										aria-invalid={fieldErrors.name ? 'true' : undefined}
-										aria-describedby={fieldErrors.name ? 'rule-name-error' : undefined}
-									/>
-									{#if fieldErrors.name}
-										<p class="field-error" id="rule-name-error">{fieldErrors.name}</p>
-									{/if}
-								</div>
-
-								<div class="field">
-									<label class="label" for="rule-scope">Scope</label>
-									<select
-										id="rule-scope"
-										class="input input-mono"
-										bind:value={form.device_id}
-										aria-describedby="rule-scope-hint"
-									>
-										<option value="">Global — every device</option>
-										{#each devices as device (device.device_id)}
-											<option value={device.device_id}>{deviceOptionLabel(device)}</option>
-										{/each}
-									</select>
-									<p class="hint" id="rule-scope-hint">
-										Global rules apply to the whole fleet; a scoped rule only sees that device.
-									</p>
-								</div>
-
-								<div class="field">
-									<label class="label" for="matcher-type">Sender match type</label>
-									<select
-										id="matcher-type"
-										class="input"
-										bind:value={form.matcher_type}
-										aria-describedby="matcher-type-hint"
-									>
-										{#each MATCHERS as matcher (matcher.value)}
-											<option value={matcher.value}>{matcher.label}</option>
-										{/each}
-									</select>
-									<p class="hint" id="matcher-type-hint">{matcherHint.hint}</p>
-								</div>
-
-								<div class="field span-2">
-									<label class="label" for="matcher-value">Sender value</label>
-									<input
-										id="matcher-value"
-										class="input input-mono"
-										bind:value={form.matcher_value}
-										placeholder={matcherHint.placeholder}
-										autocomplete="off"
-										spellcheck="false"
-										aria-invalid={fieldErrors.matcher_value ? 'true' : undefined}
-										aria-describedby="matcher-value-hint matcher-counter"
-									/>
-									<div class="field-foot">
-										{#if fieldErrors.matcher_value}
-											<p class="field-error" id="matcher-value-hint">
-												{fieldErrors.matcher_value}
-											</p>
-										{:else}
-											<span class="hint" id="matcher-value-hint">
-												Phone number, shortcode or pattern.
-											</span>
-										{/if}
-										<span class="counter mono" class:over={matcherBytes > 512}>
-											{matcherBytes}/512
-										</span>
-									</div>
-									<span class="sr-only" id="matcher-counter">Sender pattern, maximum 512 bytes</span>
-								</div>
-
-								<div class="field">
-									<label class="label" for="body-type">Message match type</label>
-									<select
-										id="body-type"
-										class="input"
-										bind:value={form.body_type}
-										aria-describedby="body-type-hint"
-									>
-										{#each BODY_TYPES as item (item.value)}
-											<option value={item.value}>{item.label}</option>
-										{/each}
-									</select>
-									<p class="hint" id="body-type-hint">{bodyHint.hint}</p>
-								</div>
-
-								<div class="field span-2">
-									<label class="label" for="body-value">Message value</label>
-									<input
-										id="body-value"
-										class="input input-mono"
-										bind:value={form.body_value}
-										placeholder={bodyHint.placeholder}
-										autocomplete="off"
-										spellcheck="false"
-										aria-invalid={fieldErrors.body_value ? 'true' : undefined}
-										aria-describedby="body-value-hint"
-									/>
-									<div class="field-foot">
-										{#if fieldErrors.body_value}
-											<p class="field-error" id="body-value-hint">{fieldErrors.body_value}</p>
-										{:else}
-											<span class="hint" id="body-value-hint">
-												Matched against the full inbound body.
-											</span>
-										{/if}
-										<span class="counter mono" class:over={bodyBytes > 512}>{bodyBytes}/512</span>
-									</div>
-								</div>
-							</div>
-						</section>
-
-						<section class="rule-section" aria-labelledby="rule-reply-heading">
-							<div class="rule-section-head">
-								<h3 class="eyebrow" id="rule-reply-heading">Reply</h3>
-								<p class="hint" id="rule-reply-help">
-									<code>{'{sender}'}</code>, <code>{'{body}'}</code> and
-									<code>{'{matched}'}</code> are filled in when the reply is sent; everything else is
-									plain text.
-								</p>
-							</div>
-
-							<div class="form-grid">
-								<div class="field span-3">
-									<label class="label" for="reply-template">
-										Reply template <span class="optional">optional</span>
-									</label>
-									<textarea
-										id="reply-template"
-										class="input"
-										bind:value={form.reply_template}
-										placeholder="Reply sent back to the sender…"
-										rows="3"
-										aria-invalid={fieldErrors.reply_template ? 'true' : undefined}
-										aria-describedby="rule-reply-help reply-template-hint"
-									></textarea>
-									<div class="field-foot">
-										{#if fieldErrors.reply_template}
-											<p class="field-error" id="reply-template-hint">
-												{fieldErrors.reply_template}
-											</p>
-										{:else}
-											<span class="hint" id="reply-template-hint">
-												Leave empty to match without sending a reply.
-											</span>
-										{/if}
-										<span class="counter mono" class:over={replyBytes > 1000}>
-											{replyBytes}/1000
-										</span>
-									</div>
-								</div>
-							</div>
-
-							<p class="suppress-note">
-								A matched rule suppresses every workflow for that message.
-							</p>
-						</section>
-
-						<section class="rule-section" aria-labelledby="rule-limits-heading">
-							<div class="rule-section-head rule-limits-head">
-								<div>
-									<h3 class="eyebrow" id="rule-limits-heading">Limits &amp; targeting</h3>
-									<p class="hint">
-										{limitsOpen
-											? 'Enforced per rule and device.'
-											: 'The saved values apply until you open this section.'}
-									</p>
-								</div>
-								<button
-									type="button"
-									class="limit-toggle"
-									onclick={() => (limitsOpen = !limitsOpen)}
-									aria-expanded={limitsOpen}
-									aria-controls="rule-limits"
-								>
-									<span class="mono">{limitSummary}</span>
-									<span class="limit-toggle-action">{limitsOpen ? 'Hide' : 'Edit'}</span>
-									<Icon name={limitsOpen ? 'chevron-up' : 'chevron-down'} size={13} />
-								</button>
-							</div>
-
-							{#if limitsOpen}
-								<div class="form-grid" id="rule-limits">
-									<div class="field">
-										<label class="label" for="rule-priority">Priority</label>
-										<input
-											id="rule-priority"
-											class="input input-mono input-num"
-											type="number"
-											bind:value={form.priority}
-											step="1"
-											aria-invalid={fieldErrors.priority ? 'true' : undefined}
-											aria-describedby="rule-priority-hint"
-										/>
-										{#if fieldErrors.priority}
-											<p class="field-error" id="rule-priority-hint">{fieldErrors.priority}</p>
-										{:else}
-											<p class="hint" id="rule-priority-hint">
-												Higher wins when several rules match.
-											</p>
-										{/if}
-									</div>
-
-									<div class="field">
-										<label class="label" for="rule-cooldown">Cooldown (seconds)</label>
-										<input
-											id="rule-cooldown"
-											class="input input-mono input-num"
-											type="number"
-											bind:value={form.cooldown_s}
-											min="0"
-											step="1"
-											aria-invalid={fieldErrors.cooldown_s ? 'true' : undefined}
-											aria-describedby="rule-cooldown-hint"
-										/>
-										{#if fieldErrors.cooldown_s}
-											<p class="field-error" id="rule-cooldown-hint">{fieldErrors.cooldown_s}</p>
-										{:else}
-											<p class="hint" id="rule-cooldown-hint">
-												Enforced per rule and device: the minimum gap between auto replies.
-											</p>
-										{/if}
-									</div>
-
-									<div class="field">
-										<label class="label" for="rule-max">Max replies / hour</label>
-										<input
-											id="rule-max"
-											class="input input-mono input-num"
-											type="number"
-											bind:value={form.max_per_hour}
-											min="0"
-											step="1"
-											aria-invalid={fieldErrors.max_per_hour ? 'true' : undefined}
-											aria-describedby="rule-max-hint"
-										/>
-										{#if fieldErrors.max_per_hour}
-											<p class="field-error" id="rule-max-hint">{fieldErrors.max_per_hour}</p>
-										{:else}
-											<p class="hint" id="rule-max-hint">
-												Enforced per rule and device, in a rolling hour.
-											</p>
-										{/if}
-									</div>
-
-									<div class="field">
-										<label class="label" for="rule-sim">SIM slot</label>
-										<input
-											id="rule-sim"
-											class="input input-mono input-num"
-											type="number"
-											bind:value={form.sim_slot}
-											min="0"
-											step="1"
-											aria-invalid={fieldErrors.sim_slot ? 'true' : undefined}
-											aria-describedby="rule-sim-hint"
-										/>
-										{#if fieldErrors.sim_slot}
-											<p class="field-error" id="rule-sim-hint">{fieldErrors.sim_slot}</p>
-										{:else}
-											<p class="hint" id="rule-sim-hint">0 uses the device default.</p>
-										{/if}
-									</div>
-
-									<div class="toggles span-2">
-										<label class="check">
-											<input
-												id="rule-enabled"
-												type="checkbox"
-												bind:checked={form.enabled}
-												aria-describedby="rule-enabled-hint"
-											/>
-											<span>
-												Enabled
-												<span
-													class="hint"
-													id="rule-enabled-hint"
-													aria-hidden="true"
-													style="display: block"
-												>
-													Disabled rules are stored but never matched.
-												</span>
-											</span>
-										</label>
-										<label class="check">
-											<input
-												id="rule-allow-shortcode"
-												type="checkbox"
-												bind:checked={form.allow_shortcode}
-												aria-describedby="rule-allow-shortcode-hint"
-											/>
-											<span>
-												Allow shortcode replies
-												<span
-													class="hint"
-													id="rule-allow-shortcode-hint"
-													aria-hidden="true"
-													style="display: block"
-												>
-													Shortcode replies can be billable on the device.
-												</span>
-											</span>
-										</label>
-									</div>
-								</div>
-							{/if}
-						</section>
-
-						{#if formError}
-							<div role="alert">
-								<Notice tone="danger" title="Rule not saved">{formError}</Notice>
-							</div>
-						{/if}
-
-						<div class="form-foot rule-actions">
-							<button type="submit" class="btn btn-primary" disabled={submitting} aria-busy={submitting}>
-								{#if submitting}<Spinner />{:else}<Icon name="check" size={14} />{/if}
+			<div class="bento settle" style="--i: 0">
+				<section class="card span-12 editor" id="rule-form" aria-labelledby="rule-form-heading">
+					<div class="editor-head">
+						<div>
+							<h2 id="rule-form-heading" class="editor-title">New rule</h2>
+							<p class="editor-note">One reply, rate-limited per rule and device.</p>
+						</div>
+						<div class="editor-actions">
+							<button
+								type="submit"
+								form="rule-form-body"
+								class="btn btn-primary btn-sm"
+								disabled={submitting}
+								aria-busy={submitting}
+							>
+								{#if submitting}<Spinner />{:else}<Icon name="check" size={12} />{/if}
 								Save rule
 							</button>
 							<button
 								type="button"
-								class="btn btn-ghost"
+								class="btn btn-sm"
 								onclick={() => (formOpen = false)}
 								disabled={submitting}
 							>
 								Cancel
 							</button>
-							<span class="spacer"></span>
-							<span class="hint">Upserts by id; a new id is generated on save.</span>
 						</div>
-					</form>
-
-					<div class="form-test">
-						<RuleTestPanel
-							rules={rules}
-							devices={devices}
-							scope={form.device_id}
-							draftNotice
-						/>
 					</div>
+
+					<div class="editor-body">
+						<form
+							id="rule-form-body"
+							class="rule-form"
+							onsubmit={(event) => {
+								event.preventDefault();
+								void submitRule();
+							}}
+							novalidate
+						>
+							<div class="preview">
+								<p class="preview-label">This rule</p>
+								{@render ruleSentence(form)}
+								<p class="preview-limits mono">{limitSummary}</p>
+							</div>
+
+							<section class="rule-section" aria-labelledby="rule-match-heading">
+								<div class="rule-section-head">
+									<h3 class="eyebrow" id="rule-match-heading">Match</h3>
+									<p class="hint">Who the message is from and what it says.</p>
+								</div>
+
+								<div class="form-grid">
+									<div class="field span-2">
+										<label class="label" for="rule-name">Name</label>
+										<input
+											id="rule-name"
+											class="input"
+											bind:value={form.name}
+											placeholder="Stop requests"
+											aria-invalid={fieldErrors.name ? 'true' : undefined}
+											aria-describedby={fieldErrors.name ? 'rule-name-error' : undefined}
+										/>
+										{#if fieldErrors.name}
+											<p class="field-error" id="rule-name-error">{fieldErrors.name}</p>
+										{/if}
+									</div>
+
+									<div class="field">
+										<label class="label" for="rule-scope">Scope</label>
+										<select
+											id="rule-scope"
+											class="input input-mono"
+											bind:value={form.device_id}
+											aria-describedby="rule-scope-hint"
+										>
+											<option value="">Global — every device</option>
+											{#each devices as device (device.device_id)}
+												<option value={device.device_id}>{deviceOptionLabel(device)}</option>
+											{/each}
+										</select>
+										<p class="hint" id="rule-scope-hint">
+											A global rule sees the whole fleet; a scoped rule only sees that device.
+										</p>
+									</div>
+
+									<div class="field">
+										<label class="label" for="matcher-type">Sender match type</label>
+										<select
+											id="matcher-type"
+											class="input"
+											bind:value={form.matcher_type}
+											aria-describedby="matcher-type-hint"
+										>
+											{#each MATCHERS as matcher (matcher.value)}
+												<option value={matcher.value}>{matcher.label}</option>
+											{/each}
+										</select>
+										<p class="hint" id="matcher-type-hint">{matcherHint.hint}</p>
+									</div>
+
+									<div class="field span-2">
+										<label class="label" for="matcher-value">Sender value</label>
+										<input
+											id="matcher-value"
+											class="input input-mono"
+											bind:value={form.matcher_value}
+											placeholder={matcherHint.placeholder}
+											autocomplete="off"
+											spellcheck="false"
+											aria-invalid={fieldErrors.matcher_value ? 'true' : undefined}
+											aria-describedby="matcher-value-hint matcher-counter"
+										/>
+										<div class="field-foot">
+											{#if fieldErrors.matcher_value}
+												<p class="field-error" id="matcher-value-hint">
+													{fieldErrors.matcher_value}
+												</p>
+											{:else}
+												<span class="hint" id="matcher-value-hint">
+													Phone number, shortcode or pattern.
+												</span>
+											{/if}
+											<span class="counter mono" class:over={matcherBytes > 512}>
+												{matcherBytes}/512
+											</span>
+										</div>
+										<span class="sr-only" id="matcher-counter">Sender pattern, maximum 512 bytes</span>
+									</div>
+
+									<div class="field">
+										<label class="label" for="body-type">Message match type</label>
+										<select
+											id="body-type"
+											class="input"
+											bind:value={form.body_type}
+											aria-describedby="body-type-hint"
+										>
+											{#each BODY_TYPES as item (item.value)}
+												<option value={item.value}>{item.label}</option>
+											{/each}
+										</select>
+										<p class="hint" id="body-type-hint">{bodyHint.hint}</p>
+									</div>
+
+									<div class="field span-2">
+										<label class="label" for="body-value">Message value</label>
+										<input
+											id="body-value"
+											class="input input-mono"
+											bind:value={form.body_value}
+											placeholder={bodyHint.placeholder}
+											autocomplete="off"
+											spellcheck="false"
+											aria-invalid={fieldErrors.body_value ? 'true' : undefined}
+											aria-describedby="body-value-hint"
+										/>
+										<div class="field-foot">
+											{#if fieldErrors.body_value}
+												<p class="field-error" id="body-value-hint">{fieldErrors.body_value}</p>
+											{:else}
+												<span class="hint" id="body-value-hint">
+													Matched against the full inbound body.
+												</span>
+											{/if}
+											<span class="counter mono" class:over={bodyBytes > 512}>{bodyBytes}/512</span>
+										</div>
+									</div>
+								</div>
+							</section>
+
+							<section class="rule-section" aria-labelledby="rule-reply-heading">
+								<div class="rule-section-head">
+									<h3 class="eyebrow" id="rule-reply-heading">Reply</h3>
+									<p class="hint" id="rule-reply-help">
+										<code>{'{sender}'}</code>, <code>{'{body}'}</code> and
+										<code>{'{matched}'}</code> are filled in when the reply is sent; everything else
+										is plain text.
+									</p>
+								</div>
+
+								<div class="form-grid">
+									<div class="field span-3">
+										<label class="label" for="reply-template">
+											Reply template <span class="optional">optional</span>
+										</label>
+										<textarea
+											id="reply-template"
+											class="input"
+											bind:value={form.reply_template}
+											placeholder="Reply sent back to the sender…"
+											rows="3"
+											aria-invalid={fieldErrors.reply_template ? 'true' : undefined}
+											aria-describedby="rule-reply-help reply-template-hint"
+										></textarea>
+										<div class="field-foot">
+											{#if fieldErrors.reply_template}
+												<p class="field-error" id="reply-template-hint">
+													{fieldErrors.reply_template}
+												</p>
+											{:else}
+												<span class="hint" id="reply-template-hint">
+													Leave empty to match without sending a reply.
+												</span>
+											{/if}
+											<span class="counter mono" class:over={replyBytes > 1000}>
+												{replyBytes}/1000
+											</span>
+										</div>
+									</div>
+								</div>
+
+								<p class="suppress-note">
+									A rule that replies stops the flows for that message. A rule with no reply
+									leaves them running.
+								</p>
+							</section>
+
+							<section class="rule-section" aria-labelledby="rule-limits-heading">
+								<div class="rule-section-head">
+									<h3 class="eyebrow" id="rule-limits-heading">Limits &amp; targeting</h3>
+									<p class="hint">Enforced per rule and device, in a rolling hour.</p>
+								</div>
+
+								<button
+									type="button"
+									class="limits-toggle"
+									onclick={() => (limitsOpen = !limitsOpen)}
+									aria-expanded={limitsOpen}
+									aria-controls="rule-limits"
+								>
+									<span class="limits-value mono">{limitSummary}</span>
+									<span class="limits-action">{limitsOpen ? 'Hide' : 'Edit'}</span>
+									<Icon name={limitsOpen ? 'chevron-up' : 'chevron-down'} size={13} />
+								</button>
+
+								{#if limitsOpen}
+									<div class="form-grid limits-grid" id="rule-limits">
+										<div class="field">
+											<label class="label" for="rule-priority">Priority</label>
+											<input
+												id="rule-priority"
+												class="input input-mono input-num"
+												type="number"
+												bind:value={form.priority}
+												step="1"
+												aria-invalid={fieldErrors.priority ? 'true' : undefined}
+												aria-describedby="rule-priority-hint"
+											/>
+											{#if fieldErrors.priority}
+												<p class="field-error" id="rule-priority-hint">{fieldErrors.priority}</p>
+											{:else}
+												<p class="hint" id="rule-priority-hint">
+													Higher wins when several rules match.
+												</p>
+											{/if}
+										</div>
+
+										<div class="field">
+											<label class="label" for="rule-cooldown">Cooldown (seconds)</label>
+											<input
+												id="rule-cooldown"
+												class="input input-mono input-num"
+												type="number"
+												bind:value={form.cooldown_s}
+												min="0"
+												step="1"
+												aria-invalid={fieldErrors.cooldown_s ? 'true' : undefined}
+												aria-describedby="rule-cooldown-hint"
+											/>
+											{#if fieldErrors.cooldown_s}
+												<p class="field-error" id="rule-cooldown-hint">{fieldErrors.cooldown_s}</p>
+											{:else}
+												<p class="hint" id="rule-cooldown-hint">
+													The minimum gap between auto replies.
+												</p>
+											{/if}
+										</div>
+
+										<div class="field">
+											<label class="label" for="rule-max">Max replies / hour</label>
+											<input
+												id="rule-max"
+												class="input input-mono input-num"
+												type="number"
+												bind:value={form.max_per_hour}
+												min="0"
+												step="1"
+												aria-invalid={fieldErrors.max_per_hour ? 'true' : undefined}
+												aria-describedby="rule-max-hint"
+											/>
+											{#if fieldErrors.max_per_hour}
+												<p class="field-error" id="rule-max-hint">{fieldErrors.max_per_hour}</p>
+											{:else}
+												<p class="hint" id="rule-max-hint">0 blocks every reply.</p>
+											{/if}
+										</div>
+
+										<div class="field">
+											<label class="label" for="rule-sim">SIM slot</label>
+											<input
+												id="rule-sim"
+												class="input input-mono input-num"
+												type="number"
+												bind:value={form.sim_slot}
+												min="0"
+												step="1"
+												aria-invalid={fieldErrors.sim_slot ? 'true' : undefined}
+												aria-describedby="rule-sim-hint"
+											/>
+											{#if fieldErrors.sim_slot}
+												<p class="field-error" id="rule-sim-hint">{fieldErrors.sim_slot}</p>
+											{:else}
+												<p class="hint" id="rule-sim-hint">0 uses the device default.</p>
+											{/if}
+										</div>
+
+										<div class="toggles span-2">
+											<label class="check">
+												<input
+													id="rule-enabled"
+													type="checkbox"
+													bind:checked={form.enabled}
+													aria-describedby="rule-enabled-hint"
+												/>
+												<span>
+													Enabled
+													<span
+														class="hint"
+														id="rule-enabled-hint"
+														aria-hidden="true"
+														style="display: block"
+													>
+														Disabled rules are stored but never matched.
+													</span>
+												</span>
+											</label>
+											<label class="check">
+												<input
+													id="rule-allow-shortcode"
+													type="checkbox"
+													bind:checked={form.allow_shortcode}
+													aria-describedby="rule-allow-shortcode-hint"
+												/>
+												<span>
+													Allow shortcode replies
+													<span
+														class="hint"
+														id="rule-allow-shortcode-hint"
+														aria-hidden="true"
+														style="display: block"
+													>
+														Shortcode replies can be billable on the device.
+													</span>
+												</span>
+											</label>
+										</div>
+									</div>
+								{/if}
+							</section>
+
+							{#if formError}
+								<div role="alert">
+									<Notice tone="danger" title="Rule not saved">{formError}</Notice>
+								</div>
+							{/if}
+
+							<div class="form-foot">
+								<button
+									type="submit"
+									class="btn btn-primary"
+									disabled={submitting}
+									aria-busy={submitting}
+								>
+									{#if submitting}<Spinner />{:else}<Icon name="check" size={14} />{/if}
+									Save rule
+								</button>
+								<button
+									type="button"
+									class="btn btn-ghost"
+									onclick={() => (formOpen = false)}
+									disabled={submitting}
+								>
+									Cancel
+								</button>
+								<span class="spacer"></span>
+								<span class="hint">Saving with an existing name creates a second rule.</span>
+							</div>
+						</form>
+					</div>
+				</section>
+
+			</div>
+
+			<div class="bento settle" style="--i: 1">
+				<div class="span-12 test-col">
+					<RuleTestPanel rules={rules} devices={devices} scope={form.device_id} draftNotice />
 				</div>
-			</section>
+			</div>
 		{/if}
 
 		{#if error}
-			<section class="panel">
-				<div class="panel-body stack">
+			<div class="bento settle" style="--i: 1">
+				<section class="card span-12">
 					<Notice tone="danger" title="Could not load rules">{error}</Notice>
-					<div class="row">
+					<div class="row" style="margin-top: 16px">
 						<button type="button" class="btn btn-primary" onclick={() => void loadRules()}>
 							<Icon name="refresh" size={14} /> Try again
 						</button>
 					</div>
-				</div>
-			</section>
+				</section>
+			</div>
 		{:else if loading}
-			<section class="panel" aria-busy="true" aria-live="polite">
-				<span class="sr-only">Loading rules</span>
-				<div class="panel-head"><h2 class="panel-title">Rules</h2></div>
-				<div class="loading-rows">
-					{#each ['a', 'b', 'c'] as key (key)}
-						<div class="skeleton" style="height: 54px"></div>
-					{/each}
-				</div>
-			</section>
+			<div class="bento settle" style="--i: 1">
+				<section class="card span-12" aria-busy="true" aria-live="polite">
+					<span class="sr-only">Loading rules</span>
+					<div class="skeleton" style="height: 16px; width: 90px"></div>
+					<div class="loading-rows">
+						{#each ['a', 'b', 'c'] as key (key)}
+							<div class="skeleton" style="height: 64px"></div>
+						{/each}
+					</div>
+				</section>
+			</div>
 		{:else if rules.length === 0}
-			<section class="panel">
-				<EmptyState
-					icon="filter"
-					title="No rules yet"
-					description="A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically."
-				>
-					<button type="button" class="btn btn-primary" onclick={openForm}>
-						<Icon name="plus" size={14} /> Create the first rule
-					</button>
-				</EmptyState>
-			</section>
+			<div class="bento settle" style="--i: 1">
+				<section class="card span-12">
+					<EmptyState
+						icon="filter"
+						title="No rules yet"
+						description="A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically."
+					>
+						<button type="button" class="btn btn-primary" onclick={openForm}>
+							<Icon name="plus" size={14} /> Create the first rule
+						</button>
+					</EmptyState>
+				</section>
+			</div>
 		{:else}
-			<section class="panel">
-				<div class="panel-head">
-					<h2 class="panel-title"><Icon name="filter" size={14} /> Rules</h2>
-					<span class="panel-meta">
-						{rules.length} rule{rules.length === 1 ? '' : 's'} ·{' '}
-						{rules.filter((rule) => rule.enabled).length} enabled
-					</span>
-				</div>
-				<div class="table-scroll desktop-only">
-					<table class="table rules-table">
-						<caption class="sr-only">Auto-reply rules including disabled and global rules</caption>
-						<thead>
-							<tr>
-								<th scope="col">Rule</th>
-								<th scope="col">Sender match</th>
-								<th scope="col">Message match</th>
-								<th scope="col">Reply</th>
-								<th scope="col">Limits</th>
-								<th scope="col">State</th>
-								<th scope="col"><span class="sr-only">Actions</span></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each rules as rule (rule.id)}
-								<tr class:disabled={!rule.enabled}>
-									<td>
-										<span class="cell-main">{rule.name}</span>
-										<span class="cell-sub">
-											{#if rule.device_id}
-												{@const scoped = findDevice(rule.device_id)}
-												<span class="scope-name">{scopeName(rule.device_id)}</span>
-												{#if scoped && deviceLabel(scoped)}
-													<span class="mono scope">{rule.device_id}</span>
-												{/if}
-											{:else}
-												<Badge tone="accent">global</Badge>
-											{/if}
-										</span>
-									</td>
-									<td>
-										<Badge tone="muted">{rule.matcher_type}</Badge>
-										<span class="mono pattern" title={rule.matcher_value}>{rule.matcher_value}</span>
-									</td>
-									<td>
-										<Badge tone="muted">{rule.body_type}</Badge>
-										<span class="mono pattern" title={rule.body_value}>{rule.body_value}</span>
-									</td>
-									<td>
-										{#if rule.reply_template}
-											<span class="reply mono">{rule.reply_template}</span>
-										{:else}
-											<span class="muted">no reply</span>
-										{/if}
-									</td>
-									<td>
-										<span class="cell-sub mono limits">
-											prio {rule.priority} · {rule.cooldown_s}s
-											<br />
-											max {rule.max_per_hour}/h · SIM {rule.sim_slot}
-											{#if rule.allow_shortcode}
-												<br />shortcode ok
-											{/if}
-										</span>
-									</td>
-									<td>
+			<div class="bento settle" style="--i: 1">
+				<section
+					class="card list-card {listTestOpen ? 'span-8' : 'span-12'}"
+					aria-labelledby="rules-heading"
+				>
+					<div class="panel-heading">
+						<div>
+							<h2 id="rules-heading" class="section-title">Rules</h2>
+							<p class="section-note">
+								{rules.length}
+								{rules.length === 1 ? 'rule' : 'rules'} · {enabledCount} enabled · the first match
+								inside its limits replies
+							</p>
+						</div>
+					</div>
+
+					<ul class="rule-list">
+						{#each rules as rule (rule.id)}
+							<li class="rule-row" class:is-off={!rule.enabled}>
+								<div class="rule-main">
+									<div class="rule-head">
+										<span class="rule-name">{rule.name}</span>
 										{#if rule.enabled}
 											<Badge tone="ok" dot>on</Badge>
 										{:else}
-											<Badge tone="muted">off</Badge>
+											<Badge tone="muted">paused</Badge>
 										{/if}
-									</td>
-									<td>
-										<div class="cell-actions">
-											<button
-												type="button"
-												class="btn btn-ghost btn-sm"
-												onclick={() => void openListTest(rule)}
-												aria-label={`Test rule ${rule.name}`}
-											>
-												<Icon name="activity" size={12} /> Test
-											</button>
-											<button
-												type="button"
-												class="btn btn-danger-ghost btn-sm"
-												onclick={() => {
-													deleteError = null;
-													deleteTarget = rule;
-												}}
-												aria-label={`Delete rule ${rule.name}`}
-											>
-												<Icon name="trash" size={12} /> Delete
-											</button>
-										</div>
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-
-				<ul class="rule-cards">
-					{#each rules as rule (rule.id)}
-						<li class="rule-card" class:disabled={!rule.enabled}>
-							<div class="rule-head">
-								<span class="rule-name">{rule.name}</span>
-								{#if rule.enabled}
-									<Badge tone="ok" dot>on</Badge>
-								{:else}
-									<Badge tone="muted">off</Badge>
-								{/if}
-							</div>
-							<div class="rule-scope">
-								{#if rule.device_id}
-									{@const scoped = findDevice(rule.device_id)}
-									<span class="scope-name">{scopeName(rule.device_id)}</span>
-									{#if scoped && deviceLabel(scoped)}
-										<span class="mono">{rule.device_id}</span>
-									{/if}
-								{:else}
-									<Badge tone="accent">global</Badge>
-								{/if}
-							</div>
-							<dl class="rule-kv">
-								<div>
-									<dt>Sender</dt>
-									<dd>
-										<Badge tone="muted">{rule.matcher_type}</Badge>
-										<span class="mono">{rule.matcher_value}</span>
-									</dd>
-								</div>
-								<div>
-									<dt>Message</dt>
-									<dd>
-										<Badge tone="muted">{rule.body_type}</Badge>
-										<span class="mono">{rule.body_value}</span>
-									</dd>
-								</div>
-								<div>
-									<dt>Reply</dt>
-									<dd class="reply">
-										{#if rule.reply_template}
-											{rule.reply_template}
+									</div>
+									{@render ruleSentence(rule)}
+									<p class="rule-meta">
+										<span class="mono meta-item">{limitsLine(rule)}</span>
+										{#if rule.device_id}
+											<span class="meta-item scope-name">{scopeName(rule.device_id)}</span>
 										{:else}
-											<span class="muted">no reply</span>
+											<span class="meta-item">every device</span>
 										{/if}
-									</dd>
+									</p>
 								</div>
-								<div>
-									<dt>Limits</dt>
-									<dd class="mono limits">
-										prio {rule.priority} · {rule.cooldown_s}s · max {rule.max_per_hour}/h · SIM
-										{rule.sim_slot}{#if rule.allow_shortcode} · shortcode ok{/if}
-									</dd>
+
+								<div class="rule-actions">
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => void openListTest(rule)}
+										aria-label={`Test rule ${rule.name}`}
+									>
+										<Icon name="activity" size={12} /> Test
+									</button>
+									<button
+										type="button"
+										class="btn btn-danger-ghost btn-sm"
+										onclick={() => {
+											deleteError = null;
+											deleteTarget = rule;
+										}}
+										aria-label={`Delete rule ${rule.name}`}
+									>
+										<Icon name="trash" size={12} /> Delete
+									</button>
 								</div>
-							</dl>
-							<div class="card-actions">
-								<button
-									type="button"
-									class="btn btn-sm"
-									onclick={() => void openListTest(rule)}
-									aria-label={`Test rule ${rule.name}`}
-								>
-									<Icon name="activity" size={12} /> Test
-								</button>
-								<button
-									type="button"
-									class="btn btn-danger btn-sm"
-									onclick={() => {
-										deleteError = null;
-										deleteTarget = rule;
-									}}
-									aria-label={`Delete rule ${rule.name}`}
-								>
-									<Icon name="trash" size={12} /> Delete rule
-								</button>
-							</div>
-						</li>
-					{/each}
-				</ul>
-				<p class="panel-note">
-					Patterns are validated against the RE2 subset when you save. The gateway matches rules
-					as messages sync; it does not send them to the phone.
-				</p>
-			</section>
+							</li>
+						{/each}
+					</ul>
+
+					<p class="panel-note">
+						Patterns are checked against the RE2 subset when you save. The gateway matches rules as
+						messages sync; it does not send them to the phone.
+					</p>
+				</section>
+
+				{#if listTestOpen}
+					<div class="span-4 test-col" id="rule-test-panel">
+						<RuleTestPanel
+							rules={rules}
+							devices={devices}
+							scope={listTestScope}
+							startOpen
+							onclose={() => (listTestOpen = false)}
+						/>
+					</div>
+				{/if}
+			</div>
 		{/if}
 	</div>
 </div>
@@ -994,7 +973,7 @@
 		<p>
 			<span class="mono">{deleteTarget.name}</span> will be removed from{' '}
 			{deleteTarget.device_id ? `device ${scopeDetail(deleteTarget.device_id)}` : 'every device'}
-			immediately.
+			immediately. Anything that matches it stops getting an answer.
 		</p>
 		<p class="hint" style="margin-top: 10px">
 			Replies already queued on a device are not recalled.
@@ -1003,36 +982,249 @@
 </ConfirmDialog>
 
 <style>
-	.form-panel {
-		border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+	.editor {
+		scroll-margin-top: 80px;
+		padding: 0;
+		overflow: hidden;
 	}
 
-	.head-actions {
+	.editor-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-4) var(--df-p-space-5);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+	}
+
+	.editor-title {
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.editor-note {
+		margin-top: 2px;
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-meta);
+	}
+
+	.editor-actions {
 		display: flex;
 		align-items: center;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
-	.form-test {
-		margin-top: var(--s-4);
+	.editor-body {
+		padding: var(--df-p-space-5);
 	}
 
 	.rule-form {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-4);
+		gap: var(--df-p-space-5);
 	}
+
+	/* ---------- the sentence, in the list and in the editor ---------- */
+
+	.preview {
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
+	}
+
+	.preview-label {
+		font-size: var(--df-p-text-2xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.preview-limits {
+		margin-top: var(--df-p-space-2);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.sentence {
+		display: block;
+		margin-top: 2px;
+		font-size: var(--df-p-text-md);
+		line-height: 1.5;
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.sentence .lead {
+		color: var(--df-text-secondary);
+	}
+
+	.tok {
+		font-size: 0.9em;
+		font-weight: 500;
+		color: var(--df-text-primary);
+	}
+
+	/* The reply is a sentence, not a code chip: mono weight carries it. */
+	.tok.reply {
+		font-weight: 400;
+	}
+
+	.reply.is-long {
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+		max-width: 68ch;
+		vertical-align: top;
+	}
+
+	.arrow {
+		padding: 0 2px;
+		color: var(--df-text-meta);
+	}
+
+	.no-reply {
+		color: var(--df-text-meta);
+	}
+
+	/* ---------- list ---------- */
+
+	.list-card {
+		padding: 0;
+		overflow: hidden;
+	}
+
+	/* The saved-rule confirmation keeps its mint container here, so a change to the
+	   shared callout tones cannot turn it into a grey box. */
+	.flash :global(.callout) {
+		background: var(--df-state-ok-bg);
+	}
+
+	.panel-heading {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-4) var(--df-p-space-5) var(--df-p-space-3);
+	}
+
+	.section-title {
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.section-note {
+		margin-top: 2px;
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-meta);
+	}
+
+	.rule-list {
+		margin: 0;
+		padding: 0 var(--df-p-space-5);
+		list-style: none;
+	}
+
+	.rule-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+		gap: var(--df-p-space-4);
+		padding: var(--df-p-space-4) 0;
+		border-top: 1px solid var(--df-border-hairline);
+		transition: background-color 140ms ease;
+	}
+
+	.rule-row:first-child {
+		border-top: 0;
+	}
+
+	.rule-main {
+		min-width: 0;
+	}
+
+	.rule-head {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+	}
+
+	.rule-name {
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		line-height: 1.3;
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.rule-meta {
+		display: flex;
+		align-items: baseline;
+		column-gap: var(--df-p-space-2);
+		row-gap: 2px;
+		flex-wrap: wrap;
+		margin-top: var(--df-p-space-2);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.rule-meta .mono {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	/* The separator rides with the item after it, so a wrap never leaves a
+	   dangling dot at the end of a line. */
+	.meta-item + .meta-item::before {
+		content: '·';
+		margin-right: var(--df-p-space-2);
+		/* A separator is punctuation, not a hairline: in dark the control border
+		   is 1.6:1 on the card and the dots vanish between the facts. */
+	color: light-dark(
+		var(--df-border-control),
+		color-mix(in srgb, var(--df-text-meta) 65%, transparent)
+	);
+	}
+
+	.scope-name {
+		overflow-wrap: anywhere;
+	}
+
+	.rule-row.is-off .rule-name,
+	.rule-row.is-off .sentence,
+	.rule-row.is-off .sentence .lead,
+	.rule-row.is-off .sentence .tok {
+		color: var(--df-text-meta);
+	}
+
+	.rule-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	/* ---------- editor form ---------- */
 
 	.rule-section {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-3);
-		padding-top: var(--s-4);
-		border-top: 1px solid var(--line);
+		gap: var(--df-p-space-3);
+		padding-top: var(--df-p-space-5);
+		border-top: 1px solid var(--df-border-hairline);
 	}
 
-	.rule-section:first-child {
+	.rule-section:first-of-type {
 		padding-top: 0;
 		border-top: 0;
 	}
@@ -1043,305 +1235,137 @@
 		gap: 3px;
 	}
 
-	.rule-limits-head {
-		flex-direction: row;
-		align-items: flex-start;
-		justify-content: space-between;
-		flex-wrap: wrap;
-	}
-
-	.rule-limits-head > div {
-		display: flex;
-		flex-direction: column;
-		gap: 3px;
-	}
-
-	.limit-toggle {
-		display: inline-flex;
-		align-items: center;
-		justify-content: flex-start;
-		gap: 8px;
-		min-height: 32px;
-		padding: 4px 9px;
-		border: 1px solid var(--line-strong);
-		border-radius: var(--r-sm);
-		background: var(--surface);
-		color: var(--ink-2);
-		font-size: var(--text-sm);
-	}
-
-	.limit-toggle:hover {
-		background: var(--surface-2);
-	}
-
-	.limit-toggle .mono {
-		font-size: 10.5px;
-		color: var(--ink-2);
-	}
-
-	.limit-toggle-action {
-		color: var(--accent);
-		font-weight: 500;
-	}
-
-	.suppress-note {
-		font-size: 11.5px;
-		line-height: 1.45;
-		color: var(--ink-3);
-	}
-
-	.rule-actions {
-		flex-wrap: wrap;
-	}
-
 	.field-foot {
 		display: flex;
 		align-items: baseline;
 		justify-content: space-between;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
 	.counter {
-		font-size: 10px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 		flex: none;
 	}
 
 	.counter.over {
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
+	}
+
+	.suppress-note {
+		font-size: var(--df-p-text-sm);
+		line-height: 1.45;
+		color: var(--df-text-meta);
+	}
+
+	.limits-toggle {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		width: 100%;
+		min-height: 40px;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		text-align: left;
+		transition: background-color 140ms ease;
+	}
+
+	.limits-toggle:hover {
+		background: var(--df-surface-press);
+	}
+
+	.limits-toggle:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	.limits-value {
+		flex: 1;
+		min-width: 0;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	.limits-action {
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+		color: var(--df-accent-text);
+	}
+
+	.limits-toggle :global(svg) {
+		color: var(--df-text-meta);
 	}
 
 	.toggles {
 		display: flex;
-		gap: var(--s-5);
+		gap: var(--df-p-space-5);
 		flex-wrap: wrap;
 		padding: 2px 0;
 	}
 
-	.rules-table {
-		min-width: 1000px;
-		table-layout: fixed;
-	}
-
-	.rules-table .cell-actions {
-		gap: 4px;
-	}
-
-	.rules-table th:nth-child(1) {
-		width: 18%;
-	}
-
-	.rules-table th:nth-child(2) {
-		width: 15%;
-	}
-
-	.rules-table th:nth-child(3) {
-		width: 15%;
-	}
-
-	.rules-table th:nth-child(4) {
-		width: 20%;
-	}
-
-	.rules-table th:nth-child(5) {
-		width: 11%;
-	}
-
-	.rules-table th:nth-child(6) {
-		width: 6%;
-	}
-
-	.rules-table th:nth-child(7) {
-		width: 15%;
-	}
-
 	.input-num {
-		max-width: 160px;
+		max-width: 180px;
 	}
 
-	.rule-cards {
-		display: none;
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.rule-card {
-		padding: var(--s-4);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.rule-card:last-child {
-		border-bottom: 0;
-	}
-
-	.rule-head {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--s-3);
-	}
-
-	.rule-name {
-		font-weight: 500;
-		line-height: 1.35;
-	}
-
-	.rule-scope {
-		margin-top: 4px;
-		font-size: 10px;
-		color: var(--ink-3);
-		overflow-wrap: anywhere;
-	}
-
-	.rule-kv {
-		display: grid;
-		gap: var(--s-2);
-		margin: var(--s-3) 0 0;
-	}
-
-	.rule-kv > div {
-		display: grid;
-		grid-template-columns: 62px minmax(0, 1fr);
-		gap: var(--s-2);
-		align-items: baseline;
-	}
-
-	.rule-kv dt {
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	.rule-kv dd {
-		margin: 0;
-		font-size: var(--text-base);
+	.test-col {
 		min-width: 0;
-		overflow-wrap: anywhere;
-	}
-
-	.rule-kv .limits {
-		white-space: normal;
-		font-size: 10.5px;
-		color: var(--ink-2);
-	}
-
-	.rule-kv .reply {
-		display: -webkit-box;
-		-webkit-line-clamp: 3;
-		line-clamp: 3;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		font-family: var(--font-mono);
-		font-size: 11.5px;
-		line-height: 1.5;
-		color: var(--ink-2);
-		white-space: pre-wrap;
-	}
-
-	.rule-card.disabled .rule-name {
-		color: var(--ink-3);
-	}
-
-	.card-actions {
-		display: flex;
-		gap: var(--s-2);
-		margin-top: var(--s-3);
-	}
-
-	@media (max-width: 820px) {
-		.desktop-only {
-			display: none;
-		}
-
-		.rule-cards {
-			display: block;
-		}
-	}
-
-	.pattern {
-		display: block;
-		margin-top: 4px;
-		font-size: var(--text-sm);
-		overflow-wrap: anywhere;
-	}
-
-	.scope {
-		display: block;
-		font-size: 10px;
-		color: var(--ink-3);
-		overflow-wrap: anywhere;
-	}
-
-	.scope-name {
-		display: block;
-		font-size: 11px;
-		color: var(--ink-2);
-		overflow-wrap: anywhere;
-	}
-
-	.reply {
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		font-size: 11.5px;
-		line-height: 1.5;
-		color: var(--ink-2);
-		max-width: 34ch;
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-	}
-
-	.limits {
-		line-height: 1.55;
-		font-size: 10px;
-		color: var(--ink-3);
-		white-space: nowrap;
-	}
-
-	tr.disabled .cell-main,
-	tr.disabled .pattern {
-		color: var(--ink-3);
+		scroll-margin-top: 80px;
 	}
 
 	.loading-rows {
 		display: grid;
-		gap: var(--s-2);
-		padding: var(--s-4);
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-4);
 	}
 
-	@media (max-width: 620px) {
+	@media (max-width: 900px) {
+		.rule-row {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.rule-actions {
+			justify-content: flex-start;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.editor-body {
+			padding: var(--df-p-space-4);
+		}
+
+		.panel-heading,
+		.rule-list {
+			padding-inline: var(--df-p-space-4);
+		}
+
+		/* Stacked, the limits and the scope are two facts on two lines; a leading
+		   dot would read as a bullet. */
+		.rule-meta {
+			flex-direction: column;
+			gap: 1px;
+		}
+
+		.meta-item + .meta-item::before {
+			content: none;
+		}
+
 		.toggles {
 			flex-direction: column;
-			gap: var(--s-3);
+			gap: var(--df-p-space-3);
 		}
 
-		.head-actions {
-			width: 100%;
-			flex: 1 1 100%;
-		}
-
-		.form-panel .panel-head {
-			flex-wrap: wrap;
-		}
-
-		.form-panel .panel-title {
-			flex: 1 0 auto;
-			white-space: nowrap;
-		}
-
-		.head-actions .panel-meta {
-			display: none;
-		}
-
-		.limit-toggle {
+		.limits-toggle {
 			min-height: 44px;
-			width: 100%;
-			justify-content: space-between;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.rule-row,
+		.limits-toggle {
+			transition: none;
 		}
 	}
 </style>

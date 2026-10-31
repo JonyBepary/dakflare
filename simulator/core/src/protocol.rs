@@ -42,6 +42,12 @@ pub struct Target {
 }
 
 impl Target {
+    /// The absolute URL for a path. Public because the WebSocket upgrade is
+    /// handed to tungstenite's own client, which builds the request itself.
+    pub fn absolute(&self, path: &str) -> String {
+        self.url(path)
+    }
+
     pub fn new(base_url: impl Into<String>, admin_token: Option<String>) -> Result<Self, ProtocolError> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
@@ -404,6 +410,20 @@ impl DeviceClient {
 
     /* ---- device: signed requests ---------------------------------------- */
 
+    /// The base URL this client signs for, without a trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.target.base_url
+    }
+
+    /// Signed headers for the WebSocket upgrade.
+    ///
+    /// §1.2: the upgrade is a signed GET carrying no query string, so the
+    /// canonical string covers the empty body. That is vector B in
+    /// `test-support/protocol-vectors.json`.
+    pub fn upgrade_headers(&self) -> Result<HeaderMap, ProtocolError> {
+        self.signed_headers("GET", "/v1/device/ws", b"")
+    }
+
     fn signed_headers(&self, method: &str, path: &str, body: &[u8]) -> Result<HeaderMap, ProtocolError> {
         let signed = sign_request(
             &self.device_id,
@@ -496,6 +516,23 @@ impl DeviceClient {
         Ok(value.get("commands").cloned().unwrap_or(Value::Array(vec![])))
     }
 
+    /// `POST /v1/sms/status/batch` — report a terminal state for commands this
+    /// device collected.
+    ///
+    /// §6.1: a rejected transition is a successful no-op, so an unknown or
+    /// already-terminal command id is not an error here.
+    pub async fn report_status(
+        &self,
+        updates: &[(String, String)],
+    ) -> Result<Value, ProtocolError> {
+        let payload: Vec<Value> = updates
+            .iter()
+            .map(|(command_id, status)| json!({ "command_id": command_id, "status": status }))
+            .collect();
+        self.signed_post("/v1/sms/status/batch", json!({ "updates": payload }))
+            .await
+    }
+
     /// `POST /v1/sms/incoming/batch` — upload messages and acknowledge commands.
     pub async fn upload_inbound(
         &self,
@@ -537,16 +574,8 @@ impl DeviceClient {
             })
             .collect();
 
-        let mut payload = payload;
-        payload.extend(outbound.iter().map(|report| {
-            json!({
-                "local_id": report.local_id,
-                "sender_e164": report.to,
-                "body": report.body,
-                "received_at": report.sent_at,
-                "direction": "out",
-            })
-        }));
+        let outbound_payload: Vec<Value> =
+            outbound.iter().map(OutboundReport::to_json).collect();
 
         let runs_payload: Vec<Value> = runs
             .iter()
@@ -560,7 +589,11 @@ impl DeviceClient {
             })
             .collect();
 
-        let mut body = json!({ "messages": payload, "ack_command_ids": ack_command_ids });
+        let mut body = json!({
+            "messages": payload,
+            "ack_command_ids": ack_command_ids,
+            "outbound": outbound_payload,
+        });
         if let Some(map) = body.as_object_mut() {
             map.insert("flow_runs".into(), Value::Array(runs_payload));
         }
@@ -775,6 +808,49 @@ mod tests {
         assert!(lines[4].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
+    /// The published vectors, read from the file the Worker and the JS harness
+    /// also read, so the phone cannot drift from either on the one string every
+    /// signed request depends on.
+    #[test]
+    fn shared_protocol_vectors_are_reproduced() {
+        let raw = include_str!("../../../test-support/protocol-vectors.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).expect("protocol vectors parse");
+
+        assert_eq!(
+            body_digest(b""),
+            doc["empty_body_sha256"].as_str().expect("empty_body_sha256"),
+            "the §2.3 empty-body digest"
+        );
+
+        let vectors = doc["canonical"].as_array().expect("canonical array");
+        assert!(!vectors.is_empty(), "the shared file carries no vectors");
+        for vector in vectors {
+            let id = vector["id"].as_str().expect("id");
+            let body = vector["body"].as_str().expect("body").as_bytes();
+            assert_eq!(
+                body.len() as u64,
+                vector["body_bytes"].as_u64().expect("body_bytes"),
+                "{id}: body_bytes is the UTF-8 length, not the character count"
+            );
+            assert_eq!(
+                body_digest(body),
+                vector["body_sha256"].as_str().expect("body_sha256"),
+                "{id}: body digest"
+            );
+            assert_eq!(
+                canonical_string(
+                    vector["method"].as_str().expect("method"),
+                    vector["pathname"].as_str().expect("pathname"),
+                    vector["timestamp"].as_str().expect("timestamp"),
+                    vector["nonce"].as_str().expect("nonce"),
+                    body,
+                ),
+                vector["canonical"].as_str().expect("canonical"),
+                "{id}: canonical string"
+            );
+        }
+    }
+
     #[test]
     fn empty_body_digest_matches_the_contract_vector() {
         // SHA-256("") — the §2.3 empty-body digest.
@@ -968,13 +1044,40 @@ pub struct OutboundReport {
     pub to: String,
     pub body: String,
     pub sent_at: i64,
+    /// `queued` | `sent` | `failed` | `delivered`. `None` lets a caller that
+    /// does not know the state omit the key rather than invent one.
+    pub state: Option<String>,
+    /// Why a send failed, from the row's `last_error`. Omitted when absent.
+    pub error: Option<String>,
+}
+
+impl OutboundReport {
+    /// The frozen `outbound[]` entry. `state`/`error` are serialized only when
+    /// present, so a client that knows nothing about them keeps sending the
+    /// original four-field shape.
+    fn to_json(&self) -> Value {
+        let mut entry = json!({
+            "local_id": self.local_id,
+            "to": self.to,
+            "body": self.body,
+            "sent_at": self.sent_at,
+        });
+        if let Some(state) = &self.state {
+            entry["state"] = json!(state);
+        }
+        if let Some(error) = &self.error {
+            entry["error"] = json!(error);
+        }
+        entry
+    }
 }
 
 impl DeviceClient {
     /// Mirror locally-sent SMS into the deployment's message log.
     ///
-    /// Sent through the same inbound endpoint with `direction: "out"`, so the
-    /// `(device_id, local_id)` idempotency key makes retries free.
+    /// Sent through the inbound endpoint's `outbound[]` array, so the
+    /// `(device_id, local_id)` idempotency key makes retries free and a later
+    /// `sent`/`delivered` report updates the row instead of duplicating it.
     pub async fn upload_outbound(
         &self,
         reports: &[OutboundReport],
@@ -982,22 +1085,11 @@ impl DeviceClient {
         if reports.is_empty() {
             return Ok(Value::Null);
         }
-        let payload: Vec<Value> = reports
-            .iter()
-            .map(|report| {
-                json!({
-                    "local_id": report.local_id,
-                    "sender_e164": report.to,
-                    "body": report.body,
-                    "received_at": report.sent_at,
-                    "direction": "out",
-                })
-            })
-            .collect();
+        let payload: Vec<Value> = reports.iter().map(OutboundReport::to_json).collect();
 
         self.signed_post(
             "/v1/sms/incoming/batch",
-            json!({ "messages": payload, "ack_command_ids": [] }),
+            json!({ "messages": [], "ack_command_ids": [], "outbound": payload }),
         )
         .await
     }

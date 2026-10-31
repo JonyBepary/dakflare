@@ -129,6 +129,11 @@ export const MAX_PEER_CHARS = 32;
 /** Operator-facing device label. Optional, trimmed, and never a routing key. */
 export const MAX_LABEL_CHARS = 64;
 export const MAX_ID_CHARS = 128;
+/**
+ * Caller-supplied idempotency key. Long enough for a UUID or a hash, short
+ * enough that a key cannot be used as a storage channel.
+ */
+export const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 export const MAX_FCM_TOKEN_CHARS = 512;
 export const MAX_RULE_VALUE_CHARS = 512;
 export const MAX_REPLY_TEMPLATE_CHARS = 1_000;
@@ -145,3 +150,77 @@ export const MAX_REPLY_TEMPLATE_CHARS = 1_000;
 export const MAX_WORKFLOW_NODES = 50;
 export const MAX_WORKFLOW_EDGES = 100;
 export const MAX_WORKFLOW_GRAPH_BYTES = 65_536;
+
+/**
+ * Which side runs the password KDF — AUTH_PLAN §2.
+ *
+ *   off             no password factor at all (the default)
+ *   client-derived  the browser runs PBKDF2; the Worker only peppers + compares
+ *   server-kdf      the Worker runs PBKDF2 (60–150 ms; paid plan / 30 s limit)
+ *
+ * Read per request, never cached: a deployment changes it with a `[vars]` entry.
+ * An unknown value falls back to `off`, the safe side — a typo disables the
+ * factor instead of silently running a KDF somewhere the operator did not pick.
+ *
+ * This is the deployment's capability, NOT the row's provenance. A row records
+ * its own `m=` (who derived the material) so mode changes never rewrite rows;
+ * `server-kdf` therefore accepts both request shapes, which is what keeps an
+ * account created on the free tier usable after an upgrade.
+ */
+export type PasswordMode = "off" | "client-derived" | "server-kdf";
+
+export function passwordMode(env: { AUTH_PASSWORD_MODE?: string }): PasswordMode {
+  const raw = env.AUTH_PASSWORD_MODE;
+  if (typeof raw !== "string") return "off";
+  const value = raw.trim().toLowerCase();
+  if (value === "client-derived" || value === "server-kdf") return value;
+  return "off";
+}
+
+/* ======================================================================== */
+/* Magic links (AUTH_PLAN §1, factor 2)                                     */
+/* ======================================================================== */
+
+/** The contract's 15 minutes. Exposed so `/v1/auth/mode` can tell the console. */
+export const DEFAULT_MAGIC_LINK_TTL_SECONDS = 15 * 60;
+
+/**
+ * Token lifetime. Read per request and clamped to [1 s, 1 h]: the default is
+ * the contract's 15 minutes, while the conformance harness shortens it to
+ * exercise expiry without waiting a quarter of an hour. The lower bound is 1
+ * second rather than 60 so a test deployment can make a link expire promptly;
+ * production operators should leave the default alone.
+ */
+export function magicLinkTtlSeconds(env: { MAGIC_LINK_TTL_SECONDS?: string }): number {
+  return readIntEnv(
+    env.MAGIC_LINK_TTL_SECONDS,
+    DEFAULT_MAGIC_LINK_TTL_SECONDS,
+    1,
+    60 * 60
+  );
+}
+
+/** Where a magic link lands in the console. The SvelteKit base is `/admin`. */
+export const MAGIC_LINK_PATH = "/admin/magic";
+
+/**
+ * Sanitise the `next` a link carries.
+ *
+ * Only a same-origin console path is accepted: it must start with `/admin` and
+ * must not be a protocol-relative `//host` or contain a backslash (browsers
+ * normalise `\` to `/`, so `/\evil.example` would become `//evil.example`).
+ * Anything else falls back to the console's overview. This is the one place a
+ * URL from a request body reaches a link, so it fails closed.
+ */
+export function sanitizeAdminNext(value: unknown): string {
+  if (typeof value !== "string") return "/admin";
+  const next = value.trim();
+  if (next.length === 0 || next.length > 512) return "/admin";
+  if (!next.startsWith("/admin")) return "/admin";
+  if (next.startsWith("//") || next.includes("\\")) return "/admin";
+  // `/administrator` is not the console. Require the base itself or a child.
+  if (next.length > "/admin".length && next.charAt("/admin".length) !== "/" && next.charAt("/admin".length) !== "?") {
+    return "/admin";
+  }
+  return next;
+}

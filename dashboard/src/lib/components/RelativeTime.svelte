@@ -23,6 +23,6 @@
 	onMount(() => subscribeClock());
 </script>
 
-<time class={className} datetime={value ? new Date(value).toISOString() : undefined} title={absolute}>
+<time class={className} datetime={value ? new Date(value).toISOString() : undefined} title={absolute ?? fallback}>
 	{label}
 </time>

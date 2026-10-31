@@ -13,12 +13,14 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, MAX_BODY_CHARS, MAX_PEER_CHARS } from "../lib/config";
 import { lintRe2 } from "../lib/re2-compat";
 import { RE_DEVICE_ID } from "../auth/canonical";
-import { evaluateRules, type RuleRecord } from "../rules/evaluate";
+import { compileRule, evaluateRules, type RuleRecord } from "../lib/rule-graph";
 
 const ALLOWED_MATCHER_TYPES = new Set(["exact", "prefix", "suffix", "glob", "regex"]);
 const ALLOWED_BODY_TYPES = new Set(["keyword", "regex"]);
@@ -51,7 +53,11 @@ export async function handleRulesGet(_req: Request, env: Env, deviceId: string):
 }
 
 /** `POST /v1/rules` (admin) — create or replace a rule. */
-export async function handleRulesPost(req: Request, env: Env): Promise<Response> {
+export async function handleRulesPost(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -130,6 +136,33 @@ export async function handleRulesPost(req: Request, env: Env): Promise<Response>
     deviceId = rawDeviceId;
   }
 
+  // Compile the exact row that is about to be stored, so a rule that the flow
+  // engine cannot interpret is refused here rather than at inbound time. The
+  // reason is logged without any matcher value, body or template.
+  const stored: RuleRecord = {
+    id,
+    name,
+    enabled: input.enabled === undefined ? 1 : input.enabled ? 1 : 0,
+    priority: readInt(input.priority, 0),
+    matcher_type: matcherType,
+    matcher_value: matcherValue,
+    body_type: bodyType,
+    body_value: bodyValue,
+    reply_template: replyTemplate,
+    cooldown_s: readInt(input.cooldown_seconds ?? input.cooldown_s, 60),
+    max_per_hour: readInt(input.max_replies_per_hour ?? input.max_per_hour, 10),
+    sim_slot: readInt(input.sim_slot, 0),
+    allow_shortcode: input.allow_shortcode_reply || input.allow_shortcode ? 1 : 0,
+    device_id: deviceId,
+    updated_at: Date.now(),
+  };
+
+  const compiled = compileRule(stored);
+  if (!compiled.ok) {
+    console.warn(`[rules] rule ${id} rejected: ${compiled.reason}`);
+    return err("rule_rejected", 400);
+  }
+
   await env.DB.prepare(
     `INSERT OR REPLACE INTO rules
        (id, name, enabled, priority, matcher_type, matcher_value,
@@ -138,23 +171,31 @@ export async function handleRulesPost(req: Request, env: Env): Promise<Response>
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
-      id,
-      name,
-      input.enabled === undefined ? 1 : input.enabled ? 1 : 0,
-      readInt(input.priority, 0),
-      matcherType,
-      matcherValue,
-      bodyType,
-      bodyValue,
-      replyTemplate,
-      readInt(input.cooldown_seconds ?? input.cooldown_s, 60),
-      readInt(input.max_replies_per_hour ?? input.max_per_hour, 10),
-      readInt(input.sim_slot, 0),
-      input.allow_shortcode_reply || input.allow_shortcode ? 1 : 0,
-      deviceId,
-      Date.now()
+      stored.id,
+      stored.name,
+      stored.enabled,
+      stored.priority,
+      stored.matcher_type,
+      stored.matcher_value,
+      stored.body_type,
+      stored.body_value,
+      stored.reply_template,
+      stored.cooldown_s,
+      stored.max_per_hour,
+      stored.sim_slot,
+      stored.allow_shortcode,
+      stored.device_id,
+      stored.updated_at
     )
     .run();
+
+  await writeAudit(env, {
+    action: "rule.saved",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: id,
+    // No matcher value, body or template: those can contain phone numbers.
+    detail: { device_id: deviceId, enabled: input.enabled === undefined ? true : Boolean(input.enabled) },
+  });
 
   return Response.json({ ok: true, id });
 }
@@ -201,7 +242,7 @@ export async function handleRulesTest(req: Request, env: Env): Promise<Response>
       ORDER BY priority DESC, id ASC`
   ).all<RuleRecord>();
 
-  const evaluations = evaluateRules(
+  const evaluations = await evaluateRules(
     rows.results ?? [],
     { peer, body },
     { deviceId: deviceId ?? "", now: Date.now(), dryRun: true, hits: [] }

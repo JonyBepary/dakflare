@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 13+ themed icon. Alpha only: the system supplies the colour, so every
+    shape is opaque black and carries no meaning through hue.
+
+    Deliberately the same silhouette as the coloured foreground, gap included.
+    docs/design-review/06-banner-design.md 3.6 suggests welding the arc down to
+    the slab for this layer; rendered at 24 and 48px the welded version closes the
+    arc's inner curve into a hole and the silhouette becomes a padlock, which the
+    same review refuses as an icon ("a security claim that outlives the banner").
+    Keeping the 3.25dp gap keeps the drawing, and at 48 it still separates: the
+    gap is 1.4px, read as a dark line, while at 24 the two masses merge, which is
+    the honest degradation for a status-bar size.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M50,40h8a9,9 0 0 1 9,9v24a9,9 0 0 1 -9,9h-8a9,9 0 0 1 -9,-9v-24a9,9 0 0 1 9,-9z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M46.5,34a7.5,7.5 0 0 1 15,0"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round" />
+</vector>

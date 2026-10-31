@@ -19,3 +19,22 @@ ADMIN_TOKEN="dev-admin-token"
 # OFFLINE_ALERT_MS="5000"
 # STALE_SOCKET_MS="2000"
 # NONCE_WINDOW_MS="300000"
+
+# ---------------------------------------------------------------------------
+# Auth (docs/AUTH_PLAN.md). `AUTH_MODE` is retired: one gate, two credentials
+# (a Better Auth session, or ADMIN_TOKEN plus `X-Dakflare-Client: cli`).
+#
+# BETTER_AUTH_SECRET signs session cookies and encrypts TOTP secrets. Generate
+# one with: openssl rand -base64 32
+# Absent => /api/auth and /v1/auth/* answer 503; admin routes are unaffected.
+# BETTER_AUTH_SECRET=""
+#
+# The Worker's own origin. Used for trustedOrigins, the WebAuthn rpId (its
+# hostname) and the Secure-cookie decision (https => secure). Local dev MUST be
+# http here or the browser refuses the __Secure- session cookie.
+AUTH_BASE_URL="http://127.0.0.1:8787"
+# Comma-separated extra origins allowed to call /api/auth (the console's origin).
+AUTH_TRUSTED_ORIGINS="http://127.0.0.1:8787"
+# Pin the WebAuthn rpId. Defaults to AUTH_BASE_URL's hostname; production pins
+# sohelahmedjony.workers.dev (AUTH_PLAN §3). Changing it invalidates passkeys.
+# AUTH_RP_ID="sohelahmedjony.workers.dev"

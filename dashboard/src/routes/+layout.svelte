@@ -3,10 +3,13 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { deleteSession, setUnauthorizedHandler } from '$lib/api';
-	import { formatAbsolute } from '$lib/format';
+	import { deleteSession, setUnauthorizedHandler, signOutAccount } from '$lib/api';
+	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
+	import { announcer } from '$lib/announce.svelte';
+	import { formatAbsolute, formatCount } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
+	import { consoleCounts } from '$lib/console-counts.svelte';
 	import Brand from '$lib/components/Brand.svelte';
 	import AlertBanner from '$lib/components/AlertBanner.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
@@ -17,29 +20,77 @@
 
 	let { children } = $props();
 
-	type NavItem = { href: string; label: string; icon: IconName; match?: string[] };
+	type CountKey = 'devices' | 'messages' | 'rules';
+	type NavItem = {
+		href: string;
+		label: string;
+		icon: IconName;
+		match?: string[];
+		count?: CountKey;
+		countWord?: string;
+	};
 
 	// Rules and workflows are two authored forms of one automation pipeline. The
 	// segmented control on those pages switches between them, so the rail carries
 	// a single entry instead of implying two unrelated features.
-	const nav: NavItem[] = [
-		{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
-		{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone' },
-		{ href: ROUTES.messages, label: 'Messages', icon: 'message' },
+	//
+	// Security is its own section because it answers a different question
+	// ("who did what") than the fleet does, and it is the one part of the rail a
+	// member must not see (AUTH_PLAN §5).
+	const sections: Array<{ label: string; items: NavItem[]; ownersOnly?: boolean }> = [
 		{
-			href: ROUTES.rules,
-			label: 'Automation',
-			icon: 'workflow',
-			match: [ROUTES.rules, ROUTES.workflows]
+			label: 'Console',
+			items: [
+				{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
+				{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone', count: 'devices', countWord: 'paired' },
+				{ href: ROUTES.messages, label: 'Messages', icon: 'message', count: 'messages', countWord: 'kept' },
+				{
+					href: ROUTES.rules,
+					label: 'Automation',
+					icon: 'workflow',
+					match: [ROUTES.rules, ROUTES.workflows],
+					count: 'rules',
+					countWord: 'authored'
+				}
+			]
+		},
+		{
+			label: 'Security',
+			ownersOnly: true,
+			items: [
+				{ href: ROUTES.audit, label: 'Audit log', icon: 'history' },
+				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield' }
+			]
 		}
 	];
 
+	const visibleSections = $derived(
+		sections.filter((section) => section.ownersOnly !== true || session.canViewSecurity)
+	);
+	const nav = $derived(visibleSections.flatMap((section) => section.items));
+
+	const COUNT_REFRESH_MS = 60_000;
+
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');
 	let loggingOut = $state(false);
-	let mobileNav = $state<HTMLElement | null>(null);
+	let topbarNav = $state<HTMLElement | null>(null);
 
 	const isLogin = $derived(
 		page.url.pathname === ROUTES.login || page.url.pathname === `${ROUTES.login}/`
+	);
+
+	// The account screens stand outside the shell: they are reached before there
+	// is a session to prove (login, invite, first passkey, a magic link).
+	const isPreauth = $derived(
+		isLogin ||
+			page.url.pathname === ROUTES.invite ||
+			page.url.pathname === `${ROUTES.invite}/` ||
+			page.url.pathname === ROUTES.enrol ||
+			page.url.pathname === `${ROUTES.enrol}/` ||
+			// A magic link opens before anyone is signed in, and the page must not
+			// spend the token on load — so it cannot run the session boot either.
+			page.url.pathname === ROUTES.magic ||
+			page.url.pathname === `${ROUTES.magic}/`
 	);
 
 	function isActive(item: NavItem): boolean {
@@ -56,6 +107,38 @@
 		);
 	}
 
+	const activeLabel = $derived(nav.find(isActive)?.label ?? 'Console');
+
+	/** The rail's section for the current page: the header names where you are. */
+	const activeSection = $derived(
+		visibleSections.find((section) => section.items.some(isActive))?.label ?? 'Console'
+	);
+
+	/** Who is signed in. The token gate has no user row, so it stays "Operator". */
+	const operatorName = $derived(
+		session.name ?? (session.authMode === 'legacy' ? 'Admin token' : 'Operator')
+	);
+	const operatorInitials = $derived.by(() => {
+		const source = session.name ?? session.email ?? '';
+		const parts = source.trim().split(/\s+/).filter(Boolean);
+		if (parts.length === 0) return 'OP';
+		if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+		return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+	});
+
+	function pillCount(item: NavItem): number | null {
+		if (!item.count) return null;
+		const value = consoleCounts[item.count];
+		// A zero pill is noise; the rail's job is to show what exists.
+		return value !== null && value > 0 ? value : null;
+	}
+
+	function linkLabel(item: NavItem): string | undefined {
+		const count = pillCount(item);
+		if (count === null || item.countWord === undefined) return undefined;
+		return `${item.label}, ${count} ${item.countWord}`;
+	}
+
 	function loginUrl(next?: string): string {
 		const target =
 			next && next.startsWith(`${BASE}/`) && next !== ROUTES.login ? next : undefined;
@@ -64,13 +147,17 @@
 
 	function handleUnauthorized() {
 		session.clear();
-		if (isLogin) return;
+		// A stale admin-token cookie survives a cutover: `/admin/session` still
+		// verifies it, but the `new` gate ignores it, so leaving it in place would
+		// bounce login → overview → login. Clearing it makes the next answer honest.
+		void deleteSession().catch(() => undefined);
+		if (isPreauth) return;
 		boot = 'ready';
 		void goto(ROUTES.login, { replaceState: true });
 	}
 
 	async function bootSession() {
-		if (isLogin) {
+		if (isPreauth) {
 			boot = 'ready';
 			return;
 		}
@@ -89,6 +176,9 @@
 	async function logout() {
 		loggingOut = true;
 		try {
+			// Whichever door was used, close it. The token cookie is cleared either
+			// way; the account session only exists under `new`.
+			if (session.authMode === 'new') await signOutAccount();
 			await deleteSession();
 		} catch {
 			// Leave the UI either way: the operator asked to end the session.
@@ -101,7 +191,32 @@
 	onMount(() => {
 		setUnauthorizedHandler(handleUnauthorized);
 		void bootSession();
-		return () => setUnauthorizedHandler(null);
+
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible' && !isPreauth) void consoleCounts.refresh();
+		}, COUNT_REFRESH_MS);
+		const onVisible = () => {
+			if (document.visibilityState === 'visible' && !isPreauth) void consoleCounts.refresh();
+		};
+		const onAlertsChanged = () => {
+			if (!isPreauth) void consoleCounts.refresh();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+		window.addEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+
+		return () => {
+			setUnauthorizedHandler(null);
+			clearInterval(timer);
+			document.removeEventListener('visibilitychange', onVisible);
+			window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
+		};
+	});
+
+	// One health read per navigation feeds the rail's pill counts. Overview pushes
+	// its own result into the same store, so the two never disagree.
+	$effect(() => {
+		void page.url.pathname;
+		if (boot === 'ready' && !isPreauth) void consoleCounts.refresh();
 	});
 
 	// Keep the current section in view inside the horizontally scrolling mobile
@@ -109,7 +224,7 @@
 	// edge with the next one fading in, instead of a row that starts at Overview.
 	$effect(() => {
 		void page.url.pathname;
-		const navEl = mobileNav;
+		const navEl = topbarNav;
 		if (!navEl) return;
 		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
 		if (!active) return;
@@ -123,6 +238,14 @@
 <svelte:head>
 	<meta name="robots" content="noindex, nofollow" />
 </svelte:head>
+
+<!-- The one polite live region: it exists before any notice text does, in
+     every branch, so writing into it is announced. -->
+<div class="sr-only" role="status" aria-live="polite">{announcer.text}</div>
+
+{#if boot === 'ready'}
+	<a class="skip" href="#main">Skip to content</a>
+{/if}
 
 {#if boot === 'checking'}
 	<div class="boot" aria-live="polite" aria-busy="true">
@@ -146,81 +269,161 @@
 			</div>
 		</div>
 	</div>
-{:else if isLogin}
-	{@render children()}
+{:else if isPreauth}
+	<main id="main" tabindex="-1">
+		{@render children()}
+	</main>
 {:else}
 	<div class="shell">
 		<aside class="rail">
 			<Brand />
 			<nav class="nav" aria-label="Main">
-				<p class="eyebrow nav-label">Console</p>
-				{#each nav as item (item.href)}
-					<a class="nav-link" href={item.href} aria-current={isActive(item) ? 'page' : undefined}>
-						<Icon name={item.icon} size={15} />
-						{item.label}
-					</a>
+				{#each visibleSections as section (section.label)}
+					<p class="nav-label">{section.label}</p>
+					{#each section.items as item (item.href)}
+						{@const count = pillCount(item)}
+						<a
+							class="nav-link"
+							href={item.href}
+							aria-current={isActive(item) ? 'page' : undefined}
+							aria-label={linkLabel(item)}
+						>
+							<Icon name={item.icon} size={20} />
+							{item.label}
+							{#if count !== null}
+								<span class="nav-pill" aria-hidden="true">{formatCount(count)}</span>
+							{/if}
+						</a>
+					{/each}
 				{/each}
 			</nav>
 
 			<div class="rail-foot">
-				<p class="session-line" title={session.expiresAt ? formatAbsolute(session.expiresAt) : undefined}>
-					<span class="session-dot"></span>
-					{#if session.expiresAt}
-						<span>session · <RelativeTime value={session.expiresAt} /></span>
-					{:else}
-						<span>session active</span>
-					{/if}
-				</p>
-				<div class="rail-actions">
-					<button
-						type="button"
-						class="btn btn-sm"
-						onclick={() => void logout()}
-						disabled={loggingOut}
-						aria-busy={loggingOut}
-					>
-						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={13} />{/if}
-						Sign out
-					</button>
-					<ThemeToggle />
+				<p class="nav-label">Operator</p>
+				<div class="operator">
+					<div class="operator-id">
+						<span class="operator-avatar" aria-hidden="true">{operatorInitials}</span>
+						<span class="operator-copy">
+							<span class="operator-name">{operatorName}</span>
+							<span
+								class="operator-meta"
+								title={session.email ?? (session.expiresAt ? formatAbsolute(session.expiresAt) : undefined)}
+							>
+								{#if session.role}
+									<span class="operator-role">{session.role}</span>
+									·
+								{/if}
+								{#if session.expiresAt}
+									expires <RelativeTime value={session.expiresAt} />
+								{:else}
+									session active
+								{/if}
+							</span>
+						</span>
+					</div>
 				</div>
 			</div>
 		</aside>
 
 		<div class="main-wrap">
-			<header class="mobile-bar">
-				<Brand />
-				<nav class="mobile-nav" aria-label="Main" bind:this={mobileNav}>
-					{#each nav as item (item.href)}
-						<a
-							class="nav-link"
-							href={item.href}
-							aria-current={isActive(item) ? 'page' : undefined}
-						>
-							<Icon name={item.icon} size={14} />
-							{item.label}
-						</a>
-					{/each}
-				</nav>
-				<div class="row" style="gap: 4px">
+			<header class="topbar">
+				<a class="topbar-brand" href={ROUTES.overview} aria-label="DakFlare overview">
+					<svg width="15" height="15" viewBox="18 18 72 72" aria-hidden="true" focusable="false">
+						<rect class="slab" x="41" y="40" width="26" height="42" rx="9" fill="currentColor" />
+						<path class="arc" d="M46.5 34a7.5 7.5 0 0 1 15 0" />
+					</svg>
+				</a>
+				<span class="topbar-brand-name">DakFlare</span>
+
+				<div class="topbar-context">
+					<span class="eyebrow">{activeSection}</span>
+					<span class="topbar-section">{activeLabel}</span>
+				</div>
+
+				<div class="topbar-actions">
 					<ThemeToggle />
 					<button
 						type="button"
-						class="btn btn-ghost btn-icon btn-sm"
+						class="btn btn-icon btn-sm"
 						onclick={() => void logout()}
 						disabled={loggingOut}
 						aria-label="Sign out"
 						title="Sign out"
 					>
-						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={14} />{/if}
+						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={16} />{/if}
 					</button>
 				</div>
 			</header>
 
-			<main class="main">
-				<AlertBanner />
+			<nav class="shell-tabs" aria-label="Main" bind:this={topbarNav}>
+				{#each nav as item (item.href)}
+					<a
+						class="nav-link"
+						href={item.href}
+						aria-current={isActive(item) ? 'page' : undefined}
+					>
+						<Icon name={item.icon} size={16} />
+						{item.label}
+					</a>
+				{/each}
+			</nav>
+
+			<AlertBanner />
+
+			<main class="main" id="main" tabindex="-1">
 				{@render children()}
 			</main>
 		</div>
 	</div>
 {/if}
+
+<style>
+	/* The console's first focusable control: hidden above the viewport until
+	   focused, then a real target at the top-left. */
+	.skip {
+		position: absolute;
+		left: var(--df-p-space-4);
+		top: calc(-1 * var(--df-p-space-8));
+		z-index: 100;
+		display: inline-flex;
+		align-items: center;
+		min-height: 44px;
+		padding: 0 var(--df-p-space-3);
+		background: var(--df-p-cream-100);
+		color: var(--df-p-umber-900);
+		border-radius: var(--df-p-radius-sm);
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+		text-decoration: none;
+	}
+
+	.skip:focus {
+		top: var(--df-p-space-3);
+		outline: 2px solid var(--df-p-coral-500);
+		outline-offset: 2px;
+		color: var(--df-p-umber-900);
+	}
+
+	/* Same drawing as Brand.svelte: the slab in the surrounding ink, the arc
+	   coral at the proportion the 27px plate uses. */
+	.topbar-brand .arc {
+		fill: none;
+		stroke: var(--df-p-coral-500);
+		stroke-width: 5.5;
+		stroke-linecap: round;
+	}
+
+	#main:focus {
+		outline: none;
+	}
+
+	/* The role word reads as a value, not as a sentence: mono, lower case,
+	   separated from the expiry by the same dot the rest of the rail uses. */
+	.operator-role {
+		font-size: 10px;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-secondary);
+	}
+</style>

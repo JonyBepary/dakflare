@@ -113,7 +113,7 @@
 			case 'body_mismatch':
 				return 'The message body does not match this rule.';
 			case 'shortcode_blocked':
-				return 'The sender is a shortcode, and shortcode replies are off for this rule.';
+				return 'The sender is a shortcode, and this rule does not reply to shortcodes.';
 			case 'cooldown':
 				return 'This rule is inside its cooldown window.';
 			case 'hourly_cap':
@@ -163,10 +163,11 @@
 </script>
 
 <section class="panel test-panel" aria-labelledby={titleId}>
-	<div class="panel-head">
-		<h3 class="panel-title" id={titleId}><Icon name="shield" size={14} /> Test saved rules</h3>
-		<span class="panel-meta">dry run · nothing is sent</span>
-		<span class="spacer"></span>
+	<div class="test-head">
+		<div class="test-heading">
+			<h3 class="test-title" id={titleId}>Test a message</h3>
+			<p class="test-note">Nothing is sent.</p>
+		</div>
 		<button type="button" class="btn btn-sm" onclick={toggle} aria-expanded={open}>
 			<Icon name={open ? 'x' : 'activity'} size={12} />
 			{open ? (onclose ? 'Close' : 'Hide') : 'Open test'}
@@ -174,11 +175,11 @@
 	</div>
 
 	{#if open}
-		<div class="panel-body test-body">
+		<div class="test-body">
 			{#if draftNotice}
 				<p class="draft-note">
-					Testing saved rules — save to include this one. This test never uses the unsaved form
-					values.
+					Tests the saved rules only — save this rule to include it. The unsaved values above are
+					not used.
 				</p>
 			{/if}
 
@@ -190,7 +191,7 @@
 				}}
 			>
 				<div class="field">
-					<span class="label">Test for</span>
+					<span class="label">Test on</span>
 					{#if scoped}
 						<div class="test-scope">
 							{#if scopedDevice && deviceLabel(scopedDevice)}
@@ -238,10 +239,10 @@
 				<div class="test-actions span-2">
 					<button type="submit" class="btn btn-primary btn-sm" disabled={running} aria-busy={running}>
 						{#if running}<Spinner />{:else}<Icon name="activity" size={12} />{/if}
-						Test saved rules
+						Run the test
 					</button>
 					<span class="hint">
-						Matchers only. Cooldowns and hourly caps are not applied to this test.
+						Checks the matchers only; cooldowns and hourly limits are not applied.
 					</span>
 				</div>
 			</form>
@@ -251,37 +252,43 @@
 			{/if}
 
 			{#if matches}
-				{#if matches.length === 0}
-					<p class="test-empty">No saved rules exist yet.</p>
-				{:else}
-					<ul class="test-matches">
-						{#each matches as match, index (match.rule_id)}
-							{@const wouldReply = index === firstMatchedIndex}
-							<li class="test-match" class:would-reply={wouldReply}>
-								<div class="test-match-head">
-									<span class="test-name">{ruleName(match)}</span>
-									{#if wouldReply}
-										<span class="test-verdict">would reply</span>
-									{/if}
-								</div>
-								<p class="hint">{reasonText(match, index)}</p>
-							</li>
-						{/each}
-					</ul>
-
-					{#if firstMatched && firstMatchedRule}
-						{#if firstMatchedRule.reply_template.trim()}
-							<div class="reply-preview">
-								<p class="eyebrow">Would send</p>
-								<p class="reply-text">{renderedReply ?? '(empty after substitution)'}</p>
-							</div>
-						{:else}
-							<p class="hint">This rule matches without sending a reply.</p>
-						{/if}
+				<div class="results" aria-live="polite">
+					{#if matches.length === 0}
+						<p class="test-empty">No rules exist yet.</p>
 					{:else}
-						<p class="test-empty">No saved rule would reply to this sample.</p>
+						<ul class="test-matches">
+							{#each matches as match, index (match.rule_id)}
+								{@const wouldReply = index === firstMatchedIndex}
+								<li class="test-match" class:would-reply={wouldReply}>
+									<div class="test-match-head">
+										<span class="test-name">{ruleName(match)}</span>
+										{#if wouldReply}
+											<span class="verdict">would reply</span>
+										{/if}
+									</div>
+									<p class="test-reason">{reasonText(match, index)}</p>
+								</li>
+							{/each}
+						</ul>
+
+						{#if firstMatched && firstMatchedRule}
+							{#if firstMatchedRule.reply_template.trim()}
+								<div class="reply-preview">
+									<p class="preview-label">Would send</p>
+									<p class="reply-text">
+										{renderedReply || 'The reply is empty after the values are filled in.'}
+									</p>
+								</div>
+							{:else}
+								<p class="hint">
+									This rule matches and sends no reply. Flows still run for that message.
+								</p>
+							{/if}
+						{:else}
+							<p class="test-empty">No rule would reply to this sample.</p>
+						{/if}
 					{/if}
-				{/if}
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -290,32 +297,67 @@
 <style>
 	.test-panel {
 		min-width: 0;
+		border-radius: var(--df-p-radius-lg);
+		/* The same panel sits in a 4-column rail and full width under the editor;
+		   the fields follow its own width, not the viewport's. */
+		container-type: inline-size;
 	}
 
-	.test-panel .panel-head {
+	.test-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
+		padding: var(--df-p-space-3) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		border-radius: var(--df-p-radius-lg) var(--df-p-radius-lg) 0 0;
+	}
+
+	.test-heading {
+		min-width: 0;
+	}
+
+	.test-title {
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.test-note {
+		margin-top: 2px;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.test-body {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-4);
 	}
 
 	.draft-note {
-		padding: 7px 9px;
-		border: 1px solid color-mix(in srgb, var(--warn) 28%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--warn) 6%, var(--surface));
-		color: var(--ink-2);
-		font-size: 11.5px;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-c-tint-edge-warn);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-warn-bg);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
 	}
 
 	.test-form {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-		gap: var(--s-3);
+		grid-template-columns: minmax(0, 1fr);
+		gap: var(--df-p-space-3);
+	}
+
+	@container (min-width: 520px) {
+		.test-form {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
 	}
 
 	.test-form .span-2 {
@@ -328,44 +370,50 @@
 		gap: 1px;
 		min-height: 34px;
 		justify-content: center;
-		padding: 4px 9px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		font-size: var(--text-base);
+		padding: 4px var(--df-p-space-2);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-base);
 	}
 
 	.test-scope .mono {
-		font-size: 10px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
 	.test-actions {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
+	}
+
+	.results {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-3);
 	}
 
 	.test-matches {
 		display: flex;
 		flex-direction: column;
-		gap: 0;
 		margin: 0;
 		padding: 0;
 		list-style: none;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
 		overflow: hidden;
-		max-height: 340px;
+		max-height: 320px;
 		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 
 	.test-match {
-		padding: 8px 10px;
-		border-bottom: 1px solid var(--line);
-		background: var(--surface);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-card);
 	}
 
 	.test-match:last-child {
@@ -373,63 +421,78 @@
 	}
 
 	.test-match.would-reply {
-		border-left: 2px solid var(--ok);
-		background: color-mix(in srgb, var(--ok) 5%, var(--surface));
+		background: var(--df-state-ok-bg);
+		box-shadow: inset 3px 0 0 var(--df-state-ok-ink);
 	}
 
 	.test-match-head {
 		display: flex;
 		align-items: baseline;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
 	.test-name {
-		font-size: var(--text-base);
-		font-weight: 500;
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
 	}
 
-	.test-verdict {
-		padding: 1px 5px;
-		border: 1px solid color-mix(in srgb, var(--ok) 32%, var(--line));
-		border-radius: 3px;
-		background: color-mix(in srgb, var(--ok) 9%, var(--surface));
-		color: var(--ok);
-		font-family: var(--font-mono);
-		font-size: 9px;
-		letter-spacing: 0.05em;
+	.verdict {
+		padding: 1px 7px;
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+		font-size: var(--df-p-text-2xs);
+		font-weight: 700;
+		line-height: 1.6;
+		white-space: nowrap;
+	}
+
+	.test-match.would-reply .verdict {
+		background: var(--df-surface-card);
+	}
+
+	.test-reason {
+		margin-top: 2px;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+	}
+
+	.preview-label {
+		font-size: var(--df-p-text-2xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
+		color: var(--df-text-meta);
 	}
 
 	.reply-preview {
-		padding: 10px;
-		border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+		padding: var(--df-p-space-3);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
 	}
 
 	.reply-text {
 		margin-top: 4px;
-		font-family: var(--font-mono);
-		font-size: 11.5px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-sm);
 		line-height: 1.5;
-		color: var(--ink-2);
+		color: var(--df-text-primary);
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
 
 	.test-empty {
-		font-size: var(--text-base);
-		color: var(--ink-3);
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-meta);
 	}
 
-	@media (max-width: 620px) {
-		.test-form {
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.test-form .span-2 {
-			grid-column: auto;
+	@media (prefers-reduced-motion: reduce) {
+		.test-matches {
+			scroll-behavior: auto;
 		}
 	}
 </style>

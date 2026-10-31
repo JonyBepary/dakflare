@@ -15,11 +15,14 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import {
   MAX_BODY_BYTES,
   MAX_BODY_CHARS,
+  MAX_IDEMPOTENCY_KEY_CHARS,
   MAX_OUTBOUND_COMMANDS,
   MAX_PEER_CHARS,
   clampExpiresInS,
@@ -36,7 +39,11 @@ interface CommandPayload {
 }
 
 /** `POST /v1/sms/send` (admin) — enqueue exactly one outbound SMS. */
-export async function handleSend(req: Request, env: Env): Promise<Response> {
+export async function handleSend(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -59,6 +66,23 @@ export async function handleSend(req: Request, env: Env): Promise<Response> {
   const expiresAt = Date.now() + clampExpiresInS(input.expires_in_s) * 1000;
   const priority = readPriority(input.priority);
 
+  // The key travels in the body, not a header, because the canonical string
+  // signs METHOD, PATH, timestamp, nonce and the body digest only. A header
+  // would be the one input to this call that the device's signature does not
+  // cover.
+  const rawKey = input.idempotency_key;
+  let idempotencyKey: string | null = null;
+  if (rawKey !== undefined && rawKey !== null) {
+    if (
+      typeof rawKey !== "string" ||
+      rawKey === "" ||
+      rawKey.length > MAX_IDEMPOTENCY_KEY_CHARS
+    ) {
+      return err("bad_request", 400);
+    }
+    idempotencyKey = rawKey;
+  }
+
   // Shared with the rules pipeline so the command id / message row pairing cannot
   // drift between an operator send and an automated reply.
   const queued = await enqueueOutboundCommand(env, {
@@ -68,14 +92,33 @@ export async function handleSend(req: Request, env: Env): Promise<Response> {
     body,
     priority,
     expiresAt,
+    idempotencyKey,
   });
-  if (!queued) return internalError();
+  if (!queued.ok) return internalError();
 
-  return Response.json({ command_id: commandId });
+  // A replay created nothing: the command and its message row already exist, and
+  // an audit row here would claim this call sent something.
+  if (queued.replayed) {
+    return Response.json({ command_id: queued.commandId, replayed: true });
+  }
+
+  // Metadata only: the recipient and the message body stay out of audit_log.
+  await writeAudit(env, {
+    action: "message.sent",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { command_id: queued.commandId, count: 1 },
+  });
+
+  return Response.json({ command_id: queued.commandId, replayed: false });
 }
 
 /** `POST /v1/sms/send/batch` (admin) — enqueue many outbound SMS in one DO call. */
-export async function handleSendBatch(req: Request, env: Env): Promise<Response> {
+export async function handleSendBatch(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
@@ -99,6 +142,12 @@ export async function handleSendBatch(req: Request, env: Env): Promise<Response>
     if (to.length > MAX_PEER_CHARS) return err("bad_request", 400);
     if (typeof body !== "string") return err("bad_request", 400);
     if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
+    // Refused here rather than at the Durable Object: the batch does not carry
+    // per-entry replay semantics yet, and this route rebuilds each entry, so a
+    // key would be dropped on the floor without a word.
+    if (item.idempotency_key !== undefined && item.idempotency_key !== null) {
+      return err("idempotency_key_not_supported_in_batch", 400);
+    }
     prepared.push({
       command_id: crypto.randomUUID(),
       to,
@@ -137,6 +186,13 @@ export async function handleSendBatch(req: Request, env: Env): Promise<Response>
       ).bind(command.command_id, deviceId, command.command_id, command.to, command.body, now)
     )
   );
+
+  await writeAudit(env, {
+    action: "message.sent",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { command_ids: prepared.map((c) => c.command_id), count: prepared.length },
+  });
 
   return Response.json({ command_ids: prepared.map((c) => c.command_id) });
 }

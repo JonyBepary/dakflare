@@ -14,9 +14,11 @@
 //!   reinstall but not a factory reset, and can be spoofed on a rooted device.
 //!   It exists for support and duplicate detection only.
 //!
-//! The private key is stored as PKCS#8 PEM in the local database. That is
-//! acceptable for a simulator whose whole purpose is to hold test identities on
-//! a developer machine; the Android build must move it to the Keystore.
+//! The private half is PKCS#8 PEM in memory and only ever signs from there. At
+//! rest the Android build stores it wrapped under a non-exportable
+//! AndroidKeyStore key (`keystore:v1:` — see [`crate::keyvault`]); a desktop
+//! build keeps the plaintext column, because a developer machine has no
+//! Keystore and the simulator's purpose is holding test identities there.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use p256::ecdsa::{SigningKey, VerifyingKey, signature::Signer};
@@ -94,6 +96,21 @@ fn generate_device_id() -> Result<String, IdentityError> {
     Ok(id)
 }
 
+/// The base64 DER SubjectPublicKeyInfo for a PKCS#8 private key.
+///
+/// This is the proof the vault's migration publishes before it overwrites a
+/// plaintext key: unwrapping the blob must yield a key whose public half is
+/// byte-for-byte the SPKI already registered with the Worker.
+pub fn public_key_spki_b64(private_key_pkcs8_pem: &str) -> Result<String, IdentityError> {
+    let signing_key = SigningKey::from_pkcs8_pem(private_key_pkcs8_pem)
+        .map_err(|e| IdentityError::Encoding(e.to_string()))?;
+    let spki = signing_key
+        .verifying_key()
+        .to_public_key_der()
+        .map_err(|e| IdentityError::Encoding(e.to_string()))?;
+    Ok(STANDARD.encode(spki.as_bytes()))
+}
+
 /// Sign a canonical request string, returning the base64 IEEE-P1363 signature.
 ///
 /// P1363 (`r || s`, 64 bytes) is what WebCrypto and the Worker expect; this is
@@ -158,6 +175,16 @@ mod tests {
 
         assert!(verify_p1363(&id.public_key_spki_b64, canonical, &signature).unwrap());
         assert!(!verify_p1363(&id.public_key_spki_b64, "tampered", &signature).unwrap());
+    }
+
+    #[test]
+    fn public_key_spki_can_be_derived_from_the_private_half() {
+        let id = generate_identity().unwrap();
+        // The vault's migration publishes this before it overwrites a key.
+        assert_eq!(
+            public_key_spki_b64(&id.private_key_pkcs8_pem).unwrap(),
+            id.public_key_spki_b64
+        );
     }
 
     #[test]

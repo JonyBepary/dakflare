@@ -101,7 +101,11 @@
 			<span class="alert-mark" aria-hidden="true"><Icon name="alert" size={15} /></span>
 			<div class="alert-copy">
 				<h2 id="open-alerts-title">
-					{deviceCount} {deviceWord} {deviceCount === 1 ? 'has' : 'have'} not been heard from
+					{#if deviceCount === 1 && newest}
+						{alertName(newest)} has not been heard from
+					{:else}
+						{deviceCount} {deviceWord} {deviceCount === 1 ? 'has' : 'have'} not been heard from
+					{/if}
 				</h2>
 				{#if newest && deviceCount > 1}
 					<p class="alert-meta">
@@ -162,38 +166,24 @@
 {:else if error}
 	<div class="alert-check" role="status">
 		<Icon name="info" size={13} />
-		<span>Alert check unavailable. {error}</span>
+		<span>The console could not check for alerts. {error}</span>
 		<button type="button" class="link-btn" onclick={() => void load()}>Retry</button>
 	</div>
 {/if}
 
 <style>
+	/* Full-bleed band under the header: 04 §4.5. No entrance animation —
+	   DESIGN_2026 §2 forbids motion on the alert path. */
 	.alert-banner {
-		margin-bottom: var(--s-4);
-		border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
-		border-left-width: 3px;
-		border-left-color: var(--danger);
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--danger) 6%, var(--surface));
-		animation: alert-in 220ms ease both;
-	}
-
-	@keyframes alert-in {
-		from {
-			opacity: 0;
-			transform: translateY(-3px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
+		border-bottom: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 22%, transparent);
+		background: var(--df-state-danger-bg);
 	}
 
 	.alert-head {
 		display: flex;
 		align-items: flex-start;
 		gap: 10px;
-		padding: 10px 12px;
+		padding: 13px var(--df-c-shell-gutter);
 	}
 
 	.alert-mark {
@@ -202,10 +192,10 @@
 		width: 26px;
 		height: 26px;
 		flex: none;
-		border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--danger) 9%, var(--surface));
-		color: var(--danger);
+		border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 26%, transparent);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-state-danger-ink);
 	}
 
 	.alert-copy {
@@ -214,45 +204,46 @@
 	}
 
 	.alert-copy h2 {
-		font-size: var(--text-base);
-		font-weight: 600;
-		color: var(--ink);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		color: var(--df-text-primary);
 		line-height: 1.35;
 	}
 
 	.alert-meta {
 		margin-top: 2px;
-		font-size: 11.5px;
+		font-size: var(--df-p-text-base);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 	}
 
 	.alert-device-link {
-		color: var(--ink-2);
-		font-weight: 500;
+		color: var(--df-text-primary);
+		font-weight: 600;
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
 	.alert-device-link:hover {
-		color: var(--accent);
+		color: var(--df-accent-text);
 	}
 
 	.alert-list {
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		border-top: 1px solid color-mix(in srgb, var(--danger) 18%, var(--line));
+		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 18%, transparent);
 	}
 
 	.alert-row {
 		display: flex;
 		align-items: center;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		flex-wrap: wrap;
-		padding: 7px 12px;
-		border-bottom: 1px solid color-mix(in srgb, var(--danger) 12%, var(--line));
+		padding: 9px var(--df-c-shell-gutter);
+		border-bottom: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
 	}
 
 	.alert-row:last-child {
@@ -267,15 +258,15 @@
 	}
 
 	.alert-device .mono {
-		font-size: 10px;
-		color: var(--ink-3);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
 		overflow-wrap: anywhere;
 	}
 
 	.alert-age {
-		font-family: var(--font-mono);
-		font-size: 10px;
-		color: var(--ink-3);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
 		white-space: nowrap;
 	}
 
@@ -285,19 +276,19 @@
 
 	.alert-more,
 	.alert-error {
-		padding: 7px 12px;
-		font-size: 11px;
+		padding: 8px var(--df-c-shell-gutter);
+		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
-		color: var(--ink-3);
+		color: var(--df-text-secondary);
 	}
 
 	.alert-more {
-		border-top: 1px solid color-mix(in srgb, var(--danger) 12%, var(--line));
+		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
 	}
 
 	.alert-error {
-		border-top: 1px solid color-mix(in srgb, var(--danger) 18%, var(--line));
-		color: var(--danger);
+		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 18%, transparent);
+		color: var(--df-state-danger-ink);
 	}
 
 	.alert-check {
@@ -305,27 +296,18 @@
 		align-items: center;
 		gap: 7px;
 		flex-wrap: wrap;
-		margin-bottom: var(--s-4);
-		padding: 7px 10px;
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		font-size: 11.5px;
-		color: var(--ink-3);
+		padding: 8px var(--df-c-shell-gutter);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 	}
 
 	@media (max-width: 620px) {
-		.alert-head {
-			padding: 9px 10px;
-		}
-
-		.alert-row {
-			padding: 7px 10px;
-		}
-
 		.alert-row .btn {
 			margin-left: 0;
 			width: 100%;
+			min-height: 44px;
 		}
 
 		.alert-check {

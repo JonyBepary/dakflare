@@ -10,7 +10,7 @@
 	}: { tone?: Tone; dot?: boolean; children?: Snippet } = $props();
 </script>
 
-<span class="badge badge-{tone}">
-	{#if dot}<span class="badge-dot"></span>{/if}
+<span class="chip" data-tone={tone}>
+	{#if dot}<span class="chip-dot"></span>{/if}
 	{#if children}{@render children()}{/if}
 </span>

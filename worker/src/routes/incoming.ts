@@ -31,10 +31,9 @@ import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
 import { enqueueOutboundCommand } from "../lib/commands";
 import {
   evaluateRules,
-  renderReplyTemplate,
   type RuleHit,
   type RuleRecord,
-} from "../rules/evaluate";
+} from "../lib/rule-graph";
 import { RE_WORKFLOW_ID } from "../lib/workflow";
 import {
   MAX_ACK_IDS,
@@ -46,11 +45,53 @@ import {
 } from "../lib/config";
 
 /** §17: accept `received_at` inside [now - 30 days, now + 1 day]. */
-const RECEIVED_AT_PAST_MS = 30 * 24 * 60 * 60 * 1000;
+// A gateway that was switched off for months still has real messages to hand
+// over. The guard is for nonsense (epoch 0, a typo), not for an old phone.
+const RECEIVED_AT_PAST_MS = 180 * 24 * 60 * 60 * 1000;
 const RECEIVED_AT_FUTURE_MS = 24 * 60 * 60 * 1000;
 
 /** Upper bound on device-reported flow runs per batch (500 messages max anyway). */
 const MAX_FLOW_RUN_REPORTS = 1_000;
+
+/**
+ * `reply_error` is operator-facing prose. The contract caps it at 200 characters
+ * so one device cannot put a paragraph in every console row.
+ */
+const MAX_REPLY_ERROR_CHARS = 200;
+
+/** Every state a device may report for an outbound SMS (contract §11.10). */
+const REPLY_STATES = ["queued", "sent", "failed", "delivered"] as const;
+type ReplyState = (typeof REPLY_STATES)[number];
+
+function isReplyState(value: unknown): value is ReplyState {
+  return typeof value === "string" && (REPLY_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * Read the optional `state`/`error` pair from an outbound entry.
+ *
+ * `null` means "the client did not report it"; an unknown state or a non-string
+ * error is a client contract violation and must fail the batch, never be
+ * silently dropped — a reply whose state was discarded is exactly the
+ * unanswered-looking row this endpoint exists to prevent.
+ */
+function readReplyState(
+  row: Record<string, unknown>
+): { state: ReplyState | null; error: string | null } | null {
+  let state: ReplyState | null = null;
+  if (row.state !== undefined && row.state !== null) {
+    if (!isReplyState(row.state)) return null;
+    state = row.state;
+  }
+
+  let error: string | null = null;
+  if (row.error !== undefined && row.error !== null) {
+    if (typeof row.error !== "string") return null;
+    error = row.error.slice(0, MAX_REPLY_ERROR_CHARS);
+  }
+
+  return { state, error };
+}
 
 interface ReportedRun {
   localId: string;
@@ -68,6 +109,10 @@ interface ValidatedMessage {
   autoReply: number;
   /** "in" (default) or "out" for a message the DEVICE sent itself. */
   direction: "in" | "out";
+  /** Null for inbound rows and for clients that predate state reporting. */
+  replyState: ReplyState | null;
+  /** Only meaningful with `replyState === "failed"`; capped at 200 chars. */
+  replyError: string | null;
 }
 
 /** A newly inserted inbound row, after D1 has confirmed the insert. */
@@ -100,6 +145,13 @@ export async function handleIncomingBatch(
   if (!Array.isArray(messages)) return err("bad_request", 400);
   // Unbounded arrays are unbounded D1 statements, DO work and billable rows.
   if (messages.length > MAX_INCOMING_MESSAGES) return err("bad_request", 400);
+
+  // §11.10 outbound history may travel as `outbound[]` (the frozen console
+  // contract) or, for older clients, as `messages[]` entries with
+  // `direction: "out"`. Both are validated identically below.
+  const outbound = data.outbound ?? [];
+  if (!Array.isArray(outbound)) return err("bad_request", 400);
+  if (messages.length + outbound.length > MAX_INCOMING_MESSAGES) return err("bad_request", 400);
 
   const ackCommandIds: string[] = [];
   if (data.ack_command_ids !== undefined) {
@@ -171,6 +223,20 @@ export async function handleIncomingBatch(
     const direction = rawDirection === undefined ? "in" : rawDirection;
     if (direction !== "in" && direction !== "out") return err("bad_request", 400);
 
+    // Per-message state only describes an outbound send. On an inbound row it
+    // is a client bug, and storing it would make the console claim a received
+    // message had a delivery state.
+    let replyState: ReplyState | null = null;
+    let replyError: string | null = null;
+    if (direction === "out") {
+      const parsed = readReplyState(row);
+      if (parsed === null) return err("bad_request", 400);
+      replyState = parsed.state;
+      replyError = parsed.error;
+    } else if (row.state !== undefined || row.error !== undefined) {
+      return err("bad_request", 400);
+    }
+
     const body = row.body;
     if (typeof body !== "string") return err("bad_request", 400);
     if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
@@ -199,6 +265,55 @@ export async function handleIncomingBatch(
       receivedAt,
       autoReply: row.auto_reply_sent || row.auto_reply ? 1 : 0,
       direction,
+      replyState,
+      replyError,
+    });
+  }
+
+  // The frozen `outbound[]` shape { local_id, to, body, sent_at, state?, error? }.
+  // It carries the same rows as `direction: "out"` and resolves to the same
+  // `(device_id, local_id)` dedupe key.
+  for (const entry of outbound) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return err("bad_request", 400);
+    }
+    const row = entry as Record<string, unknown>;
+
+    const localId = row.local_id;
+    if (typeof localId !== "string" || localId === "") return err("bad_request", 400);
+    if (localId.length > MAX_ID_CHARS) return err("bad_request", 400);
+
+    const to = row.to;
+    if (typeof to !== "string" || to === "") return err("bad_request", 400);
+    if (to.length > MAX_PEER_CHARS) return err("bad_request", 400);
+
+    const body = row.body;
+    if (typeof body !== "string") return err("bad_request", 400);
+    if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
+
+    const sentAtRaw = row.sent_at;
+    if (typeof sentAtRaw !== "string" && typeof sentAtRaw !== "number") {
+      return err("bad_request", 400);
+    }
+    const sentAt = typeof sentAtRaw === "number" ? sentAtRaw : Date.parse(sentAtRaw);
+    if (!Number.isFinite(sentAt)) return err("bad_request", 400);
+    if (sentAt < now - RECEIVED_AT_PAST_MS || sentAt > now + RECEIVED_AT_FUTURE_MS) {
+      return err("bad_request", 400);
+    }
+
+    const parsed = readReplyState(row);
+    if (parsed === null) return err("bad_request", 400);
+
+    validated.push({
+      id: crypto.randomUUID(),
+      localId,
+      peer: to,
+      body,
+      receivedAt: sentAt,
+      autoReply: 0,
+      direction: "out",
+      replyState: parsed.state,
+      replyError: parsed.error,
     });
   }
 
@@ -233,26 +348,56 @@ export async function handleIncomingBatch(
       return err("storage_unavailable", 503);
     }
 
-    const stmt = env.DB.prepare(
+    // Inbound rows keep the original "insert once" rule: a replay must not
+    // overwrite automation bookkeeping such as auto_reply/reply_source.
+    const inboundStmt = env.DB.prepare(
       `INSERT INTO messages
          (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(device_id, local_id) DO NOTHING`
     );
+    // Outbound rows are an upsert: the SAME (device_id, local_id) row goes
+    // `queued` → `sent` → `delivered` (or `failed`) as the radio reports it.
+    // The WHERE makes an identical replay a no-op, so `meta.changes` still
+    // distinguishes "written" from "already there", and a collision with an
+    // inbound row of the same local_id can never rewrite its state.
+    const outboundStmt = env.DB.prepare(
+      `INSERT INTO messages
+         (id, device_id, local_id, direction, peer, body, received_at, auto_reply,
+          reply_state, reply_error)
+       VALUES (?, ?, ?, 'out', ?, ?, ?, 0, ?, ?)
+       ON CONFLICT(device_id, local_id) DO UPDATE SET
+         reply_state = excluded.reply_state,
+         reply_error = excluded.reply_error
+       WHERE messages.direction = 'out'
+         AND (messages.reply_state IS NOT excluded.reply_state
+              OR messages.reply_error IS NOT excluded.reply_error)`
+    );
     let results: D1Result[];
     try {
       results = await env.DB.batch(
         validated.map((m) =>
-          stmt.bind(
-            m.id,
-            deviceId,
-            m.localId,
-            m.direction,
-            m.peer,
-            m.body,
-            m.receivedAt,
-            m.autoReply
-          )
+          m.direction === "in"
+            ? inboundStmt.bind(
+                m.id,
+                deviceId,
+                m.localId,
+                m.direction,
+                m.peer,
+                m.body,
+                m.receivedAt,
+                m.autoReply
+              )
+            : outboundStmt.bind(
+                m.id,
+                deviceId,
+                m.localId,
+                m.peer,
+                m.body,
+                m.receivedAt,
+                m.replyState,
+                m.replyError
+              )
         )
       );
     } catch (error) {
@@ -265,11 +410,14 @@ export async function handleIncomingBatch(
     const acceptedMessages: AcceptedMessage[] = [];
     const acceptedInbound: AcceptedInbound[] = [];
     for (let i = 0; i < results.length; i++) {
-      // `meta.changes` is 0 when `ON CONFLICT DO NOTHING` skipped the row.
+      // `meta.changes` is 0 when an inbound `DO NOTHING` skipped the row, or
+      // when an outbound upsert matched the same state it already held.
       if ((results[i].meta?.changes ?? 0) > 0) {
         accepted++;
         const row = validated[i];
-        // Outbound mirror rows are history, not triggers.
+        // Outbound mirror rows are history, not triggers. A `failed` row is
+        // logged like any other, but it never enters the rules/flows pipeline,
+        // so `auto_reply_sent` semantics stay exactly as they were.
         if (row.direction === "in") {
           const acceptedRow: AcceptedInbound = {
             id: row.id,
@@ -398,7 +546,7 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
 
   const rows = await env.DB.prepare(
     `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply,
-            reply_source, reply_ref, reply_command_id
+            reply_source, reply_ref, reply_command_id, reply_state, reply_error
        FROM messages
       WHERE device_id = ? AND received_at < ?
       ORDER BY received_at DESC, id DESC
@@ -457,7 +605,7 @@ async function applyRules(
   const hits: RuleHit[] = [...(hitRows.results ?? [])];
 
   for (const message of messages) {
-    const evaluations = evaluateRules(
+    const evaluations = await evaluateRules(
       rules,
       { peer: message.sender, body: message.body },
       { deviceId, now, hits }
@@ -466,11 +614,7 @@ async function applyRules(
     for (const evaluation of evaluations) {
       if (!evaluation.matched) continue;
 
-      const replyBody = renderReplyTemplate(evaluation.rule.reply_template, {
-        sender: message.sender,
-        body: message.body,
-        matched: evaluation.matched_text,
-      }).slice(0, MAX_BODY_CHARS);
+      const replyBody = evaluation.reply_body.slice(0, MAX_BODY_CHARS);
       // The console documents an empty template as "match without sending a reply".
       if (replyBody.trim() === "") continue;
 
@@ -485,7 +629,8 @@ async function applyRules(
       });
       // A DO failure is not a reason to try lower-priority rules: the queue as a
       // whole is unavailable. Leave the message unanswered so flows may still run.
-      if (!queued) break;
+      // A rules reply never carries an idempotency key, so `replayed` is false.
+      if (!queued.ok) break;
 
       try {
         await env.DB.batch([

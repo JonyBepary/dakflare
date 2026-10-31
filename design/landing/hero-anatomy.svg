@@ -1,0 +1,569 @@
+<svg id="dakflareIsoSvg" viewBox="0 0 880 560" class="iso-anatomy" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Interactive isometric diagram connecting Operator, Cloudflare Edge, Android Handset, Cellular Network, and Peer Mobile">
+          <defs>
+            <!-- Soft Ground Ambient Shadows -->
+            <filter id="plinthShadow" x="-25%" y="-25%" width="150%" height="160%">
+              <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#857a6b" flood-opacity="0.22"/>
+            </filter>
+            <filter id="phoneShadow" x="-30%" y="-20%" width="160%" height="160%">
+              <feDropShadow dx="0" dy="6" stdDeviation="5" flood-color="#241f1a" flood-opacity="0.28"/>
+            </filter>
+            <filter id="cyanPadGlow" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="7" result="blur"/>
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+            <filter id="orangePacketGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="3.5" result="blur"/>
+              <feMerge>
+                <feMergeNode in="blur"/>
+                <feMergeNode in="SourceGraphic"/>
+              </feMerge>
+            </filter>
+
+            <!-- Plinth Four-Tone Gradients -->
+            <linearGradient id="plinthTop" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#fffdf8"/>
+              <stop offset="100%" stop-color="#fbf6ee"/>
+            </linearGradient>
+            <linearGradient id="plinthLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#f6efe3"/>
+              <stop offset="100%" stop-color="#ede3d3"/>
+            </linearGradient>
+            <linearGradient id="plinthRight" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#e7dccb"/>
+              <stop offset="100%" stop-color="#d3c4ac"/>
+            </linearGradient>
+
+            <!-- Server Blade Gradients -->
+            <linearGradient id="bladeTop" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#fffdf8"/>
+              <stop offset="100%" stop-color="#fbf6ee"/>
+            </linearGradient>
+            <linearGradient id="bladeLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#f6efe3"/>
+              <stop offset="100%" stop-color="#e7dccb"/>
+            </linearGradient>
+            <linearGradient id="bladeRight" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#ede3d3"/>
+              <stop offset="100%" stop-color="#d3c4ac"/>
+            </linearGradient>
+
+            <!-- Translucent Glass Enclosure Gradients -->
+            <linearGradient id="edgeGlassFill" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#fffdf8" stop-opacity="0.58"/>
+              <stop offset="55%" stop-color="#fbf6ee" stop-opacity="0.34"/>
+              <stop offset="100%" stop-color="#f6efe3" stop-opacity="0.46"/>
+            </linearGradient>
+            <linearGradient id="edgeGlassStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#e7dccb" stop-opacity="0.9"/>
+              <stop offset="50%" stop-color="#d3c4ac" stop-opacity="0.65"/>
+              <stop offset="100%" stop-color="#e7dccb" stop-opacity="0.85"/>
+            </linearGradient>
+
+            <!-- Handset Body Gradients -->
+            <linearGradient id="phoneBodyLeft" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stop-color="#3a3129"/>
+              <stop offset="100%" stop-color="#241f1a"/>
+            </linearGradient>
+            <linearGradient id="phoneScreen" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#1c1814"/>
+              <stop offset="50%" stop-color="#14110e"/>
+              <stop offset="100%" stop-color="#0b0a08"/>
+            </linearGradient>
+
+            <!-- Reusable Isometric Arrowhead Markers -->
+            <marker id="isoArrowOrange" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M 1 1.8 L 8.8 5 L 1 8.2 z" fill="#d9502c"/>
+            </marker>
+            <marker id="isoArrowOrangeSoft" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 2 L 8.5 5 L 1 8 z" fill="#c9482a"/>
+            </marker>
+          </defs>
+
+          <!-- ========================================================================= -->
+          <!-- LAYER 1: FLOOR SHADOWS & CONNECTING ISOMETRIC SIGNAL LINES                -->
+          <!-- ========================================================================= -->
+          <g id="isoSignalNetwork">
+            <!-- 1A. Operator Tablet -> Cloudflare Edge Upper Dashed Path -->
+            <path id="pathOpToEdgeTop"
+              d="M 184 238 L 246 202"
+              stroke="#d9502c" stroke-width="1.5" stroke-dasharray="4 3.5"
+              marker-end="url(#isoArrowOrange)" fill="none" class="flow-line-active" />
+
+            <!-- Internal glass routing trace from entry port to top blade -->
+            <path d="M 252 200 L 274 212 L 296 199"
+              stroke="#ff9b7a" stroke-width="1.2" stroke-dasharray="3 3"
+              marker-end="url(#isoArrowOrangeSoft)" fill="none" opacity="0.85" />
+
+            <!-- 1B. Operator Plinth -> Cloudflare Edge Lower Path -->
+            <path id="pathOpToEdgeBottom"
+              d="M 192 385 L 254 348"
+              stroke="#d9502c" stroke-width="1.5" stroke-dasharray="5 3.5"
+              marker-end="url(#isoArrowOrange)" fill="none" class="flow-line-active" />
+
+            <!-- 2. Cloudflare Edge -> Android Handset Multi-Trace Conduit Routing -->
+            <!-- Main stepped isometric bus trace -->
+            <path id="pathEdgeToHandsetMain"
+              d="M 380 282 L 414 262 L 414 295 L 368 322 L 424 354"
+              stroke="#d9502c" stroke-width="1.5" stroke-dasharray="4 3.5"
+              marker-end="url(#isoArrowOrange)" fill="none" class="flow-line-active" />
+            <!-- Secondary parallel signal trace with junction dots -->
+            <path d="M 358 310 L 395 289 L 418 302"
+              stroke="#ff9b7a" stroke-width="1.2" stroke-dasharray="2.5 2.5" fill="none" opacity="0.85" />
+            <circle cx="384" cy="313" r="2.2" fill="#d9502c" />
+            <circle cx="395" cy="289" r="2" fill="#c9482a" />
+            <circle cx="368" cy="322" r="2.2" fill="#d9502c" />
+
+            <!-- 3. Android Handset <-> Cellular Network Bidirectional Isometric Link -->
+            <path id="pathHandsetToCell"
+              d="M 505 314 L 566 278"
+              stroke="#d9502c" stroke-width="1.6" stroke-dasharray="4.5 3.5"
+              marker-start="url(#isoArrowOrange)" marker-end="url(#isoArrowOrange)"
+              fill="none" class="flow-line-bidir" />
+
+            <!-- 4. Cellular Network <-> Peer Mobile Bidirectional Isometric Link -->
+            <path id="pathCellToPeer"
+              d="M 656 277 L 728 319"
+              stroke="#d9502c" stroke-width="1.6" stroke-dasharray="4.5 3.5"
+              marker-start="url(#isoArrowOrange)" marker-end="url(#isoArrowOrange)"
+              fill="none" class="flow-line-bidir" />
+            <!-- Subtle parallel ground guide under Cell-to-Peer link -->
+            <path d="M 662 288 L 722 323"
+              stroke="#ff9b7a" stroke-width="1" stroke-dasharray="2 3" fill="none" opacity="0.55" />
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- STATION 2 (BACK-CENTER): CLOUDFLARE EDGE GLASS ENCLOSURE & 4 BLADE STACK  -->
+          <!-- ========================================================================= -->
+          <g id="station-edge" class="iso-station" data-station="edge">
+            <!-- Ground ambient shadow under Edge Enclosure -->
+            <polygon points="334,158 430,213 310,283 214,228" fill="#ede3d3" opacity="0.52" filter="blur(8px)" />
+
+            <!-- Translucent Back Glass Walls -->
+            <g id="edgeGlassBack">
+              <!-- Back-Right Glass Wall -->
+              <path d="M 332 70 L 418 120 L 418 265 L 332 215 Z"
+                fill="url(#edgeGlassFill)" stroke="url(#edgeGlassStroke)" stroke-width="1.2" opacity="0.65" />
+              <!-- Internal Server Rack Dark Base Pad -->
+              <polygon points="342,226 402,261 342,296 282,261" fill="#857a6b" stroke="#5b5348" stroke-width="1" />
+              <polygon points="282,261 342,296 342,303 282,268" fill="#5b5348" />
+              <polygon points="402,261 342,296 342,303 402,268" fill="#3a3129" />
+            </g>
+
+            <!-- 4-TIER SERVER BLADE STACK (Painted Bottom-to-Top for exact depth order) -->
+            <!-- BLADE 4 (Bottom: Durable Objects) -->
+            <g id="blade-4" class="iso-blade" data-blade="Durable Objects" data-blade-desc="Stateful WebSocket coordinator maintaining persistent per-device session channels with sub-millisecond wakeups.">
+              <!-- Top face -->
+              <polygon points="342,208 398,240 342,272 286,240" fill="url(#bladeTop)" stroke="#6b6153" stroke-width="0.9" />
+              <!-- Left face -->
+              <polygon points="286,240 342,272 342,288 286,256" fill="url(#bladeLeft)" stroke="#6b6153" stroke-width="0.9" />
+              <!-- Right face -->
+              <polygon points="398,240 342,272 342,288 398,256" fill="url(#bladeRight)" stroke="#6b6153" stroke-width="0.9" />
+              <!-- Left face LEDs & vent slots -->
+              <circle cx="296" cy="253" r="2.1" fill="#d9502c" />
+              <circle cx="303" cy="257" r="1.8" fill="#ff9b7a" />
+              <line x1="312" y1="262" x2="334" y2="275" stroke="#857a6b" stroke-width="2" stroke-linecap="round" />
+              <!-- Right face orange bus ports -->
+              <polygon points="354,271 366,264 366,270 354,277" fill="#d9502c" />
+              <polygon points="374,260 384,254 384,260 374,266" fill="#d9502c" />
+            </g>
+
+            <!-- BLADE 3 (KV Cache) -->
+            <g id="blade-3" class="iso-blade" data-blade="KV (Cache)" data-blade-desc="Low-latency edge key-value store caching device public keys, rate-limit tokens, and routing metadata across 300+ PoPs.">
+              <polygon points="342,184 398,216 342,248 286,216" fill="url(#bladeTop)" stroke="#6b6153" stroke-width="0.9" />
+              <polygon points="286,216 342,248 342,264 286,232" fill="url(#bladeLeft)" stroke="#6b6153" stroke-width="0.9" />
+              <polygon points="398,216 342,248 342,264 398,232" fill="url(#bladeRight)" stroke="#6b6153" stroke-width="0.9" />
+              <circle cx="296" cy="229" r="2.1" fill="#d9502c" />
+              <circle cx="303" cy="233" r="1.8" fill="#7d9354" />
+              <line x1="312" y1="238" x2="334" y2="251" stroke="#857a6b" stroke-width="2" stroke-linecap="round" />
+              <polygon points="354,247 366,240 366,246 354,253" fill="#d9502c" />
+              <polygon points="374,236 384,230 384,236 374,242" fill="#d9502c" />
+            </g>
+
+            <!-- BLADE 2 (D1 Database) -->
+            <g id="blade-2" class="iso-blade" data-blade="D1 (Database)" data-blade-desc="Serverless SQLite database storing encrypted message delivery receipts, webhook audit logs, and retry state.">
+              <polygon points="342,160 398,192 342,224 286,192" fill="url(#bladeTop)" stroke="#6b6153" stroke-width="0.9" />
+              <polygon points="286,192 342,224 342,240 286,208" fill="url(#bladeLeft)" stroke="#6b6153" stroke-width="0.9" />
+              <polygon points="398,192 342,224 342,240 398,208" fill="url(#bladeRight)" stroke="#6b6153" stroke-width="0.9" />
+              <circle cx="296" cy="205" r="2.1" fill="#d9502c" />
+              <circle cx="303" cy="209" r="1.8" fill="#ff9b7a" />
+              <line x1="312" y1="214" x2="334" y2="227" stroke="#857a6b" stroke-width="2" stroke-linecap="round" />
+              <polygon points="354,223 366,216 366,222 354,229" fill="#d9502c" />
+              <polygon points="374,212 384,206 384,212 374,218" fill="#d9502c" />
+            </g>
+
+            <!-- BLADE 1 (Top: Workers + Top Embossed Badge) -->
+            <g id="blade-1" class="iso-blade" data-blade="Workers" data-blade-desc="Edge V8 isolates handling REST/CLI API ingestion, signature verification, and instant webhook dispatch in <2 ms.">
+              <polygon points="342,136 398,168 342,200 286,168" fill="url(#bladeTop)" stroke="#6b6153" stroke-width="0.9" />
+              <!-- Inner recessed panel on top blade -->
+              <polygon points="342,142 388,168 342,194 296,168" fill="#fffdf8" stroke="#d3c4ac" stroke-width="0.7" />
+              <!-- Orange diamond emblem on top blade -->
+              <polygon points="342,157 358,166 342,175 326,166" fill="#d9502c" />
+              <polygon points="342,161 350,166 342,171 334,166" fill="#fffdf8" />
+              <!-- Left face -->
+              <polygon points="286,168 342,200 342,216 286,184" fill="url(#bladeLeft)" stroke="#6b6153" stroke-width="0.9" />
+              <!-- Right face -->
+              <polygon points="398,168 342,200 342,216 398,184" fill="url(#bladeRight)" stroke="#6b6153" stroke-width="0.9" />
+              <circle cx="296" cy="181" r="2.1" fill="#d9502c" />
+              <circle cx="303" cy="185" r="1.8" fill="#7d9354" />
+              <line x1="312" y1="190" x2="334" y2="203" stroke="#857a6b" stroke-width="2" stroke-linecap="round" />
+              <polygon points="354,199 366,192 366,198 354,205" fill="#d9502c" />
+              <polygon points="374,188 384,182 384,188 374,194" fill="#d9502c" />
+            </g>
+
+            <!-- Translucent Front-Left Glass Enclosure & Skewed Isometric Header -->
+            <g id="edgeGlassFront" class="transition-transform duration-500">
+              <!-- Front-Left Main Glass Face -->
+              <path d="M 218 136 Q 218 124 228 118 L 324 63 Q 334 57 344 63 L 408 100 Q 416 105 416 115 L 416 258 Q 416 268 406 274 L 310 329 Q 300 335 290 329 L 226 292 Q 218 287 218 275 Z"
+                fill="url(#edgeGlassFill)" stroke="url(#edgeGlassStroke)" stroke-width="1.5" />
+
+              <!-- Front Glass Inner Bevel Highlight -->
+              <path d="M 232 132 L 330 76 L 330 282 L 232 338 Z"
+                fill="none" stroke="#fffdf8" stroke-width="1.1" opacity="0.7" />
+
+              <!-- Isometric Skewed Cloudflare Cloud Logo + "Cloudflare Edge" Label on Glass -->
+              <g transform="translate(282, 134) skewY(-30) scale(0.95)">
+                <!-- Cloudflare Stylised Cloud Icon -->
+                <path d="M -8 -22 C -8 -29 -2 -34 5 -34 C 10 -34 15 -30 16 -25 C 18 -26 21 -26 23 -24 C 26 -22 27 -18 26 -15 C 29 -14 31 -11 31 -8 C 31 -4 28 -1 24 -1 L -12 -1 C -16 -1 -19 -4 -19 -8 C -19 -12 -16 -16 -12 -16 C -11 -20 -9 -21 -8 -22 Z"
+                  fill="#d9502c" opacity="0.92" />
+                <path d="M 15 -22 C 18 -22 21 -19 21 -15 L 26 -15 C 28 -15 30 -12 30 -9 C 30 -5 27 -1 23 -1 L 12 -1 Z"
+                  fill="#ff9b7a" opacity="0.9" />
+                <text x="5" y="14" text-anchor="middle" fill="#3a3129" font-family="var(--sans)" font-weight="700" font-size="13.5" letter-spacing="0.01em">
+                  Cloudflare Edge
+                </text>
+              </g>
+            </g>
+
+            <!-- Right-Side Leader Lines & Callout List (Workers, D1, KV, Durable Objects) -->
+            <g id="edgeCalloutLines" opacity="0.92" transform="translate(-16,-38)">
+              <!-- Leader lines from each blade right face to callout list -->
+              <polyline points="386,184 386,142 444,174" fill="none" stroke="#d3c4ac" stroke-width="0.9" />
+              <polyline points="386,208 394,162 444,193" fill="none" stroke="#d3c4ac" stroke-width="0.9" />
+              <polyline points="386,232 402,182 444,212" fill="none" stroke="#d3c4ac" stroke-width="0.9" />
+              <polyline points="386,256 410,202 444,231" fill="none" stroke="#d3c4ac" stroke-width="0.9" />
+
+              <!-- Callout Labels -->
+              <g class="cursor-pointer" data-blade-trigger="1">
+                <circle cx="451" cy="171" r="2.2" fill="#5b5348" />
+                <text x="458" y="175" fill="#5b5348" font-family="var(--sans)" font-size="11" font-weight="500">Workers</text>
+              </g>
+              <g class="cursor-pointer" data-blade-trigger="2">
+                <circle cx="451" cy="191" r="2.2" fill="#5b5348" />
+                <text x="458" y="195" fill="#5b5348" font-family="var(--sans)" font-size="11" font-weight="500">D1 (Database)</text>
+              </g>
+              <g class="cursor-pointer" data-blade-trigger="3">
+                <circle cx="451" cy="211" r="2.2" fill="#5b5348" />
+                <text x="458" y="215" fill="#5b5348" font-family="var(--sans)" font-size="11" font-weight="500">KV (Cache)</text>
+              </g>
+              <g class="cursor-pointer" data-blade-trigger="4">
+                <circle cx="451" cy="231" r="2.2" fill="#5b5348" />
+                <text x="458" y="235" fill="#5b5348" font-family="var(--sans)" font-size="11" font-weight="500">Durable Objects</text>
+              </g>
+            </g>
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- STATION 1 (BOTTOM-LEFT): OPERATOR (WEB / CLI)                             -->
+          <!-- ========================================================================= -->
+          <g id="station-operator" class="iso-station" data-station="operator">
+            <!-- Ground Drop Shadow -->
+            <polygon points="126,356 204,401 126,446 48,401" fill="#e7dccb" opacity="0.65" filter="url(#plinthShadow)" />
+
+            <!-- Isometric Chamfered Plinth -->
+            <!-- Top Face -->
+            <polygon points="126,342 202,386 126,430 50,386" fill="url(#plinthTop)" stroke="#857a6b" stroke-width="1" />
+            <!-- Inner Subtle Top Bevel Ring -->
+            <polygon points="126,348 192,386 126,424 60,386" fill="none" stroke="#ede3d3" stroke-width="0.8" />
+            <!-- Left Vertical Wall -->
+            <polygon points="50,386 126,430 126,443 50,399" fill="url(#plinthLeft)" stroke="#857a6b" stroke-width="1" />
+            <!-- Right Vertical Wall -->
+            <polygon points="202,386 126,430 126,443 202,399" fill="url(#plinthRight)" stroke="#857a6b" stroke-width="1" />
+
+            <!-- Cast Shadow of Operator on Plinth -->
+            <ellipse cx="123" cy="389" rx="22" ry="11" fill="#d3c4ac" opacity="0.7" />
+
+            <!-- Standing Operator Figure (Three-Quarter Isometric Back/Right View) -->
+            <!-- Left & Right Sneakers -->
+            <g id="operatorShoes">
+              <!-- Left Sneaker -->
+              <path d="M 106 382 L 118 377 L 122 383 L 109 389 Z" fill="#fbf6ee" stroke="#3a3129" stroke-width="0.9" />
+              <path d="M 106 385 L 109 389 L 122 383 L 122 386 L 109 392 L 106 388 Z" fill="#5b5348" />
+              <!-- Right Sneaker -->
+              <path d="M 122 389 L 137 382 L 143 387 L 127 395 Z" fill="#fbf6ee" stroke="#3a3129" stroke-width="0.9" />
+              <path d="M 122 392 L 127 395 L 143 387 L 143 390 L 127 398 L 122 395 Z" fill="#5b5348" />
+            </g>
+
+            <!-- Dark Trousers / Legs -->
+            <g id="operatorLegs">
+              <!-- Left Leg -->
+              <path d="M 105 312 L 119 314 L 118 381 L 106 382 Z" fill="#241f1a" stroke="#14110e" stroke-width="0.9" />
+              <!-- Right Leg -->
+              <path d="M 120 315 L 136 315 L 132 387 L 121 388 Z" fill="#332a22" stroke="#14110e" stroke-width="0.9" />
+              <!-- Subtle trouser crease highlight -->
+              <line x1="131" y1="322" x2="128" y2="382" stroke="#4a413a" stroke-width="1" />
+            </g>
+
+            <!-- Glowing Tablet / CLI Device Held in Right Hand -->
+            <g id="operatorTablet" transform="translate(148, 232)">
+              <!-- Tablet Bezel in Isometric Tilt -->
+              <polygon points="0,12 22,-4 30,18 8,34" fill="#241f1a" stroke="#14110e" stroke-width="1" />
+              <!-- Glowing Screen -->
+              <polygon points="2,13 20,0 27,17 9,30" fill="#fbf6ee" />
+              <!-- UI Header & SMS Dispatch Button on Tablet Screen -->
+              <polygon points="5,13 18,4 20,8 7,17" fill="#b23b20" />
+              <polygon points="8,20 19,12 21,16 10,24" fill="#d9502c" />
+              <!-- Operator Right Hand Holding Tablet -->
+              <ellipse cx="14" cy="24" rx="4.5" ry="3.2" fill="#c9a887" stroke="#8a6a4a" stroke-width="0.7" />
+            </g>
+
+            <!-- Charcoal Hoodie Torso & Arms -->
+            <g id="operatorTorso">
+              <!-- Main Torso Back/Side Silhouette -->
+              <path d="M 101 236 C 96 254 99 288 102 313 L 138 316 C 141 292 143 262 139 238 Z"
+                fill="#3a3129" stroke="#1c1814" stroke-width="1" />
+              <!-- Left Arm Relaxed by Side -->
+              <path d="M 101 239 C 93 254 94 278 99 296 L 107 294 C 104 278 104 258 108 244 Z"
+                fill="#332a22" stroke="#1c1814" stroke-width="0.9" />
+              <!-- Right Arm Raised Holding Tablet -->
+              <path d="M 134 240 C 142 252 146 268 156 258 L 152 249 C 145 253 142 244 137 236 Z"
+                fill="#4a413a" stroke="#1c1814" stroke-width="0.9" />
+              <!-- Hoodie Draped Hood on Upper Back -->
+              <path d="M 103 235 C 108 228 131 228 137 236 C 134 247 124 252 114 250 C 106 248 102 242 103 235 Z"
+                fill="#241f1a" stroke="#14110e" stroke-width="0.9" />
+              <!-- Hoodie Bottom Ribbed Hem -->
+              <path d="M 102 307 L 138 310 L 138 316 L 102 313 Z" fill="#2b241d" />
+            </g>
+
+            <!-- Operator Head & Hair -->
+            <g id="operatorHead">
+              <!-- Neck & Right Cheek Profile -->
+              <path d="M 118 214 L 132 212 C 135 218 134 226 129 229 L 117 232 Z" fill="#c9a887" />
+              <!-- Dark Textured Hair -->
+              <path d="M 111 206 C 111 196 124 192 133 198 C 139 202 138 211 133 214 C 129 216 127 221 124 225 C 118 227 112 223 111 215 Z"
+                fill="#241f1a" stroke="#14110e" stroke-width="0.8" />
+              <!-- Ear detail -->
+              <ellipse cx="129" cy="219" rx="2" ry="3" fill="#c9a887" />
+            </g>
+
+            <!-- Station 1 Typography Label Below Plinth -->
+            <text x="126" y="468" text-anchor="middle" fill="var(--ink)" font-family="var(--sans)" font-weight="700" font-size="13.5">
+              Operator
+            </text>
+            <text x="126" y="486" text-anchor="middle" fill="var(--ink-3)" font-family="var(--sans)" font-weight="500" font-size="11.5">
+              Web / CLI
+            </text>
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- STATION 3 (BOTTOM-CENTER-RIGHT): ANDROID HANDSET (THE RADIO)              -->
+          <!-- ========================================================================= -->
+          <g id="station-handset" class="iso-station" data-station="handset">
+            <!-- Ground Drop Shadow -->
+            <polygon points="468,314 544,358 468,402 392,358" fill="#e7dccb" opacity="0.65" filter="url(#plinthShadow)" />
+
+            <!-- Isometric Plinth -->
+            <polygon points="468,300 542,343 468,386 394,343" fill="url(#plinthTop)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="468,306 532,343 468,380 404,343" fill="none" stroke="#ede3d3" stroke-width="0.8" />
+            <polygon points="394,343 468,386 468,399 394,356" fill="url(#plinthLeft)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="542,343 468,386 468,399 542,356" fill="url(#plinthRight)" stroke="#857a6b" stroke-width="1" />
+
+            <!-- Glowing Cyan/Blue Inductive Base Aura on Plinth -->
+            <polygon points="464,324 504,347 464,370 424,347" fill="#ff9b7a" opacity="0.32" filter="url(#cyanPadGlow)" />
+
+            <!-- Upright Isometric Android Smartphone -->
+            <g id="androidHandsetSolid" class="transition-transform duration-500" filter="url(#phoneShadow)">
+              <!-- Back Metallic Chassis Rim -->
+              <path d="M 436 232 L 478 208 C 482 206 486 208 486 213 L 486 325 C 486 330 483 334 479 336 L 437 360 C 433 362 430 360 430 355 L 430 242 C 430 238 432 234 436 232 Z"
+                fill="#4a413a" stroke="#241f1a" stroke-width="1" />
+              <!-- Side Thickness Band (Left Edge & Top Curve) -->
+              <path d="M 436 232 L 442 235 L 436 245 L 436 358 L 430 355 L 430 242 Z" fill="#5b5348" />
+              <!-- Front Bezel & Glass Screen (Isometric Right-Facing Plane) -->
+              <path d="M 442 235 L 484 211 C 487 209 490 211 490 216 L 490 328 C 490 333 487 337 484 339 L 442 363 C 439 365 436 363 436 358 L 436 245 C 436 241 439 237 442 235 Z"
+                fill="url(#phoneScreen)" stroke="#332a22" stroke-width="1.1" />
+              <!-- Earpiece Speaker Slit -->
+              <line x1="458" y1="233" x2="468" y2="227" stroke="#6b6153" stroke-width="1.6" stroke-linecap="round" />
+
+              <!-- Glowing Green Android Robot Emblem on Screen (Skewed into Isometric Plane) -->
+              <g transform="translate(463, 290) skewY(-30) scale(0.88)">
+                <!-- Antennas -->
+                <line x1="-6" y1="-19" x2="-9" y2="-25" stroke="#8ba05f" stroke-width="1.8" stroke-linecap="round" />
+                <line x1="6" y1="-19" x2="9" y2="-25" stroke="#8ba05f" stroke-width="1.8" stroke-linecap="round" />
+                <!-- Dome Head -->
+                <path d="M -11 -10 A 11 10 0 0 1 11 -10 Z" fill="#8ba05f" />
+                <!-- Eyes -->
+                <circle cx="-4.5" cy="-14.5" r="1.1" fill="#14110e" />
+                <circle cx="4.5" cy="-14.5" r="1.1" fill="#14110e" />
+                <!-- Torso Box -->
+                <rect x="-11" y="-8" width="22" height="17" rx="2" fill="#7d9354" />
+                <!-- Left & Right Arms -->
+                <rect x="-16" y="-7" width="3.6" height="13" rx="1.8" fill="#6f854a" />
+                <rect x="12.4" y="-7" width="3.6" height="13" rx="1.8" fill="#8ba05f" />
+                <!-- Legs -->
+                <rect x="-7" y="9" width="4.2" height="8" rx="2" fill="#7d9354" />
+                <rect x="2.8" y="9" width="4.2" height="8" rx="2" fill="#7d9354" />
+              </g>
+            </g>
+
+            <!-- 3D Isometric Hardware Security Shield Badge Next to Phone -->
+            <g id="securityShieldSolid" transform="translate(502, 314)">
+              <!-- Shield Back Thickness -->
+              <path d="M -9 -8 L 1 -14 L 11 -8 L 11 4 C 11 12 1 19 1 19 C 1 19 -9 12 -9 4 Z"
+                fill="#1c1814" stroke="#14110e" stroke-width="0.8" />
+              <!-- Shield Front Isometric Face -->
+              <path d="M -6 -6 L 4 -12 L 14 -6 L 14 6 C 14 14 4 21 4 21 C 4 21 -6 14 -6 6 Z"
+                fill="#332a22" stroke="#4a413a" stroke-width="0.9" />
+              <!-- Glowing Orange Lock/Keyhole Core Inside Shield -->
+              <circle cx="4" cy="2" r="3.2" fill="#d9502c" />
+              <path d="M 2.8 4 L 5.2 4 L 5.8 9 L 2.2 9 Z" fill="#ff9b7a" />
+            </g>
+
+            <!-- Station 3 Label Below Plinth -->
+            <text x="444" y="424" text-anchor="start" fill="var(--ink)" font-family="var(--sans)" font-weight="700" font-size="13.5">
+              Android Handset
+            </text>
+            <text x="444" y="442" text-anchor="start" fill="var(--ink-3)" font-family="var(--sans)" font-weight="500" font-size="11.5">
+              The Radio
+            </text>
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- STATION 4 (TOP-RIGHT): CELLULAR NETWORK (GSM / LTE TOWER)                 -->
+          <!-- ========================================================================= -->
+          <g id="station-cellular" class="iso-station" data-station="cellular">
+            <!-- Ground Drop Shadow -->
+            <polygon points="614,228 672,262 614,296 556,262" fill="#e7dccb" opacity="0.65" filter="url(#plinthShadow)" />
+
+            <!-- Isometric Square Plinth -->
+            <polygon points="614,216 670,248 614,280 558,248" fill="url(#plinthTop)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="614,221 661,248 614,275 567,248" fill="none" stroke="#ede3d3" stroke-width="0.8" />
+            <polygon points="558,248 614,280 614,292 558,260" fill="url(#plinthLeft)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="670,248 614,280 614,292 670,260" fill="url(#plinthRight)" stroke="#857a6b" stroke-width="1" />
+
+            <!-- Tower Base Anchor Plate -->
+            <polygon points="614,234 636,247 614,260 592,247" fill="#d3c4ac" stroke="#6b6153" stroke-width="0.9" />
+
+            <!-- Isometric Tapered Steel Lattice Tower -->
+            <g id="cellTowerLattice" stroke-linecap="round" stroke-linejoin="round">
+              <!-- Back Leg Struts -->
+              <line x1="614" y1="236" x2="614" y2="118" stroke="#6b6153" stroke-width="2" />
+              <!-- Left & Right Front Legs -->
+              <line x1="596" y1="247" x2="609" y2="120" stroke="#5b5348" stroke-width="2.4" />
+              <line x1="632" y1="247" x2="619" y2="120" stroke="#3a3129" stroke-width="2.4" />
+              <!-- Center Front Spine Leg -->
+              <line x1="614" y1="258" x2="614" y2="122" stroke="#5b5348" stroke-width="2.2" />
+
+              <!-- Horizontal Isometric Ring Girders (4 tiers) -->
+              <polyline points="599,224 614,233 629,224" fill="none" stroke="#5b5348" stroke-width="1.6" />
+              <polyline points="602,196 614,203 626,196" fill="none" stroke="#5b5348" stroke-width="1.5" />
+              <polyline points="605,168 614,173 623,168" fill="none" stroke="#5b5348" stroke-width="1.4" />
+              <polyline points="608,140 614,144 620,140" fill="none" stroke="#5b5348" stroke-width="1.3" />
+
+              <!-- X-Bracing Lattice Webbing -->
+              <path d="M 597 245 L 614 233 L 631 245 M 599 224 L 614 256 L 629 224" fill="none" stroke="#6b6153" stroke-width="1.2" />
+              <path d="M 600 223 L 614 203 L 628 223 M 602 196 L 614 231 L 626 196" fill="none" stroke="#6b6153" stroke-width="1.2" />
+              <path d="M 603 195 L 614 173 L 625 195 M 605 168 L 614 201 L 623 168" fill="none" stroke="#6b6153" stroke-width="1.1" />
+              <path d="M 606 167 L 614 144 L 622 167 M 608 140 L 614 171 L 620 140" fill="none" stroke="#6b6153" stroke-width="1.1" />
+              <path d="M 608 139 L 614 122 L 620 139" fill="none" stroke="#6b6153" stroke-width="1" />
+            </g>
+
+            <!-- Cylindrical Top Transceiver Mast & Collar Rings -->
+            <g id="cellTowerTransceiver">
+              <!-- Mounting Collar -->
+              <ellipse cx="614" cy="120" rx="8.5" ry="4.5" fill="#6b6153" stroke="#3a3129" stroke-width="0.9" />
+              <!-- Upper Cylinder Body -->
+              <path d="M 609 92 L 609 118 A 5 2.8 0 0 0 619 118 L 619 92 Z" fill="#ede3d3" stroke="#5b5348" stroke-width="0.9" />
+              <!-- Cylinder Ring Bands -->
+              <ellipse cx="614" cy="108" rx="5.5" ry="2.6" fill="none" stroke="#6b6153" stroke-width="1" />
+              <ellipse cx="614" cy="99" rx="5.5" ry="2.6" fill="none" stroke="#6b6153" stroke-width="1" />
+              <!-- Top Cap -->
+              <ellipse cx="614" cy="92" rx="5" ry="2.5" fill="#fffdf8" stroke="#5b5348" stroke-width="0.9" />
+            </g>
+
+            <!-- Concentric Orange RF Waves ((( ))) -->
+            <g id="cellTowerWaves" fill="none" stroke-linecap="round">
+              <!-- Inner Pair -->
+              <path class="rf-wave-1" d="M 598 95 C 593 102 593 114 598 121" stroke="#d9502c" stroke-width="2" />
+              <path class="rf-wave-1" d="M 630 95 C 635 102 635 114 630 121" stroke="#d9502c" stroke-width="2" />
+              <!-- Middle Pair -->
+              <path class="rf-wave-2" d="M 590 88 C 582 99 582 117 590 128" stroke="#c9482a" stroke-width="1.8" />
+              <path class="rf-wave-2" d="M 638 88 C 646 99 646 117 638 128" stroke="#c9482a" stroke-width="1.8" />
+              <!-- Outer Pair -->
+              <path class="rf-wave-3" d="M 581 81 C 571 96 571 120 581 135" stroke="#ff9b7a" stroke-width="1.5" />
+              <path class="rf-wave-3" d="M 647 81 C 657 96 657 120 647 135" stroke="#ff9b7a" stroke-width="1.5" />
+            </g>
+
+            <!-- Leader Line & Station 4 Label (Top-Right of Tower) -->
+            <polyline points="638,169 655,152 672,152" fill="none" stroke="#857a6b" stroke-width="0.9" />
+            <circle cx="638" cy="169" r="2" fill="#6b6153" />
+            <text x="677" y="150" text-anchor="start" fill="var(--ink)" font-family="var(--sans)" font-weight="700" font-size="13">
+              Cellular Network
+            </text>
+            <text x="677" y="166" text-anchor="start" fill="var(--ink-3)" font-family="var(--sans)" font-weight="500" font-size="11">
+              GSM / LTE
+            </text>
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- STATION 5 (FAR RIGHT): PEER MOBILE (RECIPIENT)                            -->
+          <!-- ========================================================================= -->
+          <g id="station-peer" class="iso-station" data-station="peer">
+            <!-- Ground Drop Shadow -->
+            <polygon points="776,326 836,360 776,394 716,360" fill="#e7dccb" opacity="0.65" filter="url(#plinthShadow)" />
+
+            <!-- Isometric Plinth -->
+            <polygon points="776,314 834,347 776,380 718,347" fill="url(#plinthTop)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="776,319 825,347 776,375 727,347" fill="none" stroke="#ede3d3" stroke-width="0.8" />
+            <polygon points="718,347 776,380 776,392 718,359" fill="url(#plinthLeft)" stroke="#857a6b" stroke-width="1" />
+            <polygon points="834,347 776,380 776,392 834,359" fill="url(#plinthRight)" stroke="#857a6b" stroke-width="1" />
+
+            <!-- Cast Shadow on Plinth -->
+            <ellipse cx="776" cy="348" rx="18" ry="9" fill="#d3c4ac" opacity="0.65" />
+
+            <!-- Upright Peer Mobile Handset (Facing Left-Front Toward Tower) -->
+            <g id="peerMobileSolid" filter="url(#phoneShadow)">
+              <!-- Metallic Back Chassis -->
+              <path d="M 762 246 L 796 266 C 799 268 801 272 801 276 L 801 352 C 801 356 798 358 795 356 L 761 336 C 758 334 756 330 756 326 L 756 250 C 756 246 759 244 762 246 Z"
+                fill="#4a413a" stroke="#241f1a" stroke-width="1" />
+              <!-- Left-Facing Screen Plane -->
+              <path d="M 757 249 L 791 269 C 794 271 796 275 796 279 L 796 355 C 796 359 793 361 790 359 L 756 339 C 753 337 751 333 751 329 L 751 253 C 751 249 754 247 757 249 Z"
+                fill="url(#phoneScreen)" stroke="#2b241d" stroke-width="1.1" />
+              <!-- Earpiece Speaker Slit -->
+              <line x1="769" y1="262" x2="778" y2="267" stroke="#6b6153" stroke-width="1.5" stroke-linecap="round" />
+
+              <!-- Glowing Orange SMS Bubble Notification on Screen (Skewed into Left Isometric Plane) -->
+              <g id="peerSmsBubble" transform="translate(773, 304) skewY(30)">
+                <rect x="-11" y="-11" width="22" height="17" rx="3.5" fill="#d9502c" />
+                <!-- Speech Bubble Tail -->
+                <polygon points="-4,6 2,6 -3,11" fill="#d9502c" />
+                <!-- 3 Crisp White Text Lines Inside SMS Bubble -->
+                <line x1="-6.5" y1="-5.5" x2="6.5" y2="-5.5" stroke="#fffdf8" stroke-width="1.7" stroke-linecap="round" />
+                <line x1="-6.5" y1="-1.5" x2="6.5" y2="-1.5" stroke="#fffdf8" stroke-width="1.7" stroke-linecap="round" />
+                <line x1="-6.5" y1="2.5" x2="2.5" y2="2.5" stroke="#fffdf8" stroke-width="1.7" stroke-linecap="round" />
+              </g>
+            </g>
+
+            <!-- Station 5 Label Below Plinth -->
+            <text x="776" y="422" text-anchor="middle" fill="var(--ink)" font-family="var(--sans)" font-weight="700" font-size="13.5">
+              Peer Mobile
+            </text>
+            <text x="776" y="440" text-anchor="middle" fill="var(--ink-3)" font-family="var(--sans)" font-weight="500" font-size="11.5">
+              Recipient
+            </text>
+          </g>
+
+          <!-- ========================================================================= -->
+          <!-- LAYER 6: LIVE ANIMATED SMS PACKET ORB (Controlled by Anatomy Model)       -->
+          <!-- ========================================================================= -->
+          <g id="livePacketGroup" opacity="0" pointer-events="none">
+            <circle id="livePacketHalo" cx="184" cy="238" r="9" fill="#d9502c" opacity="0.32" filter="url(#orangePacketGlow)" />
+            <circle id="livePacketCore" cx="184" cy="238" r="4.2" fill="#d9502c" stroke="#fffdf8" stroke-width="1.5" />
+            <g id="livePacketTag" transform="translate(184, 220)">
+              <rect x="-42" y="-16" width="84" height="17" rx="4" fill="#14110e" opacity="0.9" />
+              <text id="livePacketText" x="0" y="-4.5" text-anchor="middle" fill="#fffdf8" font-family="var(--mono)" font-size="9" font-weight="600">
+                POST /v1/sms
+              </text>
+            </g>
+          </g>
+        </svg>

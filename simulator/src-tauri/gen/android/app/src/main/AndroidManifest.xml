@@ -11,12 +11,40 @@
         it every source is empty and the guard reports itself as unknown.
     -->
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <!--
+        The subscription list (SIM slot and carrier) is gated on READ_PHONE_STATE,
+        not on READ_PHONE_NUMBERS. It is a normal permission, granted at install,
+        so the Device frame can stop saying "not reported".
+    -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!--
+        Inbound messages are announced, and the MMS receiver says when this build
+        cannot open a push. Requested once at runtime on Android 13+.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- The gateway has to be awake to collect a command and answer an SMS, and
+         Doze defers a foreground service for hours. This is the permission that
+         lets the app ask for the exemption with one system dialog; without it a
+         send is bounded by when the phone happens to wake, measured between 3.5
+         seconds and several minutes. The first-run gate requires it. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!--
+        M5.3: the gateway's offline drain is a foreground service. The type is
+        `remoteMessaging` (an SMS gateway is that category), which is one of the
+        types Android 15 still allows to start from BOOT_COMPLETED.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- Bring the service back after a reboot; BootReceiver starts it only when paired. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/Theme.simulator"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
@@ -32,19 +60,153 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+
+            <!--
+                Default-SMS eligibility: Android only offers the SMS role to an
+                app with an Activity that handles SENDTO for these four schemes.
+                There is no compose screen; MainActivity routes a sms:/smsto:
+                number to its thread and everything else to Threads.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+            <!-- The same links may be opened as VIEW intents by other apps. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+
+            <!--
+                Onboarding links. `dakflare pair` prints `dakflare://pair?u=…&c=…`
+                and the console mints `dakflare://invite?u=…&t=…`; without this
+                filter the phone answers "unable to resolve Intent". Both land in
+                MainActivity, which fills Settings for the pair link and opens the
+                console page for the invite.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="dakflare" android:host="pair" />
+                <data android:scheme="dakflare" android:host="invite" />
+            </intent-filter>
         </activity>
 
         <!--
-            Only the system (which holds BROADCAST_SMS) can deliver SMS_RECEIVED
-            to this receiver. It runs without the Tauri runtime; persistence goes
-            through NativeBridge into libsimulator_lib.so.
+            Only the system (which holds BROADCAST_SMS) can deliver SMS_DELIVER
+            or SMS_RECEIVED to this receiver. SMS_DELIVER is the default app's
+            copy; SMS_RECEIVED stays declared so the gateway still works when
+            another app holds the role. It runs without the Tauri runtime;
+            persistence goes through NativeBridge into libsimulator_lib.so.
         -->
         <receiver
             android:name="dev.dakflare.simulator.bridge.SmsReceiver"
             android:exported="true"
             android:permission="android.permission.BROADCAST_SMS">
             <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            M5.3: one low-importance foreground service drains pending rows while
+            the process lives. Not on the receive path for a single SMS — the
+            receiver is enough — so the notification is not required to receive.
+            `remoteMessaging` is the platform's own category for this work.
+        -->
+        <service
+            android:name="dev.dakflare.simulator.bridge.GatewayService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <!--
+            Reboot survival. The receiver checks the local store for a paired
+            identity and does nothing when there is none; exported=false is
+            enough because BOOT_COMPLETED is a protected system broadcast.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            The SMS role on this Android build also requires a
+            RESPOND_VIA_MESSAGE service protected by SEND_RESPOND_VIA_MESSAGE
+            (the dialer's quick-reply action). Without it RoleManager rejects
+            the package as unqualified. The service is a deliberate no-op.
+        -->
+        <service
+            android:name="dev.dakflare.simulator.bridge.RespondViaMessageService"
+            android:exported="true"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
+
+        <!--
+            Required for the default-SMS role even though MMS is out of scope
+            (docs/WAVE2_NATIVE_SMS.md §5): Android will not offer the role to an
+            app without a WAP_PUSH_DELIVER receiver. MmsReceiver drops the push.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.MmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_WAP_PUSH">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            Finishes a composed send. `PendingIntent.getBroadcast` targets this
+            component with the SENT and DELIVERED actions, so the broadcasts are
+            explicit and the receiver stays unexported; no other app can mark a
+            row.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.SendStatusReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.dakflare.simulator.SMS_SENT" />
+                <action android:name="dev.dakflare.simulator.SMS_DELIVERED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            The "Reply" action on a message notification. The action's
+            PendingIntent is explicit (this component) and MUTABLE so the platform
+            can attach the RemoteInput text; unexported means only a holder of
+            that PendingIntent can reach it, and no Activity is involved, so a
+            reply works after the process was killed (the broadcast cold-starts
+            it). The send goes through SmsSender, like the composer.
+        -->
+        <receiver
+            android:name="dev.dakflare.simulator.bridge.SmsReplyReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.dakflare.simulator.SMS_REPLY" />
             </intent-filter>
         </receiver>
 

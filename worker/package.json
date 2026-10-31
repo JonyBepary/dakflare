@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
-  "description": "DakFlare v5 edge backend — Worker + D1 + per-device Durable Object. Implements PROTOCOL_CONTRACT_V5 Rev C.",
+  "description": "DakFlare v5 edge backend \u2014 Worker + D1 + per-device Durable Object. Implements PROTOCOL_CONTRACT_V5 Rev C.",
   "scripts": {
     "dev": "wrangler dev --local",
     "dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
     "build:dashboard": "npm --prefix ../dashboard ci --no-audit --no-fund && npm --prefix ../dashboard run build",
     "deploy": "npm run build:dashboard && cf deploy",
-    "deploy:cf": "npm run build:dashboard && cf deploy",
     "deploy:no-dashboard": "cf deploy",
+    "smoke": "./scripts/smoke.sh",
     "cf:check": "cf deploy --dry-run",
     "dev:dashboard": "npm --prefix ../dashboard run dev",
     "typecheck": "tsc --noEmit",
@@ -24,5 +24,9 @@
     "cf": "^1.0.0-beta.19",
     "typescript": "^5.9.3",
     "wrangler": "^4.112.0"
+  },
+  "dependencies": {
+    "@better-auth/passkey": "1.7.14",
+    "better-auth": "1.7.14"
   }
 }

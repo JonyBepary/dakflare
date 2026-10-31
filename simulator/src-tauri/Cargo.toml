@@ -21,6 +21,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The device socket. Blocking, and reusing the rustls+ring pair the core already
+# builds for Android; see src/socket.rs for why it is not async.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 dakflare-core = { path = "../core" }
 
 [target.'cfg(target_os = "android")'.dependencies]

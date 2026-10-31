@@ -17,7 +17,19 @@ export const ROUTES = {
 	workflows: resolve('/workflows'),
 	// One static editor route for drafts and saved flows alike; the workflow key
 	// travels as `?id=<id>` because saved ids only exist in D1 at runtime.
-	workflowEdit: resolve('/workflows/edit')
+	workflowEdit: resolve('/workflows/edit'),
+	// Pre-auth account routes. `/invite` takes a code or a `dakflare://invite`
+	// link; `/enrol` forces the first passkey before Overview is reachable.
+	invite: resolve('/invite'),
+	enrol: resolve('/enrol'),
+	// Where a magic link lands. It never spends the token on load: the button on
+	// the page is the only POST (mail scanners prefetch every link).
+	magic: resolve('/magic'),
+	// Owner/admin only (AUTH_PLAN §5); the nav hides it for members.
+	audit: resolve('/audit'),
+	// Owner/admin only as well: the account's factors are managed next to the
+	// log that records their use.
+	security: resolve('/security')
 } as const;
 
 export const BASE = ROUTES.overview.replace(/\/$/, '');

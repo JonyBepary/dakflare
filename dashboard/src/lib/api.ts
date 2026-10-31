@@ -9,14 +9,19 @@
 
 import type {
 	Alert,
+	AuditResult,
 	CommandInfo,
 	Device,
 	DeviceCommand,
 	DeviceStatus,
 	Health,
 	HealthResult,
+	InviteList,
+	MeInfo,
 	MessagesResult,
+	MintedInvite,
 	PairingCode,
+	RedeemInfo,
 	Rule,
 	RuleInput,
 	RuleTestResult,
@@ -29,18 +34,45 @@ import type {
 
 const SESSION_PATH = '/admin/session';
 
+/** Better Auth's mount. Same origin, cookies only — no second client library. */
+const AUTH_BASE = '/api/auth';
+
 export class ApiError extends Error {
 	readonly status: number;
 	readonly code: string | null;
 	/** The endpoint's machine-readable payload when it sends one (`details` on a 400). */
 	readonly details: unknown;
+	/**
+	 * Seconds the endpoint asked us to wait, when it said so. `null` means it
+	 * did not: no countdown is invented from a bare 429.
+	 */
+	readonly retryAfter: number | null;
+	/** The endpoint's own sentence, kept when our copy is the one shown. */
+	readonly serverMessage: string | null;
+	/**
+	 * The whole decoded body, when it was JSON. Some refusals carry the fact that
+	 * explains them — a `password_mode_mismatch` names the mode the deployment
+	 * moved to — and a sentence written without that value would be a guess.
+	 */
+	readonly payload: unknown;
 
-	constructor(message: string, status: number, code: string | null = null, details: unknown = null) {
+	constructor(
+		message: string,
+		status: number,
+		code: string | null = null,
+		details: unknown = null,
+		retryAfter: number | null = null,
+		serverMessage: string | null = null,
+		payload: unknown = null
+	) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
 		this.code = code;
 		this.details = details;
+		this.retryAfter = retryAfter;
+		this.serverMessage = serverMessage;
+		this.payload = payload;
 	}
 }
 
@@ -57,8 +89,28 @@ const CODE_MESSAGES: Record<string, string> = {
 	storage_unavailable: 'Storage is temporarily unavailable. Try again shortly.',
 	payload_too_large: 'The request was too large.',
 	revoke_failed: 'The device could not be revoked. It may still be able to authenticate.',
-	internal_error: 'The gateway hit an internal error.'
+	internal_error: 'The gateway hit an internal error.',
+	// Account paths (AUTH_PLAN §4). Each one names the next action, not the wire.
+	invite_invalid: 'That invite was already used or has expired. Ask the owner for a new one.',
+	already_registered: 'That address already has an account. Sign in instead.',
+	forbidden: 'This account is not allowed to do that.',
+	session_failed: 'The invite worked, but no session was issued. Open the link again.',
+	auth_unavailable: 'This deployment has no auth secret yet.',
+	owner_exists: 'This deployment already has an owner. Sign in instead.',
+	// Better Auth's two-factor error codes (plugins/two-factor/error-code.ts).
+	// Each names the next action rather than echoing the wire.
+	INVALID_CODE: 'That code was not accepted. Check the authenticator and use the code showing now.',
+	INVALID_BACKUP_CODE: 'That recovery code was not accepted. Each one works once — check the one you typed.',
+	TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE: 'Too many attempts. Sign in with your passkey again to start over.',
+	ACCOUNT_TEMPORARILY_LOCKED: 'Too many failed codes on this account.',
+	INVALID_TWO_FACTOR_COOKIE: 'This sign-in expired before the code was entered. Start again with your passkey.',
+	TOTP_ALREADY_ENABLED: 'An authenticator is already set up on this account.',
+	TOTP_NOT_ENABLED: 'No authenticator is set up on this account yet.',
+	TOTP_NOT_CONFIGURED: 'Authenticator codes are not available on this deployment.',
+	TWO_FACTOR_NOT_ENABLED: 'Two-factor is not set up on this account.',
+	INVALID_PASSWORD: 'This deployment asked for a password to change two-factor, and this account has none.'
 };
+
 
 interface RequestOptions extends RequestInit {
 	/** Statuses whose JSON body is still meaningful (health answers 503 when degraded). */
@@ -128,7 +180,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 			payload && typeof payload === 'object'
 				? ((payload as Record<string, unknown>).details ?? null)
 				: null;
-		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details);
+		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details, null, null, payload);
 	}
 
 	return { data: payload as T, status: response.status };
@@ -168,17 +220,208 @@ export function deleteSession(): Promise<{ ok: boolean }> {
 	return get<{ ok: boolean }>(SESSION_PATH, { method: 'DELETE', silentAuth: true });
 }
 
+/* --------------------------------------------------------------- accounts */
+
+/**
+ * `GET /v1/auth/me` — the Better Auth session, when this deployment is on
+ * `AUTH_MODE=new`. A 401 here is not an error the layout shows: it means the
+ * legacy cookie is the one to ask about.
+ */
+export function getMe(): Promise<MeInfo> {
+	return get<MeInfo>('/v1/auth/me', { silentAuth: true });
+}
+
+/** `POST /v1/auth/redeem` — spends the invite and answers with the session cookie. */
+export function redeemInvite(token: string): Promise<RedeemInfo> {
+	return get<RedeemInfo>('/v1/auth/redeem', {
+		method: 'POST',
+		body: JSON.stringify({ token }),
+		silentAuth: true
+	});
+}
+
+/**
+ * One request to the Better Auth mount.
+ *
+ * The library owns its routes, cookies and error envelope, so this is a thin
+ * JSON fetch rather than an admin call: no `X-Admin-Session`, no `/v1` prefix,
+ * and no global 401 handling — these run before a console session exists.
+ */
+export async function authRequest<T>(
+	path: string,
+	init: { method?: string; body?: unknown } = {}
+): Promise<{ data: T; status: number }> {
+	const method = init.method ?? 'GET';
+	// Better Auth's router answers 415 to a POST with no JSON content type, and
+	// `/sign-out` has no body of its own. Sending `{}` keeps every POST on the
+	// mount well-formed — without it a sign-out silently did nothing.
+	const body = init.body ?? (method === 'GET' || method === 'HEAD' ? undefined : {});
+
+	const headers = new Headers({ Accept: 'application/json' });
+	if (body !== undefined) headers.set('Content-Type', 'application/json');
+
+	let response: Response;
+	try {
+		response = await fetch(`${AUTH_BASE}${path}`, {
+			method,
+			headers,
+			...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			credentials: 'same-origin',
+			signal: AbortSignal.timeout(20_000)
+		});
+	} catch (error) {
+		if (error instanceof DOMException && error.name === 'TimeoutError') {
+			throw new ApiError('The gateway did not answer in time. Try again.', 0);
+		}
+		throw new ApiError('Could not reach the gateway. Check the connection and try again.', 0);
+	}
+
+	const text = await response.text();
+	let payload: unknown = null;
+	if (text) {
+		try {
+			payload = JSON.parse(text);
+		} catch {
+			payload = null;
+		}
+	}
+
+	if (!response.ok) {
+		const code = extractCode(payload) ?? extractField(payload, 'code');
+		const fallback = `Request failed (${response.status}).`;
+		const retryAfter = readRetryAfter(response, payload);
+		throw new ApiError(
+			code ? (CODE_MESSAGES[code] ?? fallback) : fallback,
+			response.status,
+			code,
+			null,
+			retryAfter,
+			extractField(payload, 'message'),
+			payload
+		);
+	}
+
+	return { data: payload as T, status: response.status };
+}
+
+/**
+ * The wait the server itself asked for: a `Retry-After` header (seconds, or an
+ * HTTP date), or a `retryAfter` field in the body. `null` when it said nothing,
+ * so no timer is ever invented on the screen.
+ */
+function readRetryAfter(response: Response, payload: unknown): number | null {
+	const header = response.headers.get('retry-after');
+	if (header !== null) {
+		const seconds = Number(header.trim());
+		if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+		const date = Date.parse(header);
+		if (Number.isFinite(date)) {
+			const delta = Math.ceil((date - Date.now()) / 1000);
+			if (delta > 0) return delta;
+		}
+	}
+	if (payload && typeof payload === 'object') {
+		const value = (payload as Record<string, unknown>).retryAfter;
+		const seconds = typeof value === 'number' ? value : Number(value);
+		if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+	}
+	return null;
+}
+
+/** The current Better Auth session, or `null`. Throws 503 when `/api/auth` is off. */
+export async function getAuthSession(): Promise<unknown> {
+	const { data } = await authRequest<unknown>('/get-session');
+	return data ?? null;
+}
+
+export async function signOutAccount(): Promise<void> {
+	try {
+		await authRequest<unknown>('/sign-out', { method: 'POST' });
+	} catch {
+		// Leaving the screen matters more than the cookie clearing itself.
+	}
+}
+
+/* ------------------------------------------------------------------ invites */
+
+/**
+ * `GET /v1/admin/invites` — pending and spent rows, with the gateway's clock.
+ *
+ * The list is the operator's record of who may still make an account; `now` is
+ * what decides whether a row is open or expired, so the page does not have to
+ * trust the browser's clock for that call.
+ */
+export function getInvites(): Promise<InviteList> {
+	return get<InviteList>('/v1/admin/invites');
+}
+
+/**
+ * `POST /v1/admin/invites` — mint one single-use invite.
+ *
+ * The response's `token` is the only copy that will ever exist outside the
+ * invitee's hands. Refusals worth naming: `already_registered` (409) and
+ * `forbidden` (403) when a non-owner asks for the owner role.
+ */
+export function createInvite(input: {
+	email: string;
+	role: 'owner' | 'admin' | 'member';
+	expires_in_s: number;
+}): Promise<MintedInvite> {
+	return get<MintedInvite>('/v1/admin/invites', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+/** `DELETE /v1/admin/invites/:id` — revoke an unspent invite; 404 when it is gone. */
+export function revokeInvite(id: string): Promise<{ ok: boolean; deleted: number }> {
+	return get(`/v1/admin/invites/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/* ------------------------------------------------------------------- audit */
+
+export interface AuditQuery {
+	limit?: number;
+	/** Keyset cursor: the `at` of the oldest row already shown. */
+	before?: number;
+	actor?: string;
+	action?: string;
+}
+
+export function getAudit(query: AuditQuery = {}): Promise<AuditResult> {
+	const params = new URLSearchParams({ limit: String(query.limit ?? 100) });
+	if (query.before !== undefined) params.set('before', String(query.before));
+	if (query.actor) params.set('actor', query.actor);
+	if (query.action) params.set('action', query.action);
+	return get<AuditResult>(`/v1/admin/audit?${params.toString()}`);
+}
+
+function extractField(payload: unknown, field: string): string | null {
+	if (!payload || typeof payload !== 'object') return null;
+	const value = (payload as Record<string, unknown>)[field];
+	return typeof value === 'string' ? value : null;
+}
+
+
 /* -------------------------------------------------------------------- reads */
 
-export async function getHealth(): Promise<HealthResult> {
+export async function getHealth(silentAuth = false): Promise<HealthResult> {
 	const { data, status } = await request<Health>('/v1/admin/health', {
-		allowStatuses: [503]
+		allowStatuses: [503],
+		silentAuth
 	});
 	return { health: data, httpStatus: status };
 }
 
-export async function getDevices(): Promise<Device[]> {
-	const data = await get<{ devices: Device[] }>('/v1/devices');
+/**
+ * `GET /v1/devices` — the fleet, active devices only unless asked otherwise.
+ *
+ * `include_archived` is the whole toggle: the default read is the fleet the
+ * operator works with, and archived rows are a separate, explicit request.
+ */
+export async function getDevices(includeArchived = false): Promise<Device[]> {
+	const query = includeArchived ? '?include_archived=1' : '';
+	const data = await get<{ devices: Device[] }>(`/v1/devices${query}`);
 	return data.devices ?? [];
 }
 
@@ -313,6 +556,25 @@ export async function revokeDevice(
 	deviceId: string
 ): Promise<{ ok: boolean; d1_deleted: number }> {
 	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+}
+
+/**
+ * `POST /v1/admin/devices/:id/archive` — takes the device out of the fleet list.
+ *
+ * Nothing is destroyed: the key, the message history and the queue stay, and the
+ * gateway unarchives the row by itself the next time the phone polls.
+ */
+export async function archiveDevice(deviceId: string): Promise<{ ok: boolean }> {
+	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}/archive`, {
+		method: 'POST'
+	});
+}
+
+/** `POST /v1/admin/devices/:id/unarchive` — puts the device back in the fleet list. */
+export async function unarchiveDevice(deviceId: string): Promise<{ ok: boolean }> {
+	return get(`/v1/admin/devices/${encodeURIComponent(deviceId)}/unarchive`, {
+		method: 'POST'
+	});
 }
 
 export async function mintPairingCode(input: {

@@ -37,6 +37,9 @@ export function formatClock(value: number | null | undefined): string {
 	return clockFormatter.format(new Date(value));
 }
 
+/** Past this age `formatRelative` answers with a full stamp instead of "12d ago". */
+export const RELATIVE_MAX_MS = 7 * 86_400_000;
+
 /** "just now", "4m ago", "3h ago", "12 Oct 2026, 14:03" — future values read "in 4m". */
 export function formatRelative(value: number | null | undefined, now = Date.now()): string {
 	if (!value) return 'never';
@@ -49,7 +52,7 @@ export function formatRelative(value: number | null | undefined, now = Date.now(
 	else if (abs < 60_000) text = `${Math.round(abs / 1000)}s`;
 	else if (abs < 3_600_000) text = `${Math.floor(abs / 60_000)}m`;
 	else if (abs < 86_400_000) text = `${Math.floor(abs / 3_600_000)}h`;
-	else if (abs < 7 * 86_400_000) text = `${Math.floor(abs / 86_400_000)}d`;
+	else if (abs < RELATIVE_MAX_MS) text = `${Math.floor(abs / 86_400_000)}d`;
 	else return formatAbsolute(value);
 
 	if (text === 'just now') return text;

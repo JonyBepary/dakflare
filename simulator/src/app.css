@@ -1,155 +1,1916 @@
+@import '../../design/tokens.css';
+
+@font-face {
+	font-family: 'Nunito';
+	font-style: normal;
+	font-weight: 400 800;
+	font-display: swap;
+	src: url('/fonts/nunito-var.woff2') format('woff2');
+}
+
+/* Pre-migration names, kept alive on top of the shared tokens. */
 :root {
-  --bg: #f4f3ee;
-  --surface: #fbfaf6;
-  --ink: #161713;
-  --ink-2: #4b4e46;
-  --ink-3: #6a6e64;
-  --line: #dcd9cf;
-  --accent: #2f42c4;
-  --danger: #a52f26;
-  --ok: #1c6b45;
-  --radius: 8px;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--bg: var(--df-surface-page);
+	--surface: var(--df-surface-card);
+	--surface-2: var(--df-surface-well);
+	--ink: var(--df-text-primary);
+	--ink-2: var(--df-text-secondary);
+	--ink-3: var(--df-text-meta);
+	--line: var(--df-border-hairline);
+	--line-strong: var(--df-border-control);
+	--accent: var(--df-accent-text);
+	--accent-fill: var(--df-accent-fill);
+	--accent-soft: var(--df-accent-soft);
+	--danger: var(--df-state-danger-ink);
+	--ok: var(--df-state-ok-ink);
+	--radius: var(--df-p-radius-sm);
+	--mono: var(--df-p-font-mono);
+	--sans: var(--df-p-font-sans);
+	--display: var(--df-font-display);
+	/* A field boundary is a UI component, so 1.4.11 asks 3:1 for it. The shared
+	   --df-border-control measures 1.68:1 on cream and 1.9:1 on night, so the
+	   phone carries its own value for the controls that need a boundary: 3.38 /
+	   3.19 on card and page here, 3.11 / 3.63 on night card and field. Fixing it
+	   here keeps the console's own border where it is. */
+	--df-border-input: #94897a;
+	/* MainActivity pads android.R.id.content by systemBars() | displayCutout().
+	   The dock adds no inset of its own; env(safe-area-inset-bottom) would
+	   double-count by the navigation-bar height on Android. */
+	--inset-b: 0px;
 }
 
+/* Phone dark: layer 2 only, so every component token above keeps working. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1110;
-    --surface: #151918;
-    --ink: #e9e7df;
-    --ink-2: #b9b8ae;
-    --ink-3: #8d9089;
-    --line: #2a302e;
-    --accent: #9aa6ff;
-    --danger: #f08578;
-    --ok: #66c795;
-  }
+	:root {
+		--df-surface-page: var(--df-p-night-900);
+		--df-surface-card: var(--df-p-night-800);
+		--df-surface-well: var(--df-p-night-700);
+		--df-surface-press: var(--df-p-night-600);
+		--df-surface-field: var(--df-p-night-900);
+		--df-surface-selected: var(--df-p-night-600);
+
+		--df-border-hairline: var(--df-p-night-500);
+		--df-border-control: #4d4136;
+		--df-border-focus: var(--df-p-coral-300);
+		--df-border-input: #786b5c;
+
+		--df-text-primary: var(--df-p-mist-50);
+		--df-text-secondary: var(--df-p-mist-300);
+		--df-text-meta: var(--df-p-mist-500);
+		--df-text-on-accent: var(--df-p-umber-1000);
+		--df-text-on-danger: var(--df-p-cream-50);
+
+		--df-accent-text: var(--df-p-coral-300);
+		--df-accent-text-hover: var(--df-p-coral-400);
+		--df-accent-fill: var(--df-p-coral-500);
+		--df-accent-fill-hover: var(--df-p-coral-400);
+		--df-accent-fill-press: var(--df-p-coral-600);
+		--df-accent-soft: #3a241c;
+		--df-accent-decor: var(--df-p-coral-400);
+
+		--df-state-ok-bg: var(--df-p-mint-900);
+		--df-state-ok-ink: var(--df-p-mint-300);
+		--df-state-info-bg: var(--df-p-sky-900);
+		--df-state-info-ink: var(--df-p-sky-300);
+		--df-state-warn-bg: var(--df-p-butter-900);
+		--df-state-warn-ink: var(--df-p-butter-300);
+		--df-state-danger-bg: var(--df-p-peach-900);
+		--df-state-danger-ink: var(--df-p-peach-300);
+		--df-state-danger-fill: #8a3a28;
+		--df-state-neutral-bg: var(--df-p-stone-900);
+		--df-state-neutral-ink: var(--df-p-stone-300);
+		--df-state-filter-bg: var(--df-p-lilac-900);
+		--df-state-filter-ink: var(--df-p-lilac-300);
+
+		--df-shadow-card: none;
+		--df-shadow-raised: none;
+		--df-shadow-dialog: 0 30px 80px -24px rgba(0, 0, 0, 0.8);
+
+		--df-c-chip-border: color-mix(in srgb, var(--df-c-chip-ink) 28%, transparent);
+		--df-c-dialog-width: min(420px, calc(100vw - 32px));
+	}
 }
 
-* { box-sizing: border-box; }
+* {
+	box-sizing: border-box;
+}
 
-html, body { margin: 0; height: 100%; }
+html,
+body {
+	margin: 0;
+	height: 100%;
+}
 
 body {
-  background: var(--bg);
-  color: var(--ink);
-  font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
+	background: var(--bg);
+	color: var(--ink);
+	font-family: var(--sans);
+	font-size: 14px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	overscroll-behavior-y: none;
 }
 
-.shell { display: flex; flex-direction: column; min-height: 100%; }
+button,
+input,
+select,
+textarea {
+	font: inherit;
+}
+
+/* ---------------------------------------------------------------- shell */
+
+.app {
+	height: 100%;
+	max-width: 640px;
+	margin: 0 auto;
+	display: grid;
+	grid-template-rows: auto minmax(0, 1fr) auto;
+	background: var(--bg);
+	/* The keyboard, measured in the webview (see lib/keyboard.ts), because
+	   MainActivity insets the content view by system bars and cutout only.
+	   Zero when the window itself resizes, so nothing is padded twice. */
+	padding-bottom: var(--df-kb, 0px);
+}
+
+@media (min-width: 700px) {
+	.app {
+		border-inline: 1px solid var(--line);
+	}
+}
 
 .topbar {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; padding: 14px 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	min-height: 48px;
+	padding: 0 var(--df-p-space-5);
+	background: var(--surface);
+	border-bottom: 1px solid var(--line);
 }
 
-.brand { display: flex; align-items: baseline; gap: 10px; }
-.brand strong { letter-spacing: .12em; font-size: 13px; }
-.brand span { color: var(--ink-3); font-size: 12px; }
-
-.meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
-
-main { padding: 20px; max-width: 1180px; width: 100%; margin: 0 auto; }
-
-h1, h2 { margin: 0; font-weight: 600; }
-h1 { font-size: 18px; }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); }
-
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
+.wordmark {
+	font-family: var(--display);
+	font-size: 13px;
+	font-weight: 800;
+	letter-spacing: 0.16em;
+	color: var(--ink);
 }
 
-.grid { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
-@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
-
-.field { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
-.field label, .field .field-label { font-size: 12px; color: var(--ink-2); }
-.field small { color: var(--ink-3); font-size: 11px; }
-
-input, select {
-  width: 100%; padding: 8px 10px;
-  background: var(--bg); color: var(--ink);
-  border: 1px solid var(--line); border-radius: 6px;
-  font: inherit;
-}
-input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 2px;
+.topbar-meta {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-3);
+	white-space: nowrap;
 }
 
-button {
-  font: inherit; cursor: pointer;
-  border-radius: 6px; border: 1px solid var(--line);
-  background: var(--surface); color: var(--ink);
-  padding: 8px 12px;
+.topbar-meta[data-offline='true'] {
+	color: var(--ink-2);
 }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
-button:disabled { opacity: .55; cursor: not-allowed; }
 
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.app-main {
+	min-width: 0;
+	min-height: 0;
+	overflow-x: hidden;
+	overflow-y: auto;
+	padding: 0 var(--df-p-space-5) var(--df-p-space-5);
+	scrollbar-width: thin;
+}
+
+.screen {
+	width: 100%;
+	max-width: 560px;
+	margin: 0 auto;
+}
+
+/* ---------------------------------------------------------------- type */
+
+h1,
+h2,
+h3,
+p {
+	margin: 0;
+}
+
+.screen-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 22px 0 14px;
+}
+
+.screen-head > div {
+	min-width: 0;
+}
+
+.screen-head h1 {
+	font-family: var(--display);
+	font-size: 20px;
+	line-height: 1.3;
+	font-weight: 700;
+	letter-spacing: -0.015em;
+	color: var(--ink);
+}
+
+.eyebrow {
+	margin-bottom: 2px;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.11em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.screen-meta {
+	margin-top: 3px;
+	max-width: 46ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+}
+
+.sheet-title {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.mono {
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: -0.01em;
+}
+
+.muted {
+	color: var(--ink-3);
+}
+
+.note {
+	margin: 10px 0 0;
+	font-size: 11.5px;
+	line-height: 1.5;
+	color: var(--ink-3);
+	overflow-wrap: anywhere;
+}
+
+.note code {
+	font-family: var(--mono);
+	font-size: 11px;
+}
+
+.quiet-state {
+	padding: 28px 12px;
+	text-align: center;
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--ink-3);
+}
+
+/* Read by a screen reader, invisible on screen: the words a colour or an
+   alignment would otherwise carry alone. */
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+/* ---------------------------------------------------------------- dock */
+
+.dock {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	background: color-mix(in srgb, var(--surface) 94%, transparent);
+	border-top: 1px solid var(--line);
+	/* No env() inset here. See --inset-b above. */
+	padding-bottom: var(--inset-b);
+}
+
+.dock a {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 2px;
+	min-width: 48px;
+	min-height: 56px;
+	padding: 6px 2px 5px;
+	color: var(--ink-3);
+	text-decoration: none;
+	font-size: 11px;
+	line-height: 1.2;
+	font-weight: 600;
+	text-align: center;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.dock a::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: 50%;
+	width: 24px;
+	height: 3px;
+	border-radius: 0 0 3px 3px;
+	background: var(--df-accent-decor);
+	transform: translateX(-50%) scaleX(0);
+	transform-origin: center;
+	transition: transform 160ms var(--df-p-ease-standard);
+}
+
+.dock a[aria-current='page'] {
+	color: var(--df-c-dock-item-ink-active);
+	font-weight: 700;
+}
+
+.dock a[aria-current='page']::before {
+	transform: translateX(-50%) scaleX(1);
+}
+
+.dock-mark {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+}
+
+.dock-label {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	min-height: 48px;
+	padding: 0 14px;
+	border: 1px solid var(--line-strong);
+	border-radius: 12px;
+	background: var(--surface);
+	color: var(--ink);
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.2;
+	cursor: pointer;
+	transition:
+		transform 90ms ease-out,
+		background-color 120ms ease-out,
+		border-color 120ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+	background: var(--df-surface-well);
+}
+
+.btn:active:not(:disabled) {
+	transform: scale(0.97);
+}
+
+.btn.primary {
+	background: var(--df-accent-fill);
+	border-color: var(--df-accent-fill);
+	color: var(--df-text-on-accent);
+}
+
+.btn.primary:hover:not(:disabled) {
+	background: var(--df-accent-fill-hover);
+	border-color: var(--df-accent-fill-hover);
+}
+
+.btn.wide {
+	width: 100%;
+}
+
+.btn.small {
+	min-height: 48px;
+	padding: 0 10px;
+	font-size: 12px;
+}
+
+.btn.quiet {
+	border-color: transparent;
+	background: transparent;
+	color: var(--ink-3);
+}
+
+.btn.quiet:hover:not(:disabled) {
+	background: var(--df-surface-well);
+	color: var(--ink);
+}
+
+.btn.danger-ghost {
+	color: var(--danger);
+	border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+	background: transparent;
+}
+
+/* A disabled control is still read: 0.5 opacity put a 13px label at 3.1:1 on
+   cream and a coral fill at 1.47:1. The muted pair below measures 5.31:1 light
+   and 5.54:1 dark, and still reads as "not now" because the fill loses coral. */
+.btn:disabled,
+.icon-btn:disabled,
+button:disabled {
+	opacity: 1;
+	cursor: not-allowed;
+	color: var(--ink-3);
+}
+
+.btn:disabled,
+.icon-btn:disabled {
+	background: var(--df-surface-well);
+	border-color: var(--line);
+}
+
+.btn.primary:disabled {
+	background: var(--df-c-composer-send-disabled-bg);
+	border-color: transparent;
+	color: var(--df-c-composer-send-disabled-ink);
+}
+
+.icon-btn {
+	display: grid;
+	place-items: center;
+	width: 48px;
+	height: 48px;
+	flex: none;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--surface);
+	color: var(--ink-2);
+	cursor: pointer;
+}
+
+.icon-btn:hover:not(:disabled) {
+	color: var(--ink);
+	background: var(--df-surface-well);
+}
+
+:where(a, button, input, select, textarea, summary, [role='switch']):focus-visible {
+	outline: 2px solid var(--df-border-focus);
+	outline-offset: 2px;
+}
+
+.dock a:focus-visible {
+	outline-offset: -3px;
+	border-radius: 10px;
+}
+
+input,
+select,
+textarea {
+	width: 100%;
+	min-height: 48px;
+	padding: 0 12px;
+	border: 1px solid var(--df-border-input);
+	border-radius: 10px;
+	background: var(--df-surface-field);
+	color: var(--ink);
+	font-size: 14px;
+	line-height: 1.4;
+}
+
+input::placeholder {
+	color: var(--ink-3);
+	opacity: 1;
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 12px;
+}
+
+.field label,
+.field .field-label {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--ink-2);
+}
+
+.field small {
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--ink-3);
+}
+
+.form-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 14px;
+}
+
+.form-actions .btn.primary {
+	flex: 1 1 auto;
+}
+
+/* ---------------------------------------------------------------- surfaces */
+
+.sheet {
+	margin-top: 12px;
+	padding: 16px;
+	background: var(--surface);
+	border: 1px solid var(--line);
+	border-radius: var(--df-p-radius-lg);
+}
+
+.sheet-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	margin-bottom: 7px;
+}
+
+.pill {
+	display: inline-block;
+	flex: none;
+	max-width: 58%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	padding: 3px 8px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	color: var(--ink-3);
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	vertical-align: middle;
+}
+
+.pill[data-state='live'] {
+	background: var(--df-state-ok-bg);
+	border-color: transparent;
+	color: var(--df-state-ok-ink);
+}
+
+.pill[data-state='offline'] {
+	background: var(--df-state-danger-bg);
+	border-color: transparent;
+	color: var(--df-state-danger-ink);
+}
+
+.pill[data-state='unknown'] {
+	background: var(--df-state-neutral-bg);
+	border-color: transparent;
+	color: var(--df-state-neutral-ink);
+}
+
+.state-pill {
+	display: inline-block;
+	flex: none;
+	margin-top: 4px;
+	padding: 4px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	background: var(--df-state-neutral-bg);
+	color: var(--df-state-neutral-ink);
+}
+
+.state-pill[data-state='live'] {
+	background: var(--df-state-ok-bg);
+	color: var(--df-state-ok-ink);
+}
+
+.state-pill[data-state='synced'] {
+	background: var(--df-state-info-bg);
+	color: var(--df-state-info-ink);
+}
+
+.state-pill[data-state='stale'] {
+	background: var(--df-state-warn-bg);
+	color: var(--df-state-warn-ink);
+}
+
+.state-pill[data-state='offline'] {
+	background: var(--df-state-danger-bg);
+	color: var(--df-state-danger-ink);
+}
+
+.rows {
+	margin-top: 6px;
+}
+
+.rowline {
+	display: grid;
+	grid-template-columns: 92px minmax(0, 1fr);
+	gap: 12px;
+	align-items: baseline;
+	padding: 10px 0;
+	border-top: 1px solid var(--line);
+}
+
+.rowline:first-child {
+	padding-top: 4px;
+	border-top: 0;
+}
+
+.rowline .label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.rowline .value {
+	min-width: 0;
+	text-align: right;
+	font-size: 13px;
+	line-height: 1.4;
+	color: var(--ink);
+	overflow-wrap: anywhere;
+}
+
+.rowline .value.mono {
+	font-size: 11.5px;
+}
+
+.rowline .value.id-value {
+	font-size: 10.5px;
+	text-align: left;
+	word-break: break-all;
+}
+
+.notice {
+	margin-top: 12px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--df-surface-well);
+	color: var(--ink-2);
+	font-size: 12px;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.notice[data-tone='ok'] {
+	border-color: color-mix(in srgb, var(--df-state-ok-ink) 32%, var(--line));
+	background: var(--df-state-ok-bg);
+	color: var(--ink);
+}
+
+.notice[data-tone='error'] {
+	border-color: color-mix(in srgb, var(--df-state-danger-ink) 35%, var(--line));
+	background: var(--df-state-danger-bg);
+	color: var(--ink);
+}
+
+/* ---------------------------------------------------------------- empty */
+
+.empty-state {
+	margin-top: 8px;
+	padding: 32px 20px;
+	border: 1px dashed var(--line-strong);
+	border-radius: var(--df-p-radius-lg);
+	background: var(--df-surface-well);
+	text-align: center;
+}
+
+.empty-icon {
+	display: grid;
+	place-items: center;
+	width: 46px;
+	height: 46px;
+	margin: 0 auto 12px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	background: var(--surface);
+	color: var(--ink-3);
+}
+
+.empty-state h2 {
+	font-family: var(--display);
+	font-size: 17px;
+	line-height: 1.3;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+
+.empty-state p {
+	max-width: 34ch;
+	margin: 6px auto 0;
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--ink-2);
+}
+
+.text-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 48px;
+	margin-top: 6px;
+	color: var(--accent);
+	font-size: 12.5px;
+	font-weight: 700;
+	text-decoration: none;
+}
+
+.text-link:hover {
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+.inline-link {
+	color: var(--accent);
+	font-weight: 600;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	/* A link inside a sentence is exempt from the 48dp rule (2.5.8 inline
+	   exception), but a 12px line box is still a poor target: the padding
+	   grows the hit area to 24px without moving the text. */
+	padding-block: 6px;
+}
+
+/* ---------------------------------------------------------------- threads */
+
+.threads {
+	list-style: none;
+	margin: 10px 0 0;
+	padding: 0;
+	border-top: 1px solid var(--df-border-hairline);
+}
+
+.threads > li {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 76px;
+}
+
+.thread-row {
+	display: grid;
+	grid-template-columns: 28px minmax(0, 1fr);
+	gap: 10px;
+	align-items: start;
+	min-height: 72px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--df-border-hairline);
+	color: inherit;
+	text-decoration: none;
+	-webkit-tap-highlight-color: transparent;
+	transition: background-color 120ms ease-out;
+}
+
+.thread-row:hover {
+	background: var(--df-surface-well);
+}
+
+.thread-mark {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	margin-top: 1px;
+	border-radius: 999px;
+	background: var(--df-surface-well);
+	color: var(--df-text-meta);
+}
+
+.thread-mark[data-dir='out'] {
+	background: var(--df-accent-soft);
+	color: var(--df-accent-text);
+}
+
+.thread-main {
+	display: block;
+	min-width: 0;
+}
+
+.thread-top {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.thread-peer {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--df-text-primary);
+}
+
+.thread-time {
+	flex: none;
+	font-family: var(--df-p-font-mono);
+	font-size: 10px;
+	color: var(--df-text-meta);
+}
+
+.thread-preview {
+	display: block;
+	margin-top: 1px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 13px;
+	line-height: 1.4;
+	color: var(--df-text-secondary);
+}
+
+.thread-foot {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 3px;
+	font-size: 10px;
+	line-height: 1.2;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--df-text-meta);
+}
+
+.state-chip {
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--df-state-neutral-bg);
+	color: var(--df-state-neutral-ink);
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	text-transform: none;
+}
+
+.state-chip[data-tone='ok'] {
+	background: var(--df-state-ok-bg);
+	color: var(--df-state-ok-ink);
+}
+
+.state-chip[data-tone='warn'] {
+	background: var(--df-state-warn-bg);
+	color: var(--df-state-warn-ink);
+}
+
+.state-chip[data-tone='danger'] {
+	background: var(--df-state-danger-bg);
+	color: var(--df-state-danger-ink);
+}
+
+.load-more {
+	margin-top: 14px;
+}
+
+/* ----------------------------------------------------------- conversation */
+
+.conv-head {
+	/* The thread scrolls under this, so the peer and the way back stay put
+	   while a five-line draft takes the bottom of a short screen. */
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 14px 0 10px;
+	background: var(--bg);
+	border-bottom: 1px solid var(--df-border-hairline);
+}
+
+.conv-back {
+	margin-left: -14px;
+	border-color: transparent;
+	background: transparent;
+}
+
+.conv-who {
+	min-width: 0;
+	flex: 1;
+}
+
+.conv-who h1 {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--df-p-font-mono);
+	font-size: 15px;
+	line-height: 1.3;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--df-text-primary);
+}
+
+.conv-sub {
+	margin-top: 1px;
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--df-text-meta);
+}
+
+/* The reply composer takes the dock's slot: one bottom bar at a time. */
+
+.composer {
+	/* 48dp is a target rule, not a preference; the component token ships 40. */
+	--df-c-composer-send-size: 48px;
+	display: flex;
+	flex-direction: column;
+	gap: var(--df-p-space-2);
+	padding: var(--df-c-composer-padding);
+	background: var(--df-c-composer-bg);
+	border-top: 1px solid var(--df-c-composer-border);
+}
+
+.composer-row {
+	display: flex;
+	align-items: flex-end;
+	gap: var(--df-p-space-2);
+}
+
+.composer-field {
+	display: flex;
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 48px;
+	max-height: var(--df-c-composer-max-height);
+	/* The bottom padding is the field's breathing room and the textarea's clip
+	   boundary sits above it, so no half line can paint into it. */
+	padding: 0 0 var(--df-p-space-3);
+	overflow: hidden;
+	border: 1px solid var(--df-border-input);
+	border-radius: var(--df-c-composer-field-radius);
+	background: var(--df-c-composer-field-bg);
+	cursor: text;
+}
+
+.composer-field:focus-within {
+	/* The ring is the system's, on the field: the border keeps its own colour
+	   so focus does not draw two concentric coral lines. */
+	outline: var(--df-p-focus-width) solid var(--df-border-focus);
+	outline-offset: var(--df-p-focus-offset);
+}
+
+.composer-input {
+	flex: 1 1 auto;
+	width: 100%;
+	min-width: 0;
+	min-height: 0;
+	padding: var(--df-p-space-3) var(--df-p-space-3) 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	color: var(--df-c-composer-field-ink);
+	font-size: var(--df-c-composer-font-size);
+	line-height: 1.4;
+	resize: none;
+	overflow-y: auto;
+}
+
+.composer-input:focus-visible {
+	/* The ring belongs on the field, not on the text inside it. */
+	outline: none;
+}
+
+.composer-input::placeholder {
+	color: var(--df-c-composer-placeholder-ink);
+	opacity: 1;
+}
+
+.composer-blocked {
+	display: flex;
+	align-items: center;
+	gap: var(--df-p-space-2);
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 48px;
+	padding: var(--df-p-space-3);
+	border: 1px dashed var(--df-border-control);
+	border-radius: var(--df-c-composer-field-radius);
+	background: var(--df-surface-well);
+	color: var(--df-text-secondary);
+	font-size: var(--df-p-text-base);
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+
+.composer-send {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: var(--df-c-composer-send-size);
+	height: var(--df-c-composer-send-size);
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--df-p-radius-pill);
+	background: var(--df-c-composer-send-bg);
+	color: var(--df-c-composer-send-ink);
+	cursor: pointer;
+	transition:
+		transform var(--df-p-dur-press) ease-out,
+		background-color 120ms ease-out;
+}
+
+.composer-send:hover:not(:disabled) {
+	background: var(--df-c-composer-send-hover-bg);
+}
+
+.composer-send:active:not(:disabled) {
+	transform: scale(0.97);
+}
+
+.composer-send:disabled {
+	/* The muted pair already carries the disabled reading; the global 0.5
+	   opacity would take it below 3:1 on the bar. */
+	background: var(--df-c-composer-send-disabled-bg);
+	color: var(--df-c-composer-send-disabled-ink);
+	opacity: 1;
+}
+
+.composer-meta {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--df-p-space-3);
+	min-width: 0;
+	/* The counter belongs to the field, so it ends where the field does rather
+	   than under the send button. */
+	padding-right: calc(var(--df-c-composer-send-size) + var(--df-p-space-2));
+	padding-left: 2px;
+}
+
+.composer-status {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	font-size: var(--df-c-composer-hint-size);
+	line-height: 1.4;
+	color: var(--df-c-composer-hint-ink);
+	overflow-wrap: anywhere;
+}
+
+.composer-status[data-tone='error'] {
+	color: var(--df-state-danger-ink);
+}
+
+.composer-mark {
+	display: grid;
+	place-items: center;
+	flex: none;
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+.composer-count {
+	display: flex;
+	flex: none;
+	align-items: baseline;
+	gap: 6px;
+	font-size: var(--df-p-text-xs);
+	line-height: 1.4;
+	color: var(--df-c-composer-counter-ink);
+	white-space: nowrap;
+}
+
+.composer-count .mono {
+	font-size: var(--df-p-text-xs);
+}
+
+.composer-encoding {
+	font-size: var(--df-p-text-2xs);
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--df-text-meta);
+}
+
+.composer-encoding[data-encoding='ucs2'] {
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+.composer-parts[data-multi='true'] {
+	font-weight: 700;
+	color: var(--df-c-composer-counter-warn-ink);
+}
+
+/* Shared by the reply bar and the new-message screen. */
+.composer-failure {
+	display: grid;
+	gap: 2px;
+	padding: var(--df-p-space-2) 10px;
+	border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 35%, var(--df-border-hairline));
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-state-danger-bg);
+	color: var(--df-text-primary);
+	font-size: var(--df-p-text-sm);
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.composer-failure p:first-child {
+	font-weight: 700;
+}
+
+.composer-failure-reason {
+	font-size: var(--df-p-text-xs);
+	color: var(--df-text-secondary);
+}
+
+.chat-wrap {
+	padding-bottom: var(--df-p-space-5);
+}
+
+.chat-tools {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 48px;
+	padding: 6px 0 2px;
+}
+
+.load-older {
+	min-height: 48px;
+}
+
+.oldest-note {
+	padding: 10px 0;
+	text-align: center;
+	font-family: var(--df-p-font-mono);
+	font-size: 10.5px;
+	color: var(--df-text-meta);
+}
+
+.chat {
+	display: flex;
+	flex-direction: column;
+	list-style: none;
+	margin: 4px 0 0;
+	padding: 0;
+}
+
+.day-divider {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 40px;
+	margin: 18px 0 8px;
+	text-align: center;
+	font-family: var(--df-p-font-mono);
+	font-size: 10.5px;
+	color: var(--df-text-meta);
+}
+
+.chat .day-divider:first-child {
+	margin-top: 6px;
+}
+
+.bubble-row {
+	display: flex;
+	justify-content: flex-start;
+	content-visibility: auto;
+	contain-intrinsic-size: auto 54px;
+}
+
+.bubble-row + .bubble-row {
+	margin-top: var(--df-c-bubble-gap);
+}
+
+.bubble-row[data-dir='out'] {
+	justify-content: flex-end;
+}
+
+.bubble-row[data-dir='in'] + .bubble-row[data-dir='out'],
+.bubble-row[data-dir='out'] + .bubble-row[data-dir='in'] {
+	margin-top: 12px;
+}
+
+.bubble {
+	max-width: var(--df-c-bubble-max-width);
+	min-width: 0;
+	padding: var(--df-c-bubble-padding);
+	border-radius: var(--df-c-bubble-radius);
+	border-bottom-left-radius: var(--df-c-bubble-radius-tail);
+	background: var(--df-c-bubble-in-bg);
+	color: var(--df-c-bubble-in-ink);
+}
+
+.bubble-row[data-dir='out'] .bubble {
+	border-bottom-left-radius: var(--df-c-bubble-radius);
+	border-bottom-right-radius: var(--df-c-bubble-radius-tail);
+	background: var(--df-c-bubble-out-bg);
+	color: var(--df-c-bubble-out-ink);
+}
+
+.bubble-row[data-dir='out'] + .bubble-row[data-dir='out'] .bubble {
+	border-bottom-right-radius: var(--df-c-bubble-radius);
+	border-bottom-left-radius: var(--df-c-bubble-radius);
+}
+
+.bubble-body {
+	font-size: var(--df-c-bubble-body-size);
+	line-height: var(--df-c-bubble-body-leading);
+	overflow-wrap: anywhere;
+}
+
+.bubble-meta {
+	display: flex;
+	align-items: baseline;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 4px;
+	font-size: var(--df-c-bubble-meta-size);
+	color: var(--df-c-bubble-meta-ink);
+}
+
+.bubble-state {
+	font-weight: 700;
+	color: var(--df-c-bubble-status-sent-ink);
+}
+
+.bubble-state[data-tone='warn'] {
+	color: var(--df-c-bubble-status-queued-ink);
+}
+
+.bubble-state[data-tone='danger'] {
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--df-c-bubble-status-failed-bg);
+	color: var(--df-c-bubble-status-failed-ink);
+}
+
+/* ---------------------------------------------------------------- compose */
+
+/* Threads' one action that is not a section: writing to a number. */
+.screen-actions {
+	display: flex;
+	flex: none;
+	gap: var(--df-p-space-2);
+}
+
+.icon-btn.compose-open {
+	border-color: transparent;
+	background: var(--df-accent-fill);
+	color: var(--df-text-on-accent);
+	text-decoration: none;
+	transition:
+		transform var(--df-p-dur-press) ease-out,
+		background-color 120ms ease-out;
+}
+
+.icon-btn.compose-open:hover {
+	background: var(--df-accent-fill-hover);
+	color: var(--df-text-on-accent);
+}
+
+.icon-btn.compose-open:active {
+	transform: scale(0.94);
+}
+
+.compose-screen {
+	padding-bottom: var(--df-p-space-6);
+}
+
+/* The same sticky header as a conversation, with a title instead of a peer. */
+.compose-head h1 {
+	font-family: var(--display);
+	font-size: var(--df-p-text-lg);
+	font-weight: 800;
+	letter-spacing: -0.015em;
+}
+
+.compose-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--df-p-space-4);
+	margin-top: var(--df-p-space-4);
+	animation: compose-in var(--df-p-dur-settle) var(--df-p-ease-standard) both;
+}
+
+/* One reveal when the screen opens; the reduced state is the final state. */
+@keyframes compose-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+}
+
+.compose-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+}
+
+.compose-label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--df-text-meta);
+}
+
+/* A number is an identity: mono, tabular, and never shortened. */
+.compose-to {
+	min-height: 52px;
+	font-family: var(--mono);
+	font-size: var(--df-p-text-lg);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0.01em;
+}
+
+/* A text field is always the place the caret is, so it always shows the ring;
+   the global rule only promises it for keyboard focus. */
+.compose-to:focus,
+.compose-body:focus {
+	outline: var(--df-p-focus-width) solid var(--df-border-focus);
+	outline-offset: var(--df-p-focus-offset);
+}
+
+.compose-hint {
+	min-height: 16px;
+	font-size: 11.5px;
+	line-height: 1.45;
+	color: var(--df-text-meta);
+	overflow-wrap: anywhere;
+}
+
+.compose-hint[data-tone='error'] {
+	color: var(--df-state-danger-ink);
+}
+
+.compose-dialled {
+	font-size: var(--df-p-text-sm);
+	font-weight: 600;
+	color: var(--df-text-primary);
+}
+
+.compose-body {
+	min-height: 132px;
+	padding: var(--df-p-space-3);
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-surface-field);
+	font-size: var(--df-c-composer-font-size);
+	line-height: 1.5;
+	resize: none;
+}
+
+.compose-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	justify-content: flex-end;
+	gap: var(--df-p-space-3);
+	min-height: 16px;
+}
+
+/* The hard cap is a sentence of its own, beside the segment meter rather than
+   inside it: the meter counts parts, this says the body will not be sent. */
+.compose-meta .composer-cap {
+	margin-right: auto;
+	font-size: var(--df-c-composer-hint-size);
+	line-height: 1.4;
+	color: var(--df-state-danger-ink);
+	overflow-wrap: anywhere;
+}
+
+.compose-actions {
+	display: flex;
+	flex-direction: column;
+	gap: var(--df-p-space-2);
+}
+
+.compose-send {
+	min-height: 52px;
+	font-size: var(--df-p-text-md);
+}
+
+/* The same disabled reading as the composer's send: a muted fill with legible
+   ink, not a washed-out coral that still looks pressable. */
+.compose-send:disabled {
+	border-color: transparent;
+	background: var(--df-c-composer-send-disabled-bg);
+	color: var(--df-c-composer-send-disabled-ink);
+	opacity: 1;
+}
+
+.compose-blocked {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--df-p-space-2);
+	padding: 10px var(--df-p-space-3);
+	border: 1px dashed var(--df-border-control);
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-surface-well);
+	color: var(--df-text-secondary);
+	font-size: 12.5px;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.compose-settings {
+	align-self: center;
+}
+
+/* The 48dp target rule applies to the From picker too; the shared control is 44. */
+.compose-screen select {
+	min-height: 48px;
+}
+
+.compose-screen .picker.compact {
+	margin-top: var(--df-p-space-4);
+}
+
+/* ---------------------------------------------------------------- device */
+
+.fact-value {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 2px;
+}
+
+.fact-missing {
+	font-size: 11.5px;
+	color: var(--df-text-meta);
+}
+
+.fact-reason {
+	max-width: 32ch;
+	text-align: right;
+	font-size: 10.5px;
+	line-height: 1.35;
+	color: var(--df-text-meta);
+	overflow-wrap: anywhere;
+}
+
+.state-block {
+	margin-top: 4px;
+	padding: 20px;
+	border-radius: var(--df-p-radius-lg);
+	background: var(--df-state-neutral-bg);
+	color: var(--df-state-neutral-ink);
+}
+
+.state-block[data-state='live'] {
+	background: var(--df-state-ok-bg);
+	color: var(--df-state-ok-ink);
+}
+
+.state-block[data-state='synced'] {
+	background: var(--df-state-info-bg);
+	color: var(--df-state-info-ink);
+}
+
+.state-block[data-state='stale'] {
+	background: var(--df-state-warn-bg);
+	color: var(--df-state-warn-ink);
+}
+
+.state-block[data-state='offline'] {
+	background: var(--df-state-danger-bg);
+	color: var(--df-state-danger-ink);
+}
+
+.state-line {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.state-line h2 {
+	font-family: var(--display);
+	font-size: 28px;
+	line-height: 1.15;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	color: var(--ink);
+}
+
+.beacon {
+	width: 8px;
+	height: 8px;
+	border-radius: 999px;
+	background: currentColor;
+}
+
+.state-sentence {
+	margin-top: 8px;
+	max-width: 34ch;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--ink-2);
+}
+
+.state-last {
+	margin-top: 10px;
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+
+.stack {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 10px;
+}
+
+.wake-note {
+	margin: 14px 2px 0;
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--ink-3);
+}
+
+/* ---------------------------------------------------------------- flows */
+
+.statement {
+	margin-top: 4px;
+	padding: 16px 18px;
+	border-radius: var(--df-p-radius-md);
+	background: var(--df-state-filter-bg);
+}
+
+.statement p {
+	font-size: 13px;
+	line-height: 1.55;
+	color: var(--ink-2);
+}
+
+.statement strong {
+	color: var(--ink);
+	font-weight: 700;
+}
+
+.empty-inline {
+	margin: 8px 0 14px;
+	padding: 14px;
+	border-radius: 12px;
+	background: var(--df-surface-well);
+}
+
+.empty-inline p {
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--ink-2);
+}
+
+.empty-inline p + p {
+	margin-top: 6px;
+}
+
+.empty-inline strong {
+	color: var(--ink);
+	font-weight: 700;
+}
+
+.empty-inline .note {
+	margin-top: 8px;
+	font-size: 10.5px;
+}
+
+.flow-list {
+	list-style: none;
+	margin: 8px 0 14px;
+	padding: 0;
+}
+
+.flow-row {
+	padding: 12px 0;
+	border-top: 1px solid var(--df-border-hairline);
+}
+
+.flow-row:first-child {
+	padding-top: 4px;
+	border-top: 0;
+}
+
+.flow-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.flow-id {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--df-text-primary);
+}
+
+.flow-meta {
+	margin-top: 2px;
+	font-size: 10.5px;
+	color: var(--df-text-meta);
+}
+
+.flow-run {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 6px;
+	font-size: 11px;
+}
+
+.flow-run-label {
+	font-size: 9.5px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--df-text-meta);
+}
+
+.flow-run time {
+	font-size: 10.5px;
+}
+
+.picker {
+	display: block;
+	margin-top: 12px;
+}
+
+.picker.compact {
+	margin-top: 2px;
+	margin-bottom: 4px;
+}
+
+.picker-label {
+	display: block;
+	margin-bottom: 4px;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.switch-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	margin-top: 14px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line);
+}
+
+.switch-row .label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.switch-copy {
+	margin-top: 3px;
+	font-size: 11.5px;
+	line-height: 1.4;
+	color: var(--ink-3);
+}
+
+[data-switch-root] {
+	position: relative;
+	display: flex;
+	align-items: center;
+	flex: none;
+	width: 52px;
+	min-height: 48px;
+	padding: 0 4px;
+	border: 0;
+	border-radius: 999px;
+	background: transparent;
+	cursor: pointer;
+}
+
+/* The target is 48dp; the track it draws stays 32px. The off track is the
+   measured field border rather than a pastel, so "off" is 3.38:1 against the
+   thumb and 3.38:1 against the card instead of 1.24:1, and it is not read by
+   colour alone: the thumb moves. */
+[data-switch-root]::before {
+	content: '';
+	position: absolute;
+	inset: 8px 0;
+	border: 1px solid var(--df-border-input);
+	border-radius: 999px;
+	background: var(--df-border-input);
+	transition:
+		background-color 120ms ease-out,
+		border-color 120ms ease-out;
+}
+
+[data-switch-root][data-state='checked']::before {
+	background: var(--df-accent-fill);
+	border-color: var(--df-accent-fill);
+}
+
+[data-switch-thumb] {
+	position: relative;
+	display: block;
+	flex: none;
+	width: 24px;
+	height: 24px;
+	border-radius: 999px;
+	background: var(--surface);
+	box-shadow: var(--df-p-shadow-1);
+	transition: transform 120ms var(--df-p-ease-standard);
+}
+
+[data-switch-root][data-state='checked'] [data-switch-thumb] {
+	transform: translateX(20px);
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.advanced {
+	margin-top: 14px;
+	padding-top: 10px;
+	border-top: 1px solid var(--line);
+}
+
+.advanced summary {
+	/* list-item keeps the native disclosure triangle that flex would drop;
+	   the padding is what makes the row a 48dp target. */
+	display: list-item;
+	padding-block: 15px;
+	cursor: pointer;
+	color: var(--ink-3);
+	font-size: 12px;
+}
+
+.advanced[open] summary {
+	margin-bottom: 6px;
+}
+
+.advanced p {
+	margin-bottom: 4px;
+	color: var(--ink-3);
+	font-size: 11.5px;
+	line-height: 1.5;
+}
 
 .device {
-  border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 12px; margin-top: 10px; background: var(--bg);
-}
-.device-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-.device-id { font-family: var(--mono); font-size: 12px; color: var(--ink-2); word-break: break-all; }
-.pill {
-  font-size: 11px; padding: 2px 8px; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--ink-3); white-space: nowrap;
-}
-.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 10px; }
-.fact { font-size: 12px; }
-.fact b { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3); font-weight: 600; }
-.fact span { font-family: var(--mono); }
-
-.empty { padding: 28px 12px; text-align: center; color: var(--ink-3); }
-
-.error {
-  margin-top: 12px; padding: 10px 12px; border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
-  color: var(--danger); font-size: 12px;
+	margin-top: 12px;
+	padding: 12px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--bg);
 }
 
-.notice-ok {
-  margin-top: 12px; padding: 10px 12px; border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--line));
-  color: var(--ok); font-size: 12px;
+.device-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
 }
 
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); }
+.device-head strong {
+	min-width: 0;
+	font-size: 14px;
+	font-weight: 700;
+	overflow-wrap: anywhere;
+}
+
+.device-id {
+	margin-top: 2px;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-2);
+	word-break: break-all;
+}
+
+.facts {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+	gap: 8px;
+	margin-top: 10px;
+}
+
+.fact {
+	min-width: 0;
+	font-size: 12px;
+}
+
+.fact b {
+	display: block;
+	font-size: 9.5px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.fact span {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink);
+	overflow-wrap: anywhere;
+}
+
+.device-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.device-actions .btn {
+	flex: 1 1 auto;
+}
+
+/* ---------------------------------------------------------------- dialog */
+
+.overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	background: var(--df-c-dialog-scrim);
+}
+
 .dialog {
-  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: min(420px, calc(100vw - 32px));
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 18px;
+	position: fixed;
+	top: 50%;
+	left: 50%;
+	z-index: 50;
+	transform: translate(-50%, -50%);
+	width: var(--df-c-dialog-width);
+	padding: 18px;
+	background: var(--df-c-dialog-bg);
+	border: 1px solid var(--df-c-dialog-border);
+	border-radius: var(--df-c-dialog-radius);
+	box-shadow: var(--df-c-dialog-shadow);
 }
-.dialog h3 { margin: 0 0 6px; font-size: 15px; }
-.dialog p { margin: 0 0 14px; color: var(--ink-2); font-size: 13px; }
-.dialog .row { justify-content: flex-end; }
 
-/* The admin credential is a lab override, not part of onboarding. */
-details.advanced {
-  margin-top: 14px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+.dialog h3 {
+	margin: 0 0 6px;
+	font-family: var(--display);
+	font-size: 16px;
+	font-weight: 700;
 }
-details.advanced summary {
-  cursor: pointer;
-  color: var(--ink-3);
-  font-size: 12px;
+
+.dialog p {
+	margin: 0 0 14px;
+	color: var(--ink-2);
+	font-size: 13px;
+	line-height: 1.5;
 }
-details.advanced[open] summary { margin-bottom: 6px; }
-details.advanced p {
-  margin: 0 0 4px;
-  color: var(--ink-3);
-  font-size: 12px;
+
+.dialog .row {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.dialog .row button {
+	min-height: 48px;
+	padding: 0 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--surface);
+	color: var(--ink);
+}
+
+.dialog .row button.danger {
+	color: var(--danger);
+	border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+}
+
+/* ---------------------------------------------------------------- responsive */
+
+@media (max-width: 359px) {
+	.topbar,
+	.app-main {
+		padding-inline: var(--df-p-space-4);
+	}
+
+	.rowline {
+		grid-template-columns: 78px minmax(0, 1fr);
+	}
+}
+
+/* The reduced state is the final state, not a faster animation. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation: none !important;
+		transition: none !important;
+		scroll-behavior: auto !important;
+	}
 }

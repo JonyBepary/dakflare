@@ -7,15 +7,24 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    Device, DeviceClient, Message, NewDevice, ProtocolError, Store, Target, drain_outbox,
-    inject_inbound, parse_pair_link,
+    CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, MAX_SEARCH_HITS, Message, NewDevice,
+    ProtocolError, Retention, RetentionStatus, SearchHits, Store, Target,
+    carrier::flush_pending, check_send, drain_outbox, inject_inbound, parse_pair_link,
+    sync_flows as sync_flows_core,
 };
 use serde::Serialize;
+#[cfg(target_os = "android")]
+use serde::Deserialize;
 use tauri::{Manager, State};
 
 /// Direct JNI surface for the Android `SmsReceiver`. Not compiled on desktop.
 #[cfg(target_os = "android")]
 mod android;
+mod socket;
+
+/// Android Keystore bridge for the identity vault. Not compiled on desktop.
+#[cfg(target_os = "android")]
+mod vault;
 
 struct AppState {
     store: Arc<Store>,
@@ -25,6 +34,12 @@ struct AppState {
 struct TargetView {
     base_url: Option<String>,
     has_admin_token: bool,
+}
+
+#[derive(Serialize)]
+struct MessagePage {
+    messages: Vec<Message>,
+    has_more: bool,
 }
 
 async fn load_target(state: &AppState) -> Result<Target, String> {
@@ -198,7 +213,26 @@ async fn pair_device(
         .pair_with_identity(&code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(format!("Paired as {}", device.device_id))
+    record_pairing(&state, &device.device_id).await;
+    record_contact(&state, &device.device_id).await;
+    Ok(pairing_message(&state, &client, &device.device_id).await)
+}
+
+/// Pairing has already succeeded by the time this runs: the returned sentence
+/// carries the flow-sync outcome, but a failure there never fails the pairing.
+/// The first real contact (`poll_device`, the gateway tick) retries the sync.
+async fn pairing_message(
+    state: &State<'_, AppState>,
+    client: &DeviceClient,
+    device_id: &str,
+) -> String {
+    match sync_flows_core(&state.store, client).await {
+        Ok(count) => format!("Paired as {device_id}. Cached {count} flow(s)."),
+        Err(error) => {
+            eprintln!("[pair] flow sync failed: {error}");
+            format!("Paired as {device_id}. Flows will sync on the next contact.")
+        }
+    }
 }
 
 /// Redeem an operator-minted pairing code. No admin token is read or required.
@@ -237,7 +271,9 @@ async fn pair_with_code(
         .pair_with_identity(&link.code, &device.public_key_spki, label, sim_slot)
         .await
         .map_err(pair_failure)?;
-    Ok(format!("Paired as {}", device.device_id))
+    record_pairing(&state, &device.device_id).await;
+    record_contact(&state, &device.device_id).await;
+    Ok(pairing_message(&state, &client, &device.device_id).await)
 }
 
 /// Translate the protocol error into something a person can act on.
@@ -274,7 +310,47 @@ async fn poll_device(
     device_id: String,
 ) -> Result<serde_json::Value, String> {
     let (client, _device) = client_for(&state, &device_id).await?;
-    client.poll(&[]).await.map_err(|e| e.to_string())
+    // A receiver can leave rows pending while offline; flush them before polling
+    // so opening the app clears the backlog. Best effort.
+    let _ = flush_pending(&state.store, &client, &device_id).await;
+    // Opening the app is also a flow-sync trigger: a Worker-side edit must reach
+    // the phone without an operator opening the carrier panel. Best effort, and
+    // reported in the reply so the Flows frame can say a refresh failed.
+    let flows = match sync_flows_core(&state.store, &client).await {
+        Ok(count) => serde_json::json!({ "ok": true, "count": count }),
+        Err(error) => {
+            eprintln!("[poll] flow sync failed: {error}");
+            serde_json::json!({ "ok": false, "error": error.to_string() })
+        }
+    };
+    let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
+    // The poll above is signed and was answered, so this is a real contact. The
+    // Device frame reads this setting, never `devices.updated_at`.
+    record_contact(&state, &device_id).await;
+    // `updated_at` is kept for the device list's recency order only; it is not
+    // contact evidence.
+    let _ = state.store.touch_device(&device_id).await;
+    // A deployment that answers this identity has accepted it. That backfills the
+    // pairing time for identities created before it was recorded, without
+    // overwriting the original date on later polls.
+    let key = format!("paired:{device_id}");
+    if matches!(state.store.get_setting(&key).await, Ok(None)) {
+        record_pairing(&state, &device_id).await;
+    }
+    Ok(serde_json::json!({ "commands": commands, "flows": flows }))
+}
+
+/// Pull the deployment's flow set for this device into the local cache.
+///
+/// The explicit "Sync now" trigger in the Flows frame. Returns the number of
+/// cached flows; an error leaves the previous cache in place so the frame keeps
+/// listing graphs this phone can still run.
+#[tauri::command]
+async fn sync_flows(state: State<'_, AppState>, device_id: String) -> Result<usize, String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    sync_flows_core(&state.store, &client)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Test-cleanup: erase this device's message log on the deployment.
@@ -289,6 +365,67 @@ async fn purge_messages(state: State<'_, AppState>, device_id: String) -> Result
 async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
     let (client, _device) = client_for(&state, &device_id).await?;
     client.revoke().await.map_err(|e| e.to_string())
+}
+
+/// Remember when this identity was paired.
+///
+/// Nothing in the local schema records it: `devices` holds the identity, not the
+/// handshake. The Device frame would otherwise have to say "not recorded" about
+/// a phone that plainly is, so the one fact that matters is kept beside it.
+async fn record_pairing(state: &State<'_, AppState>, device_id: &str) {
+    let _ = state
+        .store
+        .set_setting(&format!("paired:{device_id}"), &now_ms().to_string())
+        .await;
+}
+
+/// Remember when a signed request to this identity was last answered.
+///
+/// `devices.updated_at` is stamped at creation and cannot tell a phone that has
+/// never reached the deployment from one that answered a poll a second ago, so
+/// the Device frame must not derive `live` from it. This setting is written only
+/// by the paths that actually completed a signed exchange (poll, flush, pair),
+/// and `get_last_contact` is the only thing the UI reads.
+async fn record_contact(state: &State<'_, AppState>, device_id: &str) {
+    let _ = state
+        .store
+        .set_setting(&format!("last_contact:{device_id}"), &now_ms().to_string())
+        .await;
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// When this identity last answered a signed request, if it ever has.
+#[tauri::command]
+async fn get_last_contact(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Option<i64>, String> {
+    let value = state
+        .store
+        .get_setting(&format!("last_contact:{device_id}"))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(value.and_then(|raw| raw.trim().parse::<i64>().ok()))
+}
+
+/// When this identity last completed a pairing handshake, if it ever did.
+#[tauri::command]
+async fn get_device_pairing(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Option<i64>, String> {
+    let value = state
+        .store
+        .get_setting(&format!("paired:{device_id}"))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(value.and_then(|raw| raw.trim().parse::<i64>().ok()))
 }
 
 /* ---------------------------------------------------------------- carrier */
@@ -347,6 +484,12 @@ async fn carrier_inject(
     .await
     .map_err(|e| e.to_string())?;
 
+    // The upload (and the flow fetch above) were signed; an offline inject is
+    // local-only and must not count as contact.
+    if client.is_some() {
+        record_contact(&state, &device_id).await;
+    }
+
     Ok(serde_json::json!({
         "uploaded": result.uploaded,
         "accepted": result.accepted,
@@ -374,9 +517,357 @@ async fn carrier_drain(
     }
 
     let (client, _device) = client_for(&state, &device_id).await?;
-    drain_outbox(state.store.as_ref(), &client, &device_id)
+    let captured = drain_outbox(state.store.as_ref(), &client, &device_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // `drain_outbox` polls the deployment with this identity's key; the answer
+    // is contact even when it carried no commands.
+    record_contact(&state, &device_id).await;
+    Ok(captured)
+}
+
+/* ---------------------------------------------------------------- compose */
+
+/// `send_sms` reply. The UI pairs this id with the row it later reads back.
+#[derive(Serialize)]
+struct SendSmsReply {
+    local_id: String,
+}
+
+/// Rust → Kotlin bridge for the composer.
+///
+/// A registered Tauri mobile plugin rather than a direct JNI call: it is the
+/// sanctioned mechanism (`PluginApi::register_android_plugin` +
+/// `run_mobile_plugin_async`), it dispatches to the Android context without this
+/// crate needing a `JavaVM` of its own (`ndk_context` is not a dependency), and
+/// it uses the same class-loading and main-thread plumbing as the bundled path
+/// plugin. A direct JNI call would have to cache a VM during some Kotlin→Rust
+/// call that may not have happened yet.
+#[cfg(target_os = "android")]
+struct SmsBridge(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmsPluginRequest<'a> {
+    device_id: &'a str,
+    to: &'a str,
+    body: &'a str,
+    /// 1-based tray index, exactly as the device row holds it.
+    sim_slot: i64,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct SmsPluginReply {
+    local_id: String,
+}
+
+/// The webview's one pending sms:/smsto: route, if an intent offered one.
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct SmsRouteReply {
+    route: Option<String>,
+}
+
+#[cfg(target_os = "android")]
+fn sms_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("dakflare-sms")
+        .setup(|app, api| {
+            let handle =
+                api.register_android_plugin("dev.dakflare.simulator.bridge", "SmsPlugin")?;
+            app.manage(SmsBridge(handle));
+            Ok(())
+        })
+        .build()
+}
+
+/// Turn a plugin failure into the composer's plain-string contract. Kotlin only
+/// rejects with its own worded refusals, so nothing here can carry a number or a
+/// body.
+#[cfg(target_os = "android")]
+fn sms_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
+    use tauri::plugin::mobile::PluginInvokeError;
+
+    match error {
+        PluginInvokeError::InvokeRejected(response) => response
+            .message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The phone could not send the message".to_string()),
+        other => {
+            // Carries no number and no body; only the JNI/deserialisation reason.
+            eprintln!("[sms] mobile plugin failed: {other}");
+            "The phone could not send the message".to_string()
+        }
+    }
+}
+
+/// Send one SMS composed in the webview.
+///
+/// Kotlin writes the `queued` row (`queueOutbound`) before the radio is touched
+/// and reports the real outcome with a `SENT` broadcast, so this command never
+/// claims delivery: it returns the row's id, and the row moves to `sent` or
+/// `failed` on its own. A device with no row is `Not paired`, which is what the
+/// composer shows as its empty state.
+///
+/// The recipient and body policy is enforced *here*, before the device lookup
+/// and before the plugin call, because the composer is not the only caller: an
+/// sms:/smsto: intent, the inline-reply receiver and tests all reach the same
+/// command. The rules and their exact sentences live in
+/// `dakflare_core::compose`, so this refusal and the field cannot disagree.
+/// Nothing below logs a recipient or a body; refusals carry counts only.
+#[tauri::command]
+async fn send_sms(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    device_id: String,
+    to: String,
+    body: String,
+) -> Result<SendSmsReply, String> {
+    let to = check_send(&to, &body).map_err(|problem| problem.sentence())?;
+
+    let device = state
+        .store
+        .get_device(&device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Not paired".to_string())?;
+
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<SmsBridge>()
+            .ok_or_else(|| "Sending SMS is not available in this build".to_string())?;
+        let reply = bridge
+            .0
+            .run_mobile_plugin_async::<SmsPluginReply>(
+                "send",
+                SmsPluginRequest {
+                    device_id: &device.device_id,
+                    to,
+                    body: body.as_str(),
+                    sim_slot: device.sim_slot,
+                },
+            )
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(SendSmsReply {
+            local_id: reply.local_id,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, device, to);
+        Err("Sending SMS is only available on the phone".into())
+    }
+}
+
+/// Ask Android to show its default-SMS role dialog.
+///
+/// Kotlin owns the platform branch (`RoleManager` on API 29+,
+/// `ACTION_CHANGE_DEFAULT` below it). This command only opens the dialog; it
+/// never reports the role as held. `get_device_facts` stays the source of truth
+/// because `MainActivity.onResume` re-reads the role holder after the dialog
+/// closes.
+#[tauri::command]
+async fn request_default_sms_role(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.try_state::<SmsBridge>().ok_or_else(|| {
+            "Changing the SMS role is not available in this build".to_string()
+        })?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestDefaultSmsRole", ())
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Changing the SMS role is only available on the phone".into())
+    }
+}
+
+/// Take the pending sms:/smsto: or pairing route from the Android shell, once.
+///
+/// `MainActivity` records it when a SENDTO/VIEW intent arrives; the webview
+/// opens the matching thread, or Settings for a `dakflare://pair` link. Only a
+/// `/messages` path and the one `/settings?pair=` route the shell builds from a
+/// validated link are accepted, so a malformed intent cannot steer the router
+/// elsewhere. A desktop build has no intents and returns `None`.
+#[tauri::command]
+async fn take_sms_route(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let Some(bridge) = app.try_state::<SmsBridge>() else {
+            return Ok(None);
+        };
+        let reply = bridge
+            .0
+            .run_mobile_plugin_async::<SmsRouteReply>("takeSmsRoute", ())
+            .await
+            .map_err(sms_plugin_error)?;
+        Ok(reply.route.filter(|route| {
+            route == "/messages"
+                || route.starts_with("/messages/")
+                || route.starts_with("/settings?pair=")
+        }))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+/// Rust → Kotlin bridge for the permission gate.
+///
+/// The same mechanism as [`SmsBridge`] and for the same reasons: a registered
+/// mobile plugin dispatches to the Android context without this crate needing a
+/// `JavaVM` of its own. A separate plugin rather than another command on
+/// `SmsPlugin`, because permissions are not SMS: the gate has to work before
+/// the app can send anything at all.
+#[cfg(target_os = "android")]
+struct PermissionBridge(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+fn permission_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("dakflare-permissions")
+        .setup(|app, api| {
+            let handle =
+                api.register_android_plugin("dev.dakflare.simulator.bridge", "PermissionPlugin")?;
+            app.manage(PermissionBridge(handle));
+            Ok(())
+        })
+        .build()
+}
+
+/// Turn a plugin failure into a sentence the gate can show. The Kotlin side only
+/// rejects with its own worded refusals; anything else is a JNI or
+/// deserialisation failure and carries nothing the operator can act on.
+#[cfg(target_os = "android")]
+fn permission_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
+    use tauri::plugin::mobile::PluginInvokeError;
+
+    match error {
+        PluginInvokeError::InvokeRejected(response) => response
+            .message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The phone could not open that setting".to_string()),
+        other => {
+            eprintln!("[permissions] mobile plugin failed: {other}");
+            "The phone could not open that setting".to_string()
+        }
+    }
+}
+
+/// The five checks the gate shows: `battery_exempt`, `sms_role`, `send_sms`,
+/// `receive_sms`, `notifications`.
+///
+/// Read-only. Android is the source of truth; the UI never infers a grant from a
+/// button tap, only from a fresh read after the system dialog closes. A desktop
+/// build reports everything granted, so the gate never appears there.
+#[tauri::command]
+async fn permission_state(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Permissions are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("state", ())
+            .await
+            .map_err(permission_plugin_error)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({
+            "battery_exempt": true,
+            "sms_role": true,
+            "send_sms": true,
+            "receive_sms": true,
+            "notifications": true,
+        }))
+    }
+}
+
+/// Open the battery-exemption dialog. Asking, never claiming: the gate re-reads
+/// [`permission_state`] when the app regains focus.
+#[tauri::command]
+async fn request_battery_exemption(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "The battery setting is not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestBattery", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("The battery setting is only available on the phone".into())
+    }
+}
+
+/// Ask for `SEND_SMS` and `RECEIVE_SMS` in one dialog.
+#[tauri::command]
+async fn request_sms_permissions(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Permissions are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestSmsPermissions", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Permissions are only available on the phone".into())
+    }
+}
+
+/// Ask for `POST_NOTIFICATIONS`, or open the app's notification settings when
+/// the permission is granted but the operator switched the app off.
+#[tauri::command]
+async fn request_notifications(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Notifications are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestNotifications", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Notifications are only available on the phone".into())
+    }
 }
 
 #[tauri::command]
@@ -388,6 +879,139 @@ async fn list_messages(
     state
         .store
         .list_messages(&device_id, limit.unwrap_or(100).clamp(1, 500))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// One keyset page for the Threads frame.
+///
+/// No cursor means the first page and delegates to [`list_messages`], so the
+/// two commands cannot disagree about what "newest" is. A cursor is the
+/// `(created_at, id)` pair of the last row the client already has; `has_more`
+/// comes from fetching one extra row rather than a second `COUNT`.
+#[tauri::command]
+async fn list_messages_page(
+    state: State<'_, AppState>,
+    device_id: String,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<MessagePage, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 100);
+    let mut messages = match (before_created_at, before_id) {
+        (None, None) => state.store.list_messages(&device_id, limit + 1).await,
+        (Some(created_at), Some(id)) => {
+            state
+                .store
+                .list_messages_before(&device_id, created_at, &id, limit + 1)
+                .await
+        }
+        _ => {
+            return Err("before_created_at and before_id must be provided together".into());
+        }
+    }
+    .map_err(|e| e.to_string())?;
+
+    let has_more = messages.len() as i64 > limit;
+    messages.truncate(limit as usize);
+    Ok(MessagePage { messages, has_more })
+}
+
+/// Bounded search over this device's local log: peer or body, case-insensitive.
+///
+/// The store escapes LIKE wildcards, caps the pattern, and returns at most
+/// [`MAX_SEARCH_HITS`] rows plus a `truncated` flag; the Threads frame prints
+/// that instead of a count it cannot support.
+#[tauri::command]
+async fn search_messages(
+    state: State<'_, AppState>,
+    device_id: String,
+    query: String,
+    limit: Option<i64>,
+) -> Result<SearchHits, String> {
+    state
+        .store
+        .search_messages(&device_id, &query, limit.unwrap_or(MAX_SEARCH_HITS))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The retention rule in force, when it last ran and what that run removed.
+#[tauri::command]
+async fn get_retention(state: State<'_, AppState>) -> Result<RetentionStatus, String> {
+    state
+        .store
+        .retention_status()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Choose a retention rule and apply it now.
+///
+/// `forever` is a valid choice and deletes nothing. An unknown rule is refused
+/// before it is stored, so a typo cannot become the setting the next open reads.
+/// The stores' own rule decides what may go: mirrored rows only, never a queued
+/// send, an unuploaded failure or a pending inbound row.
+#[tauri::command]
+async fn set_retention(
+    state: State<'_, AppState>,
+    policy: String,
+) -> Result<RetentionStatus, String> {
+    let Some(retention) = Retention::parse(&policy) else {
+        return Err(
+            "That is not a retention rule. Choose 90 days, 30 days, 1,000 messages or forever."
+                .into(),
+        );
+    };
+    state
+        .store
+        .set_retention(retention)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Choosing a rule is the instruction to apply it, not just to record it.
+    state
+        .store
+        .purge_expired_messages()
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .store
+        .retention_status()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The cached flow set, readable by the Flows frame. A corrupt graph keeps its
+/// row and reports `node_count: null`; it does not hide the cache.
+#[tauri::command]
+async fn list_cached_flows(state: State<'_, AppState>) -> Result<Vec<CachedFlow>, String> {
+    state
+        .store
+        .list_cached_flows()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_flow_runs(
+    state: State<'_, AppState>,
+    device_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<FlowRunRow>, String> {
+    state
+        .store
+        .list_flow_runs(&device_id, limit.unwrap_or(50).clamp(1, 100))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Handset facts written by the Android shell. A desktop build has none, so
+/// every field is `null` rather than a fabricated value.
+#[tauri::command]
+async fn get_device_facts(state: State<'_, AppState>) -> Result<DeviceFacts, String> {
+    state
+        .store
+        .get_device_facts()
         .await
         .map_err(|e| e.to_string())
 }
@@ -434,7 +1058,14 @@ async fn schema_version(state: State<'_, AppState>) -> Result<i64, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Mobile plugins need an Android class to drive. Desktop keeps the command
+    // but reports that sending is phone-only.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(sms_plugin()).plugin(permission_plugin());
+
+    builder
         .setup(|app| {
             let dir = app
                 .path()
@@ -444,10 +1075,22 @@ pub fn run() {
 
             // Opening the store is async; setup runs before the event loop, so a
             // blocking open here is simpler than racing the UI against a lazy DB.
-            let store = tauri::async_runtime::block_on(Store::open(dir.join("simulator.db")))
-                .map_err(|e| {
-                    std::io::Error::other(format!("could not open local database: {e}"))
-                })?;
+            //
+            // On Android the store is opened with the Keystore cipher, so any
+            // plaintext key left by an older build is wrapped in place (and
+            // proven) before a single command can sign with it.
+            let db_path = dir.join("simulator.db");
+            #[cfg(target_os = "android")]
+            let store = tauri::async_runtime::block_on(Store::open_with_cipher(
+                db_path,
+                Arc::new(vault::JniKeyCipher),
+            ))
+            .map_err(|e| std::io::Error::other(format!("could not open local database: {e}")))?;
+
+            #[cfg(not(target_os = "android"))]
+            let store = tauri::async_runtime::block_on(Store::open(db_path)).map_err(|e| {
+                std::io::Error::other(format!("could not open local database: {e}"))
+            })?;
 
             app.manage(AppState {
                 store: Arc::new(store),
@@ -463,11 +1106,28 @@ pub fn run() {
             pair_device,
             pair_with_code,
             poll_device,
+            sync_flows,
             purge_messages,
             revoke_device,
             carrier_inject,
             carrier_drain,
+            send_sms,
+            request_default_sms_role,
+            permission_state,
+            request_battery_exemption,
+            request_sms_permissions,
+            request_notifications,
+            take_sms_route,
             list_messages,
+            list_messages_page,
+            search_messages,
+            get_retention,
+            set_retention,
+            list_cached_flows,
+            list_flow_runs,
+            get_device_facts,
+            get_device_pairing,
+            get_last_contact,
             clear_messages,
             set_offline,
             get_offline,

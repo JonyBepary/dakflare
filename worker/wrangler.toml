@@ -20,6 +20,10 @@ name = "dakflare-worker"
 # keeps running until you delete it explicitly.
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
+# Required by better-auth (its password utilities import `node:crypto`). The flag
+# is inert for code that does not use node: builtins, so it does not change the
+# device protocol paths.
+compatibility_flags = ["nodejs_compat"]
 
 # Preview URLs are public by default and are not part of any route the device
 # uses. Keep them off.
@@ -27,8 +31,11 @@ preview_urls = false
 
 # ---------------------------------------------------------------------------
 # Durable Object: one DeviceGateway instance per device_id.
-# `[[migrations]]` with `new_sqlite_classes` remains correct for SQLite-backed
-# DOs; declarative `[exports]` is the successor syntax.
+# Declared through `exports`, which is the current lifecycle syntax: Wrangler
+# 4.151 refuses to deploy when a provisioned namespace is not declared, and
+# `exports` and `[[migrations]]` are mutually exclusive. The class name is
+# unchanged — it is the identity the deployed instances already carry, and
+# renaming it would need a new migration tag.
 # ---------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "DEVICE"
@@ -36,9 +43,21 @@ name = "DEVICE"
 # instances, and renaming it requires a new migration tag. Display name: DakFlareDeviceDO.
 class_name = "DeviceGateway"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["DeviceGateway"]
+# One globally named AuthGuard object (name "global") owns the failed-auth
+# counters, so every location sees the same 15-minute account/IP window. Before
+# this, the window was isolate memory and an attacker rotating locations got a
+# fresh budget at each. The Rate Limiting bindings remain only a fallback.
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
+[exports.DeviceGateway]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthGuard]
+type = "durable-object"
+storage = "sqlite"
 
 # ---------------------------------------------------------------------------
 # D1 — pairing codes, device registry, message log, rules.
@@ -102,7 +121,59 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
+# Failed-auth lockout (AUTH_PLAN §3). The authoritative counter is the global
+# AuthGuard Durable Object (see lib/auth-limits.ts and `[exports.AuthGuard]`).
+# These Rate Limiting bindings are only the FALLBACK used while that object is
+# unreachable: the Rate Limiting API accepts only a 10- or 60-second period and
+# returns no count, so it cannot express the 15-minute window or the fixed
+# lockout expiry. Counted on FAILURES only, so a refused request costs no row.
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "1006"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "1007"
+simple = { limit = 20, period = 60 }
+
 [vars]
+# Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
+# what a deployment that has not migrated yet must keep). `new` = Better Auth
+# session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
+# (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
+# Which side runs the password KDF (AUTH_PLAN §2, phase 4):
+#   off (default) | client-derived (free tier) | server-kdf (paid plan)
+# `off` disables the whole password factor: /v1/auth/salt still answers (same
+# shape for every address), sign-in and set answer 403 password_disabled.
+# `client-derived` refuses a plaintext password outright, because 210,000
+# PBKDF2 iterations do not fit the 10 ms free-tier CPU budget; the browser
+# derives and the Worker only peppers + compares. `server-kdf` accepts both
+# shapes so an account created on free keeps working after an upgrade.
+# Changing this never rewrites stored rows: each row's m= records whether the
+# browser or the Worker derived the material.
+# The KDF runs in the browser: a server-side PBKDF2 measured ~27 ms against the
+# free tier's 10 ms budget. Set to "server-kdf" only on Workers Paid.
+AUTH_PASSWORD_MODE = "client-derived"
+# Magic-link factor (AUTH_PLAN §1, factor 2). The routes are always mounted, but
+# `/v1/auth/mode` reports `magic_link:false` and no mail is sent unless a sender
+# is configured. RESEND_API_KEY is a Worker secret, never a var here:
+#   wrangler secret put RESEND_API_KEY
+# The sandbox sender (onboarding@resend.dev) is fine until a domain exists.
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+# Token lifetime in seconds (default 900 = 15 minutes). Clamped to [1, 3600];
+# the conformance harness lowers it so expiry can be tested without a wait.
+MAGIC_LINK_TTL_SECONDS = "900"
+# Redirectable Resend API base so a local capture can stand in for the provider.
+# Production should leave this unset (defaults to https://api.resend.com).
+# RESEND_BASE_URL = "http://127.0.0.1:8791"
+# Failed-auth lockout window, in seconds (AUTH_PLAN §3). 900 = 15 minutes. The
+# AuthGuard window in `lib/auth-limits.ts` is clamped to [1, 3600]; lower it only
+# for the conformance harness, which waits out the window it starts the Worker
+# with. The Rate Limiting bindings cannot express this window (10/60 s only).
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
+# AUTH_PEPPER is a Worker secret, never a var here:
+#   wrangler secret put AUTH_PEPPER     # v2:<b64-32>,v1:<b64-32>
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    DakFlare launcher, foreground layer — the "Torch" mark (docs/design-review/06-banner-design.md §3.1).
+
+    A phone standing upright (ink slab) with one coral broadcast arc leaving its
+    top. No face, no check, no notification dot: a dot on a phone reads as a
+    missed call, which is the opposite of what this app promises.
+
+    Geometry on the 108dp adaptive canvas:
+      slab  rect x41 y40 w26 h42 rx9                           token df-text-primary #241F1A
+      arc   M46.5 34 a7.5 7.5 0 0 1 15 0, stroke 5.5, round caps  token df-accent-decor #D9502C
+      gap   3.25dp between the arc caps (y36.75) and the slab (y40)
+    The mark spans x41 to 67 and y23.75 to 82, inside a 30.9dp radius around (54,54):
+    inside the 72dp safe window, with the tolerance the review allows for launcher
+    parallax. The 18dp bleed on each side exists to be cropped, not to be used.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The phone slab. -->
+    <path
+        android:fillColor="@color/dakflare_ink"
+        android:pathData="M50,40h8a9,9 0 0 1 9,9v24a9,9 0 0 1 -9,9h-8a9,9 0 0 1 -9,-9v-24a9,9 0 0 1 9,-9z" />
+    <!-- The one coral arc: a true semicircle, apex (54,26.5). -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M46.5,34a7.5,7.5 0 0 1 15,0"
+        android:strokeColor="#D9502C"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round" />
+</vector>

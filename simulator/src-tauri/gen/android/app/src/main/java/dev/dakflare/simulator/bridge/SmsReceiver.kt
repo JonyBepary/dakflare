@@ -1,6 +1,7 @@
 package dev.dakflare.simulator.bridge
 
 import android.Manifest
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -27,7 +28,17 @@ import org.json.JSONObject
  */
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
+        // SMS_DELIVER is the copy Android sends to the default SMS app;
+        // SMS_RECEIVED is the ordinary broadcast every RECEIVE_SMS holder gets
+        // when no default app is set. Both carry the same PDUs and share one
+        // path. If the platform ever sends both for one message, the core's
+        // deterministic local_id (PDU timestamp + sender) reuses the first row
+        // and returns no actions, so neither storage nor a reply happens twice.
+        if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION &&
+            intent.action != Telephony.Sms.Intents.SMS_DELIVER_ACTION
+        ) {
+            return
+        }
 
         // Opening a database and sending may take longer than a receiver's
         // main-thread budget; keep the broadcast alive while a worker does it.
@@ -77,10 +88,11 @@ class SmsReceiver : BroadcastReceiver() {
         // second database the UI never reads.
         val appDir = context.applicationInfo.dataDir
         for ((sender, group) in bySender) {
+            val body = group.body.toString()
             val result = NativeBridge.processIncomingSafely(
                 appDir = appDir,
                 sender = sender,
-                body = group.body.toString(),
+                body = body,
                 receivedAtMs = group.receivedAtMs,
             )
             val outcome = parse(result)
@@ -93,6 +105,38 @@ class SmsReceiver : BroadcastReceiver() {
                 Log.w(TAG, "inbound was not answered: ${outcome.error}")
                 continue
             }
+
+            // M5.3: a successful store proves the phone is paired, so ask the
+            // foreground service to take over the drain when this broadcast's
+            // own flush would outlive the receiver budget. Best effort only: a
+            // platform or OEM refusal must not cost the message, so `start`
+            // catches everything and logs just the exception class.
+            GatewayService.start(context)
+
+            // The store succeeded, so the message is safe before the provider is
+            // touched. The write is best effort and time-bounded: a wedged
+            // provider must not keep an ordered SMS_DELIVER alive past budget.
+            val write = SmsProvider.writeInboxBounded(
+                context = context,
+                address = sender,
+                body = body,
+                dateMs = group.receivedAtMs,
+                subscriptionId = subscriptionId,
+            )
+            Log.i(TAG, "inbox provider=${write.name.lowercase()}")
+
+            // Announce a genuinely new delivery once. A duplicate provider row
+            // means the first delivery already announced it; without the role
+            // the notifier's own delivery-key set is the same decision.
+            if (write != SmsProvider.InboxWrite.DUPLICATE) {
+                SmsNotifier.notifyInbound(
+                    context = context,
+                    peer = sender,
+                    body = body,
+                    deliveryKey = "${group.receivedAtMs}:$sender",
+                )
+            }
+
             reply(context, appDir, outcome.deviceId, sender, subscriptionId, outcome.actions)
         }
     }
@@ -126,7 +170,7 @@ class SmsReceiver : BroadcastReceiver() {
         // Guard against a loopback / self-sent SMS. When no source yields a
         // number there is nothing to compare against, so the guard is logged as
         // unknown and only a number known from another source would match.
-        val ownNumbers = ownNumbers(context)
+        val ownNumbers = ownNumbers(context, appDir)
         if (ownNumbers.isEmpty()) {
             Log.i(TAG, "self-number guard unknown; proceeding")
         } else if (normalize(sender) in ownNumbers) {
@@ -150,24 +194,58 @@ class SmsReceiver : BroadcastReceiver() {
             }
             try {
                 val parts = manager.divideMessage(action.body)
+                // The receipt is the only proof the radio accepted the message:
+                // the send call returning proves only that the request was
+                // accepted for dispatch. [SendStatusReceiver] marks the row
+                // `sent` on RESULT_OK and `failed` otherwise, then flushes. A
+                // delivery report is attached alongside it so `delivered` is
+                // recorded only when the carrier says so.
+                val sent = SendReceipt.pendingIntent(context, deviceId, action.localId)
+                val delivered = SendReceipt.deliveryIntent(context, deviceId, action.localId)
                 if (parts.size > 1) {
-                    manager.sendMultipartTextMessage(action.to, null, parts, null, null)
+                    // `sendMultipartTextMessage` takes one intent per part. The
+                    // same intents are repeated, as [SmsSender] does: every part
+                    // reports the same row and the store keeps the last report.
+                    // The platform sends one report per part, so a radio
+                    // rejection reports a failure instead of a false `sent`.
+                    val sentIntents = ArrayList<PendingIntent>(parts.size)
+                    val deliveryIntents = ArrayList<PendingIntent>(parts.size)
+                    repeat(parts.size) {
+                        sentIntents.add(sent)
+                        deliveryIntents.add(delivered)
+                    }
+                    manager.sendMultipartTextMessage(
+                        action.to,
+                        null,
+                        parts,
+                        sentIntents,
+                        deliveryIntents,
+                    )
                 } else {
-                    manager.sendTextMessage(action.to, null, action.body, null, null)
+                    manager.sendTextMessage(action.to, null, action.body, sent, delivered)
                 }
-                Log.i(TAG, "reply handled to=${mask(action.to)} parts=${parts.size}")
+                Log.i(TAG, "reply handed to radio to=${mask(action.to)} parts=${parts.size}")
             } catch (error: Throwable) {
-                // The reply never left the phone. `failed` keeps it out of the
-                // mirror; M5.5's retry queue owns what happens next.
+                // Either the receipt could not be built or the send call threw:
+                // there is no way to learn the radio's verdict, so record the
+                // honest failure now. `failed` keeps it out of the mirror;
+                // M5.5's retry queue owns what happens next.
                 mark(appDir, deviceId, action.localId, "failed")
                 Log.e(TAG, "reply failed: ${error.javaClass.simpleName}")
                 continue
             }
-            // Exactly once per action, after the whole (possibly multipart)
-            // send call returned. A mark error leaves the row queued — never
-            // claim `sent` when the store did not accept it.
-            mark(appDir, deviceId, action.localId, "sent")
+            // No mark here. The row stays `queued` until the `SENT` broadcast
+            // arrives. If the platform drops that broadcast the row stays
+            // `queued` — that is the honest state, and `flush_pending` will not
+            // upload it; there is deliberately no timer that guesses a verdict.
         }
+
+        // Best effort: the inbound row and its run upload together when the
+        // Worker is reachable. Outbound rows upload only once the receipt has
+        // made them `sent`; a failure leaves everything for the next flush.
+        // Declined rows stay `failed` and are never uploaded.
+        val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
+        Log.i(TAG, "flush attempted ok=$ok")
     }
 
     /**
@@ -213,13 +291,19 @@ class SmsReceiver : BroadcastReceiver() {
      * All need a phone-number permission; without it the set is empty and the
      * caller treats the guard as unknown rather than as "not me".
      */
-    private fun ownNumbers(context: Context): Set<String> {
+    private fun ownNumbers(context: Context, appDir: String): Set<String> {
         val numbers = LinkedHashSet<String>()
 
         fun add(raw: String?) {
             val digits = normalize(raw ?: return)
             if (digits.length >= MIN_DIGITS) numbers += digits
         }
+
+        // The number this app last read from the radio. A receiver that cold-starts
+        // for a broadcast often gets an empty line1Number before the modem is up,
+        // and an empty set turns the guard off instead of on — the one failure
+        // mode that could make the gateway answer itself.
+        add(NativeBridge.getDeviceFactSafely(appDir, "self_number"))
 
         try {
             add(context.getSystemService(TelephonyManager::class.java)?.line1Number)

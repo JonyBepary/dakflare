@@ -705,7 +705,7 @@
 							pannable
 							zoomable
 							nodeBorderRadius={3}
-							nodeColor="var(--ink-3)"
+							nodeColor="var(--df-text-meta)"
 							nodeStrokeColor="transparent"
 						/>
 						<Panel position="top-left">
@@ -862,33 +862,33 @@
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 	}
 
 	.mobile-defer-body h2 {
-		font-size: var(--text-lg);
+		font-size: var(--df-p-text-lg);
 	}
 
 	.mobile-defer-body > p {
 		max-width: 46ch;
-		font-size: var(--text-base);
+		font-size: var(--df-p-text-base);
 		line-height: 1.55;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.defer-summary {
 		width: 100%;
-		padding: var(--s-3);
-		border: 1px solid var(--line);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
+		padding: var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
 	}
 
 	.defer-list {
 		display: flex;
 		flex-direction: column;
 		gap: 7px;
-		margin: var(--s-2) 0 0;
+		margin: var(--df-p-space-2) 0 0;
 		padding: 0;
 		list-style: none;
 	}
@@ -896,7 +896,7 @@
 	.defer-list li {
 		display: flex;
 		align-items: flex-start;
-		gap: var(--s-2);
+		gap: var(--df-p-space-2);
 	}
 
 	.defer-index {
@@ -906,11 +906,10 @@
 		height: 18px;
 		flex: none;
 		margin-top: 1px;
-		border: 1px solid var(--line);
-		border-radius: 3px;
-		font-size: 9px;
-		color: var(--ink-3);
-		background: var(--surface);
+		border-radius: var(--df-p-radius-xs);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+		background: var(--df-surface-card);
 	}
 
 	.defer-step {
@@ -921,26 +920,29 @@
 	}
 
 	.defer-step strong {
-		font-size: var(--text-base);
+		font-size: var(--df-p-text-base);
 		font-weight: 500;
 	}
 
 	.defer-step small {
 		font-size: 11px;
 		line-height: 1.4;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 		overflow-wrap: anywhere;
 	}
 
 	.version-chip {
-		font-size: 10px;
-		color: var(--ink-3);
+		padding: 1px 7px;
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.editor-grid {
 		display: grid;
 		grid-template-columns: 186px minmax(0, 1fr) 290px;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 		align-items: start;
 		min-width: 0;
 	}
@@ -955,32 +957,31 @@
 	.inspector-col {
 		display: flex;
 		flex-direction: column;
-		gap: var(--s-3);
+		gap: var(--df-p-space-3);
 	}
 
 	.canvas-shell {
 		position: relative;
 		height: 600px;
-		border: 1px solid var(--line);
-		border-radius: var(--r);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-lg);
 		overflow: hidden;
-		background: var(--bg);
-		box-shadow: var(--shadow);
+		background: light-dark(var(--df-surface-well), var(--df-surface-page));
 		transition: border-color 160ms ease;
 	}
 
 	.canvas-shell:focus-within {
-		border-color: var(--line-strong);
+		border-color: var(--df-border-control);
 	}
 
 	.canvas-shell :global(.svelte-flow) {
-		border-radius: var(--r);
+		border-radius: var(--df-p-radius-lg);
 	}
 
 	.canvas-shell :global(.svelte-flow__node:focus-visible) {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--df-accent-text);
 		outline-offset: 3px;
-		border-radius: var(--r);
+		border-radius: var(--df-p-radius-md);
 	}
 
 	.wf-toolbar-panel {
@@ -989,12 +990,11 @@
 		gap: 4px;
 		width: 380px;
 		max-width: calc(100vw - 56px);
-		padding: 5px;
-		border: 1px solid var(--line-strong);
-		border-radius: var(--r-sm);
-		background: color-mix(in srgb, var(--surface) 94%, transparent);
-		backdrop-filter: blur(6px);
-		box-shadow: var(--shadow);
+		padding: var(--df-p-space-1);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-card);
+		box-shadow: var(--df-shadow-raised);
 	}
 
 	.toolbar-row {
@@ -1007,7 +1007,7 @@
 	.toolbar-sep {
 		width: 1px;
 		height: 18px;
-		background: var(--line);
+		background: var(--df-border-hairline);
 		margin: 0 1px;
 	}
 
@@ -1016,11 +1016,11 @@
 		align-items: center;
 		gap: 6px;
 		width: 100%;
-		padding: 0 3px 1px;
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		letter-spacing: 0.03em;
-		color: var(--ink-3);
+		padding: 0 var(--df-p-space-1) 2px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.02em;
+		color: var(--df-text-meta);
 	}
 
 	.toolbar-state > span:not(.dot):not(.toolbar-blocked) {
@@ -1032,14 +1032,14 @@
 	}
 
 	.toolbar-blocked {
-		color: var(--danger);
+		color: var(--df-state-danger-ink);
 		white-space: nowrap;
 	}
 
 	.btn.is-active {
-		background: var(--accent-soft);
-		border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
-		color: var(--ink);
+		background: var(--df-accent-soft);
+		border-color: color-mix(in srgb, var(--df-accent-text) 32%, var(--df-border-hairline));
+		color: var(--df-text-primary);
 	}
 
 	/* enabled switch */
@@ -1052,7 +1052,7 @@
 		padding: 0 2px;
 		cursor: pointer;
 		font-size: 11px;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		white-space: nowrap;
 	}
 
@@ -1065,12 +1065,12 @@
 
 	.switch-track {
 		position: relative;
-		width: 28px;
-		height: 16px;
+		width: 30px;
+		height: 18px;
 		flex: none;
-		border: 1px solid var(--line-strong);
-		border-radius: 999px;
-		background: var(--surface-2);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-well);
 		transition:
 			background-color 140ms ease,
 			border-color 140ms ease;
@@ -1080,36 +1080,36 @@
 		position: absolute;
 		top: 2px;
 		left: 2px;
-		width: 10px;
-		height: 10px;
+		width: 12px;
+		height: 12px;
 		border-radius: 50%;
-		background: var(--ink-3);
+		background: var(--df-text-meta);
 		transition:
 			transform 140ms ease,
 			background-color 140ms ease;
 	}
 
 	.switch input:checked + .switch-track {
-		background: color-mix(in srgb, var(--ok) 18%, var(--surface));
-		border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+		background: var(--df-state-ok-bg);
+		border-color: var(--df-state-ok-ink);
 	}
 
 	.switch input:checked + .switch-track > span {
 		transform: translateX(12px);
-		background: var(--ok);
+		background: var(--df-state-ok-ink);
 	}
 
 	.switch input:focus-visible + .switch-track {
-		outline: 2px solid var(--accent);
+		outline: 2px solid var(--df-accent-text);
 		outline-offset: 2px;
 	}
 
 	.switch-label {
-		font-family: var(--font-mono);
+		font-family: var(--df-p-font-mono);
 		font-size: 9.5px;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.canvas-empty {
@@ -1119,11 +1119,11 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: var(--s-2);
-		padding: var(--s-5);
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-5);
 		text-align: center;
 		pointer-events: none;
-		background: color-mix(in srgb, var(--bg) 55%, transparent);
+		background: color-mix(in srgb, var(--df-surface-well) 72%, transparent);
 	}
 
 	.canvas-empty .empty-mark {
@@ -1131,26 +1131,26 @@
 	}
 
 	.canvas-empty h2 {
-		font-size: var(--text-lg);
+		font-size: var(--df-p-text-lg);
 	}
 
 	.canvas-empty p {
 		max-width: 38ch;
-		font-size: var(--text-base);
+		font-size: var(--df-p-text-base);
 		line-height: 1.5;
-		color: var(--ink-3);
+		color: var(--df-text-meta);
 	}
 
 	.canvas-empty .btn {
 		pointer-events: auto;
-		margin-top: var(--s-2);
+		margin-top: var(--df-p-space-2);
 	}
 
 	.loading-grid {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
-		gap: var(--s-3);
-		padding: var(--s-4);
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-4);
 	}
 
 	@media (max-width: 1080px) {
@@ -1220,6 +1220,14 @@
 	@media (max-width: 900px) {
 		.loading-grid {
 			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.canvas-shell,
+		.switch-track,
+		.switch-track > span {
+			transition: none;
 		}
 	}
 </style>

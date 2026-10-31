@@ -25,7 +25,9 @@ Exit:   0 if every vector matches, 1 otherwise.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
+from pathlib import Path
 
 # §1.1 — the three field grammars, restated independently.
 import re
@@ -35,6 +37,9 @@ RE_NONCE = re.compile(r"^[0-9a-f]{32}$")
 RE_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+# The one published copy, shared with the JS harness and the Rust core.
+SHARED_VECTORS = Path(__file__).with_name("protocol-vectors.json")
 
 # §4.2 — the published vectors, transcribed from the contract.
 VECTORS = [
@@ -144,6 +149,29 @@ def main() -> int:
           build_canonical("GET", "/v1/device/ws", "1776470400000",
                           "0f1e2d3c4b5a69788796a5b4c3d2e1f0", "").split("\n")[4],
           EMPTY_SHA256)
+
+    print("\n-- the shared file agrees with this transcription --")
+    # The transcription above is the independent opinion and must NOT be derived
+    # from this file. Comparing the two is the point: if the contract's published
+    # values change and only one copy follows, this fails.
+    shared = json.loads(SHARED_VECTORS.read_text(encoding="utf-8"))
+    by_id = {vector["id"]: vector for vector in shared["canonical"]}
+    check("the file carries the same vector ids",
+          sorted(by_id), sorted(vector["id"] for vector in VECTORS))
+    for vector in VECTORS:
+        other = by_id.get(vector["id"])
+        if other is None:
+            check(f"{vector['id']} present in the shared file", False, True)
+            continue
+        for field in ("method", "pathname", "timestamp", "nonce", "body", "canonical"):
+            check(f"{vector['id']} {field} matches the shared file",
+                  other.get(field), vector[field])
+        check(f"{vector['id']} body_bytes matches the shared file",
+              other.get("body_bytes"), vector["body_bytes_len"])
+        check(f"{vector['id']} body_sha256 matches the shared file",
+              other.get("body_sha256"), vector["body_sha256"])
+    check("empty_body_sha256 matches the shared file",
+          shared.get("empty_body_sha256"), EMPTY_SHA256)
 
     print("\n-- method normalisation --")
     check("lowercase method is uppercased",

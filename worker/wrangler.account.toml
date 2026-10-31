@@ -20,15 +20,31 @@
 name = "dakflare-worker-staging"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
+# Required by better-auth (its password utilities import `node:crypto`). The flag
+# is inert for code that does not use node: builtins, so it does not change the
+# device protocol paths.
+compatibility_flags = ["nodejs_compat"]
 preview_urls = false
 
 [[durable_objects.bindings]]
 name = "DEVICE"
 class_name = "DeviceGateway"
 
+# The global failed-auth counter. See lib/auth-limits.ts and wrangler.toml.
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceGateway"]
+
+# A new tag, not an edit to v1: v1 is already applied wherever this config has
+# run. wrangler.toml uses `[exports.*]` instead; this file keeps the ordered
+# migration history because it predates the exports switch.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["AuthGuard"]
 
 # remote = true -> the real preview database, while the Worker and DO run locally.
 [[d1_databases]]
@@ -67,7 +83,29 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
+# Failed-auth lockout FALLBACK (the authoritative counter is the AUTH_GUARD
+# Durable Object above; see lib/auth-limits.ts and wrangler.toml).
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "1006"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "1007"
+simple = { limit = 20, period = 60 }
+
 [vars]
+# `AUTH_MODE` is retired: one gate, two credentials (Better Auth session, or
+# ADMIN_TOKEN plus X-Dakflare-Client: cli). A leftover `AUTH_MODE` here was read
+# by nothing and only made this file disagree with the other two.
+#
+# Which side runs the password KDF: off | client-derived | server-kdf.
+AUTH_PASSWORD_MODE = "client-derived"
+# Magic-link factor. RESEND_API_KEY is a Worker secret, never a var.
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+MAGIC_LINK_TTL_SECONDS = "900"
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"

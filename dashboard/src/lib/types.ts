@@ -8,6 +8,18 @@ export interface HealthCounts {
 	open_alerts: number;
 }
 
+/** Which gate answers the admin routes. `AUTH_MODE` in the Worker. */
+export type AuthMode = 'legacy' | 'new';
+
+/**
+ * Which side runs the password KDF — `AUTH_PASSWORD_MODE` in the Worker.
+ *
+ * `off` is the default and means the factor does not exist on this deployment.
+ * The mode is the deployment's capability; it is NOT a row's provenance, which
+ * every stored row carries as `m=c|s`.
+ */
+export type PasswordMode = 'off' | 'client-derived' | 'server-kdf';
+
 export interface Health {
 	ok: boolean;
 	version: string;
@@ -21,6 +33,12 @@ export interface Health {
 	last_message_at: number | null;
 	db_error?: string | null;
 	checked_at?: number;
+	auth_mode?: AuthMode;
+	auth_configured?: boolean;
+	/** `off` when the field is absent: a Worker without phase 4 has no password factor. */
+	password_mode?: PasswordMode;
+	/** Whether `AUTH_PEPPER` is set. Without it no password row can be written or read. */
+	password_configured?: boolean;
 }
 
 export interface HealthResult {
@@ -44,6 +62,12 @@ export interface Device {
 	label?: string | null;
 	/** Optional; 0–2 or null when the phone did not report a slot. */
 	sim_slot?: number | null;
+	/**
+	 * Set when the operator archived the device; `null` (or absent) while it is
+	 * in the fleet. An archived row keeps its key and its message history, and
+	 * the gateway clears this again by itself the next time the phone polls.
+	 */
+	archived_at?: number | null;
 }
 
 export interface DeviceStatus {
@@ -73,6 +97,15 @@ export interface CommandInfo {
 	expires_at: number;
 }
 
+/**
+ * What happened to a reply, from the phone's outbound mirror.
+ *
+ * Only four things are reported: the phone's queue, the radio's verdict, the
+ * carrier's receipt, and failure. `PENDING`/`DISPATCHED` from the command state
+ * both arrive here as `queued`; this console does not guess between them.
+ */
+export type ReplyState = 'queued' | 'sent' | 'failed' | 'delivered';
+
 export interface Message {
 	id: string;
 	device_id: string;
@@ -86,8 +119,17 @@ export interface Message {
 	reply_source?: 'rule' | string | null;
 	/** The rule id that answered, when `reply_source` is `'rule'`. */
 	reply_ref?: string | null;
-	/** The ordinary outbound command created for the rule reply. */
+	/** The ordinary outbound command created for the rule reply. Equal to the reply row's `id`. */
 	reply_command_id?: string | null;
+	/**
+	 * On an outbound row, the fate of that send. An inbound row carries `null`:
+	 * it has no send state, and the console reads its reply's fate from the
+	 * outbound row whose id is `reply_command_id`. `null` also covers older
+	 * rows written before the phone reported state.
+	 */
+	reply_state?: ReplyState | string | null;
+	/** The phone's own failure reason, when `reply_state` is `'failed'`. */
+	reply_error?: string | null;
 }
 
 export interface MessagesResult {
@@ -285,4 +327,95 @@ export interface PairingCode {
 export interface SessionInfo {
 	ok: boolean;
 	expires_at: number;
+}
+
+/* ---------------------------------------------------------------- accounts */
+
+export type Role = 'owner' | 'admin' | 'member';
+
+/** `GET /v1/auth/me` — who the Better Auth session is (AUTH_MODE=new). */
+export interface AuthUser {
+	id: string;
+	email: string;
+	name: string;
+	role: Role;
+	twoFactorEnabled: boolean;
+}
+
+export interface MeInfo {
+	ok: boolean;
+	user: AuthUser;
+	expires_at: number;
+	/** The mode the Worker is in right now; the console trusts this over health. */
+	auth_mode: AuthMode;
+}
+
+/** `POST /v1/auth/redeem` — a single-use invite became an account and a session. */
+export interface RedeemInfo {
+	ok: boolean;
+	user: { id: string; email: string; name: string; role: Role };
+	expires_at: number;
+}
+
+/**
+ * `GET /v1/admin/invites` — every invite row, newest first. `role` is typed as
+ * a plain string because the column is one: a row written by an older build (or
+ * by hand) is shown exactly as stored rather than snapped to a known value.
+ */
+export interface Invite {
+	id: string;
+	email: string;
+	role: string;
+	expires_at: number;
+	used_at: number | null;
+	created_by: string | null;
+	created_at: number;
+}
+
+export interface InviteList {
+	invites: Invite[];
+	/** The gateway's clock at the moment it answered, for the state column. */
+	now: number;
+}
+
+/**
+ * `POST /v1/admin/invites` — the only response that ever carries `token`. The
+ * gateway keeps its hash and nothing else, so the console must not hold it
+ * past the panel that shows it.
+ */
+export interface MintedInvite {
+	id: string;
+	email: string;
+	role: string;
+	expires_at: number;
+	token: string;
+}
+
+export type InviteRole = 'owner' | 'admin' | 'member';
+
+/** A `/api/auth/passkey/*` answer before it is decoded. */
+export interface PasskeySummary {
+	id: string;
+	name: string | null;
+	createdAt: string;
+}
+
+/* ------------------------------------------------------------------- audit */
+
+/** One `audit_log` row, exactly as stored. `detail` is the parsed `detail_json`. */
+export interface AuditEvent {
+	id: string;
+	at: number;
+	actor_user: string | null;
+	actor_label: string | null;
+	action: string;
+	subject: string | null;
+	ip: string | null;
+	user_agent: string | null;
+	detail: unknown;
+}
+
+export interface AuditResult {
+	events: AuditEvent[];
+	limit: number;
 }

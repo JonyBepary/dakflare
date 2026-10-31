@@ -44,6 +44,7 @@ import {
   MAX_ACK_IDS,
   MAX_INCOMING_MESSAGES,
   type TimingConfig,
+  MAX_IDEMPOTENCY_KEY_CHARS,
 } from "./lib/config";
 import { SIGNATURE_BYTES, utf8Bytes } from "./auth/canonical";
 
@@ -76,6 +77,8 @@ interface CommandRow {
   state: string;
   created_at: number;
   expires_at: number;
+  /** Caller-supplied dedupe key, or null for an ordinary send. */
+  idempotency_key: string | null;
 }
 
 interface ScheduledTaskRow {
@@ -155,7 +158,8 @@ export class DeviceGateway extends DurableObject<Env> {
           priority   TEXT NOT NULL DEFAULT 'normal',
           state      TEXT NOT NULL DEFAULT 'PENDING',
           created_at INTEGER NOT NULL,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          idempotency_key TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_commands_state ON commands(state, priority, created_at);
 
@@ -192,6 +196,28 @@ export class DeviceGateway extends DurableObject<Env> {
         );
       } catch {
         // Column already present.
+      }
+
+      // Idempotency (CLI slice 2b). The key lives on the command row on purpose:
+      // the retention sweep already deletes terminal commands, so a key cannot
+      // outlive the command it points at and hand back an unreadable id.
+      try {
+        ctx.storage.sql.exec(`ALTER TABLE commands ADD COLUMN idempotency_key TEXT`);
+      } catch {
+        // Column already present.
+      }
+      // Partial unique index: one command per key, and any number of NULL keys,
+      // which is every command sent without one.
+      try {
+        ctx.storage.sql.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_idempotency
+             ON commands(idempotency_key) WHERE idempotency_key IS NOT NULL`
+        );
+      } catch (error) {
+        // Two rows already share a key, which cannot happen unless a partial
+        // rollout inserted duplicates. Refusing to boot would take the whole
+        // device down over a bookkeeping index.
+        console.error(`[do] idempotency index skipped: ${String(error)}`);
       }
 
       // Hibernation-safe ping/pong: answered by the edge without waking the DO.
@@ -526,13 +552,32 @@ export class DeviceGateway extends DurableObject<Env> {
     const command = parseCommandInput(parsed);
     if (!command) return err("bad_request", 400);
 
+    // Idempotency (slice 2b). A key that already produced a command returns that
+    // command rather than a second SMS. The lookup and the insert run without an
+    // await between them, and a Durable Object serialises its requests, so two
+    // concurrent retries cannot both miss the row.
+    if (command.idempotency_key !== null) {
+      const existing = this.commandIdForKey(command.idempotency_key);
+      if (existing !== null) {
+        return Response.json({ ok: true, replayed: true, command_id: existing });
+      }
+    }
+
     this.insertCommand(command);
 
     // #9: push ONLY the command just created.
     if (!this.pushCommands([toView(command)])) {
       await this.sendWakePush();
     }
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, replayed: false, command_id: command.command_id });
+  }
+
+  /** The command a key already created, or null when the key is new. */
+  private commandIdForKey(key: string): string | null {
+    const rows = this.ctx.storage.sql
+      .exec(`SELECT command_id FROM commands WHERE idempotency_key = ?`, key)
+      .toArray() as unknown as { command_id: string }[];
+    return rows.length === 0 ? null : rows[0].command_id;
   }
 
   private async handleEnqueueBatch(req: Request): Promise<Response> {
@@ -545,6 +590,12 @@ export class DeviceGateway extends DurableObject<Env> {
     for (const entry of raw) {
       const command = parseCommandInput(entry);
       if (!command) return err("bad_request", 400);
+      // The batch has no per-entry replay answer yet. Accepting the key would
+      // either duplicate or throw on the unique index, and silently dropping it
+      // would be worse than saying so.
+      if (command.idempotency_key !== null) {
+        return err("idempotency_key_not_supported_in_batch", 400);
+      }
       commands.push(command);
     }
     if (commands.length === 0) return Response.json({ ok: true, enqueued: 0 });
@@ -561,14 +612,16 @@ export class DeviceGateway extends DurableObject<Env> {
   private insertCommand(command: CommandRow): void {
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      `INSERT INTO commands (command_id, to_e164, body, priority, state, created_at, expires_at)
-       VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`,
+      `INSERT INTO commands
+         (command_id, to_e164, body, priority, state, created_at, expires_at, idempotency_key)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
       command.command_id,
       command.to_e164,
       command.body,
       command.priority,
       now,
-      command.expires_at
+      command.expires_at,
+      command.idempotency_key
     );
     this.scheduleTask(
       `exp:${command.command_id}`,
@@ -1363,6 +1416,13 @@ function parseCommandInput(entry: unknown): CommandRow | null {
       ? row.priority
       : "normal";
 
+  const key = row.idempotency_key;
+  if (key !== undefined && key !== null) {
+    if (typeof key !== "string" || key === "" || key.length > MAX_IDEMPOTENCY_KEY_CHARS) {
+      return null;
+    }
+  }
+
   return {
     command_id: commandId,
     to_e164: to,
@@ -1371,6 +1431,7 @@ function parseCommandInput(entry: unknown): CommandRow | null {
     state: "PENDING",
     created_at: Date.now(),
     expires_at: expiresAt,
+    idempotency_key: typeof key === "string" ? key : null,
   };
 }
 

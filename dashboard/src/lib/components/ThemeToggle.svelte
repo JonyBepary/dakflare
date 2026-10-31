@@ -25,10 +25,10 @@
 
 <button
 	type="button"
-	class="btn btn-ghost btn-icon btn-sm"
+	class="btn btn-icon btn-sm"
 	onclick={toggle}
 	aria-label={dark ? 'Use light theme' : 'Use dark theme'}
 	title={dark ? 'Use light theme' : 'Use dark theme'}
 >
-	{#if ready}<Icon name={dark ? 'sun' : 'moon'} size={14} />{/if}
+	{#if ready}<Icon name={dark ? 'sun' : 'moon'} size={16} />{/if}
 </button>

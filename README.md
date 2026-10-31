@@ -2,120 +2,146 @@
 
 > **Sovereign Device-to-Edge SMS Relay on Cloudflare Workers & Android.**
 >
-> DakFlare pairs a dedicated Android handset with your own Cloudflare account (Workers, Durable Objects with hibernating WebSockets, D1, and KV) to send, receive, and auto-reply to SMS over a strictly verified ECDSA P-256 wire protocol. No third-party telecom SaaS, no per-message markups, and no shared credentials.
+> DakFlare pairs a dedicated Android handset with your own Cloudflare account (Workers, Durable
+> Objects, D1, KV) to send, receive and answer SMS over a signed wire protocol. No third-party
+> telecom SaaS, no per-message markup, no shared secret between the phone and the edge.
 
-Turn any Android device and Cloudflare Worker into a zero-trust, self-hosted SMS gateway with hardware ECDSA P-256 signing and hibernating sockets.
+The handset is the radio. The Worker is the coordinator. The console is where an operator watches
+both.
 
 ## Why "DakFlare"
 
-**DakFlare** combines *Dāk* (ডাক — the historic relay-runner dispatch network across Bengal and the subcontinent that carried urgent dispatches from station to station day and night) with the **Cloudflare** edge where the coordinator lives.
+**DakFlare** combines *Dāk* (ডাক — the relay-runner dispatch network that carried urgent letters
+across Bengal station by station) with the **Cloudflare** edge where the coordinator lives.
 
-## What it actually is
-
-The Android handset is the radio. The Worker is the coordinator. Neither trusts the other by default.
+## Shape
 
 | Layer | Role |
 |---|---|
-| **Android device** | Owns the SIM. Receives and sends SMS, holds an ECDSA P-256 key in the hardware Keystore, and evaluates inbound rules locally. |
-| **Cloudflare Worker** | Verifies every request against a canonical string and a replay guard, terminates the device WebSocket, and exposes the admin API. |
-| **Durable Object** (one per device) | SQLite-backed command queue, replay-guard nonces, alarms for `ack_timeout` / `offline_alert` / expiry, and the hibernating socket itself. |
-| **D1** | Fleet registry, message log, rules, pairing codes. |
-| **KV** | FCM bearer-token cache. |
+| **Android app** (Tauri + Rust core) | Owns the SIM, is the default SMS app, holds a P-256 identity wrapped by Android Keystore, runs flows on-device, mirrors what it did |
+| **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts |
+| **Durable Object** (one per device) | SQLite-backed command queue, replay-guard nonces, alarms for `ack_timeout` / `offline_alert` / expiry |
+| **D1** | Fleet registry, message log, rules, workflows, accounts, invites, audit |
+| **KV** | FCM bearer-token cache |
 
-Auth is not a shared secret. Each device signs `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)` with a P-256 key that never leaves its Keystore; the Worker verifies the 64-byte signature, rejects replayed nonces, and returns distinct error codes so a failure is debuggable from the phone.
+Device auth is not a shared secret: each phone signs `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`
+with a P-256 key whose at-rest form is `keystore:v1:<iv>:<ciphertext>` — wrapped by a non-exportable
+AndroidKeyStore AES-GCM key. A copied database alone cannot impersonate the phone.
 
-## Quick start (bring your own Cloudflare account)
+## Quick start
 
 ```bash
 git clone https://github.com/JonyBepary/dakflare
-cd dakflare/worker
-npm install
+cd dakflare
 
-cp wrangler.template.toml wrangler.toml          # BYOCF: no resource ids
-cp cloudflare.config.template.ts cloudflare.config.ts   # BYOCF: no resource ids
-
-npx wrangler d1 create sms_gateway          # or let deploy provision it
-npx wrangler kv namespace create KV         # paste the id into cloudflare.config.ts
+# 1. the edge
+cd worker && npm install
+cp wrangler.template.toml wrangler.toml
+cp cloudflare.config.template.ts cloudflare.config.ts
+npx wrangler d1 create sms_gateway
+npx wrangler kv namespace create KV            # paste the id into cloudflare.config.ts
 npx wrangler d1 migrations apply sms_gateway --remote
 
-npx wrangler secret put ADMIN_TOKEN --name dakflare-worker   # cf cannot set single secrets yet
-npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON --name dakflare-worker   # optional
+# 2. secrets (never in the repo)
+npx wrangler secret put ADMIN_TOKEN --name dakflare-worker      # machine credential
+npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
+npx wrangler secret put AUTH_PEPPER --name dakflare-worker      # v1:<base64 32 bytes>
 
-npm run deploy           # builds dashboard/ into public/admin, then `cf deploy`
-# npx cf deploy          # deploy only, when public/admin is already built
+# 3. deploy (builds the console into worker/public/admin first)
+npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
 ```
 
-`wrangler deploy` is not available for this project: the Worker uses `cf`'s `exports` model for the
-Durable Object, which Wrangler's `[[durable_objects.bindings]]` cannot reconcile. Wrangler remains the
-tool for `dev`, `secret put`, `tail` and D1 migrations.
+`cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`,
+because `cf` cannot set one secret or stream logs yet.
 
-Then check what you actually deployed:
+CI runs the same checks on every pull request and deploys `main` when they pass. Migrations
+are applied by hand, never by the pipeline. `docs/OPS_DEPLOY.md` has the jobs, the secrets,
+the order of operations and the rollback.
+
+Then, from anywhere:
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://<your-worker>.workers.dev/v1/admin/health
+npm install -g .            # or: node cli/bin/dakflare.js …
+dakflare init               # stores the URL + token in ~/.config/dakflare/config.json (mode 600)
+dakflare doctor             # 11 checks: config, health, token, schema, migrations, bindings,
+                            # auth mode, D1, phone contact, SMS role, installed build
+dakflare auth bootstrap --email you@example.com   # prints the one-time owner invite
 ```
 
-`health` reports the version, applied migrations, which bindings are present, and row counts — never a
-message body, phone number, or key.
+Open that invite in a browser, redeem it, create a passkey. That account is the owner.
 
-## Repository layout
+## The console
 
-```
-worker/                     Worker + Durable Object + D1 migrations
-  cloudflare.config.ts       canonical config for `cf` (deploy, resources)
-  cloudflare.config.template.ts  BYOCF starting point for cf (no resource ids)
-  wrangler.toml             local dev + secrets + tail (keeps real resource ids)
-  wrangler.template.toml    BYOCF starting point for wrangler (no ids)
-  wrangler.account.toml     local Worker + real PREVIEW D1/KV
-  wrangler.config.ts        build settings for cf's Wrangler bundler
-  public/                   static assets: landing page + generated admin console
-  public/admin/             SvelteKit build output (generated, gitignored)
-  src/                      routes, auth, DO, lib
-dashboard/                  SvelteKit 5 SPA admin console, served at /admin
-cli/                        dakflare desktop CLI (init, doctor, pair, devices, send)
-PROTOCOL_CONTRACT_V5.md     FROZEN wire format — the sole authority
-dakflare_v5_master_plan_rev_c.md   architecture, gates, schedule
-dakflare_test_harness.mjs   zero-dependency virtual device + conformance suite
-hoppscotch_dakflare_collection.json
-test-support/               FCM stub, dev.sh, platform gate, burst probe, docs
-SECURITY.md                 disclosure policy and scope
-LICENSE                     AGPL-3.0-only
-```
+Prerendered SvelteKit, served by the Worker at `/admin`, hand-written CSS over a token system
+(`design/tokens.css`: primitive → semantic → component). Warm cream surfaces, pastel containers that
+never carry body text, one coral action per screen, mono for anything an operator compares with a log.
 
-## Android app identifiers (B5/B6 scaffold)
+- **Overview** — deployment health, fleet, the quiet panel, the rules-vs-flows pipeline.
+- **Devices / Messages** — the fleet with five states, and a message log that says who answered and
+  what happened to that answer (`Delivered · Sent · Queued · Failed — reason`).
+- **Automation** — rules as one sentence each, workflows on a canvas.
+- **Security** — sign-in factors (passkey, authenticator, password), invites, and the audit log.
 
-| Property | Value |
-|---|---|
-| Display name | `DakFlare` |
-| Application ID | `dev.dakflare.agent` |
-| Keystore key alias | `dakflare_device_p256` |
-| Foreground service | `remoteMessaging` |
-| FGS notification title | `DakFlare Relay Active` |
-| FGS notification body | `Connected to Cloudflare edge (remoteMessaging)` |
+### Sign-in
 
-Two builds are planned from one codebase: a Play/GitHub-Releases build with FCM, and an F-Droid build
-without proprietary push (WebSocket reconnect only). See the master plan for the trade-off.
+| # | Factor | Notes |
+|---|---|---|
+| 1 | **Passkey** | primary; nothing phishable, no shared secret |
+| 2 | **TOTP** | optional for every role; backup codes shown once |
+| 3 | **Password** | optional; the KDF runs in the browser under `AUTH_PASSWORD_MODE=client-derived`, because a server-side PBKDF2 costs ~27 ms against the free tier's 10 ms CPU budget |
 
-## Verify it yourself
+`AUTH_MODE` decides who guards `/v1/admin/*`: `legacy` (the `ADMIN_TOKEN`, exchanged for a session
+cookie) or `new` (Better Auth accounts, `requireRole()`). Registration is invite-only — there is no
+public sign-up. `dakflare auth invite` or the Security panel mints a single-use link; only its hash is
+stored.
+
+## The phone
+
+A real SMS app, not a config page: four frames behind a dock (**Threads · Device · Flows ·
+Settings**), a conversation view with paging, a reply-only composer that counts GSM-7/UCS-2 segments,
+and inline reply from the notification.
+
+It is the **default SMS app** (role held), so it receives `SMS_DELIVER`, writes what it stores into
+`content://sms`, and posts one silent notification per thread. A `remoteMessaging` foreground service
+flushes pending rows every 15 minutes and returns after a reboot.
 
 ```bash
-node dakflare_test_harness.mjs selftest          # grammar, DER→P1363, frozen vectors — no server
-python3 test-support/independent-canonical-check.py   # third implementation of the canonical string
+cd simulator
+source ~/.config/dakflare/android-env.sh        # SDK 37, NDK 27, JDK 21, Rust targets
+npx tauri android build --debug --apk --target aarch64
+adb install -r -g app/build/outputs/apk/universal/debug/app-universal-debug.apk
+
+../simulator/scripts/device-check.sh            # 8 checks against the handset
 ```
 
-The harness is an independent implementation of the protocol, not a wrapper around the Worker. The
-canonical string is re-derived a third time in Python so a shared misreading of the contract cannot hide.
+Release signing lives outside the repo: `~/.config/dakflare/dakflare-release.jks` with its password in
+`release-keystore.txt` (both mode 600), driven by `simulator/scripts/release-apk.sh`. **Losing that key
+means no future update can carry the same app id.** The certificate fingerprint is recorded in
+`docs/PHONE_RELEASE.md`.
 
-## Status
+## Verifying it
 
-Rev C backend, frozen wire contract. Verified locally, account-backed, and against a deployed Worker.
-Advanced fleet features (per-line availability, capacity, failover) are planned in the master plan and
-not yet implemented.
+```bash
+dakflare doctor                                  # edge + handset, one screen
+simulator/scripts/device-check.sh                # role, wrapped key, receive, provider, send,
+                                                 # notification, foreground service, optional reboot
+cd worker && node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite
+cd simulator/core && cargo test
+```
 
-## Licence
+The harness covers pairing, admin, reply state, auth, replay, rules, console surface, the state
+machine, websockets, ack timeout and the password factor — including a software WebAuthn authenticator,
+so passkey assertions are real cryptography rather than a mock.
 
-**AGPL-3.0-only.** If you run a modified version as a network service, section 13 requires you to offer
-its source to your users. The unmodified deployment satisfies this via `/source`.
+## Known gaps
 
-Security reports: see [`SECURITY.md`](SECURITY.md). Please do not open a public issue.
+- **MMS** is not supported; a push produces a notification saying so rather than vanishing.
+- **Magic link** is planned and unimplemented — it needs a sender, and this deployment has no domain.
+- **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
+- **`server-kdf`** is paid-tier only, by measurement.
+- The console's pre-auth state cannot read `auth_mode` (health is behind the admin gate), so the login
+  offers the token form first and the passkey door behind a live `/api/auth` probe.
+
+## License
+
+AGPL-3.0-only.

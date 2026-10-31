@@ -1,0 +1,658 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { AlertDialog } from 'bits-ui';
+	import { page } from '$app/state';
+	import Icon from '$lib/components/Icon.svelte';
+	import Notice from '$lib/components/Notice.svelte';
+	import { app, DEFAULT_SMS_PACKAGE, retentionKept, retentionWords } from '$lib/stores/app.svelte';
+	import { lastContact, relativeTime } from '$lib/device-state';
+	import { readPairLink } from '$lib/pair-link';
+
+	let baseUrl = $state('');
+	let adminToken = $state('');
+
+	const KEEP_OPTIONS = [
+		{ policy: 'days:90', name: '90 days', detail: 'Older messages go.' },
+		{ policy: 'days:30', name: '30 days', detail: 'Older messages go.' },
+		{ policy: 'messages:1000', name: '1,000 messages', detail: 'Only the newest 1,000 stay.' },
+		{ policy: 'forever', name: 'Forever', detail: 'Nothing is removed.' }
+	];
+
+	// The rule the frame shows selected. Kept beside the store so a refused
+	// change snaps back instead of leaving the radio on the wrong rule.
+	let policy = $state('forever');
+	$effect(() => {
+		if (app.retention) policy = app.retention.policy;
+	});
+
+	const keptBy = $derived(retentionKept(policy));
+	const removalNote = $derived.by(() => {
+		if (!app.retention) return 'reading the local database…';
+		if (app.retention.last_purge_at === null) return 'never run';
+		const removed = app.retention.last_deleted ?? 0;
+		const when = relativeTime(app.retention.last_purge_at);
+		return removed === 0 ? `${when} · nothing removed` : `${when} · ${removed} removed`;
+	});
+
+	async function chooseRetention(next: string) {
+		if (next === policy) return;
+		policy = next;
+		const saved = await app.saveRetention(next);
+		if (!saved) policy = app.retention?.policy ?? 'forever';
+	}
+
+	// The role dialog is another Activity. When this one comes back, the shell
+	// has already written the new holder; re-read the facts rather than trusting
+	// the tap that opened the dialog. Retention runs on the gateway tick, so a
+	// return to this frame re-reads when it last ran.
+	onMount(() => {
+		const refresh = () => {
+			if (document.visibilityState === 'visible') {
+				void app.loadFacts();
+				void app.loadRetention();
+			}
+		};
+		void app.loadRetention();
+		window.addEventListener('focus', refresh);
+		document.addEventListener('visibilitychange', refresh);
+		return () => {
+			window.removeEventListener('focus', refresh);
+			document.removeEventListener('visibilitychange', refresh);
+		};
+	});
+
+	const defaultSmsRaw = $derived(app.facts?.default_sms_app?.trim() || null);
+	// Android writes the literal "none" when no app holds the role; that is a
+	// confirmed fact, not a missing one.
+	const noDefaultSms = $derived(defaultSmsRaw === 'none');
+	const otherDefaultSms = $derived(noDefaultSms ? null : defaultSmsRaw);
+	const isDefaultSms = $derived(defaultSmsRaw === DEFAULT_SMS_PACKAGE);
+
+	let label = $state('');
+	let platformId = $state('');
+	let carrier = $state('');
+	let simSlot = $state(0);
+
+	let codeDeviceId = $state('');
+	let codeInput = $state('');
+
+	// The stored target may arrive after boot; keep the field in step without
+	// overwriting what the operator is typing.
+	$effect(() => {
+		baseUrl = app.target.base_url ?? '';
+	});
+
+	// A `dakflare://pair` link arrives as `/settings?pair=<the link>`: the
+	// Android shell validates it and hands it over, and the layout routes here.
+	// Fill both fields and stop — pairing is the operator's confirm, never a
+	// side effect of opening a link. Guarded so a re-render (or a later edit of
+	// the fields) does not apply the same link twice.
+	let appliedLink = $state<string | null>(null);
+	$effect(() => {
+		const raw = page.url.searchParams.get('pair');
+		if (!raw || raw === appliedLink) return;
+		appliedLink = raw;
+		const link = readPairLink(raw);
+		if (!link) {
+			app.notify(
+				'pair',
+				'That pairing link is malformed. Expected dakflare://pair?u=…&c=… with an http(s) worker URL and a 12-character code.',
+				'error'
+			);
+			return;
+		}
+		baseUrl = link.baseUrl;
+		codeInput = link.code;
+		app.notify(
+			'pair',
+			'Pairing link opened: the target and the code are filled in below. Check them, then press Pair with code. Nothing has been sent yet.',
+			'info'
+		);
+	});
+
+	$effect(() => {
+		if (!app.devices.some((device) => device.device_id === codeDeviceId)) {
+			codeDeviceId = app.selectedId || app.devices[0]?.device_id || '';
+		}
+	});
+
+	const canPair = $derived(
+		Boolean(codeDeviceId) && codeInput.trim().length > 0 && !app.busy.pair
+	);
+
+	async function saveTarget(event: SubmitEvent) {
+		event.preventDefault();
+		const saved = await app.saveTarget(baseUrl, adminToken);
+		if (saved) adminToken = '';
+	}
+
+	async function pairWithCode(event: SubmitEvent) {
+		event.preventDefault();
+		// A link fills the target field but does not save it. Saving here, on the
+		// operator's explicit Pair press, is what makes a bare code usable without
+		// a second trip to the target card. An unchanged field is left alone.
+		const typedTarget = baseUrl.trim().replace(/\/+$/, '');
+		const storedTarget = (app.target.base_url ?? '').trim().replace(/\/+$/, '');
+		if (typedTarget && typedTarget !== storedTarget) {
+			const saved = await app.saveTarget(typedTarget, adminToken);
+			if (!saved) {
+				app.notify('pair', 'The target could not be saved. Fix the Worker URL above, then retry.', 'error');
+				return;
+			}
+			adminToken = '';
+		}
+		const paired = await app.pairWithCode(codeDeviceId, codeInput);
+		// The code is spent; leaving it in the field invites a confusing retry.
+		if (paired) codeInput = '';
+	}
+
+	async function createIdentity(event: SubmitEvent) {
+		event.preventDefault();
+		const created = await app.createDevice({ label, platformId, carrier, simSlot });
+		if (created) {
+			label = '';
+			platformId = '';
+		}
+	}
+
+</script>
+
+<svelte:head>
+	<title>Settings · DakFlare</title>
+</svelte:head>
+
+<section class="screen">
+	<header class="screen-head">
+		<div>
+			<p class="eyebrow">Configuration</p>
+			<h1>Settings</h1>
+			<p class="screen-meta">
+				{app.schemaVersion === null ? 'local schema' : `local schema v${app.schemaVersion}`}
+			</p>
+		</div>
+		<span class="pill" data-state={app.configured ? 'live' : 'unknown'}>
+			{app.configured ? 'target set' : 'no target'}
+		</span>
+	</header>
+
+	<section class="sheet" aria-labelledby="target-title">
+		<div class="sheet-head">
+			<h2 class="sheet-title" id="target-title">Target deployment</h2>
+			<span class="pill" data-state={app.configured ? 'live' : 'unknown'}>
+				{app.configured ? app.target.base_url : 'not configured'}
+			</span>
+		</div>
+
+		<form onsubmit={saveTarget}>
+			<div class="field">
+				<label for="base-url">Worker URL</label>
+				<input
+					id="base-url"
+					bind:value={baseUrl}
+					placeholder="https://dakflare-worker.<account>.workers.dev"
+					autocomplete="off"
+					spellcheck="false"
+					disabled={!app.backendAvailable}
+				/>
+			</div>
+			<p class="note">
+				A pairing link sets this for you. Enter it by hand only when you are typing a bare code.
+			</p>
+
+			<details class="advanced">
+				<summary>Admin overrides (lab)</summary>
+				<p>
+					Not needed to pair. These credentials are only for self-pair, purge and revoke on a
+					lab deployment.
+				</p>
+				<div class="field">
+					<label for="admin-token">
+						Admin token {app.target.has_admin_token ? '(stored)' : '(not stored)'}
+					</label>
+					<input
+						id="admin-token"
+						type="password"
+						bind:value={adminToken}
+						placeholder={app.target.has_admin_token ? 'leave blank to keep' : 'ADMIN_TOKEN'}
+						autocomplete="off"
+						disabled={!app.backendAvailable}
+					/>
+					<small>Stored in this app's local database. It is never sent when pairing with a code.</small>
+				</div>
+			</details>
+
+			<div class="form-actions">
+				<button class="btn" type="submit" disabled={!app.backendAvailable || app.busy.target}>
+					{app.busy.target ? 'Saving…' : 'Save target'}
+				</button>
+			</div>
+			<Notice scope="target" />
+		</form>
+	</section>
+
+	<section class="sheet" aria-labelledby="pair-title">
+		<h2 class="sheet-title" id="pair-title">Pair with code</h2>
+		{#if app.devices.length === 0}
+			<!-- The card sits above the identity form, so a fresh install met a
+			     disabled field with no explanation. Say the order and offer the jump. -->
+			<div class="pair-gate" id="pair-gate" role="note">
+				<p class="pair-gate-line">Create an identity below, then pair.</p>
+				<p class="note">
+					Pairing registers this phone's keypair with the deployment, so there is nothing to
+					pair until one exists.
+					<a class="inline-link" href="#identity">Go to Device identity</a>
+				</p>
+			</div>
+		{:else}
+			<p class="note">
+				The operator mints a one-time code in the dashboard. Paste the code — or the whole
+				<code>dakflare://pair?u=…&amp;c=…</code> link, whose worker URL is saved as the target first.
+				No admin token is needed.
+			</p>
+		{/if}
+
+		<form onsubmit={pairWithCode}>
+			<div class="field">
+				<label for="pair-device">Device</label>
+				<select
+					id="pair-device"
+					bind:value={codeDeviceId}
+					disabled={app.devices.length === 0}
+					aria-describedby={app.devices.length === 0 ? 'pair-gate' : undefined}
+				>
+					{#if app.devices.length === 0}
+						<option value="">No device identity</option>
+					{/if}
+					{#each app.devices as device (device.device_id)}
+						<option value={device.device_id}>{device.label} · {device.device_id}</option>
+					{/each}
+				</select>
+			</div>
+			<div class="field">
+				<label for="pair-code">Code or link</label>
+				<input
+					id="pair-code"
+					bind:value={codeInput}
+					placeholder="AB12CD34EF56 or dakflare://pair?u=…&c=…"
+					autocomplete="off"
+					spellcheck="false"
+					disabled={!app.backendAvailable || app.devices.length === 0}
+					aria-describedby={app.devices.length === 0 ? 'pair-gate pair-code-reason' : undefined}
+				/>
+				{#if app.devices.length === 0}
+					<small id="pair-code-reason">Disabled until a device identity exists.</small>
+				{/if}
+			</div>
+			<p class="note">
+				Single-use and short-lived. If it fails, mint a fresh code and retry.
+			</p>
+			<div class="form-actions">
+				<button class="btn primary" type="submit" disabled={!app.backendAvailable || !canPair}>
+					{app.busy.pair ? 'Pairing…' : 'Pair with code'}
+				</button>
+			</div>
+			<Notice scope="pair" />
+		</form>
+	</section>
+
+	<section class="sheet" aria-labelledby="sms-role-title">
+		<h2 class="sheet-title" id="sms-role-title">Default SMS app</h2>
+		<p class="note">
+			Since Android 4.4 only the default SMS app reliably receives inbound SMS. Without the
+			role, this gateway still works only while no other app holds it.
+		</p>
+
+		<div class="rows">
+			<div class="rowline">
+				<span class="label">SMS role</span>
+				<span class="value fact-value">
+					{#if !app.factsLoaded}
+						<span class="fact-missing">reading Android's report…</span>
+					{:else if isDefaultSms}
+						<span class="state-chip" data-tone="ok">
+							<Icon name="check" size={12} /> DakFlare is the default SMS app
+						</span>
+					{:else if otherDefaultSms}
+						<span class="mono" title={otherDefaultSms}>{otherDefaultSms}</span>
+						<span class="fact-reason">Another app handles SMS on this phone.</span>
+					{:else if noDefaultSms}
+						<button
+							class="btn primary small"
+							type="button"
+							disabled={!app.backendAvailable || app.busy.defaultSms}
+							onclick={() => app.requestDefaultSmsRole()}
+						>
+							{app.busy.defaultSms ? 'Opening…' : 'Make DakFlare the default SMS app'}
+						</button>
+						<span class="fact-reason">
+							Android did not name a holder to this app. It confirms the change in its own
+							dialog.
+						</span>
+					{:else}
+						<span class="fact-missing">not reported by Android</span>
+						<span class="fact-reason">Open the Android build to request the role.</span>
+					{/if}
+				</span>
+			</div>
+		</div>
+		<Notice scope="default-sms" />
+	</section>
+
+	<section class="sheet" aria-labelledby="retention-title">
+		<div class="sheet-head">
+			<h2 class="sheet-title" id="retention-title">Local message log</h2>
+			<span class="pill" data-state={policy === 'forever' ? 'unknown' : 'live'}>
+				{retentionWords(policy)}
+			</span>
+		</div>
+		<p class="note">
+			Messages stay on this phone until this rule removes them. It runs when you open the app
+			and on the phone's own schedule. The deployment's copy is not touched, and a message the
+			gateway has not received yet is never removed.
+		</p>
+
+		<fieldset class="keep" disabled={!app.backendAvailable || app.busy.retention}>
+			<legend class="keep-title">Keep messages</legend>
+			{#each KEEP_OPTIONS as option (option.policy)}
+				<label class="keep-option" data-selected={policy === option.policy}>
+					<input
+						type="radio"
+						name="retention"
+						value={option.policy}
+						checked={policy === option.policy}
+						onchange={() => chooseRetention(option.policy)}
+					/>
+					<span class="keep-name">{option.name}</span>
+					<span class="keep-detail">{option.detail}</span>
+					{#if policy === option.policy}
+						<!-- A tick as well as the tint: the chosen rule must not be
+						     something only the colour says. -->
+						<span class="keep-tick" aria-hidden="true"><Icon name="check" size={12} /></span>
+					{/if}
+				</label>
+			{/each}
+		</fieldset>
+
+		<div class="rows">
+			<div class="rowline">
+				<span class="label">Kept</span>
+				<span class="value">{keptBy}</span>
+			</div>
+			<div class="rowline">
+				<span class="label">Last run</span>
+				<span class="value mono">{removalNote}</span>
+			</div>
+		</div>
+		<Notice scope="retention" />
+	</section>
+
+	<section class="sheet" id="identity" aria-labelledby="identity-title">
+		<h2 class="sheet-title" id="identity-title">Device identity</h2>
+		<p class="note">
+			This creates a real P-256 keypair. The public half registers with the deployment at
+			pairing; the private half stays on this device and never leaves it. The carrier and SIM
+			slot here belong to the identity; Android's own report is on
+			<a class="inline-link" href="/device" data-sveltekit-replacestate>Device</a>.
+		</p>
+
+		<form onsubmit={createIdentity}>
+			<div class="field">
+				<label for="label">Label</label>
+				<input id="label" bind:value={label} placeholder="Pixel 8 · reception" autocomplete="off" />
+			</div>
+			<div class="field">
+				<label for="platform-id">
+					ANDROID_ID <span class="muted">(hint, optional)</span>
+				</label>
+				<input id="platform-id" bind:value={platformId} placeholder="a1b2c3d4e5f6" autocomplete="off" />
+				<small>Never used to authenticate — only for duplicate detection and support.</small>
+			</div>
+			<div class="field">
+				<label for="carrier">Carrier <span class="muted">(optional)</span></label>
+				<input id="carrier" bind:value={carrier} placeholder="Grameenphone" autocomplete="off" />
+			</div>
+			<div class="field">
+				<label for="sim-slot">SIM slot</label>
+				<select id="sim-slot" bind:value={simSlot}>
+					<option value={0}>0 — default</option>
+					<option value={1}>1 — SIM 1</option>
+					<option value={2}>2 — SIM 2</option>
+				</select>
+			</div>
+			<div class="form-actions">
+				<button class="btn" type="submit" disabled={!app.backendAvailable || app.busy.create}>
+					{app.busy.create ? 'Generating…' : 'Create identity'}
+				</button>
+			</div>
+			<Notice scope="identity" />
+		</form>
+	</section>
+
+	<section class="sheet" aria-labelledby="devices-title">
+		<div class="sheet-head">
+			<h2 class="sheet-title" id="devices-title">Devices · {app.devices.length}</h2>
+			<button
+				class="btn small"
+				type="button"
+				onclick={() => app.reloadDevices()}
+				disabled={!app.backendAvailable || app.busy.devices}
+			>
+				{app.busy.devices ? 'Refreshing…' : 'Refresh'}
+			</button>
+		</div>
+
+		{#if app.loading.boot}
+			<p class="quiet-state">Opening the local database…</p>
+		{:else if !app.backendAvailable}
+			<p class="quiet-state">The local database is not reachable in this window.</p>
+		{:else if app.devices.length === 0}
+			<p class="quiet-state">No device identity yet. Create one above, then pair it with a code.</p>
+		{:else}
+			{#each app.devices as device (device.device_id)}
+				<article class="device">
+					<div class="device-head">
+						<div>
+							<strong>{device.label}</strong>
+							<div class="device-id" title={device.device_id}>{device.device_id.slice(0, 18)}…</div>
+						</div>
+						<span class="pill">{device.platform}</span>
+					</div>
+
+					<div class="facts">
+						<div class="fact"><b>Carrier</b><span>{device.carrier ?? '—'}</span></div>
+						<div class="fact"><b>SIM slot</b><span>{device.sim_slot}</span></div>
+						<div class="fact"><b>ANDROID_ID</b><span>{device.platform_id ?? '—'}</span></div>
+						<div class="fact">
+							<b>Pairing</b>
+							<span>
+								{app.pairedAt[device.device_id]
+									? `paired ${relativeTime(app.pairedAt[device.device_id])}`
+									: lastContact(app.contactAt[device.device_id], app.lastContactAt[device.device_id])
+										? 'signed contact answered'
+										: 'not recorded'}
+							</span>
+						</div>
+						<div class="fact"><b>Created</b><span>{new Date(device.created_at).toLocaleDateString()}</span></div>
+					</div>
+
+					<div class="device-actions">
+						<button
+							class="btn small"
+							type="button"
+							disabled={!app.configured || app.busy.selfPair}
+							title="Mints a code with the stored admin token. Pair with code is the normal path."
+							onclick={() => app.selfPair(device.device_id)}
+						>
+							Self-pair (lab)
+						</button>
+						<button
+							class="btn small"
+							type="button"
+							disabled={!app.configured || app.busy.purge}
+							title="Removes this device's message log on the deployment, not the local thread."
+							onclick={() => app.purge(device.device_id)}
+						>
+							Purge log
+						</button>
+
+						<AlertDialog.Root>
+							<AlertDialog.Trigger class="btn small danger-ghost">Delete</AlertDialog.Trigger>
+							<AlertDialog.Portal>
+								<AlertDialog.Overlay class="overlay" />
+								<AlertDialog.Content class="dialog" aria-labelledby={`delete-${device.device_id}`}>
+									<h3 id={`delete-${device.device_id}`}>Delete {device.label}?</h3>
+									<p>
+										This removes the local keypair. If the device is paired, revoke it
+										first or the deployment will keep trusting the old key.
+									</p>
+									<div class="row">
+										<AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+										<AlertDialog.Action
+											class="danger"
+											onclick={() => app.deleteDevice(device.device_id)}
+										>
+											Delete device
+										</AlertDialog.Action>
+									</div>
+								</AlertDialog.Content>
+							</AlertDialog.Portal>
+						</AlertDialog.Root>
+					</div>
+
+					<Notice scope={`settings:${device.device_id}`} />
+				</article>
+			{/each}
+			<p class="note">
+				Purge log clears the deployment copy only. The local thread is cleared from the
+				carrier panel in Flows.
+			</p>
+		{/if}
+		<Notice scope="devices" />
+	</section>
+
+	<section class="sheet" aria-labelledby="build-title">
+		<h2 class="sheet-title" id="build-title">This build</h2>
+		<div class="rows">
+			<div class="rowline">
+				<span class="label">Local schema</span>
+				<span class="value mono">{app.schemaVersion === null ? 'unavailable' : `v${app.schemaVersion}`}</span>
+			</div>
+			<div class="rowline">
+				<span class="label">Backend</span>
+				<span class="value mono">{app.backendAvailable ? 'local database' : 'browser preview'}</span>
+			</div>
+			<div class="rowline">
+				<span class="label">Composer</span>
+				<span class="value mono">reply-only</span>
+			</div>
+		</div>
+	</section>
+</section>
+
+<style>
+	/* The pair card comes before the identity card, so its empty state has to
+	   send the reader there rather than leave a disabled field unexplained. */
+	.pair-gate {
+		margin-top: 10px;
+		padding: 10px 12px;
+		border: 1px solid var(--df-border-input);
+		border-left: 3px solid var(--accent);
+		border-radius: 10px;
+		background: var(--df-surface-well);
+	}
+
+	.pair-gate .note {
+		margin-top: 4px;
+	}
+
+	.pair-gate-line {
+		margin: 0;
+		font-size: 12.5px;
+		font-weight: 700;
+		color: var(--ink);
+	}
+
+	/* The one control on this screen where a wrong tap deletes history, so it
+	   is four named cards rather than a dropdown that hides the consequences. */
+	.keep {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 8px;
+		margin: 14px 0 0;
+		padding: 0;
+		border: 0;
+	}
+
+	.keep-title {
+		grid-column: 1 / -1;
+		padding: 0;
+		margin-bottom: 1px;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--ink-2);
+	}
+
+	.keep-option {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-height: 54px;
+		padding: 9px 11px;
+		border: 1px solid var(--df-border-input);
+		border-radius: 12px;
+		background: var(--df-surface-well);
+		cursor: pointer;
+		transition:
+			border-color 140ms ease-out,
+			background-color 140ms ease-out;
+	}
+
+	/* 2px plus the tick: the selection is a shape and a mark before it is a
+	   tint, which is what a reader who cannot see coral still gets. */
+	.keep-option[data-selected='true'] {
+		border: 2px solid var(--accent);
+		padding: 8px 10px;
+		background: var(--accent-soft);
+	}
+
+	.keep-tick {
+		position: absolute;
+		top: 7px;
+		right: 7px;
+		display: grid;
+		place-items: center;
+		color: var(--accent);
+	}
+
+	.keep-option:has(input:focus-visible) {
+		outline: 2px solid var(--df-border-focus);
+		outline-offset: 2px;
+	}
+
+	.keep-option input {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.keep-name {
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--ink);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.keep-detail {
+		font-size: 10.5px;
+		line-height: 1.35;
+		color: var(--ink-3);
+	}
+
+	.keep:disabled .keep-option {
+		opacity: 0.55;
+		cursor: default;
+	}
+</style>

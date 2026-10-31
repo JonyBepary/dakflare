@@ -16,6 +16,10 @@
 name = "dakflare-worker"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
+# Required by better-auth (its password utilities import `node:crypto`). The flag
+# is inert for code that does not use node: builtins, so it does not change the
+# device protocol paths.
+compatibility_flags = ["nodejs_compat"]
 preview_urls = false
 
 [[durable_objects.bindings]]

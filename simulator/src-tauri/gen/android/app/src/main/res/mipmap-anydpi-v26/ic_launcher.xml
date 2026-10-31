@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The file whose absence kept the Tauri robot on every phone: without an
+    adaptive descriptor Android ignores the foreground layer and falls back to
+    the legacy `mipmap-*/ic_launcher.png` bitmaps.
+
+    Split per docs/design-review/06-banner-design.md §3.6: flat cream background,
+    the Torch mark as foreground, and an alpha-only monochrome layer for the
+    Android 13 themed icon (ignored below API 33, which is why it is safe here).
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

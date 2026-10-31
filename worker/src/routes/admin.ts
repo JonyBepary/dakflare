@@ -16,11 +16,17 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
+import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { internalError } from "./pair";
 
 /** `DELETE /v1/admin/devices/:device_id` — revoke a device in D1 and in its DO. */
-export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Response> {
+export async function handleDeviceRevoke(
+  env: Env,
+  deviceId: string,
+  actor?: AdminActor
+): Promise<Response> {
   if (!deviceId) return err("bad_request", 400);
 
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
@@ -42,7 +48,95 @@ export async function handleDeviceRevoke(env: Env, deviceId: string): Promise<Re
     .bind(deviceId)
     .run();
 
+  await writeAudit(env, {
+    action: "device.revoked",
+    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+    subject: deviceId,
+    detail: { d1_deleted: Number(d1.meta?.changes ?? 0) },
+  });
+
   return Response.json({ ok: true, d1_deleted: Number(d1.meta?.changes ?? 0) });
+}
+
+/**
+ * `POST /v1/admin/devices/:device_id/archive` — hide a device without deleting it.
+ *
+ * Revoke is destructive by design (a compromised phone must lose its key AND its
+ * history is not the operator's to keep). Archive is the other case: an
+ * uninstalled phone whose 150-message history is still evidence. The row and
+ * every message stay; only `GET /v1/devices` stops showing it.
+ *
+ * Deliberately no Durable Object call. An archived device is still a valid
+ * device: it can authenticate, and its next authenticated request clears the
+ * archive again (see `recordDeviceContact` in index.ts). Only revoke touches
+ * the DO.
+ */
+export function handleDeviceArchive(
+  env: Env,
+  deviceId: string,
+  actor?: AdminActor
+): Promise<Response> {
+  return setDeviceArchived(env, deviceId, true, actor);
+}
+
+/** `POST /v1/admin/devices/:device_id/unarchive` — make an archived device visible again. */
+export function handleDeviceUnarchive(
+  env: Env,
+  deviceId: string,
+  actor?: AdminActor
+): Promise<Response> {
+  return setDeviceArchived(env, deviceId, false, actor);
+}
+
+/**
+ * The shared transition. `changed` reports whether this call moved the row, so a
+ * repeated archive is a no-op 200 rather than a second audit entry claiming an
+ * event that did not happen. The audit is written only on a real transition.
+ */
+async function setDeviceArchived(
+  env: Env,
+  deviceId: string,
+  archived: boolean,
+  actor?: AdminActor
+): Promise<Response> {
+  if (!deviceId) return err("bad_request", 400);
+
+  const result = archived
+    ? await env.DB.prepare(
+        `UPDATE devices SET archived_at = ? WHERE device_id = ? AND archived_at IS NULL`
+      )
+        .bind(Date.now(), deviceId)
+        .run()
+    : await env.DB.prepare(
+        `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL`
+      )
+        .bind(deviceId)
+        .run();
+
+  const changed = Number(result.meta?.changes ?? 0) > 0;
+
+  // Read back rather than trusting the input: an archive of an already-archived
+  // device keeps the ORIGINAL timestamp, and the caller should see that value.
+  const row = await env.DB.prepare(`SELECT archived_at FROM devices WHERE device_id = ?`)
+    .bind(deviceId)
+    .first<{ archived_at: number | null }>();
+  if (!row) return Response.json({ error: "not_found" }, { status: 404 });
+
+  if (changed) {
+    await writeAudit(env, {
+      action: archived ? "device.archived" : "device.unarchived",
+      actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+      subject: deviceId,
+      detail: { archived_at: row.archived_at ?? null },
+    });
+  }
+
+  return Response.json({
+    ok: true,
+    device_id: deviceId,
+    archived_at: row.archived_at ?? null,
+    changed,
+  });
 }
 
 /**

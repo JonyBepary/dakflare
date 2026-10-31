@@ -4,7 +4,7 @@
 	import { formatAbsolute } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import type { Device, WorkflowSummary } from '$lib/types';
-	import { deviceLabel, devicePrimary } from '$lib/presence';
+	import { devicePrimary } from '$lib/presence';
 	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -84,7 +84,7 @@
 	}
 
 	function scopeName(id: string | null): string {
-		if (!id) return 'global';
+		if (!id) return 'every device';
 		const device = findDevice(id);
 		return device ? devicePrimary(device) : id;
 	}
@@ -103,7 +103,7 @@
 	<PageHeader
 		eyebrow="Automation"
 		title="Workflows"
-		description="Flows run on the phone first: they answer immediately and keep working when the gateway is unreachable. The Worker runs one only when the phone did not report a run."
+		description="Multi-step replies that run on the phone, so they answer while the gateway is unreachable."
 	>
 		<button
 			type="button"
@@ -122,193 +122,123 @@
 
 	<AutomationHeader active="workflows" />
 
-	<div class="stack">
+	<div class="grid-stack">
 		{#if notice}
-			<Notice tone="ok" title="Workflow deleted">{notice}</Notice>
+			<div class="flash" aria-live="polite">
+				<Notice tone="ok" title="Workflow deleted">{notice}</Notice>
+			</div>
 		{/if}
 
 		{#if error}
-			<section class="panel">
-				<div class="panel-body stack">
+			<div class="bento settle" style="--i: 0">
+				<section class="card span-12">
 					<Notice tone="danger" title="Could not load workflows">{error}</Notice>
-					<div class="row">
+					<div class="row" style="margin-top: 16px">
 						<button type="button" class="btn btn-primary" onclick={() => void load()}>
 							<Icon name="refresh" size={14} /> Try again
 						</button>
 					</div>
-				</div>
-			</section>
+				</section>
+			</div>
 		{:else if loading}
-			<section class="panel" aria-busy="true" aria-live="polite">
-				<span class="sr-only">Loading workflows</span>
-				<div class="panel-head"><h2 class="panel-title">Saved flows</h2></div>
-				<div class="loading-rows">
-					{#each ['a', 'b', 'c'] as key (key)}
-						<div class="skeleton" style="height: 46px"></div>
-					{/each}
-				</div>
-			</section>
+			<div class="bento settle" style="--i: 0">
+				<section class="card span-12" aria-busy="true" aria-live="polite">
+					<span class="sr-only">Loading workflows</span>
+					<div class="skeleton" style="height: 16px; width: 110px"></div>
+					<div class="loading-rows">
+						{#each ['a', 'b', 'c'] as key (key)}
+							<div class="skeleton" style="height: 68px"></div>
+						{/each}
+					</div>
+				</section>
+			</div>
 		{:else if workflows.length === 0}
-			<section class="panel">
-				<EmptyState
-					icon="workflow"
-					title="No workflows yet"
-					description="A workflow begins when a message arrives. Add a trigger, connect the steps and save it; paired phones receive it on their next flow sync."
-				>
-					<a class="btn btn-primary" href={ROUTES.workflowEdit}>
-						<Icon name="plus" size={14} /> New workflow
-					</a>
-				</EmptyState>
-			</section>
+			<div class="bento settle" style="--i: 0">
+				<section class="card span-12">
+					<EmptyState
+						icon="workflow"
+						title="No workflows yet"
+						description="A workflow begins when a message arrives. Add a trigger, connect the steps and save it; paired phones receive it on their next flow sync."
+					>
+						<a class="btn btn-primary" href={ROUTES.workflowEdit}>
+							<Icon name="plus" size={14} /> New workflow
+						</a>
+					</EmptyState>
+				</section>
+			</div>
 		{:else}
-			<section class="panel">
-				<div class="panel-head">
-					<h2 class="panel-title"><Icon name="workflow" size={14} /> Saved flows</h2>
-					<span class="panel-meta">
-						{workflows.length} {workflows.length === 1 ? 'flow' : 'flows'} · {enabledCount}
-						enabled · {totalNodes}
-						{totalNodes === 1 ? 'step' : 'steps'}
-					</span>
-				</div>
+			<div class="bento settle" style="--i: 0">
+				<section class="card list-card span-12" aria-labelledby="flows-heading">
+					<div class="panel-heading">
+						<div>
+							<h2 id="flows-heading" class="section-title">Saved flows</h2>
+							<p class="section-note">
+								{workflows.length}
+								{workflows.length === 1 ? 'flow' : 'flows'} · {enabledCount} enabled · {totalNodes}
+								{totalNodes === 1 ? 'step' : 'steps'} in all
+							</p>
+						</div>
+					</div>
 
-				<div class="table-scroll desktop-only">
-					<table class="table flows-table">
-						<caption class="sr-only">Saved workflows, their scope and size</caption>
-						<thead>
-							<tr>
-								<th scope="col">Flow</th>
-								<th scope="col">Scope</th>
-								<th scope="col">Status</th>
-								<th scope="col" class="num">Steps</th>
-								<th scope="col">Updated</th>
-								<th scope="col"><span class="sr-only">Actions</span></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each workflows as workflow (workflow.id)}
-								<tr>
-									<td>
-										<a class="cell-main flow-name" href={openHref(workflow)}>
-											{workflow.name}
-										</a>
-										<span class="cell-sub mono">{workflow.id}</span>
-									</td>
-									<td>
-										{#if workflow.device_id}
-											{@const scoped = findDevice(workflow.device_id)}
-											<span class="badge badge-muted">device</span>
-											<span class="cell-sub">
-												{#if scoped && deviceLabel(scoped)}
-													<span class="scope-name">{devicePrimary(scoped)}</span>
-													<span class="mono scope-id">{workflow.device_id}</span>
-												{:else}
-													<span class="mono scope-id">{workflow.device_id}</span>
-												{/if}
-											</span>
-										{:else}
-											<span class="badge badge-muted">global</span>
-											<span class="cell-sub">every paired device</span>
-										{/if}
-									</td>
-									<td>
+					<!--
+						The list endpoint returns id, name, enabled, device_id, updated_at and
+						node_count — no version, no cache flag and no last run. Those facts live on
+						the detail read, so the row says nothing about them rather than inventing
+						a zero.
+					-->
+					<ul class="flow-list">
+						{#each workflows as workflow (workflow.id)}
+							<li class="flow-row">
+								<div class="flow-main">
+									<div class="flow-head">
+										<a class="flow-name" href={openHref(workflow)}>{workflow.name}</a>
 										{#if workflow.enabled}
 											<Badge tone="ok" dot>enabled</Badge>
 										{:else}
 											<Badge tone="muted">paused</Badge>
 										{/if}
-									</td>
-									<td class="num">
-										<span class="mono">{workflow.node_count}</span>
-									</td>
-									<td>
-										<span class="cell-main"><RelativeTime value={workflow.updated_at} /></span>
-										<span class="cell-sub">{formatAbsolute(workflow.updated_at)}</span>
-									</td>
-									<td>
-										<div class="cell-actions">
-											<a class="btn btn-ghost btn-sm" href={openHref(workflow)}>
-												<Icon name="external" size={12} /> Open
-											</a>
-											<button
-												type="button"
-												class="btn btn-danger btn-sm"
-												onclick={() => openDelete(workflow)}
-												aria-label={`Delete ${workflow.name}`}
-											>
-												<Icon name="trash" size={12} /> Delete
-											</button>
-										</div>
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
+									</div>
+									<p class="flow-meta">
+										<span class="mono meta-item">{workflow.id}</span>
+										<span class="meta-item">
+											{workflow.node_count}
+											{workflow.node_count === 1 ? 'step' : 'steps'}
+										</span>
+										<span class="meta-item">{scopeName(workflow.device_id)}</span>
+										<span class="meta-item" title={formatAbsolute(workflow.updated_at)}>
+											saved <RelativeTime value={workflow.updated_at} />
+										</span>
+									</p>
+								</div>
 
-				<ul class="flow-cards">
-					{#each workflows as workflow (workflow.id)}
-						<li class="flow-card">
-							<div class="card-top">
-								<a class="flow-name" href={openHref(workflow)}>{workflow.name}</a>
-								{#if workflow.enabled}
-									<Badge tone="ok" dot>enabled</Badge>
-								{:else}
-									<Badge tone="muted">paused</Badge>
-								{/if}
-							</div>
-							<p class="card-id mono">{workflow.id}</p>
-							<dl class="card-kv">
-								<div>
-									<dt>Scope</dt>
-									<dd>
-										{#if workflow.device_id}
-											{@const scoped = findDevice(workflow.device_id)}
-											{#if scoped && deviceLabel(scoped)}
-												<span class="scope-name">{devicePrimary(scoped)}</span>
-												<span class="mono scope-id">{workflow.device_id}</span>
-											{:else}
-												<span class="mono scope-id">{workflow.device_id}</span>
-											{/if}
-										{:else}
-											<span class="mono">global — every device</span>
-										{/if}
-									</dd>
+								<div class="flow-actions">
+									<a
+										class="btn btn-ghost btn-sm"
+										href={openHref(workflow)}
+										aria-label={`Open ${workflow.name}`}
+									>
+										Open
+									</a>
+									<button
+										type="button"
+										class="btn btn-danger-ghost btn-sm"
+										onclick={() => openDelete(workflow)}
+										aria-label={`Delete ${workflow.name}`}
+									>
+										<Icon name="trash" size={12} /> Delete
+									</button>
 								</div>
-								<div>
-									<dt>Steps</dt>
-									<dd>{workflow.node_count}</dd>
-								</div>
-								<div>
-									<dt>Updated</dt>
-									<dd>
-										<RelativeTime value={workflow.updated_at} />
-										<span class="muted"> · {formatAbsolute(workflow.updated_at)}</span>
-									</dd>
-								</div>
-							</dl>
-							<div class="card-actions">
-								<a class="btn btn-sm" href={openHref(workflow)}>
-									<Icon name="external" size={12} /> Open
-								</a>
-								<button
-									type="button"
-									class="btn btn-danger btn-sm"
-									onclick={() => openDelete(workflow)}
-									aria-label={`Delete ${workflow.name}`}
-								>
-									<Icon name="trash" size={12} /> Delete
-								</button>
-							</div>
-						</li>
-					{/each}
-				</ul>
+							</li>
+						{/each}
+					</ul>
 
-				<p class="panel-note">
-					Saved flows are delivered to paired phones and run there when a message matches. The
-					Worker runs a flow only when the phone did not report a run; <strong>Simulate</strong>
-					previews the path without sending anything.
-				</p>
-			</section>
+					<p class="panel-note">
+						Saved flows are delivered to paired phones and run there when a message matches. The
+						Worker runs one only when the phone did not report a run; <strong>Simulate</strong>
+						previews the path without sending anything.
+					</p>
+				</section>
+			</div>
 		{/if}
 	</div>
 </div>
@@ -334,147 +264,155 @@
 			This cannot be undone.
 		</p>
 		<p class="hint" style="margin-top: 10px">
-			{deleteTarget.node_count} {deleteTarget.node_count === 1 ? 'step' : 'steps'} · scope
+			{deleteTarget.node_count}
+			{deleteTarget.node_count === 1 ? 'step' : 'steps'} · scope
 			{scopeName(deleteTarget.device_id)}
 		</p>
 	{/if}
 </ConfirmDialog>
 
 <style>
+	.list-card {
+		padding: 0;
+		overflow: hidden;
+	}
+
+	.flash :global(.callout) {
+		background: var(--df-state-ok-bg);
+	}
+
+	.panel-heading {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-4) var(--df-p-space-5) var(--df-p-space-3);
+	}
+
+	.section-title {
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.section-note {
+		margin-top: 2px;
+		font-size: var(--df-p-text-base);
+		color: var(--df-text-meta);
+	}
+
+	.flow-list {
+		margin: 0;
+		padding: 0 var(--df-p-space-5);
+		list-style: none;
+	}
+
+	.flow-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: var(--df-p-space-4);
+		padding: var(--df-p-space-4) 0;
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.flow-row:first-child {
+		border-top: 0;
+	}
+
+	.flow-main {
+		min-width: 0;
+	}
+
+	.flow-head {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+	}
+
 	.flow-name {
-		font-weight: 500;
-		color: var(--ink);
-		text-decoration: none;
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		line-height: 1.3;
+		color: var(--df-text-primary);
 		overflow-wrap: anywhere;
 	}
 
 	.flow-name:hover {
-		color: var(--accent);
+		color: var(--df-accent-text);
 		text-decoration: underline;
 		text-underline-offset: 3px;
 	}
 
-	.flows-table {
-		min-width: 760px;
+	.flow-name:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+		border-radius: var(--df-p-radius-xs);
 	}
 
-	.scope-name {
-		display: block;
-		font-size: 11px;
-		color: var(--ink-2);
-		overflow-wrap: anywhere;
-	}
-
-	.scope-id {
-		display: block;
-		font-size: 10px;
-		color: var(--ink-3);
-		overflow-wrap: anywhere;
-	}
-
-	.flows-table th:nth-child(1) {
-		width: 27%;
-	}
-
-	.flows-table th:nth-child(2) {
-		width: 23%;
-	}
-
-	.flows-table th:nth-child(3) {
-		width: 10%;
-	}
-
-	.flows-table th:nth-child(4) {
-		width: 8%;
-	}
-
-	.flows-table th:nth-child(5) {
-		width: 20%;
-	}
-
-	.flow-cards {
-		display: none;
-		list-style: none;
-		margin: 0;
-		padding: 0;
-	}
-
-	.flow-card {
-		padding: var(--s-4);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.flow-card:last-child {
-		border-bottom: 0;
-	}
-
-	.card-top {
+	.flow-meta {
 		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: var(--s-2);
-	}
-
-	.card-id {
-		margin-top: 2px;
-		font-size: 10px;
-		color: var(--ink-3);
-		overflow-wrap: anywhere;
-	}
-
-	.card-kv {
-		display: grid;
-		gap: 3px;
-		margin: var(--s-3) 0 0;
-		font-size: 11.5px;
-	}
-
-	.card-kv > div {
-		display: grid;
-		grid-template-columns: 58px minmax(0, 1fr);
-		gap: var(--s-2);
-	}
-
-	.card-kv dt {
-		padding-top: 2px;
-		font-family: var(--font-mono);
-		font-size: 9.5px;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--ink-3);
-	}
-
-	.card-kv dd {
-		margin: 0;
-		color: var(--ink-2);
-		overflow-wrap: anywhere;
-	}
-
-	.card-actions {
-		display: flex;
-		gap: var(--s-2);
-		margin-top: var(--s-3);
+		align-items: baseline;
+		column-gap: var(--df-p-space-2);
+		row-gap: 2px;
 		flex-wrap: wrap;
+		margin-top: var(--df-p-space-2);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.flow-meta .mono {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	.meta-item + .meta-item::before {
+		content: '·';
+		margin-right: var(--df-p-space-2);
+		/* A separator is punctuation, not a hairline: in dark the control border
+		   is 1.6:1 on the card and the dots vanish between the facts. */
+	color: light-dark(
+		var(--df-border-control),
+		color-mix(in srgb, var(--df-text-meta) 65%, transparent)
+	);
+	}
+
+	.flow-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		justify-content: flex-end;
 	}
 
 	.loading-rows {
 		display: grid;
-		gap: var(--s-2);
-		padding: var(--s-4);
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-4);
 	}
 
 	.panel-note strong {
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 		font-weight: 600;
 	}
 
 	@media (max-width: 820px) {
-		.desktop-only {
-			display: none;
+		.flow-row {
+			grid-template-columns: minmax(0, 1fr);
+			align-items: start;
 		}
 
-		.flow-cards {
-			display: block;
+		.flow-actions {
+			justify-content: flex-start;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.panel-heading,
+		.flow-list {
+			padding-inline: var(--df-p-space-4);
 		}
 	}
 </style>

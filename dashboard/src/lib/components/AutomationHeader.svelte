@@ -3,70 +3,79 @@
 	import Icon from './Icon.svelte';
 
 	let { active }: { active: 'rules' | 'workflows' } = $props();
+
+	// CONSOLE_UX §1: one pipeline, two authored forms. The page says which form is
+	// being edited and links across to the other; it never implies a third surface.
+	const other = $derived(
+		active === 'rules'
+			? { href: ROUTES.workflows, label: 'How flows fit' }
+			: { href: ROUTES.rules, label: 'How rules fit' }
+	);
 </script>
 
-<section class="automation-head" aria-labelledby="automation-heading">
+<section class="band" aria-labelledby="automation-heading">
 	<h2 class="sr-only" id="automation-heading">Automation</h2>
-	<nav class="auto-tabs" aria-label="Automation sections">
+
+	<nav class="tabs" aria-label="Automation sections">
 		<a
-			class="auto-tab"
+			class="tab"
 			class:is-active={active === 'rules'}
 			href={ROUTES.rules}
 			aria-current={active === 'rules' ? 'page' : undefined}
 		>
-			<Icon name="filter" size={13} />
+			<Icon name="filter" size={14} />
 			Rules
 		</a>
 		<a
-			class="auto-tab"
+			class="tab"
 			class:is-active={active === 'workflows'}
 			href={ROUTES.workflows}
 			aria-current={active === 'workflows' ? 'page' : undefined}
 		>
-			<Icon name="workflow" size={13} />
+			<Icon name="workflow" size={14} />
 			Workflows
 		</a>
 	</nav>
-	<p class="auto-copy">
-		Gateway rules are checked first and rate-limited. If one replies, the workflow is skipped;
-		otherwise the workflow runs on the phone first.
+
+	<p class="sentence">
+		Rules answer first on the gateway; when none matches, flows run on the phone.
 	</p>
+
+	<a class="cross" href={other.href}>
+		{other.label}
+		<Icon name="arrow-up-right" size={12} />
+	</a>
 </section>
 
 <style>
-	.automation-head {
+	.band {
 		display: flex;
 		align-items: center;
-		gap: var(--s-4);
+		gap: var(--df-p-space-4);
 		flex-wrap: wrap;
-		margin-bottom: var(--s-4);
-		padding: 9px 10px 9px var(--s-4);
-		border: 1px solid var(--line);
-		border-radius: var(--r);
-		background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+		margin-bottom: var(--df-p-space-5);
+		padding: var(--df-p-space-2);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-well);
 	}
 
-	.auto-tabs {
+	.tabs {
 		display: inline-flex;
 		gap: 2px;
-		padding: 2px;
-		border: 1px solid var(--line-strong);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
 		flex: none;
 	}
 
-	.auto-tab {
+	.tab {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		gap: 6px;
-		min-height: 30px;
-		padding: 0 11px;
-		border-radius: 3px;
-		color: var(--ink-3);
-		font-size: var(--text-sm);
-		font-weight: 500;
+		min-height: 32px;
+		padding: 0 12px;
+		border-radius: var(--df-p-radius-sm);
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
 		text-decoration: none;
 		white-space: nowrap;
 		transition:
@@ -74,42 +83,84 @@
 			color 140ms ease;
 	}
 
-	.auto-tab:hover {
-		color: var(--ink);
+	.tab:hover {
+		background: light-dark(
+			color-mix(in srgb, var(--df-surface-card) 60%, transparent),
+			var(--df-surface-press)
+		);
+		color: var(--df-text-primary);
 		text-decoration: none;
 	}
 
-	.auto-tab.is-active {
-		background: var(--seg-active);
-		color: var(--ink);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+	.tab:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
 	}
 
-	.auto-tab.is-active :global(svg) {
-		color: var(--accent);
+	/* The active tab is the raised object. Card is lighter than well in light
+	   and darker in dark, so the press step carries it in the dark scheme. */
+	.tab.is-active {
+		background: light-dark(var(--df-surface-card), var(--df-surface-press));
+		color: var(--df-text-primary);
+		box-shadow: var(--df-shadow-card);
 	}
 
-	.auto-copy {
+	.tab.is-active :global(svg) {
+		color: var(--df-accent-text);
+	}
+
+	.sentence {
 		flex: 1 1 320px;
 		min-width: 0;
-		font-size: var(--text-base);
+		font-size: var(--df-p-text-base);
 		line-height: 1.5;
-		color: var(--ink-2);
+		color: var(--df-text-secondary);
 	}
 
-	@media (max-width: 620px) {
-		.automation-head {
+	.cross {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		min-height: 32px;
+		padding: 0 var(--df-p-space-2);
+		border-radius: var(--df-p-radius-sm);
+		color: var(--df-accent-text);
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.cross:focus-visible {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	@media (max-width: 720px) {
+		.band {
 			align-items: flex-start;
-			padding: var(--s-3);
+			gap: var(--df-p-space-3);
+			padding: var(--df-p-space-3);
 		}
 
-		.auto-copy {
+		.sentence {
 			flex-basis: 100%;
+			order: 3;
 		}
 
-		.auto-tab {
+		.cross {
+			margin-left: auto;
+			order: 2;
+		}
+
+		.tab {
 			min-height: 44px;
-			padding: 0 13px;
+			padding: 0 14px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.tab {
+			transition: none;
 		}
 	}
 </style>

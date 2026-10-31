@@ -1,0 +1,330 @@
+/* design/tokens.css — the single token source for the console and the phone app.
+   Layer rule, checkable by grep: a name containing `-p-` is a primitive, `--df-c-` is a
+   component token, everything else is semantic. Colour only ever moves between layers
+   through the semantic one; component tokens may point at primitives for geometry.
+   Every value, and the measured contrast behind it, is `docs/design-review/03-design-system.md`.
+
+   Display face: Nunito, variable 400–800, latin subset, bundled at
+   `<app>/static/fonts/nunito-var.woff2`. Licence: SIL Open Font License 1.1
+   (https://openfontlicense.org). Source: Google Fonts CSS API v32,
+   https://fonts.googleapis.com/css2?family=Nunito:wght@400..800&display=swap
+   → https://fonts.gstatic.com/s/nunito/v32/XRXV3I6Li01BKofINeaB.woff2 */
+
+/* ---- layer 1: primitives ---- */
+
+:root {
+	--df-p-cream-50: #fffdf8;
+	--df-p-cream-100: #fbf6ee;
+	--df-p-cream-200: #f6efe3;
+	--df-p-cream-300: #ede3d3;
+	--df-p-cream-400: #e7dccb;
+	--df-p-cream-500: #d3c4ac;
+
+	--df-p-umber-300: #857a6b;
+	--df-p-umber-400: #6b6153;
+	--df-p-umber-500: #5b5348;
+	--df-p-umber-900: #241f1a;
+	--df-p-umber-1000: #1b0e08;
+
+	--df-p-coral-100: #fbe3da;
+	--df-p-coral-300: #ff9b7a;
+	--df-p-coral-400: #e2603c;
+	--df-p-coral-500: #d9502c;
+	--df-p-coral-600: #c9482a;
+	--df-p-coral-700: #b23b20;
+	--df-p-coral-800: #983018;
+
+	--df-p-mint-100: #ddf3e4;
+	--df-p-mint-300: #8fe0b4;
+	--df-p-mint-700: #1f6b45;
+	--df-p-mint-900: #22322a;
+	--df-p-sky-100: #ddebfb;
+	--df-p-sky-300: #a9cbee;
+	--df-p-sky-700: #2a5488;
+	--df-p-sky-900: #222c37;
+	--df-p-butter-100: #fbebc8;
+	--df-p-butter-300: #f0c67c;
+	--df-p-butter-700: #7a5310;
+	--df-p-butter-900: #352d1f;
+	--df-p-peach-100: #fbe0d3;
+	--df-p-peach-300: #f5a98f;
+	--df-p-peach-700: #a33218;
+	--df-p-peach-900: #382720;
+	--df-p-lilac-100: #e9e3fb;
+	--df-p-lilac-300: #c2b6f2;
+	--df-p-lilac-700: #4a3a8c;
+	--df-p-lilac-900: #2b2738;
+	--df-p-stone-100: #ede7dc;
+	--df-p-stone-300: #cbc0b0;
+	--df-p-stone-700: #5b5348;
+	--df-p-stone-900: #302b25;
+
+	--df-p-night-900: #14110e;
+	--df-p-night-800: #1c1814;
+	--df-p-night-700: #262019;
+	--df-p-night-600: #332a22;
+	--df-p-night-500: #3a3128;
+	--df-p-mist-50: #f4ece2;
+	--df-p-mist-300: #c9beaf;
+	--df-p-mist-500: #a0968a;
+
+	--df-p-text-2xs: 0.625rem;
+	--df-p-text-xs: 0.6875rem;
+	--df-p-text-sm: 0.75rem;
+	--df-p-text-base: 0.8125rem;
+	--df-p-text-md: 0.9375rem;
+	--df-p-text-lg: 1.0625rem;
+	--df-p-text-xl: 1.25rem;
+	--df-p-text-2xl: 1.625rem;
+	--df-p-text-3xl: 2.125rem;
+
+	--df-p-space-1: 4px;
+	--df-p-space-2: 8px;
+	--df-p-space-3: 12px;
+	--df-p-space-4: 16px;
+	--df-p-space-5: 24px;
+	--df-p-space-6: 32px;
+	--df-p-space-7: 48px;
+	--df-p-space-8: 64px;
+
+	--df-p-radius-xs: 4px;
+	--df-p-radius-sm: 8px;
+	--df-p-radius-md: 12px;
+	--df-p-radius-lg: 20px;
+	--df-p-radius-xl: 28px;
+	--df-p-radius-pill: 999px;
+
+	--df-p-shadow-1: 0 1px 2px rgba(74, 52, 26, 0.06);
+	--df-p-shadow-2:
+		0 2px 4px rgba(74, 52, 26, 0.06), 0 12px 28px -18px rgba(74, 52, 26, 0.35);
+	--df-p-shadow-3: 0 24px 60px -24px rgba(74, 52, 26, 0.45);
+
+	--df-p-dur-press: 90ms;
+	--df-p-dur-lift: 160ms;
+	--df-p-dur-settle: 220ms;
+	--df-p-dur-pop: 320ms;
+	--df-p-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+	--df-p-ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+	--df-p-focus-width: 2px;
+	--df-p-focus-offset: 2px;
+
+	--df-p-font-sans:
+		ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+		Arial, sans-serif;
+	--df-p-font-mono:
+		ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+	--df-p-layout-rail: 248px;
+	--df-p-layout-page-max: 1200px;
+	--df-p-layout-reading: 62ch;
+}
+
+/* ---- layer 2: semantic, light ---- */
+
+:root {
+	--df-surface-page: var(--df-p-cream-100);
+	--df-surface-card: var(--df-p-cream-50);
+	--df-surface-well: var(--df-p-cream-200);
+	--df-surface-press: var(--df-p-cream-300);
+	--df-surface-field: var(--df-p-cream-50);
+	--df-surface-selected: var(--df-p-cream-50);
+
+	--df-border-hairline: var(--df-p-cream-400);
+	--df-border-control: var(--df-p-cream-500);
+	--df-border-focus: var(--df-p-coral-700);
+
+	--df-text-primary: var(--df-p-umber-900);
+	--df-text-secondary: var(--df-p-umber-500);
+	--df-text-meta: var(--df-p-umber-400);
+	--df-text-on-accent: var(--df-p-cream-50);
+	--df-text-on-danger: var(--df-p-cream-50);
+
+	--df-accent-text: var(--df-p-coral-700);
+	--df-accent-text-hover: var(--df-p-coral-800);
+	--df-accent-fill: var(--df-p-coral-600);
+	--df-accent-fill-hover: var(--df-p-coral-700);
+	--df-accent-fill-press: var(--df-p-coral-800);
+	--df-accent-soft: var(--df-p-coral-100);
+	--df-accent-decor: var(--df-p-coral-500);
+
+	--df-state-ok-bg: var(--df-p-mint-100);
+	--df-state-ok-ink: var(--df-p-mint-700);
+	--df-state-info-bg: var(--df-p-sky-100);
+	--df-state-info-ink: var(--df-p-sky-700);
+	--df-state-warn-bg: var(--df-p-butter-100);
+	--df-state-warn-ink: var(--df-p-butter-700);
+	--df-state-danger-bg: var(--df-p-peach-100);
+	--df-state-danger-ink: var(--df-p-peach-700);
+	--df-state-danger-fill: var(--df-p-peach-700);
+	--df-state-neutral-bg: var(--df-p-stone-100);
+	--df-state-neutral-ink: var(--df-p-stone-700);
+	--df-state-filter-bg: var(--df-p-lilac-100);
+	--df-state-filter-ink: var(--df-p-lilac-700);
+
+	--df-shadow-card: var(--df-p-shadow-1);
+	--df-shadow-raised: var(--df-p-shadow-2);
+	--df-shadow-dialog: var(--df-p-shadow-3);
+
+	--df-font-display: 'Nunito', ui-rounded, system-ui, sans-serif;
+}
+
+/* ---- layer 3: component ---- */
+
+:root {
+	--df-c-chip-live-bg: var(--df-state-ok-bg);
+	--df-c-chip-live-ink: var(--df-state-ok-ink);
+	--df-c-chip-synced-bg: var(--df-state-info-bg);
+	--df-c-chip-synced-ink: var(--df-state-info-ink);
+	--df-c-chip-stale-bg: var(--df-state-warn-bg);
+	--df-c-chip-stale-ink: var(--df-state-warn-ink);
+	--df-c-chip-offline-bg: var(--df-state-danger-bg);
+	--df-c-chip-offline-ink: var(--df-state-danger-ink);
+	--df-c-chip-unknown-bg: var(--df-state-neutral-bg);
+	--df-c-chip-unknown-ink: var(--df-state-neutral-ink);
+	--df-c-chip-wake-bg: var(--df-state-filter-bg);
+	--df-c-chip-wake-ink: var(--df-state-filter-ink);
+	--df-c-chip-bg: var(--df-state-neutral-bg);
+	--df-c-chip-ink: var(--df-state-neutral-ink);
+	--df-c-chip-border: transparent;
+	--df-c-chip-radius: var(--df-p-radius-pill);
+	--df-c-chip-height: 22px;
+	--df-c-chip-padding-inline: 9px;
+	--df-c-chip-gap: 6px;
+	--df-c-chip-font-size: var(--df-p-text-xs);
+	--df-c-chip-font-weight: 700;
+	--df-c-chip-tracking: 0.02em;
+	--df-c-chip-dot-size: 6px;
+
+	--df-c-card-bg: var(--df-surface-card);
+	--df-c-card-border: var(--df-border-hairline);
+	--df-c-card-radius: var(--df-p-radius-lg);
+	--df-c-card-padding: var(--df-p-space-4);
+	--df-c-card-shadow: var(--df-shadow-card);
+	--df-c-card-shadow-hover: var(--df-shadow-raised);
+	--df-c-card-title-ink: var(--df-text-primary);
+	--df-c-card-meta-ink: var(--df-text-meta);
+	--df-c-card-head-bg: color-mix(in srgb, var(--df-surface-well) 55%, var(--df-surface-card));
+	--df-c-card-tint-mint: var(--df-state-ok-bg);
+	--df-c-card-tint-butter: var(--df-state-warn-bg);
+	--df-c-card-tint-peach: var(--df-state-danger-bg);
+	--df-c-card-tint-sky: var(--df-state-info-bg);
+	--df-c-card-tint-lilac: var(--df-state-filter-bg);
+
+	--df-c-table-head-bg: var(--df-surface-well);
+	--df-c-table-head-ink: var(--df-text-meta);
+	--df-c-table-head-size: var(--df-p-text-2xs);
+	--df-c-table-head-tracking: 0.1em;
+	--df-c-table-row-border: var(--df-border-hairline);
+	--df-c-table-row-bg-hover: color-mix(in srgb, var(--df-surface-well) 55%, transparent);
+	--df-c-table-row-bg-selected: var(--df-accent-soft);
+	--df-c-table-cell-padding-block: 11px;
+	--df-c-table-cell-padding-inline: 12px;
+	--df-c-table-cell-ink: var(--df-text-primary);
+	--df-c-table-cell-meta-ink: var(--df-text-meta);
+	--df-c-table-num-tracking: -0.01em;
+
+	--df-c-dialog-bg: var(--df-surface-card);
+	--df-c-dialog-ink: var(--df-text-primary);
+	--df-c-dialog-border: var(--df-border-control);
+	--df-c-dialog-radius: var(--df-p-radius-xl);
+	--df-c-dialog-shadow: var(--df-shadow-dialog);
+	--df-c-dialog-scrim: rgba(36, 31, 26, 0.45);
+	--df-c-dialog-width: min(470px, calc(100vw - 32px));
+	--df-c-dialog-head-ink: var(--df-text-primary);
+	--df-c-dialog-body-ink: var(--df-text-secondary);
+	--df-c-dialog-foot-bg: color-mix(in srgb, var(--df-surface-well) 55%, var(--df-surface-card));
+	--df-c-dialog-foot-border: var(--df-border-hairline);
+
+	--df-c-toast-bg: var(--df-state-neutral-bg);
+	--df-c-toast-ink: var(--df-state-neutral-ink);
+	--df-c-toast-border: transparent;
+	--df-c-toast-radius: var(--df-p-radius-lg);
+	--df-c-toast-shadow: var(--df-shadow-raised);
+	--df-c-toast-max-width: 360px;
+	--df-c-toast-inset: var(--df-p-space-4);
+	--df-c-toast-padding: 10px var(--df-p-space-3);
+	--df-c-toast-font-size: var(--df-p-text-sm);
+	--df-c-toast-dwell: 4000ms;
+	--df-c-toast-ok-bg: var(--df-state-ok-bg);
+	--df-c-toast-ok-ink: var(--df-state-ok-ink);
+	--df-c-toast-danger-bg: var(--df-state-danger-bg);
+	--df-c-toast-danger-ink: var(--df-state-danger-ink);
+
+	--df-c-dock-bg: var(--df-surface-card);
+	--df-c-dock-border: var(--df-border-hairline);
+	--df-c-dock-height: 56px;
+	--df-c-dock-padding-bottom: env(safe-area-inset-bottom, 0px);
+	--df-c-dock-item-ink: var(--df-text-meta);
+	--df-c-dock-item-ink-active: var(--df-accent-text);
+	--df-c-dock-item-size: 24px;
+	--df-c-dock-label-size: var(--df-p-text-2xs);
+	--df-c-dock-label-weight: 600;
+	--df-c-dock-badge-bg: var(--df-accent-fill);
+	--df-c-dock-badge-ink: var(--df-text-on-accent);
+	--df-c-dock-badge-size: var(--df-p-text-2xs);
+	--df-c-dock-tap-min: 48px;
+
+	--df-c-thread-row-bg: transparent;
+	--df-c-thread-row-bg-hover: var(--df-surface-well);
+	--df-c-thread-row-bg-unread: var(--df-surface-card);
+	--df-c-thread-row-border: var(--df-border-hairline);
+	--df-c-thread-row-height: 72px;
+	--df-c-thread-row-padding-inline: var(--df-p-space-4);
+	--df-c-thread-name-ink: var(--df-text-primary);
+	--df-c-thread-name-size: var(--df-p-text-md);
+	--df-c-thread-preview-ink: var(--df-text-meta);
+	--df-c-thread-preview-size: var(--df-p-text-sm);
+	--df-c-thread-time-ink: var(--df-text-meta);
+	--df-c-thread-time-size: var(--df-p-text-xs);
+	--df-c-thread-unread-bg: var(--df-accent-fill);
+	--df-c-thread-unread-ink: var(--df-text-on-accent);
+	--df-c-thread-unread-size: var(--df-p-text-xs);
+	--df-c-thread-avatar-size: 40px;
+	--df-c-thread-avatar-bg: var(--df-state-neutral-bg);
+	--df-c-thread-avatar-ink: var(--df-state-neutral-ink);
+	--df-c-thread-state-ink: var(--df-state-warn-ink);
+
+	--df-c-bubble-max-width: 78%;
+	--df-c-bubble-radius: var(--df-p-radius-lg);
+	--df-c-bubble-radius-tail: 6px;
+	--df-c-bubble-padding: 10px var(--df-p-space-3);
+	--df-c-bubble-gap: 3px;
+	--df-c-bubble-body-size: var(--df-p-text-md);
+	--df-c-bubble-body-leading: 1.4;
+	--df-c-bubble-meta-size: var(--df-p-text-xs);
+	--df-c-bubble-in-bg: var(--df-surface-well);
+	--df-c-bubble-in-ink: var(--df-text-primary);
+	--df-c-bubble-out-bg: var(--df-accent-soft);
+	--df-c-bubble-out-ink: var(--df-text-primary);
+	--df-c-bubble-meta-ink: var(--df-text-meta);
+	--df-c-bubble-status-queued-ink: var(--df-text-meta);
+	--df-c-bubble-status-sending-ink: var(--df-text-meta);
+	--df-c-bubble-status-sent-ink: var(--df-text-secondary);
+	--df-c-bubble-status-delivered-ink: var(--df-state-ok-ink);
+	--df-c-bubble-status-failed-ink: var(--df-state-danger-ink);
+	--df-c-bubble-status-failed-bg: var(--df-state-danger-bg);
+	--df-c-bubble-retry-ink: var(--df-accent-text);
+
+	--df-c-composer-bg: var(--df-surface-card);
+	--df-c-composer-border: var(--df-border-hairline);
+	--df-c-composer-padding: var(--df-p-space-2) var(--df-p-space-3);
+	--df-c-composer-field-bg: var(--df-surface-well);
+	--df-c-composer-field-ink: var(--df-text-primary);
+	--df-c-composer-field-radius: var(--df-p-radius-lg);
+	--df-c-composer-placeholder-ink: var(--df-text-meta);
+	--df-c-composer-min-height: 44px;
+	--df-c-composer-max-height: 132px;
+	--df-c-composer-font-size: var(--df-p-text-md);
+	--df-c-composer-send-bg: var(--df-accent-fill);
+	--df-c-composer-send-ink: var(--df-text-on-accent);
+	--df-c-composer-send-hover-bg: var(--df-accent-fill-hover);
+	--df-c-composer-send-disabled-bg: var(--df-surface-press);
+	--df-c-composer-send-disabled-ink: var(--df-text-meta);
+	--df-c-composer-send-size: 40px;
+	--df-c-composer-counter-ink: var(--df-text-meta);
+	--df-c-composer-counter-warn-ink: var(--df-state-warn-ink);
+	--df-c-composer-counter-over-ink: var(--df-state-danger-ink);
+	--df-c-composer-hint-ink: var(--df-text-meta);
+	--df-c-composer-hint-size: var(--df-p-text-xs);
+}

@@ -29,7 +29,12 @@
 		| 'branch'
 		| 'braces'
 		| 'stop'
-		| 'grip';
+		| 'grip'
+		| 'fingerprint'
+		| 'history'
+		| 'mail'
+		| 'archive'
+		| 'unarchive';
 </script>
 
 <script lang="ts">
@@ -144,5 +149,29 @@
 		<rect x="9" y="9" width="6" height="6" rx="1" />
 	{:else if name === 'grip'}
 		<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="2.4" />
+	{:else if name === 'fingerprint'}
+		<path d="M12 4.5a7.5 7.5 0 0 1 7.5 7.5" />
+		<path d="M4.5 12A7.5 7.5 0 0 1 12 4.5" />
+		<path d="M7.5 20.2A10 10 0 0 0 9 15.5V12a3 3 0 0 1 6 0v2" />
+		<path d="M4.6 16.5A7.5 7.5 0 0 1 4.5 15V12" />
+		<path d="M19.5 12v1.5a14 14 0 0 1-1.4 6.2" />
+		<path d="M12 12v4a10 10 0 0 0 .8 4" />
+	{:else if name === 'history'}
+		<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+		<path d="M4 4v5h5" />
+		<path d="M12 8v4.5l3 1.8" />
+	{:else if name === 'mail'}
+		<rect x="3" y="5" width="18" height="14" rx="2.5" />
+		<path d="m4.5 7.5 6.6 4.9a1.5 1.5 0 0 0 1.8 0l6.6-4.9" />
+	{:else if name === 'archive'}
+		<rect x="3" y="3.5" width="18" height="5" rx="1.2" />
+		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />
+		<path d="M12 11.5v4.5" />
+		<path d="m9.75 13.75 2.25 2.25 2.25-2.25" />
+	{:else if name === 'unarchive'}
+		<rect x="3" y="3.5" width="18" height="5" rx="1.2" />
+		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />
+		<path d="M12 16v-4.5" />
+		<path d="m9.75 13.75 2.25-2.25 2.25 2.25" />
 	{/if}
 </svg>

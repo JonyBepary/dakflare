@@ -1,97 +1,110 @@
-# `dakflare` — desktop CLI
+# `dakflare` — operator CLI
 
-Installs and operates a DakFlare deployment. Zero dependencies, Node 20+.
+Operate a self-hosted DakFlare deployment without `curl`, a dashboard tab, or
+`adb` archaeology. Zero dependencies, Node 22+ (`fetch` is built in).
 
 ```bash
-# from a checkout
-node cli/dakflare.mjs help
-
-# or make it a global command
-npm link          # then: dakflare help
+node cli/bin/dakflare.js --help
+node cli/bin/dakflare.js doctor
+npm link          # optional: makes `dakflare` global (root bin -> cli/bin/dakflare.js)
 ```
 
-## Two credentials, never mixed
-
-This is the thing most tools get wrong, so it is stated everywhere:
-
-| Plane | Credential | What it authorises | Where it lives |
-|---|---|---|---|
-| **Cloudflare account** | OAuth, obtained by `wrangler login` | create D1/KV, deploy, set secrets, read metrics | Wrangler's own store — **this CLI never keeps it** |
-| **Deployment admin** | the `ADMIN_TOKEN` Worker secret | `/v1/admin/*` on **one** deployment: pairing, send, fleet, rules | `~/.config/dakflare/config.json`, mode `0600` |
-
-They are not interchangeable. OAuth cannot call `/v1/admin/send`; the admin token cannot deploy.
-`init` uses OAuth for the Cloudflare side and **generates** the admin token itself, so you never copy
-one out of a dashboard. `doctor`, `pair`, `devices`, and `send` work without the Cloudflare account
-being authenticated at all.
-
-## Wrangler and `cf` — which does what
-
-The project is **migrated to `cloudflare.config.ts`** (`cf migrate`, completed by hand for Durable Object
-`exports`), and keeps `wrangler.toml` alongside it. That is deliberate, not leftover: each tool owns a
-different job, and Cloudflare's migration guide itself tells you to keep using Wrangler for the gaps.
-
-| Task | Tool | Why |
-|---|---|---|
-| **Deploy** | `cf deploy` (`npm run deploy:cf`) | `cf` reads `cloudflare.config.ts`; the config is the canonical one |
-| **Local dev / conformance** | `wrangler dev --local` | `cf` has no local equivalent for Durable Object SQLite, alarms or hibernating sockets — and the whole test lane depends on them |
-| **D1 migrations** | either: `cf d1 migrations apply` or `wrangler d1 migrations apply` | both support it, including `--local`. `cf` takes the database id, Wrangler takes the name |
-| **Secrets** | `wrangler secret put --name dakflare-worker` | `cf` **cannot set a single secret yet**; its own migration guide says to use `npx wrangler` |
-| **Live logs** | `wrangler tail dakflare-worker` | `cf` **cannot stream logs yet** |
-| **Account / DNS / zones** | `cf d1 list`, `cf zones`, `cf dns` | Wrangler has no DNS support at all |
-
-Two configs must not drift: bindings, vars, triggers and the DO export list are declared in **both**
-`cloudflare.config.ts` and `wrangler.toml`. `npm run check:config` diffs the binding names.
-
-> **The first `cf deploy` is a one-way door.** Switching Durable Object lifecycle from Wrangler's ordered
-> `[[migrations]]` to `exports` cannot be rolled back to a version created before the switch. Run it with
-> `cf deploy` — never a version upload — and only once `exports` lists every live class.
->
-> **Never run `cf dev` or `cf build` on this project expecting the Wrangler behaviour** unless you intend
-> to use the `cf` bundler path; local development stays on `wrangler dev --local`.
+The CLI talks to exactly one Worker: the one in
+`~/.config/dakflare/config.json`. It never calls Cloudflare's API, never
+deploys, and never prints the admin token. `init --local` is the only command
+that writes a secret file, and it generates fresh values.
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `dakflare init` | checks `wrangler login`, deploys, generates + sets `ADMIN_TOKEN`, saves the target |
-| `dakflare doctor` | health: version, migrations, bindings, counts; exits non-zero when unhealthy |
-| `dakflare pair [--ttl 600]` | mints a pairing code and a `dakflare://pair?u=…&c=…` deep link |
-| `dakflare devices` | lists paired devices with last-seen |
-| `dakflare send <+E164> <text> --device <id>` | queues an outbound SMS |
-| `dakflare use <url> [--token-file <path>]` | points at an existing deployment (verified before saving) |
-| `dakflare whoami` | target, masked token, Cloudflare auth state |
+| `dakflare init` | verify `/v1/admin/health`, then save the Worker URL and admin token |
+| `dakflare init --local` | write `worker/.dev.vars` with fresh `ADMIN_TOKEN`, `AUTH_PEPPER`, `BETTER_AUTH_SECRET` |
+| `dakflare doctor` | checklist of config, health, schema, migrations, bindings, D1, phone and adb |
+| `dakflare pair` | mint a pairing code and print the `dakflare://pair?u=…&c=…` link |
+| `dakflare pair --qr` | the same, plus a terminal QR (`qrencode`, or the built-in encoder) |
+| `dakflare devices` | list paired devices with label, SIM slot and last contact |
+| `dakflare revoke <id>` | revoke a device in D1 and its Durable Object; asks first |
+| `dakflare send --to <e164> --body <text>` | queue an outbound SMS and print its command id and state |
+| `dakflare audit --tail` | read the audit log; says "not available on this deployment" on 404 |
+| `dakflare key fingerprint` | print the release signing certificate's SHA-256 from the JKS |
 
-`init` and `use` take the admin token from `--token-file <path>`, else `DAKFLARE_ADMIN_TOKEN`, else
-`--token <t>` — `--token` is still supported but exposes the value in process arguments and shell history.
-Prefer `--token-file` (chmod `600`) or the environment variable.
-
-## What it deliberately does not do
-
-- **Choose a device for you.** `send` requires `--device`. Fleet placement and failover are planned
-  (see the master plan's F-phases), and inventing a target now would hide the gap.
-- **Store your Cloudflare credentials.** It shells out to Wrangler. If you are not logged in, it tells
-  you to run `npx wrangler login` rather than asking for a token.
-- **Print the admin token.** Only a `first4…last4` fingerprint is ever shown.
-- **Read message contents.** `doctor` reports counts and timestamps; there is no command that dumps SMS
-  bodies to a terminal.
+Every command accepts `--json` and every command has its own `--help`.
 
 ## Config
 
-`~/.config/dakflare/config.json`, created `0600`:
+`~/.config/dakflare/config.json`, written mode `600`:
 
 ```json
-{ "url": "https://dakflare-worker.<subdomain>.workers.dev", "token": "<admin token>", "installedAt": "…" }
+{
+  "url": "https://<worker>.workers.dev",
+  "token": "<ADMIN_TOKEN>",
+  "installedAt": "2026-10-30T00:00:00.000Z"
+}
 ```
 
-On Windows the path is `%USERPROFILE%\.config\dakflare\`. If the file is lost, the token is
-unrecoverable from the Worker — regenerate with `npx wrangler secret put ADMIN_TOKEN`.
+The token is stored but never printed. If the file is missing, commands say to
+run `dakflare init` and exit 2. `ADMIN_TOKEN` is unrecoverable from the Worker;
+regenerate it with `npx wrangler secret put ADMIN_TOKEN --name dakflare-worker`.
 
-## Troubleshooting
+## What `doctor` proves
 
-| Symptom | Cause |
+| Check | Passes when |
 |---|---|
-| `not authenticated with Cloudflare` | run `npx wrangler login` |
-| `network error reaching …` | wrong URL, offline, or Cloudflare Access in front without a service token |
-| `HTTP 401` on every command | token does not match the deployment's `ADMIN_TOKEN` |
-| `device_unknown` on send | that `device_id` is not in the D1 registry — `dakflare devices` |
-| `FCM not configured` warning in `doctor` | expected; devices are reachable only while their socket is open |
+| `config` | present, with `url` and `token`, mode `600` on POSIX |
+| `health` | `/v1/admin/health` answers 200 (or 503 with a diagnosis) |
+| `admin-token` | the Worker accepts the bearer token |
+| `schema` | `schema_ready` is true and the counts query worked |
+| `migrations` | every `worker/migrations/*.sql` in the checkout is in `migrations` |
+| `bindings` | `DB`, `KV`, `DEVICE` and all rate limiters are bound |
+| `fcm-binding` | FCM is present (optional; absent is a skip, not a failure) |
+| `auth-mode` | reported and known; absent is a skip until phase 2 |
+| `d1` | no `db_error`, counts readable |
+| `phone` | the freshest device contacted within `--max-age` (default 60 min) |
+| `phone-role` | `android.app.role.SMS` is held by the installed DakFlare package |
+| `phone-build` | the installed package is readable; reports release vs debug |
+
+`phone-role` and `phone-build` are skipped when `adb` is absent or no device is
+attached. `--serial` / `ANDROID_SERIAL` select a device; `ADB` overrides the
+binary. Exit 1 if any check fails; a skip is not a failure.
+
+## Examples
+
+```bash
+# configure against an existing deployment
+dakflare init --url https://dakflare-worker.example.workers.dev --token-file ~/.config/dakflare/admin-token
+
+# local development secrets (does not contact a Worker)
+dakflare init --local
+
+# a pairing code as text, or with a QR for the phone camera
+dakflare pair
+dakflare pair --label "Mi A3" --qr
+
+# queue one message; with several devices it uses the freshest, and says so
+dakflare send --to +8801540196080 --body "cli probe"
+dakflare send --to +8801540196080 --body "pinned phone" --device dev29b9c2248cb266c8
+
+# scripts
+dakflare doctor --json
+dakflare devices --json
+```
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success (including `audit` when the endpoint is absent) |
+| 1 | a check failed, the Worker returned an error, or the keystore could not be read |
+| 2 | usage error, missing config, missing tool, or a destructive command without confirmation |
+
+## Deliberately deferred to phase 2
+
+- **Invites and owner bootstrap.** `dakflare init` configures an existing
+  deployment; it does not create users or invite anyone.
+- **Audit.** `dakflare audit` is wired, but the Worker has no audit endpoint
+  yet. It prints "not available on this deployment" on 404 instead of failing.
+- **Secret rotation.** No command writes Cloudflare secrets. `init --local`
+  rotates only the local `.dev.vars`.
+- **Fleet routing.** `send` picks the freshest paired device when `--device` is
+  omitted. There is no failover or per-line capacity logic yet.

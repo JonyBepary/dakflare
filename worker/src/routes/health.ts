@@ -16,7 +16,7 @@
  */
 
 import type { Env } from "../index";
-import { timingConfig } from "../lib/config";
+import { passwordMode, timingConfig } from "../lib/config";
 import { VERSION } from "../lib/version";
 
 interface HealthCounts {
@@ -96,6 +96,17 @@ export async function handleHealth(env: Env): Promise<Response> {
       bindings,
       missing_bindings: missing,
       retention_days: timingConfig(env as unknown as Record<string, unknown>).retentionDays,
+      // Which gate answers the admin routes, and whether /api/auth can run at
+      // all. Migration 0008 is visible in `migrations` above like every other.
+      // Kept for clients that parse it. There is one mode now, and this
+      // field says which one rather than which switch is set.
+      auth_mode: "new",
+      auth_configured: Boolean(env.BETTER_AUTH_SECRET),
+      // The password factor's mode and whether its secret is present. The ring
+      // itself is never echoed: versions are operational detail, the key is not.
+      password_mode: passwordMode(env),
+      password_configured:
+        typeof env.AUTH_PEPPER === "string" && env.AUTH_PEPPER.trim() !== "",
       counts,
       // Also surfaced at the top level: the open-alert banner should not have to
       // dig through `counts` to answer "is the fleet reachable?".

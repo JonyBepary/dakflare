@@ -1,33 +1,80 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { page } from '$app/state';
+	import Composer from '$lib/components/Composer.svelte';
+	import Dock from '$lib/components/Dock.svelte';
+	import Notice from '$lib/components/Notice.svelte';
+	import PermissionGate from '$lib/components/PermissionGate.svelte';
+	import { app } from '$lib/stores/app.svelte';
+	import { composer } from '$lib/stores/composer.svelte';
 
 	let { children } = $props();
-	let schemaVersion = $state<number | null>(null);
 
-	onMount(async () => {
-		try {
-			schemaVersion = await invoke<number>('schema_version');
-		} catch {
-			// Running in a plain browser (`vite dev` without Tauri): no backend.
-			schemaVersion = null;
-		}
+	// A conversation is a push below Threads, so it swaps the dock for the reply
+	// composer: one bottom bar at a time, and the composer sits above the
+	// keyboard instead of a dock floating over it. The new-message form is a
+	// push too, but its primary send lives in the form, so it needs no bar.
+	// Android back pops either push and restores the dock.
+	const conversation = $derived(/^\/messages\/[^/]+\/?$/.test(page.url.pathname));
+	const composing = $derived(/^\/compose\/?$/.test(page.url.pathname));
+	// A thread with no messages has nothing to reply to, so the route closes the
+	// bar rather than offering a first message to an unproven number.
+	const replyable = $derived(conversation && !app.loading.boot && composer.repliesOpen);
+
+	const status = $derived(
+		app.loading.boot
+			? 'opening local db'
+			: !app.backendAvailable
+				? 'browser preview'
+				: app.schemaVersion === null
+					? 'backend ready'
+					: `schema v${app.schemaVersion}`
+	);
+
+	onMount(() => {
+		// Boot first, then take a link that launched the app (a SENDTO intent
+		// is captured before the webview exists). A link that arrives while the
+		// app is running is taken when the Activity regains focus.
+		void (async () => {
+			await app.boot();
+			await app.followSmsIntent();
+		})();
+
+		const follow = () => {
+			if (document.visibilityState === 'visible') void app.followSmsIntent();
+		};
+		window.addEventListener('focus', follow);
+		document.addEventListener('visibilitychange', follow);
+		return () => {
+			window.removeEventListener('focus', follow);
+			document.removeEventListener('visibilitychange', follow);
+		};
 	});
 </script>
 
-<div class="shell">
+<!-- A sibling of the shell, not a child: the gate is fixed to the viewport so
+     it is not clipped by the phone frame, and it never sits inside the grid
+     that lays out the topbar, the scroll area and the dock. -->
+<PermissionGate />
+
+<div class="app">
 	<header class="topbar">
-		<div class="brand">
-			<strong>DAKFLARE</strong>
-			<span>device app</span>
-		</div>
-		<div class="meta">
-			{schemaVersion === null ? 'backend unavailable' : `local schema v${schemaVersion}`}
-		</div>
+		<span class="wordmark">DAKFLARE</span>
+		<span class="topbar-meta" data-offline={!app.backendAvailable && !app.loading.boot}>
+			{status}
+		</span>
 	</header>
 
-	<main>
+	<main class="app-main">
+		<Notice scope="boot" />
+		<Notice scope="data" />
 		{@render children()}
 	</main>
+
+	{#if replyable}
+		<Composer />
+	{:else if !conversation && !composing}
+		<Dock />
+	{/if}
 </div>
