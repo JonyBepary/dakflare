@@ -58,12 +58,46 @@ const REQUIRED_BINDINGS = [
 
 /* ───────────────────────────── output ───────────────────────────── */
 
-const color = process.stdout.isTTY && !process.env.NO_COLOR;
-const paint = (code, text) => (color ? `\x1b[${code}m${text}\x1b[0m` : text);
-const green = (text) => paint(32, text);
-const red = (text) => paint(31, text);
-const yellow = (text) => paint(33, text);
-const dim = (text) => paint(2, text);
+/**
+ * Colour, in three layers, so a role is named once and rendered once.
+ *
+ * The semantic token is what every call site uses; the primitive (an SGR code,
+ * or nothing) is chosen here from the terminal and the mode. Nothing outside
+ * this block may name a colour.
+ */
+const TRUECOLOR = {
+  ok: '31,107,69',
+  warn: '122,83,16',
+  fail: '178,59,32',
+  muted: '107,97,83',
+  accent: '178,59,32',
+};
+const ANSI16 = { ok: '32', warn: '33', fail: '31', muted: '2', accent: '31' };
+
+/** Set once by `main`; `--agent` turns colour, prompts and pretty JSON off. */
+let AGENT = false;
+
+/** The output mode for this run: pretty `--json`, or compact `--agent`. */
+let MODE = { json: false, agent: false };
+
+function colorMode() {
+  if (AGENT || process.env.NO_COLOR) return 'none';
+  if (!process.stdout.isTTY) return 'none';
+  if (String(process.env.COLORTERM ?? '').toLowerCase().includes('truecolor')) return 'truecolor';
+  return 'ansi';
+}
+
+function paint(role, text) {
+  const mode = colorMode();
+  if (mode === 'none') return text;
+  const code = mode === 'truecolor' ? `38;2;${TRUECOLOR[role]}` : ANSI16[role];
+  return `\x1b[${code}m${text}\x1b[0m`;
+}
+
+const ok = (text) => paint('ok', text);
+const warn = (text) => paint('warn', text);
+const fail = (text) => paint('fail', text);
+const muted = (text) => paint('muted', text);
 
 const out = (text = '') => process.stdout.write(`${text}\n`);
 const err = (text = '') => process.stderr.write(`${text}\n`);
@@ -87,6 +121,132 @@ class CliError extends Error {
 }
 
 const usage = (message) => new CliError(message, 2, { error: 'usage' });
+
+/**
+ * What each failure means, in one table.
+ *
+ * `CliError` carries a code; the exit status, the category an agent groups by,
+ * whether waiting could help, and the command that usually fixes it are all
+ * derived from here. Keeping them in one place is what stops the exit code and
+ * the envelope from disagreeing about the same error.
+ */
+const ERROR_RULES = {
+  usage: { exit: 2, category: 'usage' },
+  no_config: { exit: 2, category: 'usage', remediation: 'dakflare init', fix: 'write the config' },
+  token_file: { exit: 2, category: 'usage' },
+  confirmation_required: { exit: 2, category: 'usage', remediation: 'dakflare revoke <device-id> --yes', fix: 'confirm non-interactively' },
+  keytool_missing: { exit: 2, category: 'tooling', remediation: 'install a JDK', fix: 'keytool is not on PATH' },
+
+  device_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'list the paired devices' },
+  command_unknown: { exit: 3, category: 'not_found', remediation: 'dakflare devices', fix: 'find the command id' },
+  not_registered: { exit: 3, category: 'not_found', remediation: 'dakflare auth bootstrap --email you@example.com', fix: 'create the owner account' },
+  keystore_missing: { exit: 3, category: 'not_found' },
+  fingerprint_missing: { exit: 3, category: 'not_found' },
+
+  unauthorized: { exit: 4, category: 'permission', remediation: 'dakflare init', fix: 're-verify the admin token' },
+
+  exists: { exit: 5, category: 'conflict' },
+
+  no_device: { exit: 6, category: 'precondition', remediation: 'dakflare pair', fix: 'pair a handset first' },
+  bad_health: { exit: 6, category: 'precondition', remediation: 'dakflare doctor --json', fix: 'see which check fails' },
+  keystore_password_missing: { exit: 6, category: 'precondition' },
+  keytool_failed: { exit: 6, category: 'precondition' },
+  revoke_failed: { exit: 6, category: 'precondition' },
+
+  network: { exit: 75, category: 'temporary', retryable: true },
+
+  internal: { exit: 1, category: 'internal' },
+  bad_response: { exit: 1, category: 'internal' },
+  cancelled: { exit: 1, category: 'internal' },
+};
+
+const DEFAULT_ERROR_RULE = { exit: 1, category: 'internal', retryable: false };
+
+/** Commands whose repetition can cause a second real-world effect. */
+const MUTATING = new Set(['send', 'revoke', 'auth', 'init', 'pair']);
+
+const ruleFor = (code) => ERROR_RULES[code] ?? DEFAULT_ERROR_RULE;
+
+/** The exit status for a failure code, so call sites never pick a number. */
+const exitCodeFor = (code) => ruleFor(code).exit;
+
+/**
+ * `--json` asks for a document; `--agent` asks for the same document without the
+ * bytes an agent does not need. Both mean "no prose on stdout".
+ */
+function outputMode(flags) {
+  const agent = flags.agent === true;
+  return { agent, json: agent || flags.json === true };
+}
+
+/* ───────────────────────────── envelope ───────────────────────────── */
+
+/** Which command is running, for the envelope. Set once by `main`. */
+let CURRENT_COMMAND = null;
+
+function baseContext() {
+  const { cfg } = readConfig();
+  return { profile: 'default', worker_url: cfg?.url ?? null };
+}
+
+/**
+ * The one error document. Every field an agent needs to decide what to do next:
+ * what failed, whether waiting helps, whether repeating is safe, and the command
+ * that usually fixes it.
+ */
+function errorEnvelope(payload) {
+  const code = typeof payload?.error === 'string' ? payload.error : 'internal';
+  const rule = ruleFor(code);
+  const retryable = rule.retryable === true;
+  const { ok: _ok, error: _code, message, ...details } = payload ?? {};
+  return {
+    schema_version: '1',
+    status: 'error',
+    command: CURRENT_COMMAND,
+    context: baseContext(),
+    error: {
+      code,
+      category: rule.category,
+      message: typeof message === 'string' ? message : code,
+      retryable,
+      // A retry of a mutating command can cause a second SMS or a second
+      // revocation, so "could waiting help" and "is repeating safe" are only the
+      // same answer for reads.
+      safe_to_retry: retryable && !MUTATING.has(CURRENT_COMMAND),
+      ...(rule.remediation === undefined
+        ? {}
+        : { remediation: [{ command: rule.remediation, description: rule.fix ?? '' }] }),
+      ...(Object.keys(details).length === 0 ? {} : { details }),
+    },
+  };
+}
+
+/**
+ * Print one result document. Pretty for a person reading `--json`, compact for
+ * `--agent`, and identical in content: the envelope is not a different shape per
+ * mode, only a different number of bytes.
+ */
+function emitJson(payload, mode) {
+  let envelope;
+  if (payload?.ok === false) {
+    envelope = errorEnvelope(payload);
+  } else {
+    const { ok: _ok, verification, warnings, summary, context, ...data } = payload ?? {};
+    envelope = {
+      schema_version: '1',
+      status: 'ok',
+      command: CURRENT_COMMAND,
+      ...(summary === undefined ? {} : { summary }),
+      context: context ?? baseContext(),
+      data,
+      verification: verification ?? null,
+      warnings: warnings ?? [],
+    };
+  }
+  out(JSON.stringify(envelope, null, mode.agent ? 0 : 2));
+}
+
+
 
 /* ───────────────────────────── flags ───────────────────────────── */
 
@@ -151,7 +311,7 @@ function parseArgv(argv) {
 }
 
 function assertFlags(flags, allowed) {
-  const known = new Set(['json', 'help', ...allowed]);
+  const known = new Set(['json', 'agent', 'help', ...allowed]);
   for (const key of Object.keys(flags)) {
     if (!known.has(key)) throw usage(`unknown option --${key}`);
   }
@@ -417,7 +577,9 @@ async function askHidden(question) {
 }
 
 async function confirm(question) {
-  if (!process.stdin.isTTY) {
+  // `--agent` never prompts, even on a terminal: a mode that can block on input
+  // is not a mode an agent can use.
+  if (AGENT || !process.stdin.isTTY) {
     throw new CliError('refusing to continue without confirmation; pass --yes for a non-interactive run.', 2, {
       error: 'confirmation_required',
     });
@@ -530,20 +692,14 @@ async function initLocal(flags, json) {
   }
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           ok: true,
           local: true,
           file,
           mode: '600',
           generated: Object.keys(generated),
           widths: Object.fromEntries(Object.entries(generated).map(([key, value]) => [key, value.length])),
-        },
-        null,
-        2
-      )
-    );
+        }, MODE));
     return 0;
   }
 
@@ -560,7 +716,7 @@ async function commandInit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('init');
   assertFlags(flags, ['url', 'token', 'token-file', 'local', 'force']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
 
   if (flags.local) return initLocal(flags, json);
 
@@ -615,9 +771,7 @@ async function commandInit(argv) {
   const healthy = result.data.ok === true;
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           ok: healthy,
           url,
           config: { path: CONFIG_FILE, mode: modeString(configMode()) },
@@ -629,11 +783,7 @@ async function commandInit(argv) {
             missing_bindings: result.data.missing_bindings ?? findings.missing_required,
             plan: findings.plan,
           },
-        },
-        null,
-        2
-      )
-    );
+        }, MODE));
     return healthy ? 0 : 1;
   }
 
@@ -643,10 +793,10 @@ async function commandInit(argv) {
   out('  token         stored; never printed');
   out('');
   if (healthy) {
-    out(green('  configured.') + ' Next: `dakflare doctor`, then `dakflare pair`.');
+    out(ok('  configured.') + ' Next: `dakflare doctor`, then `dakflare pair`.');
   } else {
     out(
-      yellow('  saved, but the deployment is not healthy.') +
+      warn('  saved, but the deployment is not healthy.') +
         (result.data.db_error ? ` D1 said: ${result.data.db_error}` : '') +
         ' Run `dakflare doctor`.'
     );
@@ -812,7 +962,7 @@ async function commandDoctor(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('doctor');
   assertFlags(flags, ['max-age', 'serial']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const serialFlag = stringFlag(flags, 'serial');
   const maxAgeFlag = stringFlag(flags, 'max-age');
   const maxAgeMinutes = maxAgeFlag === undefined ? DEFAULT_PHONE_MAX_AGE_MIN : Number(maxAgeFlag);
@@ -997,28 +1147,25 @@ function addSkippedDependents(add, why) {
 }
 
 function finishDoctor(checks, json, url, version) {
-  const summary = {
+  // `counts` in the data, `summary` in the envelope: the envelope's summary is
+  // one line of prose, and two fields with that name would collide.
+  const counts = {
     pass: checks.filter((check) => check.status === 'pass').length,
     fail: checks.filter((check) => check.status === 'fail').length,
     skip: checks.filter((check) => check.status === 'skip').length,
   };
-  const healthy = summary.fail === 0;
+  const healthy = counts.fail === 0;
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           ok: healthy,
           url: url ?? null,
           version: version ?? null,
           checked_at: new Date().toISOString(),
           checks,
-          summary,
-        },
-        null,
-        2
-      )
-    );
+          summary: `${counts.pass} passed, ${counts.fail} failed, ${counts.skip} skipped`,
+          counts,
+        }, MODE));
     if (!healthy) process.exitCode = 1;
     return;
   }
@@ -1027,16 +1174,16 @@ function finishDoctor(checks, json, url, version) {
   for (const check of checks) {
     const tag =
       check.status === 'pass'
-        ? green('[PASS]')
+        ? ok('[PASS]')
         : check.status === 'fail'
-          ? red('[FAIL]')
-          : yellow('[SKIP]');
+          ? fail('[FAIL]')
+          : warn('[SKIP]');
     out(`${tag} ${pad(check.name, 14)} ${check.detail}`);
   }
   out('');
   out(
-    `doctor: ${summary.pass} pass, ${summary.fail} fail, ${summary.skip} skip` +
-      (healthy ? '' : ` — ${red('not healthy')}`)
+    `doctor: ${counts.pass} pass, ${counts.fail} fail, ${counts.skip} skip` +
+      (healthy ? '' : ` — ${fail('not healthy')}`)
   );
   if (!healthy) process.exitCode = 1;
 }
@@ -1061,7 +1208,7 @@ async function commandPair(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('pair');
   assertFlags(flags, ['label', 'qr', 'ttl']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
   const label = stringFlag(flags, 'label');
   if (label !== undefined) {
@@ -1087,9 +1234,7 @@ async function commandPair(argv) {
   const qr = flags.qr ? qrText(deepLink) : null;
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           ok: true,
           pairing_code: code,
           expires_at: expiresAt,
@@ -1098,11 +1243,7 @@ async function commandPair(argv) {
           deep_link: deepLink,
           label: label ?? null,
           ...(qr ? { qr } : {}),
-        },
-        null,
-        2
-      )
-    );
+        }, MODE));
     return;
   }
 
@@ -1128,12 +1269,12 @@ async function commandDevices(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('devices');
   assertFlags(flags, []);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
 
   const devices = (await listDevices(cfg)).map(publicDevice);
   if (json) {
-    out(JSON.stringify({ ok: true, devices }, null, 2));
+    out(emitJson({ ok: true, devices }, MODE));
     return;
   }
 
@@ -1165,7 +1306,7 @@ async function commandRevoke(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('revoke');
   assertFlags(flags, ['yes']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
 
   const deviceId = rest[0];
@@ -1208,7 +1349,7 @@ async function commandRevoke(argv) {
 
   const d1Deleted = Number(result.data?.d1_deleted ?? 0);
   if (json) {
-    out(JSON.stringify({ ok: true, device_id: deviceId, d1_deleted: d1Deleted }, null, 2));
+    out(emitJson({ ok: true, device_id: deviceId, d1_deleted: d1Deleted }, MODE));
     return;
   }
   out(`revoked ${deviceId} (D1 rows deleted: ${d1Deleted})`);
@@ -1472,7 +1613,7 @@ async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
   assertFlags(flags, ['to', 'body', 'device', 'wait', 'until', 'idempotency-key', 'no-wait']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
 
   const to = stringFlag(flags, 'to', { required: true });
@@ -1548,9 +1689,7 @@ async function commandSend(argv) {
   const verification = verificationFor(command, { timedOut });
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           // `ok` means the Worker answered and the command exists. The outcome is
           // `verification`, and the exit code follows it when --wait was asked for.
           ok: true,
@@ -1561,11 +1700,7 @@ async function commandSend(argv) {
           replayed,
           state: command.state,
           verification,
-        },
-        null,
-        2
-      )
-    );
+        }, MODE));
     process.exitCode = outcomeExitCode(command, timedOut);
     return;
   }
@@ -1596,7 +1731,7 @@ async function commandStatus(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('status');
   assertFlags(flags, ['device', 'wait', 'until']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
 
   const commandId = rest[0];
@@ -1622,9 +1757,7 @@ async function commandStatus(argv) {
   const verification = verificationFor(command, { timedOut });
 
   if (json) {
-    out(
-      JSON.stringify(
-        {
+    out(emitJson({
           ok: true,
           device_id: deviceId,
           device_selection: note,
@@ -1632,11 +1765,7 @@ async function commandStatus(argv) {
           state: command.state,
           command,
           verification,
-        },
-        null,
-        2
-      )
-    );
+        }, MODE));
     process.exitCode = outcomeExitCode(command, timedOut);
     return;
   }
@@ -1656,7 +1785,7 @@ async function commandAuthReset(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('auth');
   assertFlags(flags, ['email', 'ttl', 'yes', 'json']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const email = stringFlag(flags, 'email');
   if (!email || !email.includes('@')) throw usage('--email is required');
   if (!flags.yes) {
@@ -1672,7 +1801,7 @@ async function commandAuthReset(argv) {
   });
   if (result.status === 404) {
     const message = 'that address has no account to reset';
-    if (json) out(JSON.stringify({ ok: false, error: 'not_registered' }, null, 2));
+    if (json) out(emitJson({ ok: false, error: 'not_registered' }, MODE));
     else out(message);
     return 1;
   }
@@ -1680,7 +1809,7 @@ async function commandAuthReset(argv) {
 
   const token = result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
-  if (json) out(JSON.stringify({ ok: true, email, link }, null, 2));
+  if (json) out(emitJson({ ok: true, email, link }, MODE));
   else {
     out(`Account reset: ${email}`);
     if (link) {
@@ -1713,7 +1842,7 @@ async function commandAuthBootstrap(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('auth');
   assertFlags(flags, ['email', 'json']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const email = stringFlag(flags, 'email');
   if (!email || !email.includes('@')) throw usage('--email is required');
   const cfg = requireConfig();
@@ -1721,7 +1850,7 @@ async function commandAuthBootstrap(argv) {
   const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email, role: 'owner' });
   if (result.status === 409) {
     const reason = result.data?.error === 'already_registered' ? 'that address already has an account' : 'an owner already exists on this deployment';
-    if (json) out(JSON.stringify({ ok: false, error: result.data?.error ?? 'owner_exists' }, null, 2));
+    if (json) out(emitJson({ ok: false, error: result.data?.error ?? 'owner_exists' }, MODE));
     else out(reason);
     return 1;
   }
@@ -1731,7 +1860,7 @@ async function commandAuthBootstrap(argv) {
   // has no way to obtain one once the flag flips. Redeeming creates it.
   const token = result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
-  if (json) out(JSON.stringify({ ok: true, email, role: 'owner', link }, null, 2));
+  if (json) out(emitJson({ ok: true, email, role: 'owner', link }, MODE));
   else {
     out(`Owner invite for ${email}`);
     if (link) {
@@ -1748,7 +1877,7 @@ async function commandAuthInvite(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('auth');
   assertFlags(flags, ['email', 'role', 'ttl', 'json']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const email = stringFlag(flags, 'email');
   if (!email || !email.includes('@')) throw usage('--email is required');
   const role = stringFlag(flags, 'role') ?? 'member';
@@ -1772,7 +1901,7 @@ async function commandAuthInvite(argv) {
   const token = result.data?.invite?.token ?? result.data?.token ?? null;
   const link = token ? `dakflare://invite?u=${encodeURIComponent(cfg.url)}&t=${encodeURIComponent(token)}` : null;
   if (json) {
-    out(JSON.stringify({ ok: true, email, role, link, expires_in: ttlSeconds }, null, 2));
+    out(emitJson({ ok: true, email, role, link, expires_in: ttlSeconds }, MODE));
   } else {
     out(`Invite for ${email} (${role})`);
     if (link) {
@@ -1788,13 +1917,13 @@ async function commandAuthInvites(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('auth');
   assertFlags(flags, ['json']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
   const result = await api(cfg, 'GET', '/v1/admin/invites');
   if (result.status !== 200) throw requestFailure('invites', result);
   const invites = result.data?.invites ?? [];
   if (json) {
-    out(JSON.stringify({ ok: true, invites }, null, 2));
+    out(emitJson({ ok: true, invites }, MODE));
     return 0;
   }
   if (invites.length === 0) {
@@ -1813,7 +1942,7 @@ async function commandAudit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('audit');
   assertFlags(flags, ['tail', 'actor', 'limit']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
   const cfg = requireConfig();
 
   const actor = stringFlag(flags, 'actor');
@@ -1835,7 +1964,7 @@ async function commandAudit(argv) {
   if (result.status === 404) {
     const message = 'not available on this deployment';
     if (json) {
-      out(JSON.stringify({ ok: true, available: false, reason: 'not_available_on_this_deployment' }, null, 2));
+      out(emitJson({ ok: true, available: false, reason: 'not_available_on_this_deployment' }, MODE));
     } else {
       out(message);
     }
@@ -1858,12 +1987,12 @@ async function commandAudit(argv) {
     null;
 
   if (json) {
-    out(JSON.stringify({ ok: true, available: true, entries: entries ?? result.data }, null, 2));
+    out(emitJson({ ok: true, available: true, entries: entries ?? result.data }, MODE));
     return;
   }
 
   if (!entries) {
-    out(JSON.stringify(result.data, null, 2));
+    out(emitJson(result.data, MODE));
     return;
   }
   if (entries.length === 0) {
@@ -1920,7 +2049,7 @@ async function commandKey(argv) {
   const action = rest[0];
   if (action !== 'fingerprint') throw usage(`unknown key command "${action}"; try \`dakflare key fingerprint\``);
   assertFlags(flags, ['keystore', 'alias']);
-  const json = Boolean(flags.json);
+  const json = MODE.json;
 
   const props = readProperties(KEYSTORE_PROPS);
   const keystore = expandHome(
@@ -1983,7 +2112,7 @@ async function commandKey(argv) {
   const fingerprint = match[1].toUpperCase();
 
   if (json) {
-    out(JSON.stringify({ ok: true, keystore, alias, sha256: fingerprint }, null, 2));
+    out(emitJson({ ok: true, keystore, alias, sha256: fingerprint }, MODE));
     return;
   }
   out('Release signing certificate');
@@ -2162,6 +2291,8 @@ async function main() {
     return printHelp('root');
   }
 
+  CURRENT_COMMAND = command;
+
   const run = COMMANDS[command];
   if (!run) {
     err(`dakflare: unknown command "${command}"`);
@@ -2175,31 +2306,31 @@ async function main() {
 }
 
 try {
+  // Resolved before `main` so a failure inside it still knows how to render.
+  MODE = outputMode(parseArgv(process.argv.slice(2)).flags);
+  AGENT = MODE.agent;
   await main();
 } catch (error) {
-  const json = process.argv.includes('--json');
+  const json = MODE.json;
   if (error instanceof CliError) {
     if (json) {
-      out(
-        JSON.stringify(
-          {
-            ok: false,
-            error: error.payload?.error ?? 'error',
-            message: error.message,
-            ...(error.payload ?? {}),
-          },
-          null,
-          2
-        )
+      emitJson(
+        {
+          ok: false,
+          error: error.payload?.error ?? 'error',
+          message: error.message,
+          ...(error.payload ?? {}),
+        },
+        MODE
       );
     } else {
       err(`dakflare: ${error.message}`);
       if (error.code === 2) err('try `dakflare <command> --help`');
     }
-    process.exitCode = error.code;
+    process.exitCode = exitCodeFor(error.payload?.error ?? 'internal');
   } else {
     const detail = process.env.DAKFLARE_DEBUG ? String(error?.stack ?? error) : String(error?.message ?? error);
-    if (json) out(JSON.stringify({ ok: false, error: 'internal', message: detail }, null, 2));
+    if (json) emitJson({ ok: false, error: 'internal', message: detail }, MODE);
     else err(`dakflare: ${detail}`);
     process.exitCode = 1;
   }
