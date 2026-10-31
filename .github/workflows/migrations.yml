@@ -1,0 +1,68 @@
+name: D1 migrations
+
+# Applying a migration is a one-way door, so it is never part of the deploy
+# pipeline. Run this by hand, after a backup, and before the code that needs the
+# new schema reaches main.
+#
+#   docs/OPS_BACKUP.md   take a bookmark or an export first
+#   docs/OPS_DEPLOY.md   the order: migrate, then deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      database:
+        description: D1 database name or id
+        required: true
+        default: sms_gateway
+      confirm:
+        description: Type apply to run the migrations
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CF_SEND_TELEMETRY: "false"
+  DO_NOT_TRACK: "1"
+
+jobs:
+  apply:
+    name: Apply D1 migrations
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: d1-migrations
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      DATABASE: ${{ inputs.database }}
+    steps:
+      - name: Refuse without the confirmation word
+        if: inputs.confirm != 'apply'
+        run: |
+          echo "confirm must be exactly 'apply'; got '${{ inputs.confirm }}'"
+          exit 1
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install the Worker's tooling
+        working-directory: worker
+        run: npm ci
+
+      - name: What is unapplied
+        working-directory: worker
+        run: npx cf d1 migrations list "$DATABASE"
+
+      - name: Apply
+        working-directory: worker
+        run: npx cf d1 migrations apply "$DATABASE"
+
+      - name: Reminder
+        run: echo "Migrations applied. Now merge the code that expects them; the deploy runs from main."
