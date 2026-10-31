@@ -142,7 +142,6 @@ simple = { limit = 20, period = 60 }
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
 # (X-Dakflare-Client: cli). Read per request in src/lib/config.ts authMode().
-AUTH_MODE = "new"
 # Which side runs the password KDF (AUTH_PLAN §2, phase 4):
 #   off (default) | client-derived (free tier) | server-kdf (paid plan)
 # `off` disables the whole password factor: /v1/auth/salt still answers (same

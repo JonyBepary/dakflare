@@ -66,7 +66,6 @@ export default defineConfig({
 			// ── inline configuration ────────────────────────────────────────────
 			// Admin auth gate: `legacy` keeps ADMIN_TOKEN; `new` uses Better Auth
 			// sessions via requireRole() (see worker/src/lib/config.ts authMode).
-			AUTH_MODE: bindings.text("legacy"),
 			AUTH_LOCKOUT_WINDOW_SECONDS: bindings.text("900"),
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),

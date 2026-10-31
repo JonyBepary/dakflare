@@ -3,6 +3,10 @@
 Status: decided 2026-10-29. Supersedes the paste-a-token login. The gateway's device
 API is out of scope: it keeps its own P-256 signature scheme.
 
+Update 2026-10-31: `AUTH_MODE=legacy` is retired. There is one admin gate and two
+credentials — a Better Auth session with role owner/admin, or `ADMIN_TOKEN` carrying
+`X-Dakflare-Client: cli`. A bare bearer token is now 401.
+
 ## 1. The ladder
 
 One account may hold several factors; the console offers them in this order.

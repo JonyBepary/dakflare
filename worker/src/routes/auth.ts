@@ -18,7 +18,6 @@ import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import {
-  authMode,
   MAX_BODY_BYTES,
   magicLinkTtlSeconds,
   passwordMode,
@@ -119,7 +118,7 @@ export async function handleAuthMe(req: Request, env: Env): Promise<Response> {
     ok: true,
     user: guard.user,
     expires_at: guard.expiresAt,
-    auth_mode: authMode(env),
+    auth_mode: "new",
   });
 }
 
@@ -145,7 +144,7 @@ export async function handleAuthMode(req: Request, env: Env): Promise<Response> 
   }
 
   return Response.json({
-    auth_mode: authMode(env),
+    auth_mode: "new",
     auth_configured: Boolean(env.BETTER_AUTH_SECRET),
     password_mode: passwordMode(env),
     password_configured:

@@ -60,7 +60,7 @@ import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./rou
 import { handleAuditList } from "./routes/audit";
 import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
-import { authMode, MAX_BODY_BYTES, readIntEnv } from "./lib/config";
+import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
 export { DeviceGateway, AuthGuard };
 
@@ -88,12 +88,10 @@ export interface Env {
   /** FCM HTTP v1 service-account JSON. Absent is a normal local-dev state. */
   FCM_SERVICE_ACCOUNT_JSON?: string;
   /**
-   * Which auth backs the admin routes (lib/config.ts `authMode`).
    * `legacy` (the default) keeps ADMIN_TOKEN; `new` moves them to
    * `requireRole()` with ADMIN_TOKEN demoted to the CLI path. Read per request
    * from `env`, so flipping it is a `[vars]` change plus a deploy.
    */
-  AUTH_MODE?: string;
   /** Public origin of this Worker, e.g. https://…workers.dev. Used for rpId/cookies. */
   AUTH_BASE_URL?: string;
   /** Comma-separated extra origins allowed by Better Auth's CSRF check. */
@@ -233,15 +231,14 @@ async function withAdmin(
 }
 
 /**
- * Admin gate, aware of `AUTH_MODE`.
+ * Admin gate. Two credentials, and only two:
  *
- *   legacy (default)  ADMIN_TOKEN exactly as before — nothing changes for an
- *                     existing deployment, and a half-finished rollout cannot
- *                     lock the owner out.
- *   new               Better Auth session with role owner/admin. ADMIN_TOKEN is
- *                     still accepted as a MACHINE credential, but only with
- *                     `X-Dakflare-Client: cli` (AUTH_PLAN §8), which is strictly
- *                     narrower than the legacy path it replaces.
+ *   a Better Auth session with role owner/admin, for a person;
+ *   ADMIN_TOKEN with `X-Dakflare-Client: cli`, for a machine (AUTH_PLAN §8).
+ *
+ * There is no third path. `AUTH_MODE=legacy` used to make ADMIN_TOKEN alone a
+ * full admin credential; it is gone, because a bearer token that never expires
+ * and needs no client header is the weakest credential the system had.
  *
  * Every admin route resolves an actor here so the audited ones can log who acted
  * without re-reading the credential anywhere else.
@@ -253,15 +250,12 @@ async function withAdminAccess(
   action: string,
   handler: (actor: AdminActor) => Promise<Response>
 ): Promise<Response> {
-  if (authMode(env) === "new") {
-    if (req.headers.get("X-Dakflare-Client") === "cli") {
-      return withAdmin(req, env, () => handler(machineActor()));
-    }
-    const guard = await requireRole(req, env, permission, { action });
-    if (!guard.ok) return guard.response;
-    return handler(actorFromUser(guard.user));
+  if (req.headers.get("X-Dakflare-Client") === "cli") {
+    return withAdmin(req, env, () => handler(machineActor()));
   }
-  return withAdmin(req, env, () => handler(machineActor()));
+  const guard = await requireRole(req, env, permission, { action });
+  if (!guard.ok) return guard.response;
+  return handler(actorFromUser(guard.user));
 }
 
 /**

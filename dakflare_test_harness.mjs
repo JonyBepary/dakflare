@@ -13,7 +13,7 @@
  *   pair            mint a code, pair a fresh device, persist identity.
  *   suite           the full conformance battery.
  *   auth            auth cases: invite-only sign-up, single use, requireRole
- *                   401/403/200, source-mode token path, audit rows. AUTH_MODE
+ *                   401/403/200, machine-token path, audit rows. The legacy
  *                   selects the assertions (legacy|new); point WORKER_URL at a
  *                   Worker started with the matching mode.
  *   password        AUTH_PLAN §2 cases: salt shape/determinism, construction
@@ -2050,14 +2050,14 @@ async function cmdSuite() {
  * Auth cases (AUTH_PLAN §3–§5). Run against a Worker started with the mode you
  * want to prove:
  *
- *   WORKER_URL=http://127.0.0.1:8787 AUTH_MODE=legacy node dakflare_test_harness.mjs auth
- *   WORKER_URL=http://127.0.0.1:8789 AUTH_MODE=new    node dakflare_test_harness.mjs auth
+ *   WORKER_URL=http://127.0.0.1:8787 node dakflare_test_harness.mjs auth
  *
  * The invite/redeem/audit cases are mode-independent; the admin-gate cases
  * differ by mode (403 vs 401 for a member session) and are asserted accordingly.
  */
 async function cmdAuth() {
-  const mode = process.env.AUTH_MODE === 'new' ? 'new' : 'legacy';
+  // One mode now: the legacy ADMIN_TOKEN-only path is gone.
+  const mode = 'new';
   console.log(`== auth (mode=${mode}) ==\nworker: ${WORKER_URL}\n`);
   const rep = new Report('auth');
 
@@ -2085,7 +2085,7 @@ async function cmdAuth() {
     Object.keys(modeProbe.data ?? {}).sort(),
     ['auth_configured', 'auth_mode', 'magic_link', 'magic_link_ttl_s', 'password_configured', 'password_mode']
   );
-  rep.check('mode reports the deployed AUTH_MODE', modeProbe.data?.auth_mode, mode);
+  rep.check("health reports the one auth mode", modeProbe.data?.auth_mode, mode);
   rep.check('auth_configured is a boolean', typeof modeProbe.data?.auth_configured, 'boolean');
   rep.check('password_configured is a boolean', typeof modeProbe.data?.password_configured, 'boolean');
   rep.check('magic_link is a boolean', typeof modeProbe.data?.magic_link, 'boolean');
@@ -2149,7 +2149,7 @@ async function cmdAuth() {
   //    operational surface and is refused every mutation with a sentence; an
   //    admin does both. The legacy token path must stay intact.
   const memberOnAdmin = await raw('GET', '/v1/admin/health', { cookie: sessionCookie });
-  if (mode === 'new') {
+  {
     rep.check('member session reads health -> 200 (AUTH_MODE=new)', memberOnAdmin.status, 200);
     const adminNoCred = await fetch(`${WORKER_URL}/v1/admin/health`);
     rep.check('no credential on an admin route -> 401', adminNoCred.status, 401);
@@ -2244,11 +2244,6 @@ async function cmdAuth() {
     });
     rep.check('admin session creates an invite -> 200', adminWrite.status, 200);
     if (adminWrite.data?.id) await admin('DELETE', `/v1/admin/invites/${adminWrite.data.id}`);
-  } else {
-    rep.check('member cookie alone is not an admin credential -> 401 (legacy)', memberOnAdmin.status, 401);
-    const token = await admin('GET', '/v1/admin/health');
-    rep.check('ADMIN_TOKEN bearer path intact (AUTH_MODE=legacy)', token.status, 200);
-    rep.check('health reports auth_mode=legacy', token.data?.auth_mode, 'legacy');
   }
 
   // 8. Audit rows: invite created/redeemed and a sign-in.

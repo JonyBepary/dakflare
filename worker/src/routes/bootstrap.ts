@@ -18,7 +18,7 @@ import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
-import { authMode, MAX_BODY_BYTES } from "../lib/config";
+import { MAX_BODY_BYTES } from "../lib/config";
 import {
   clampInviteTtlSeconds,
   hashInviteToken,
@@ -33,15 +33,13 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
   const email = normalizeEmail(parsed.value.email);
   if (email === null) return err("bad_request", 400);
 
-  const mode = authMode(env);
-
-  if (mode === "new") {
-    const owner = await env.DB.prepare(
-      `SELECT 1 AS ok FROM "user" WHERE role = 'owner' LIMIT 1`
-    ).first<{ ok: number }>();
-    if (owner !== null) {
-      return Response.json({ error: "owner_exists" }, { status: 409 });
-    }
+  // One owner per deployment, always: there is no legacy mode in which a second
+  // bootstrap could quietly mint a second full-admin credential.
+  const owner = await env.DB.prepare(
+    `SELECT 1 AS ok FROM "user" WHERE role = 'owner' LIMIT 1`
+  ).first<{ ok: number }>();
+  if (owner !== null) {
+    return Response.json({ error: "owner_exists" }, { status: 409 });
   }
 
   // An address that already has an account cannot bootstrap again — it already
@@ -79,7 +77,7 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
     action: "invite.bootstrap",
     actor: { userId: null, label: "admin-token" },
     subject: id,
-    detail: { email, role: "owner", auth_mode: mode, expires_at: expiresAt },
+    detail: { email, role: "owner", auth_mode: "new", expires_at: expiresAt },
     ...requestMeta(req),
   });
 
