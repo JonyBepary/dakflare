@@ -26,9 +26,10 @@ object PermissionState {
     const val BATTERY = "battery_exempt"
     const val SMS_ROLE = "sms_role"
     const val SEND_SMS = "send_sms"
+    const val RECEIVE_SMS = "receive_sms"
     const val NOTIFICATIONS = "notifications"
 
-    /** `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"notifications":bool}`. */
+    /** `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"receive_sms":bool,"notifications":bool}`. */
     @JvmStatic
     fun read(context: Context): String {
         val json = JSONObject()
@@ -37,6 +38,14 @@ object PermissionState {
         json.put(
             SEND_SMS,
             ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+        // Reading a message and answering it are two permissions, and a gateway
+        // with only one of them is broken in a way the operator cannot see: it
+        // sends replies to nothing.
+        json.put(
+            RECEIVE_SMS,
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) ==
                 PackageManager.PERMISSION_GRANTED,
         )
         json.put(NOTIFICATIONS, notificationsEnabled(context))

@@ -725,6 +725,151 @@ async fn take_sms_route(app: tauri::AppHandle) -> Result<Option<String>, String>
     }
 }
 
+/// Rust → Kotlin bridge for the permission gate.
+///
+/// The same mechanism as [`SmsBridge`] and for the same reasons: a registered
+/// mobile plugin dispatches to the Android context without this crate needing a
+/// `JavaVM` of its own. A separate plugin rather than another command on
+/// `SmsPlugin`, because permissions are not SMS: the gate has to work before
+/// the app can send anything at all.
+#[cfg(target_os = "android")]
+struct PermissionBridge(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+fn permission_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("dakflare-permissions")
+        .setup(|app, api| {
+            let handle =
+                api.register_android_plugin("dev.dakflare.simulator.bridge", "PermissionPlugin")?;
+            app.manage(PermissionBridge(handle));
+            Ok(())
+        })
+        .build()
+}
+
+/// Turn a plugin failure into a sentence the gate can show. The Kotlin side only
+/// rejects with its own worded refusals; anything else is a JNI or
+/// deserialisation failure and carries nothing the operator can act on.
+#[cfg(target_os = "android")]
+fn permission_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
+    use tauri::plugin::mobile::PluginInvokeError;
+
+    match error {
+        PluginInvokeError::InvokeRejected(response) => response
+            .message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The phone could not open that setting".to_string()),
+        other => {
+            eprintln!("[permissions] mobile plugin failed: {other}");
+            "The phone could not open that setting".to_string()
+        }
+    }
+}
+
+/// The five checks the gate shows: `battery_exempt`, `sms_role`, `send_sms`,
+/// `receive_sms`, `notifications`.
+///
+/// Read-only. Android is the source of truth; the UI never infers a grant from a
+/// button tap, only from a fresh read after the system dialog closes. A desktop
+/// build reports everything granted, so the gate never appears there.
+#[tauri::command]
+async fn permission_state(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Permissions are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("state", ())
+            .await
+            .map_err(permission_plugin_error)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({
+            "battery_exempt": true,
+            "sms_role": true,
+            "send_sms": true,
+            "receive_sms": true,
+            "notifications": true,
+        }))
+    }
+}
+
+/// Open the battery-exemption dialog. Asking, never claiming: the gate re-reads
+/// [`permission_state`] when the app regains focus.
+#[tauri::command]
+async fn request_battery_exemption(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "The battery setting is not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestBattery", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("The battery setting is only available on the phone".into())
+    }
+}
+
+/// Ask for `SEND_SMS` and `RECEIVE_SMS` in one dialog.
+#[tauri::command]
+async fn request_sms_permissions(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Permissions are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestSmsPermissions", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Permissions are only available on the phone".into())
+    }
+}
+
+/// Ask for `POST_NOTIFICATIONS`, or open the app's notification settings when
+/// the permission is granted but the operator switched the app off.
+#[tauri::command]
+async fn request_notifications(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Notifications are not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestNotifications", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Notifications are only available on the phone".into())
+    }
+}
+
 #[tauri::command]
 async fn list_messages(
     state: State<'_, AppState>,
@@ -918,7 +1063,7 @@ pub fn run() {
     // Mobile plugins need an Android class to drive. Desktop keeps the command
     // but reports that sending is phone-only.
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(sms_plugin());
+    let builder = builder.plugin(sms_plugin()).plugin(permission_plugin());
 
     builder
         .setup(|app| {
@@ -968,6 +1113,10 @@ pub fn run() {
             carrier_drain,
             send_sms,
             request_default_sms_role,
+            permission_state,
+            request_battery_exemption,
+            request_sms_permissions,
+            request_notifications,
             take_sms_route,
             list_messages,
             list_messages_page,
