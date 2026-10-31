@@ -31,10 +31,9 @@ import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
 import { enqueueOutboundCommand } from "../lib/commands";
 import {
   evaluateRules,
-  renderReplyTemplate,
   type RuleHit,
   type RuleRecord,
-} from "../rules/evaluate";
+} from "../lib/rule-graph";
 import { RE_WORKFLOW_ID } from "../lib/workflow";
 import {
   MAX_ACK_IDS,
@@ -606,7 +605,7 @@ async function applyRules(
   const hits: RuleHit[] = [...(hitRows.results ?? [])];
 
   for (const message of messages) {
-    const evaluations = evaluateRules(
+    const evaluations = await evaluateRules(
       rules,
       { peer: message.sender, body: message.body },
       { deviceId, now, hits }
@@ -615,11 +614,7 @@ async function applyRules(
     for (const evaluation of evaluations) {
       if (!evaluation.matched) continue;
 
-      const replyBody = renderReplyTemplate(evaluation.rule.reply_template, {
-        sender: message.sender,
-        body: message.body,
-        matched: evaluation.matched_text,
-      }).slice(0, MAX_BODY_CHARS);
+      const replyBody = evaluation.reply_body.slice(0, MAX_BODY_CHARS);
       // The console documents an empty template as "match without sending a reply".
       if (replyBody.trim() === "") continue;
 
