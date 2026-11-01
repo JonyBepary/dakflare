@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { goto } from '$app/navigation';
+import { grantSentence } from '$lib/approvals';
 
 /** This app's applicationId; the default-SMS fact reports a package name. */
 export const DEFAULT_SMS_PACKAGE = 'dev.dakflare.simulator';
@@ -112,6 +113,30 @@ export type InjectResult = {
 	fallback: boolean | null;
 };
 
+/** Where a pending grant applies. */
+export type ApprovalTarget = { recipients?: string[]; device_id?: string | null };
+
+/** One request waiting for this handset's answer. */
+export type PendingApproval = {
+	id: string;
+	scope: string;
+	target: ApprovalTarget;
+	reason: string | null;
+	requested_at: number;
+	expires_at: number;
+	ladder_s: number[];
+	max_s: number;
+};
+
+/** The deployment's answer to an approval: the numbers it granted, not the tap. */
+export type ApprovalGrant = {
+	granted_s: number;
+	requested_s: number;
+	clamped: boolean;
+	max_s: number;
+	expires_at: number;
+};
+
 export type NoticeTone = 'ok' | 'error' | 'info';
 export type Notice = { text: string; tone: NoticeTone };
 
@@ -153,6 +178,12 @@ class AppStore {
 	flowRuns = $state<FlowRun[]>([]);
 	flowsLoaded = $state(false);
 	flowsError = $state<string | null>(null);
+
+	/** Requests waiting for this handset. Never cached: each answer is a grant. */
+	approvals = $state<PendingApproval[]>([]);
+	approvalsLoaded = $state(false);
+	approvalsError = $state<string | null>(null);
+	approvalBusy = $state<Record<string, boolean>>({});
 
 	/** A local record of this session's successful signed contacts. */
 	contactAt = $state<Record<string, number>>({});
@@ -668,10 +699,106 @@ class AppStore {
 				)}${flows?.ok ? ` · ${count(flows.count ?? 0, 'flow', 'flows')} cached` : ''}.`,
 				'ok'
 			);
+			// A poll is the moment the deployment may have routed a new request
+			// to this phone, so refresh an open approval sheet with it.
+			if (this.approvalsLoaded) await this.loadApprovals(deviceId);
 		} catch (error) {
 			this.fail(`device:${deviceId}`, error);
 		} finally {
 			this.busy.poll = false;
+		}
+	}
+
+	/**
+	 * Read the requests waiting for this handset.
+	 *
+	 * This is a signed GET, so it is never served from a cache: the list is what
+	 * the deployment will accept an answer for right now.
+	 */
+	async loadApprovals(deviceId: string = this.selectedId) {
+		if (!this.backendAvailable || !deviceId) {
+			this.approvals = [];
+			this.approvalsLoaded = true;
+			return;
+		}
+		this.loading.approvals = true;
+		try {
+			const approvals = await this.call<PendingApproval[]>('list_approvals', { deviceId });
+			// A device switch while the request was in flight must not paint the
+			// previous phone's requests under the new one.
+			if (this.selectedId !== deviceId) return;
+			this.approvals = approvals;
+			this.approvalsError = null;
+		} catch (error) {
+			if (this.selectedId !== deviceId) return;
+			// Keep the previous list on screen: dropping it would let a failed
+			// refresh read as "nothing is waiting".
+			this.approvalsError = String(error);
+		} finally {
+			this.approvalsLoaded = true;
+			this.loading.approvals = false;
+		}
+	}
+
+	/**
+	 * Grant a rung. Returns the deployment's grant, or `null` on any failure.
+	 *
+	 * A failure never removes the card and never notifies "approved": the only
+	 * path to a granted message is a parsed `ApprovalGrant` carrying `granted_s`.
+	 */
+	async approve(approvalId: string, durationS: number): Promise<ApprovalGrant | null> {
+		const deviceId = this.selectedId;
+		if (!deviceId) {
+			this.notify('approvals', 'Select a device on this phone first.', 'error');
+			return null;
+		}
+		this.approvalBusy[approvalId] = true;
+		this.clearNotice('approvals');
+		try {
+			const grant = await this.call<ApprovalGrant>('approve_approval', {
+				deviceId,
+				approvalId,
+				durationS
+			});
+			if (this.selectedId === deviceId) {
+				this.approvals = this.approvals.filter((approval) => approval.id !== approvalId);
+				this.approvalsError = null;
+				this.notify('approvals', grantSentence(grant), 'ok');
+			}
+			return grant;
+		} catch (error) {
+			if (this.selectedId === deviceId) this.fail('approvals', error);
+			return null;
+		} finally {
+			delete this.approvalBusy[approvalId];
+		}
+	}
+
+	/** Answer a request with no. Rejection is an answer, not a failure. */
+	async rejectApproval(approvalId: string): Promise<boolean> {
+		const deviceId = this.selectedId;
+		if (!deviceId) {
+			this.notify('approvals', 'Select a device on this phone first.', 'error');
+			return false;
+		}
+		this.approvalBusy[approvalId] = true;
+		this.clearNotice('approvals');
+		try {
+			await this.call('reject_approval', {
+				deviceId,
+				approvalId
+			});
+			if (this.selectedId === deviceId) {
+				this.approvals = this.approvals.filter((approval) => approval.id !== approvalId);
+				this.approvalsError = null;
+				this.notify('approvals', 'Request rejected. The agent cannot send under it.', 'info');
+			}
+			return true;
+		} catch (error) {
+			if (this.selectedId === deviceId) this.fail('approvals', error);
+			return false;
+		} finally {
+			delete this.approvalBusy[approvalId];
 		}
 	}
 

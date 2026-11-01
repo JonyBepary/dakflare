@@ -150,6 +150,11 @@ export async function handleDeviceApprovalApprove(
   return Response.json({
     ok: true,
     approval_id: rawId,
+    // Repeat what was granted, not just for how long: a confirmation that names
+    // only the duration cannot say which recipients an agent just acquired the
+    // right to message.
+    scope: decided.approval.scope,
+    target: decided.approval.target,
     granted_s: decided.clamped?.seconds ?? null,
     requested_s: decided.clamped?.requested_s ?? null,
     clamped: decided.clamped?.clamped ?? false,

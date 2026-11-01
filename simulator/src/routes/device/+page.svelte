@@ -1,5 +1,6 @@
 <script lang="ts">
 	import DeviceSelect from '$lib/components/DeviceSelect.svelte';
+	import Approvals from '$lib/components/Approvals.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import { app, type DevicePermissions } from '$lib/stores/app.svelte';
 	import { lastContact, deviceState, relativeTime, STATE_LABEL, stateSentence } from '$lib/device-state';
@@ -153,6 +154,8 @@
 				{contact ? `last signed contact · ${relativeTime(contact, now)}` : 'no signed contact yet'}
 			</p>
 		</section>
+
+		<Approvals />
 
 		<section class="sheet" aria-labelledby="handset-title">
 			<div class="sheet-head">

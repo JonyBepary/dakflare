@@ -145,6 +145,9 @@ export async function handleApprovalApprove(
   return Response.json({
     ok: true,
     approval: describeApproval(decided.approval),
+    // What was granted, not only for how long.
+    scope: decided.approval.scope,
+    target: decided.approval.target,
     grant: decided.grant === null ? null : describeGrant(decided.grant),
     granted_s: decided.clamped?.seconds ?? null,
     requested_s: decided.clamped?.requested_s ?? null,

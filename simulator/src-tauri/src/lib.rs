@@ -376,9 +376,7 @@ async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<
 /// double tap from becoming a second decision.
 fn approval_failure(error: ProtocolError) -> String {
     match error {
-        ProtocolError::Status { status, body, .. }
-            if matches!(status, 404 | 409 | 410) =>
-        {
+        ProtocolError::Status { status, body, .. } if matches!(status, 404 | 409 | 410) => {
             format!(
                 "This request is no longer waiting. It may have expired or been answered \
                  elsewhere. Refresh the list. ({body})"
@@ -1205,6 +1203,9 @@ pub fn run() {
             sync_flows,
             purge_messages,
             revoke_device,
+            list_approvals,
+            approve_approval,
+            reject_approval,
             carrier_inject,
             carrier_drain,
             send_sms,

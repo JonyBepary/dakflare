@@ -1532,6 +1532,111 @@ input::placeholder {
 	color: var(--ink-3);
 }
 
+/* ------------------------------------------------------------- approvals */
+
+.approval {
+	margin-top: 12px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line);
+}
+
+.approval:first-of-type {
+	margin-top: 8px;
+	padding-top: 0;
+	border-top: 0;
+}
+
+.approval h3 {
+	margin-top: 1px;
+	font-size: 15px;
+	line-height: 1.4;
+	font-weight: 600;
+	color: var(--ink);
+	overflow-wrap: anywhere;
+}
+
+.approval-target {
+	display: block;
+	margin-top: 2px;
+	font-family: var(--mono);
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ink-2);
+}
+
+.approval-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 4px 10px;
+	margin-top: 5px;
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+
+.approval-countdown {
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	color: var(--ink-2);
+}
+
+.approval-countdown[data-expired='true'] {
+	color: var(--danger);
+}
+
+.approval-reason {
+	margin-top: 8px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: var(--df-surface-well);
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--ink-2);
+	overflow-wrap: anywhere;
+}
+
+.approval-prompt {
+	margin-top: 12px;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+
+.ladder {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+	gap: 8px;
+	margin-top: 8px;
+}
+
+/* The rung is the primary action, so it carries the accent boundary without
+   eight full coral fills competing for the eye. */
+.btn.ladder-rung {
+	min-width: 0;
+	border-color: color-mix(in srgb, var(--df-accent-fill) 55%, var(--line));
+	color: var(--accent);
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.btn.ladder-rung:hover:not(:disabled) {
+	background: var(--accent-soft);
+	border-color: var(--df-accent-fill);
+}
+
+.approval-actions {
+	margin-top: 8px;
+}
+
+.refresh-approvals {
+	margin-top: 10px;
+}
+
 /* ---------------------------------------------------------------- flows */
 
 .statement {
