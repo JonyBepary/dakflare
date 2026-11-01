@@ -3117,13 +3117,60 @@ async function commandRulesApply(argv) {
   const before = new Map((existing.data?.rules ?? []).map((rule) => [rule.id, rule]));
 
   if (flags['dry-run'] === true) {
-    const diff = rules.map((rule) => ({
+    // The list route returns the STORED columns (`matcher_type`, `matcher_value`,
+    // ...), while the apply document uses the request shape (`matcher: {type,
+    // value}`). Comparing one against the other would report every field as
+    // changed, so the incoming rule is flattened to the stored shape first.
+    const storedShape = (rule) => ({
       id: rule.id,
-      action: before.has(rule.id) ? 'update' : 'create',
-      changed_fields: before.has(rule.id)
-        ? Object.keys(rule).filter((key) => stableJson(rule[key]) !== stableJson(before.get(rule.id)[key]))
-        : [],
-    }));
+      device_id: rule.device_id ?? null,
+      name: rule.name ?? null,
+      enabled: rule.enabled === undefined ? 1 : rule.enabled ? 1 : 0,
+      priority: rule.priority ?? null,
+      matcher_type: rule.matcher?.type ?? null,
+      matcher_value: rule.matcher?.value ?? null,
+      body_type: rule.body_matcher?.type ?? null,
+      body_value: rule.body_matcher?.value ?? null,
+      reply_template: rule.reply_template ?? null,
+      cooldown_s: rule.cooldown_s ?? null,
+      max_per_hour: rule.max_per_hour ?? null,
+      sim_slot: rule.sim_slot ?? null,
+      allow_shortcode: rule.allow_shortcode === undefined ? null : rule.allow_shortcode ? 1 : 0,
+    });
+
+    const diff = rules.map((rule) => {
+      const incoming = storedShape(rule);
+      if (!before.has(rule.id)) return { id: rule.id, action: 'create', changed_fields: [] };
+      const current = before.get(rule.id) ?? {};
+      // Only the fields the document actually names: an omitted field is not a
+      // request to clear it, because the route reads omissions as defaults. The
+      // map is stored-key -> document-key, because the two shapes differ.
+      const sourceOf = {
+        device_id: 'device_id',
+        name: 'name',
+        enabled: 'enabled',
+        priority: 'priority',
+        matcher_type: 'matcher',
+        matcher_value: 'matcher',
+        body_type: 'body_matcher',
+        body_value: 'body_matcher',
+        reply_template: 'reply_template',
+        cooldown_s: 'cooldown_s',
+        max_per_hour: 'max_per_hour',
+        sim_slot: 'sim_slot',
+        allow_shortcode: 'allow_shortcode',
+      };
+      const changed = Object.keys(sourceOf).filter(
+        (key) =>
+          rule[sourceOf[key]] !== undefined &&
+          stableJson(incoming[key]) !== stableJson(current[key])
+      );
+      return {
+        id: rule.id,
+        action: changed.length === 0 ? 'unchanged' : 'update',
+        changed_fields: changed,
+      };
+    });
     if (json) {
       emitJson({ ok: true, applied: false, dry_run: true, dry_run_diff: diff }, MODE);
       return 0;

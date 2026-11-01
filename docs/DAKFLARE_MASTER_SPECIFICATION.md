@@ -806,6 +806,77 @@ did that 15-minute grant actually do" is a query rather than a reconstruction.
 
 ---
 
+### 4.5 The Canonical Flow IR (6.1.0 P1)
+
+A flow is now one document, `dakflare.flow/v2`, with one validator per runtime
+(`simulator/flow/src/ir.rs` and `worker/src/lib/flow-ir.ts`) and one shared vector
+file (`test-support/flow-ir-vectors.json`) that both are tested against. Before
+this, the Worker, the canvas and the interpreter each had their own opinion and
+agreed by coincidence.
+
+#### 4.5.1 Nine kinds
+
+| Kind | `data` | Outgoing edges |
+|---|---|---|
+| `trigger` | `{ kind: "incoming", sender?, body? }` | 1 |
+| `extract` | `{ source, pattern, flags? }`, at least one `(?<name>...)` | 1 |
+| `set_var` | `{ name, value }` | 1 |
+| `condition` | `{ left, op, right? }` | 2: `true`, `false` |
+| `switch` | `{ value, cases: string[] }` | 1 per case (`case:0` …) + `default` |
+| `delay` | `{ seconds }`, 1 to 300 | 1 |
+| `webhook` | `{ url, body }`, https only | 1 |
+| `send_sms` | `{ to, body }` | 1 |
+| `stop` | `{ reason? }` | 0 |
+
+`delay`, `webhook` and `send_sms` are **actions**, not effects: the interpreter
+returns them in visit order and the caller owns the clock, the network and the
+radio. That is what keeps a trace deterministic and identical on the phone, in
+the Worker's WASM fallback, and in `dakflare rules test`.
+
+Both performers that cannot execute one of those say so out loud rather than
+falling through: the handset logs that it skips `delay` and `webhook` (it runs
+flows synchronously and makes no outbound calls) and the Worker's dispatch logs
+the same. A flow that uses one runs partially, visibly.
+
+#### 4.5.2 What the validator refuses
+
+- A cycle, naming the **edge and the node** it returns to.
+- A node reachable from nothing, and more than one trigger.
+- A branch handle on a node that does not branch, or a missing one on a node that
+  does.
+- `{{name}}` (or `{{vars.name}}`) where `name` is not bound on **every** path into
+  that node. `set_var` and `extract` bind; the analysis is a forward dataflow
+  whose answer at a node is the intersection over its predecessors, so a value
+  that exists on the branch the author was thinking about is refused rather than
+  rendered as an empty string.
+
+#### 4.5.3 Layout is data
+
+`ui_layout` is optional on the way in and always computed on the way out:
+
+```
+algorithm  "rank-v1"
+positions  { [nodeId]: { x, y } }     x = rank * 280, y = rowWithinRank * 160
+```
+
+A node's rank is its longest distance from the trigger, so the flow reads left to
+right; the row is its sibling order, seeded by where its predecessors landed. The
+same numbers come out of both runtimes, so the canvas does not jump when a graph
+is re-saved, and a graph authored with no coordinates at all lands legibly.
+
+The computed position is also copied onto `node.position` for v6.0 readers. That
+mirror has a lifetime: `ui_layout` is authoritative.
+
+#### 4.5.4 Concurrency
+
+`expected_previous_version` is **one** conditional
+`UPDATE … WHERE id = ? AND version = ?`, read back through `meta.changes`. D1
+exposes no isolation level beyond a single statement plus atomic `batch()`, so a
+SELECT-then-UPDATE would let two consoles read version 3 and both write 4. A lost
+race is `409 version_conflict` naming the stored version.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -956,7 +1027,7 @@ though `send` is a mutating command: an `approval_required` and an
 `agent_quota_exceeded` both mean the action did **not** happen, so repeating it
 after a human answers cannot cause a second SMS.
 
-### 6.3 Complete 15-Command CLI Matrix
+### 6.3 Complete 17-Command CLI Matrix
 
 | Command | Flags | Description & Semantics |
 |---|---|---|
@@ -970,6 +1041,8 @@ after a human answers cannot cause a second SMS.
 | `status` | `<command-id>`, `--device <id>`, `--wait [d]`, `--until <s>` | Inspects live delivery state from DO SQLite queue. |
 | `auth` | `bootstrap`, `invite`, `invites`, `reset`, `mint-agent-token --name <t> --scope <a,b> [--device <id>] [--ttl <s>] [--max-per-hour <n>]`, `agent-tokens [--all]`, `revoke-agent-token <id> --yes`, `approvals [--state S]`, `approve <id> [--for 15m]`, `reject <id>`, `grants [--token <id>] [--live]`, `grants revoke <grant-id> --yes` | Accounts and the agent control plane. Agent tokens are a third credential, not a role: `mint-agent-token` prints the value once and stores a digest; `approve` picks a duration from the ladder (1m/5m/15m/30m/1h/1d/7d/30d), clamps it to the scope's ceiling and says when it did. `--agent` never prompts, so pass `--yes` on the revoking subcommands. |
 | `audit` | `--tail [n]`, `--actor <lbl>`, `--limit <n>` | Reads operational audit trail from `/v1/admin/audit`. |
+| `flows` | `apply <file> [--dry-run]` | Writes one flow document. The file is `{id, name, graph, device_id?, enabled?, expected_previous_version?}` or a bare `{nodes, edges}`. `--dry-run` returns `data.dry_run_diff` (added/removed/changed nodes and edges, capture variables, layout) and writes nothing. A stale `expected_previous_version` exits `5` and names the stored version; a refused graph exits `2` with every issue and its path. |
+| `rules` | `apply <file> [--dry-run]`, `test --peer <e164> --body <text> [--device <id>]` | `apply` writes one rule or a `{rules: [...]}` document and reports create/update/unchanged per rule. `test` evaluates **every** rule and says why each would or would not reply (`disabled`, `sender_mismatch`, `body_mismatch`, `cooldown`, `hourly_cap`), which is the honest answer to "why did this message get no reply". |
 | `key` | `fingerprint [--keystore <path>] [--alias <name>]` | Computes SHA-256 fingerprint of the release signing keystore. |
 | `capabilities` | `--agent` | Emits self-describing JSON manifest of all commands, effects (`read`, `mutating`, `destructive`), and flags. |
 | `describe` | `<command>`, `--agent` | Emits two-line purpose, usage, and flag list for a given command. |
@@ -1118,7 +1191,8 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
-- **The agent blast radius (6.1.0 P0), 49 checks:** a minted `dkf_agt_` token reads only what its scopes allow, cannot revoke a device, mint another token, read the grant table or approve its own request; a production send with no grant is `202 approval_required` and sends nothing; the same ask returns the same request; a 30-day request is clamped to one hour and says so; a grant covers its named recipients and not others; revoking a grant and revoking a token both take effect on the very next request; the third send against a budget of two is `429 agent_quota_exceeded`; and the CLI, driven by an agent token, exits `6`, `6`, `0` and `4` for those four outcomes.
+- **The flow IR (6.1.0 P1), 57 checks:** the same 15 vectors run through both runtimes, the four accepted shapes land with a computed `ui_layout` covering every node and a `node.position` that mirrors it, the eleven refused shapes are `400 workflow_invalid` with the offending path, and a stale `expected_previous_version` is `409` naming the stored version.
+- **The agent blast radius (6.1.0 P0), 52 checks:** a minted `dkf_agt_` token reads only what its scopes allow, cannot revoke a device, mint another token, read the grant table or approve its own request; a production send with no grant is `202 approval_required` and sends nothing; the same ask returns the same request; a 30-day request is clamped to one hour and says so; a grant covers its named recipients and not others; revoking a grant and revoking a token both take effect on the very next request; the third send against a budget of two is `429 agent_quota_exceeded`; and the CLI, driven by an agent token, exits `6`, `6`, `0` and `4` for those four outcomes.
 
 `simulator/core` additionally proves, without a network, that a recorded command keeps its lease token, that the ack body is `{"acks":[{"command_id":…,"claim_token":…}]}`, and that a row with no token (a composer send) sends no request at all.
 

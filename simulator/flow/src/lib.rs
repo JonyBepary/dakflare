@@ -792,9 +792,9 @@ mod tests {
         assert_eq!(layout.algorithm, ir::LAYOUT_ALGORITHM);
         assert_eq!(layout.positions.len(), 3);
         // Ranks become columns, so the flow reads left to right.
-        assert_eq!(layout.positions["t1"], Position { x: 0, y: 0 });
-        assert_eq!(layout.positions["s1"].x, 280);
-        assert_eq!(layout.positions["e1"].x, 560);
+        assert_eq!(layout.positions["t1"], Position { x: 0.0, y: 0.0 });
+        assert_eq!(layout.positions["s1"].x, 280.0);
+        assert_eq!(layout.positions["e1"].x, 560.0);
     }
 
     #[test]

@@ -63,8 +63,8 @@ pub const MAX_SMS_TO_CHARS: usize = 32;
 pub const MAX_DELAY_SECONDS: i64 = 300;
 pub const MAX_TEMPLATE_CHARS: usize = 2_048;
 
-const COL_GAP: i32 = 280;
-const ROW_GAP: i32 = 160;
+const COL_GAP: f64 = 280.0;
+const ROW_GAP: f64 = 160.0;
 
 /// The kinds, in the order the palette shows them.
 pub const NODE_KINDS: [&str; 9] = [
@@ -85,10 +85,16 @@ pub const BUILTIN_VARIABLES: [&str; 3] = ["sender", "body", "received_at"];
 
 /* ------------------------------------------------------------------ types */
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// A canvas coordinate.
+///
+/// `f64`, not an integer, because the dashboard's canvas stores what the pointer
+/// gave it and a v6.0 row can hold `123.45`. Rounding happens in the canonical
+/// form, but the TYPE has to tolerate a legacy document, or the phone refuses to
+/// parse a flow the edge still serves.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Position {
-    pub x: i32,
-    pub y: i32,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -780,8 +786,8 @@ fn parse_position(value: &Value) -> Option<Position> {
         return None;
     }
     Some(Position {
-        x: x.round() as i32,
-        y: y.round() as i32,
+        x: x.round(),
+        y: y.round(),
     })
 }
 
@@ -1242,7 +1248,7 @@ pub fn layout(graph: &FlowGraph) -> UiLayout {
     let mut positions: BTreeMap<String, Position> = BTreeMap::new();
     let mut previous_order: HashMap<&str, usize> = HashMap::new();
 
-    for (rank_index, (_, bucket)) in buckets.iter_mut().enumerate() {
+    for (column, (_, bucket)) in buckets.iter_mut().enumerate() {
         bucket.sort_by_key(|node| {
             let seed = graph
                 .edges
@@ -1258,8 +1264,8 @@ pub fn layout(graph: &FlowGraph) -> UiLayout {
             positions.insert(
                 node.id.clone(),
                 Position {
-                    x: rank_index as i32 * COL_GAP,
-                    y: row as i32 * ROW_GAP,
+                    x: column as f64 * COL_GAP,
+                    y: row as f64 * ROW_GAP,
                 },
             );
         }
