@@ -130,6 +130,12 @@ jobs:
       # reads HARNESS_LEASE_MS. Both sides must name the same number.
       LEASE_MS: "15000"
       HARNESS_LEASE_MS: "15000"
+      # `dev.sh` defaults this to 2000 ms, which is right for the platform gate's
+      # "a quiet socket is closed" case and wrong here: the lease-recovery section
+      # holds a socket deliberately quiet for the whole lease window, and at 2 s
+      # the push path ages it out as stale, finds no socket to re-deliver to, and
+      # leaves the command PENDING. That reads like a lost command and is a window.
+      STALE_SOCKET_MS: "120000"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
