@@ -453,6 +453,67 @@ export interface PasskeySummary {
 	createdAt: string;
 }
 
+/* --------------------------------------------------------------- approvals */
+
+/**
+ * What a grant is allowed to touch. The Worker stores this as JSON and only
+ * keeps the keys it knows, so a target can name recipients, a handset, a flow,
+ * a rule, or a combination a scope allows.
+ */
+export interface ApprovalTarget {
+	recipients?: string[];
+	device_id?: string;
+	flow_id?: string;
+	rule_id?: string;
+}
+
+/** One agent request, as `GET /v1/admin/approvals` describes it. */
+export interface ApprovalRequest {
+	id: string;
+	agent_token_id: string;
+	scope: string;
+	target: ApprovalTarget | null;
+	reason: string | null;
+	state: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | string;
+	requested_at: number;
+	expires_at: number;
+	decided_by?: string | null;
+	decided_at?: number | null;
+	grant_id?: string | null;
+	/** The eight rungs a human may choose from. Sent with the row, never hardcoded. */
+	ladder_s: number[];
+	/** The scope's ceiling. `null` means this scope has no grant rule at all. */
+	max_s: number | null;
+}
+
+/** A live (or ended) authority lease. Only the fields the console reads are typed. */
+export interface AuthorityGrant {
+	id: string;
+	agent_token_id: string;
+	scope: string;
+	granted_by: string;
+	granted_at: number;
+	expires_at: number;
+	revoked_at: number | null;
+	use_count: number;
+}
+
+/**
+ * `POST /v1/admin/approvals/:id/approve`.
+ *
+ * `granted_s` and `requested_s` are what actually happened, and `clamped` says
+ * whether they differ, so the screen can show the ceiling instead of hiding it.
+ */
+export interface ApprovalDecision {
+	ok: boolean;
+	approval: ApprovalRequest;
+	grant: AuthorityGrant | null;
+	granted_s: number | null;
+	requested_s: number | null;
+	clamped: boolean;
+	max_s: number | null;
+}
+
 /* ------------------------------------------------------------------- audit */
 
 /** One `audit_log` row, exactly as stored. `detail` is the parsed `detail_json`. */

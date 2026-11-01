@@ -9,6 +9,8 @@
 
 import type {
 	Alert,
+	ApprovalDecision,
+	ApprovalRequest,
 	AuditResult,
 	CommandInfo,
 	Device,
@@ -90,6 +92,11 @@ const CODE_MESSAGES: Record<string, string> = {
 	payload_too_large: 'The request was too large.',
 	revoke_failed: 'The device could not be revoked. It may still be able to authenticate.',
 	internal_error: 'The gateway hit an internal error.',
+	// Approval decisions. Each one names what to do about the stale row.
+	not_pending: 'That request was already answered or has expired. Refresh to see the current queue.',
+	expired: 'That request expired before it was answered. Refresh to see the current queue.',
+	not_grantable: 'This gateway cannot grant that permission. Reject the request and ask the agent for a permission with a known ceiling.',
+	bad_target: 'The request does not name who it applies to, so it cannot be granted. Reject it and ask the agent to send a new request.',
 	// Account paths (AUTH_PLAN §4). Each one names the next action, not the wire.
 	invite_invalid: 'That invite was already used or has expired. Ask the owner for a new one.',
 	already_registered: 'That address already has an account. Sign in instead.',
@@ -394,6 +401,47 @@ export function getAudit(query: AuditQuery = {}): Promise<AuditResult> {
 	if (query.actor) params.set('actor', query.actor);
 	if (query.action) params.set('action', query.action);
 	return get<AuditResult>(`/v1/admin/audit?${params.toString()}`);
+}
+
+/* --------------------------------------------------------------- approvals */
+
+/**
+ * `GET /v1/admin/approvals`: the queue a human answers.
+ *
+ * `state=PENDING` is the read the screen needs, and the Worker also drops rows
+ * whose `expires_at` has passed even when their stored state still says
+ * `PENDING`, so every row here can be answered now.
+ */
+export async function getApprovals(state = 'PENDING'): Promise<ApprovalRequest[]> {
+	const query = state === '' ? '' : `?state=${encodeURIComponent(state)}`;
+	const data = await get<{ approvals: ApprovalRequest[] }>(`/v1/admin/approvals${query}`);
+	return data.approvals ?? [];
+}
+
+/**
+ * `POST /v1/admin/approvals/:id/approve` mints the grant.
+ *
+ * The response is the only evidence that a grant exists: the screen must not
+ * call an approval successful before this resolves with `ok: true`.
+ */
+export function approveApproval(
+	id: string,
+	durationS: number
+): Promise<ApprovalDecision> {
+	return get<ApprovalDecision>(
+		`/v1/admin/approvals/${encodeURIComponent(id)}/approve`,
+		{ method: 'POST', body: JSON.stringify({ duration_s: durationS }) }
+	);
+}
+
+/** `POST /v1/admin/approvals/:id/reject` closes the request without a grant. */
+export function rejectApproval(
+	id: string
+): Promise<{ ok: boolean; approval: ApprovalRequest }> {
+	return get<{ ok: boolean; approval: ApprovalRequest }>(
+		`/v1/admin/approvals/${encodeURIComponent(id)}/reject`,
+		{ method: 'POST', body: JSON.stringify({}) }
+	);
 }
 
 function extractField(payload: unknown, field: string): string | null {

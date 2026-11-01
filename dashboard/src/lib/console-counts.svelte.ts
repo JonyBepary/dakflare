@@ -5,9 +5,13 @@
  * every route. Pages that already fetch health push their result in through
  * `note()`, so Overview does not need a second request just to feed the rail.
  * A failed read keeps the last known value: a pill must never invent a zero.
+ *
+ * Pending approvals are not in the health payload, so the layout asks for them
+ * separately, and only for an operator who can see the Approvals screen. The
+ * queue page pushes its own count in, so the two never disagree.
  */
 
-import { getHealth } from './api';
+import { getApprovals, getHealth } from './api';
 import type { Health } from './types';
 
 class ConsoleCounts {
@@ -15,8 +19,10 @@ class ConsoleCounts {
 	messages = $state<number | null>(null);
 	rules = $state<number | null>(null);
 	openAlerts = $state<number | null>(null);
+	approvals = $state<number | null>(null);
 
 	private inFlight = false;
+	private approvalsInFlight = false;
 
 	note(health: Health): void {
 		this.devices = health.counts?.devices ?? null;
@@ -25,7 +31,15 @@ class ConsoleCounts {
 		this.openAlerts = health.open_alerts ?? health.counts?.open_alerts ?? null;
 	}
 
-	async refresh(): Promise<void> {
+	/** The queue page already has the answer; the rail takes it rather than asking twice. */
+	noteApprovals(count: number): void {
+		this.approvals = count;
+	}
+
+	async refresh(includeApprovals = false): Promise<void> {
+		// Start the extra read first so it overlaps the health call rather than
+		// making every navigation wait for two round trips in a row.
+		if (includeApprovals) void this.refreshApprovals();
 		if (this.inFlight) return;
 		this.inFlight = true;
 		try {
@@ -35,6 +49,18 @@ class ConsoleCounts {
 			// The page owns the error message; the rail keeps its last values.
 		} finally {
 			this.inFlight = false;
+		}
+	}
+
+	private async refreshApprovals(): Promise<void> {
+		if (this.approvalsInFlight) return;
+		this.approvalsInFlight = true;
+		try {
+			this.approvals = (await getApprovals()).length;
+		} catch {
+			// A count is a convenience; a failed read keeps the last known value.
+		} finally {
+			this.approvalsInFlight = false;
 		}
 	}
 }

@@ -602,6 +602,51 @@ export async function listApprovals(
   return (rows.results ?? []).map(toApproval);
 }
 
+/**
+ * Take ownership of a pending request with ONE conditional statement.
+ *
+ * `meta.changes` is the answer: 0 means somebody else got there first, or the
+ * window closed between the read and this write, and either way this caller has
+ * not decided anything.
+ */
+async function claim(
+  env: Env,
+  id: string,
+  state: "APPROVED" | "REJECTED",
+  by: string,
+  now: number
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE approval_requests
+        SET state = ?, decided_by = ?, decided_at = ?
+      WHERE id = ? AND state = 'PENDING' AND expires_at > ?`
+  )
+    .bind(state, by, now, id, now)
+    .run();
+  return Number(result.meta?.changes ?? 0) > 0;
+}
+
+/** The honest answer when the claim lost: the row says which of the two reasons. */
+async function lostRace(env: Env, id: string): Promise<DecisionResult> {
+  const current = await getApproval(env, id);
+  if (current === null) {
+    return { ok: false, error: "not_found", message: `no approval request ${id}` };
+  }
+  if (current.state === "PENDING" && current.expires_at <= Date.now()) {
+    await env.DB.prepare(
+      `UPDATE approval_requests SET state = 'EXPIRED' WHERE id = ? AND state = 'PENDING'`
+    )
+      .bind(id)
+      .run();
+    return { ok: false, error: "expired", message: "request expired before it was answered" };
+  }
+  return {
+    ok: false,
+    error: "not_pending",
+    message: `request is already ${current.state.toLowerCase()}`,
+  };
+}
+
 export type DecisionResult =
   | { ok: true; approval: ApprovalRecord; grant: GrantRecord | null; clamped: ClampedDuration | null }
   | { ok: false; error: "not_found" | "not_pending" | "expired" | "bad_target" | "not_grantable"; message: string };
@@ -636,12 +681,8 @@ export async function decideApproval(
   }
 
   if (decision === "reject") {
-    await env.DB.prepare(
-      `UPDATE approval_requests SET state = 'REJECTED', decided_by = ?, decided_at = ?
-        WHERE id = ? AND state = 'PENDING'`
-    )
-      .bind(options.by, now, id)
-      .run();
+    const claimed = await claim(env, id, "REJECTED", options.by, now);
+    if (!claimed) return lostRace(env, id);
     const updated = await getApproval(env, id);
     return { ok: true, approval: updated ?? approval, grant: null, clamped: null };
   }
@@ -655,6 +696,16 @@ export async function decideApproval(
     };
   }
 
+  // CLAIM FIRST, then mint.
+  //
+  // Minting first let two approvers both read PENDING, both mint a grant and both
+  // answer `ok: true`; `createGrant`'s supersede then silently revoked the first
+  // grant, so one of the two people was told they had granted something that no
+  // longer existed. One conditional UPDATE makes the second answer lose, which is
+  // the truth.
+  const claimed = await claim(env, id, "APPROVED", options.by, now);
+  if (!claimed) return lostRace(env, id);
+
   const created = await createGrant(env, {
     agentTokenId: approval.agent_token_id,
     scope: approval.scope,
@@ -665,6 +716,14 @@ export async function decideApproval(
     now,
   });
   if (!created.ok) {
+    // Nothing was granted, so the request must not look decided. Handing it back
+    // to PENDING lets the operator retry once the cause is fixed.
+    await env.DB.prepare(
+      `UPDATE approval_requests SET state = 'PENDING', decided_by = NULL, decided_at = NULL
+        WHERE id = ? AND state = 'APPROVED' AND grant_id IS NULL`
+    )
+      .bind(id)
+      .run();
     return {
       ok: false,
       error: created.error === "bad_target" ? "bad_target" : "not_grantable",
@@ -672,11 +731,8 @@ export async function decideApproval(
     };
   }
 
-  await env.DB.prepare(
-    `UPDATE approval_requests SET state = 'APPROVED', decided_by = ?, decided_at = ?, grant_id = ?
-      WHERE id = ? AND state = 'PENDING'`
-  )
-    .bind(options.by, now, created.grant.id, id)
+  await env.DB.prepare(`UPDATE approval_requests SET grant_id = ? WHERE id = ?`)
+    .bind(created.grant.id, id)
     .run();
 
   const updated = await getApproval(env, id);

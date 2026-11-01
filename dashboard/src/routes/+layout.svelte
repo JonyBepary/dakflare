@@ -20,7 +20,7 @@
 
 	let { children } = $props();
 
-	type CountKey = 'devices' | 'messages' | 'rules';
+	type CountKey = 'devices' | 'messages' | 'rules' | 'approvals';
 	type NavItem = {
 		href: string;
 		label: string;
@@ -58,6 +58,13 @@
 			label: 'Security',
 			ownersOnly: true,
 			items: [
+				{
+					href: ROUTES.approvals,
+					label: 'Approvals',
+					icon: 'key',
+					count: 'approvals',
+					countWord: 'waiting'
+				},
 				{ href: ROUTES.audit, label: 'Audit log', icon: 'history' },
 				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield' }
 			]
@@ -108,6 +115,14 @@
 	}
 
 	const activeLabel = $derived(nav.find(isActive)?.label ?? 'Console');
+
+	/**
+	 * One refresh path for the rail. The approvals count is human-only, so the
+	 * extra read runs only when this session can see the Approvals screen.
+	 */
+	function refreshCounts(): void {
+		void consoleCounts.refresh(session.canViewSecurity);
+	}
 
 	/** The rail's section for the current page: the header names where you are. */
 	const activeSection = $derived(
@@ -193,13 +208,13 @@
 		void bootSession();
 
 		const timer = setInterval(() => {
-			if (document.visibilityState === 'visible' && !isPreauth) void consoleCounts.refresh();
+			if (document.visibilityState === 'visible' && !isPreauth) refreshCounts();
 		}, COUNT_REFRESH_MS);
 		const onVisible = () => {
-			if (document.visibilityState === 'visible' && !isPreauth) void consoleCounts.refresh();
+			if (document.visibilityState === 'visible' && !isPreauth) refreshCounts();
 		};
 		const onAlertsChanged = () => {
-			if (!isPreauth) void consoleCounts.refresh();
+			if (!isPreauth) refreshCounts();
 		};
 		document.addEventListener('visibilitychange', onVisible);
 		window.addEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
@@ -216,7 +231,7 @@
 	// its own result into the same store, so the two never disagree.
 	$effect(() => {
 		void page.url.pathname;
-		if (boot === 'ready' && !isPreauth) void consoleCounts.refresh();
+		if (boot === 'ready' && !isPreauth) refreshCounts();
 	});
 
 	// Keep the current section in view inside the horizontally scrolling mobile

@@ -27,6 +27,9 @@ export const ROUTES = {
 	magic: resolve('/magic'),
 	// Owner/admin only (AUTH_PLAN §5); the nav hides it for members.
 	audit: resolve('/audit'),
+	// The human side of the agent control plane: pending authority requests and
+	// the duration ladder that answers them. Also owner/admin only.
+	approvals: resolve('/approvals'),
 	// Owner/admin only as well: the account's factors are managed next to the
 	// log that records their use.
 	security: resolve('/security')

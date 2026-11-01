@@ -2961,6 +2961,31 @@ async function cmdSuite() {
     const phoneOverAsk = await approveFromPhone(2_592_000);
     rep.check('a second answer to a decided request -> 409', phoneOverAsk.status, 409);
 
+    // Two approvers at once: exactly one may win. Before the claim moved into a
+    // single conditional UPDATE both answered ok, and the first grant had already
+    // been superseded, so one person was told they had granted something that no
+    // longer existed.
+    const raced = await admin('POST', '/v1/admin/agent-tokens', {
+      name: 'race probe', scopes: ['sms:send'], max_per_hour: 1,
+    });
+    const raceAsk = await fetch(WORKER_URL + '/v1/sms/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${raced.data.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_id: identity.deviceId, to: '+8801700000198', body: 'race' }),
+    });
+    const raceId = (await raceAsk.json()).approval_request.id;
+    const [first, second] = await Promise.all([
+      admin('POST', `/v1/admin/approvals/${raceId}/approve`, { duration_s: 300 }),
+      admin('POST', `/v1/admin/approvals/${raceId}/approve`, { duration_s: 900 }),
+    ]);
+    const winners = [first.status, second.status].filter((status) => status === 200);
+    rep.check('two concurrent approvals: exactly one wins', winners.length, 1);
+    rep.check('...and the other is a conflict',
+      [first.status, second.status].filter((status) => status === 409).length, 1);
+    const raceGrants = (await admin('GET', `/v1/admin/grants?token=${raced.data.id}&live=1`)).data?.grants ?? [];
+    rep.check('...leaving exactly one live grant', raceGrants.length, 1);
+    await admin('DELETE', `/v1/admin/agent-tokens/${raced.data.id}`);
+
     const sentAfterApproval = await fetch(WORKER_URL + '/v1/sms/send', {
       method: 'POST',
       headers: {
