@@ -49,6 +49,20 @@ jobs:
       - run: npm run typecheck
       - run: npm run check:config
 
+  skills:
+    name: Skills match the CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # The CLI is zero-dependency, so this needs no install. It reads
+      # `capabilities --agent` and fails on an invocation the CLI does not have:
+      # a skill that documents a command that is not there is worse than none,
+      # because an agent follows it and concludes the deployment is broken.
+      - run: node test-support/skills-gate.mjs
+
   dashboard:
     name: Console types and build
     runs-on: ubuntu-latest

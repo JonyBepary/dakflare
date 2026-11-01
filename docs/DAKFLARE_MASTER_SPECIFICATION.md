@@ -1076,6 +1076,36 @@ A dry run reports the same gate and writes nothing.
 
 ---
 
+### 4.10 Skills, gated against the CLI (6.1.0 P6)
+
+Four skills, each a `SKILL.md` with the spec's frontmatter and under 500 lines:
+
+| Skill | For |
+|---|---|
+| `dakflare-provision` | installing, deploying, repairing, pairing, revoking |
+| `dakflare-messaging` | sending, following, retrying, reading delivery state |
+| `dakflare-flows` | the nine node kinds, validation, drift, healing |
+| `dakflare-agents` | tokens, grants, approvals, MCP, `trace` |
+
+`test-support/skills-gate.mjs` is the reason they are trustworthy, and it runs as
+its own CI job. For every skill it checks:
+
+- **Frontmatter**, against the Agent Skills spec: `name` matches the directory and
+  is at most 64 characters of `[a-z0-9-]`, `description` is required and at most
+  1024, `metadata` values are strings. `allowed-tools` is real but labelled
+  experimental by the spec, so nothing here depends on it.
+- **Every `dakflare …` invocation.** The command must exist in `capabilities`, and
+  every `--flag` must be one that command declares, plus `--json`, `--agent` and
+  `--help`. A skill that documents a command that is not there fails the build,
+  which is why the skills were written last rather than alongside the code.
+
+The skills were rewritten at 6.1.0 rather than extended: the flows skill still
+described five node kinds and the agents skill did not exist, and a document that
+confidently describes the previous release is the exact failure this gate exists to
+prevent.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -1399,6 +1429,7 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+- **Skills (6.1.0 P6), 4 documents:** `test-support/skills-gate.mjs` reads `capabilities --agent` and fails on an invocation the CLI does not have, a frontmatter name that does not match its directory, a description over 1024 characters, a non-string `metadata` value, or a body over 500 lines. Its negative case is checked: a `dakflare frobnicate` line fails the gate.
 - **Extraction drift and healing (6.1.0 P5), 12 checks:** a flow with one extract node is written, its template changes underneath it, and two misses in an hour raise `extraction_drift` naming the flow and the field; a heal whose new pattern would change two historical extractions exits 6 and leaves the stored version at 1; a heal that covers both templates bumps the version to 2 with a gate that re-checked the real history and broke nothing.
 - **MCP (6.1.0 P4), 32 checks:** `server/discover` advertises 2026-07-28 and names the server; a request with no version claim is `-32022` naming the supported list; `tools/list` returns seven tools, each with an `outputSchema`, and carries `ttlMs`/`cacheScope`; a `Mcp-Param-Device-Id` or `Mcp-Name` that disagrees with the body is `-32020`; a token with only `messages:read` sees fewer tools and cannot call `send_sms`; a send with no grant is `input_required`, and after a human approves, the retry sends; and the CLI bridge returns the same seven names and the same trace answer as the endpoint.
 - **Provenance (6.1.0 P3), 23 checks:** all seven `summary_verdict` values are produced by real fixtures, including `paused_hitl_approval` from an agent's unanswered request, `suppressed_cooldown` and `suppressed_hourly_cap` from rules that matched and were held, and `replied`/`queued`/`failed` by driving the reply command through the state machine with the device's own lease token. That set is asserted to be exactly seven. `alerts`, `dlq` and `ws inspect` answer, and an id nobody owns resolves to `kind: unknown`.
