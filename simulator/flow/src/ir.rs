@@ -393,6 +393,10 @@ pub fn validate(raw: &Value) -> Validation {
     let mut kinds: HashMap<String, String> = HashMap::new();
     let mut seen_nodes: HashMap<String, usize> = HashMap::new();
     let mut group_owner: HashMap<String, usize> = HashMap::new();
+    // A document that already carries a position for every node is one somebody
+    // arranged by hand. Those numbers win over the computed layout, which is the
+    // same rule as the Worker's copy: re-saving a canvas must not reflow it.
+    let mut legacy_positions: BTreeMap<String, Position> = BTreeMap::new();
     // name -> the node index that binds it, for duplicate detection.
     let mut bound_names: HashMap<String, usize> = HashMap::new();
     // Every template, checked after all nodes are known.
@@ -646,11 +650,15 @@ pub fn validate(raw: &Value) -> Validation {
         if !id.is_empty() && seen_nodes.get(&id) == Some(&index) {
             kinds.insert(id.clone(), kind.clone());
         }
+        let position = node.get("position").and_then(parse_position);
+        if let (Some(position), false) = (position, id.is_empty()) {
+            legacy_positions.insert(id.clone(), position);
+        }
         nodes.push(Node {
             id,
             kind,
             data,
-            position: node.get("position").and_then(parse_position),
+            position,
         });
     }
 
@@ -774,7 +782,14 @@ pub fn validate(raw: &Value) -> Validation {
     }
 
     let computed = layout(&graph);
-    graph.ui_layout = Some(computed);
+    graph.ui_layout = Some(if legacy_positions.len() == graph.nodes.len() && !graph.nodes.is_empty() {
+        UiLayout {
+            algorithm: LAYOUT_ALGORITHM.to_string(),
+            positions: legacy_positions,
+        }
+    } else {
+        computed
+    });
     Ok(graph)
 }
 

@@ -4,13 +4,38 @@
     "ok": true,
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "hi" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "hi"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "s1" },
-        { "id": "b", "source": "s1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "s1"
+        },
+        {
+          "id": "b",
+          "source": "s1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -19,17 +44,64 @@
     "ok": true,
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "c1", "type": "condition", "data": { "left": "{{body}}", "op": "contains", "right": "YES" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "ok" } },
-        { "id": "e1", "type": "stop", "data": {} },
-        { "id": "e2", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "c1",
+          "type": "condition",
+          "data": {
+            "left": "{{body}}",
+            "op": "contains",
+            "right": "YES"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "ok"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        },
+        {
+          "id": "e2",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "c1" },
-        { "id": "b", "source": "c1", "target": "s1", "sourceHandle": "true" },
-        { "id": "c", "source": "c1", "target": "e2", "sourceHandle": "false" },
-        { "id": "d", "source": "s1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "c1"
+        },
+        {
+          "id": "b",
+          "source": "c1",
+          "target": "s1",
+          "sourceHandle": "true"
+        },
+        {
+          "id": "c",
+          "source": "c1",
+          "target": "e2",
+          "sourceHandle": "false"
+        },
+        {
+          "id": "d",
+          "source": "s1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -38,23 +110,103 @@
     "ok": true,
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "x1", "type": "extract", "data": { "source": "body", "pattern": "code (?<code>[0-9]+)" } },
-        { "id": "w1", "type": "switch", "data": { "value": "{{code}}", "cases": ["1", "2"] } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "one" } },
-        { "id": "s2", "type": "send_sms", "data": { "to": "{{sender}}", "body": "two" } },
-        { "id": "e1", "type": "stop", "data": {} },
-        { "id": "e2", "type": "stop", "data": {} },
-        { "id": "e3", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "x1",
+          "type": "extract",
+          "data": {
+            "source": "body",
+            "pattern": "code (?<code>[0-9]+)"
+          }
+        },
+        {
+          "id": "w1",
+          "type": "switch",
+          "data": {
+            "value": "{{code}}",
+            "cases": [
+              "1",
+              "2"
+            ]
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "one"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "two"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        },
+        {
+          "id": "e2",
+          "type": "stop",
+          "data": {}
+        },
+        {
+          "id": "e3",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "x1" },
-        { "id": "b", "source": "x1", "target": "w1" },
-        { "id": "c", "source": "w1", "target": "s1", "sourceHandle": "case:0" },
-        { "id": "d", "source": "w1", "target": "s2", "sourceHandle": "case:1" },
-        { "id": "e", "source": "w1", "target": "e3", "sourceHandle": "default" },
-        { "id": "f", "source": "s1", "target": "e1" },
-        { "id": "g", "source": "s2", "target": "e2" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "x1"
+        },
+        {
+          "id": "b",
+          "source": "x1",
+          "target": "w1"
+        },
+        {
+          "id": "c",
+          "source": "w1",
+          "target": "s1",
+          "sourceHandle": "case:0"
+        },
+        {
+          "id": "d",
+          "source": "w1",
+          "target": "s2",
+          "sourceHandle": "case:1"
+        },
+        {
+          "id": "e",
+          "source": "w1",
+          "target": "e3",
+          "sourceHandle": "default"
+        },
+        {
+          "id": "f",
+          "source": "s1",
+          "target": "e1"
+        },
+        {
+          "id": "g",
+          "source": "s2",
+          "target": "e2"
+        }
       ]
     }
   },
@@ -63,19 +215,76 @@
     "ok": true,
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "x1", "type": "extract", "data": { "source": "body", "pattern": "amount (?<amount>[0-9]+)" } },
-        { "id": "v1", "type": "set_var", "data": { "name": "note", "value": "amount={{vars.amount}}" } },
-        { "id": "d1", "type": "delay", "data": { "seconds": 30 } },
-        { "id": "h1", "type": "webhook", "data": { "url": "https://example.test/hook", "body": "{{note}}" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "x1",
+          "type": "extract",
+          "data": {
+            "source": "body",
+            "pattern": "amount (?<amount>[0-9]+)"
+          }
+        },
+        {
+          "id": "v1",
+          "type": "set_var",
+          "data": {
+            "name": "note",
+            "value": "amount={{vars.amount}}"
+          }
+        },
+        {
+          "id": "d1",
+          "type": "delay",
+          "data": {
+            "seconds": 30
+          }
+        },
+        {
+          "id": "h1",
+          "type": "webhook",
+          "data": {
+            "url": "https://example.test/hook",
+            "body": "{{note}}"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "x1" },
-        { "id": "b", "source": "x1", "target": "v1" },
-        { "id": "c", "source": "v1", "target": "d1" },
-        { "id": "d", "source": "d1", "target": "h1" },
-        { "id": "e", "source": "h1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "x1"
+        },
+        {
+          "id": "b",
+          "source": "x1",
+          "target": "v1"
+        },
+        {
+          "id": "c",
+          "source": "v1",
+          "target": "d1"
+        },
+        {
+          "id": "d",
+          "source": "d1",
+          "target": "h1"
+        },
+        {
+          "id": "e",
+          "source": "h1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -85,14 +294,46 @@
     "contains": "cycle",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "a" } },
-        { "id": "s2", "type": "send_sms", "data": { "to": "{{sender}}", "body": "b" } }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "a"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "b"
+          }
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "s1" },
-        { "id": "b", "source": "s1", "target": "s2" },
-        { "id": "c", "source": "s2", "target": "s1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "s1"
+        },
+        {
+          "id": "b",
+          "source": "s1",
+          "target": "s2"
+        },
+        {
+          "id": "c",
+          "source": "s2",
+          "target": "s1"
+        }
       ]
     }
   },
@@ -102,18 +343,72 @@
     "contains": "not bound on every path",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "c1", "type": "condition", "data": { "left": "{{body}}", "op": "contains", "right": "amount" } },
-        { "id": "x1", "type": "extract", "data": { "source": "body", "pattern": "amount (?<amount>[0-9]+)" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "{{amount}}" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "c1",
+          "type": "condition",
+          "data": {
+            "left": "{{body}}",
+            "op": "contains",
+            "right": "amount"
+          }
+        },
+        {
+          "id": "x1",
+          "type": "extract",
+          "data": {
+            "source": "body",
+            "pattern": "amount (?<amount>[0-9]+)"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "{{amount}}"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "c1" },
-        { "id": "b", "source": "c1", "target": "x1", "sourceHandle": "true" },
-        { "id": "c", "source": "c1", "target": "s1", "sourceHandle": "false" },
-        { "id": "d", "source": "x1", "target": "s1" },
-        { "id": "e", "source": "s1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "c1"
+        },
+        {
+          "id": "b",
+          "source": "c1",
+          "target": "x1",
+          "sourceHandle": "true"
+        },
+        {
+          "id": "c",
+          "source": "c1",
+          "target": "s1",
+          "sourceHandle": "false"
+        },
+        {
+          "id": "d",
+          "source": "x1",
+          "target": "s1"
+        },
+        {
+          "id": "e",
+          "source": "s1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -123,13 +418,38 @@
     "contains": "never bound",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "{{vars.amount}}" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "{{vars.amount}}"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "s1" },
-        { "id": "b", "source": "s1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "s1"
+        },
+        {
+          "id": "b",
+          "source": "s1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -139,13 +459,37 @@
     "contains": "exactly one trigger",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "t2", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "t2",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "e1" },
-        { "id": "b", "source": "t2", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "e1"
+        },
+        {
+          "id": "b",
+          "source": "t2",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -155,13 +499,39 @@
     "contains": "one 'true' and one 'false'",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "c1", "type": "condition", "data": { "left": "{{body}}", "op": "exists" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "c1",
+          "type": "condition",
+          "data": {
+            "left": "{{body}}",
+            "op": "exists"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "c1" },
-        { "id": "b", "source": "c1", "target": "e1", "sourceHandle": "true" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "c1"
+        },
+        {
+          "id": "b",
+          "source": "c1",
+          "target": "e1",
+          "sourceHandle": "true"
+        }
       ]
     }
   },
@@ -171,15 +541,52 @@
     "contains": "needs a 'default'",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "w1", "type": "switch", "data": { "value": "{{body}}", "cases": ["a"] } },
-        { "id": "e1", "type": "stop", "data": {} },
-        { "id": "e2", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "w1",
+          "type": "switch",
+          "data": {
+            "value": "{{body}}",
+            "cases": [
+              "a"
+            ]
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        },
+        {
+          "id": "e2",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "w1" },
-        { "id": "b", "source": "w1", "target": "e1", "sourceHandle": "case:0" },
-        { "id": "c", "source": "w1", "target": "e2", "sourceHandle": "case:1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "w1"
+        },
+        {
+          "id": "b",
+          "source": "w1",
+          "target": "e1",
+          "sourceHandle": "case:0"
+        },
+        {
+          "id": "c",
+          "source": "w1",
+          "target": "e2",
+          "sourceHandle": "case:1"
+        }
       ]
     }
   },
@@ -189,12 +596,30 @@
     "contains": "not reachable",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "e1", "type": "stop", "data": {} },
-        { "id": "e2", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        },
+        {
+          "id": "e2",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "e1"
+        }
       ]
     }
   },
@@ -204,11 +629,25 @@
     "contains": "duplicate node id",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "t1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "t1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "t1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "t1"
+        }
       ]
     }
   },
@@ -218,12 +657,33 @@
     "contains": "self-loop",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "a" } }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "a"
+          }
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "s1" },
-        { "id": "b", "source": "s1", "target": "s1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "s1"
+        },
+        {
+          "id": "b",
+          "source": "s1",
+          "target": "s1"
+        }
       ]
     }
   },
@@ -233,11 +693,25 @@
     "contains": "must be one of",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "z1", "type": "sleep_pretty", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "z1",
+          "type": "sleep_pretty",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "z1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "z1"
+        }
       ]
     }
   },
@@ -247,13 +721,91 @@
     "contains": "named group",
     "graph": {
       "nodes": [
-        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
-        { "id": "x1", "type": "extract", "data": { "source": "body", "pattern": "[0-9]+" } },
-        { "id": "e1", "type": "stop", "data": {} }
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "x1",
+          "type": "extract",
+          "data": {
+            "source": "body",
+            "pattern": "[0-9]+"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
       ],
       "edges": [
-        { "id": "a", "source": "t1", "target": "x1" },
-        { "id": "b", "source": "x1", "target": "e1" }
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "x1"
+        },
+        {
+          "id": "b",
+          "source": "x1",
+          "target": "e1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "positions are preserved, not recomputed",
+    "ok": true,
+    "layout_preserved": true,
+    "graph": {
+      "nodes": [
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          },
+          "position": {
+            "x": 40,
+            "y": 120
+          }
+        },
+        {
+          "id": "s1",
+          "type": "send_sms",
+          "data": {
+            "to": "{{sender}}",
+            "body": "hi"
+          },
+          "position": {
+            "x": 340,
+            "y": 120
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {},
+          "position": {
+            "x": 640,
+            "y": 120
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "s1"
+        },
+        {
+          "id": "b",
+          "source": "s1",
+          "target": "e1"
+        }
       ]
     }
   }

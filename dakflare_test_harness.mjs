@@ -2039,6 +2039,12 @@ async function cmdSuite() {
       await sleep(400);
       const dispatched = await admin('GET', `/v1/sms/commands/${cmdId}?device_id=${identity.deviceId}`);
       rep.check('command pushed and LEASED', dispatched.data?.command?.state, 'LEASED');
+      // The lease started when the push happened, which is before this read. The
+      // window is measured from HERE, so the close assertion below cannot eat
+      // into it: measuring from after that wait made the observed value
+      // `LEASE_MS` minus however long the close took, which is a coin flip
+      // against any threshold.
+      const leaseStartedAt = Date.now();
 
       // A real deployment's alarm scheduling adds latency; allow for it. The
       // lease expires at LEASE_MS, independent of ACK_TIMEOUT_MS, and the two
@@ -2056,7 +2062,6 @@ async function cmdSuite() {
       rep.check('closing the socket does NOT release the lease',
         afterClose.data?.command?.state, 'LEASED');
 
-      const leaseStartedAt = Date.now();
       const revertDeadline = leaseStartedAt + LEASE_MS + (REMOTE ? 25_000 : 5_000);
       let revertedState = null;
       while (Date.now() < revertDeadline) {
@@ -2296,6 +2301,13 @@ async function cmdSuite() {
             (graph.nodes ?? []).every((node) =>
               node.position?.x === positions[node.id]?.x &&
               node.position?.y === positions[node.id]?.y), true);
+          // A document that arrived with a position for every node keeps them.
+          if (vector.layout_preserved === true) {
+            rep.check(`${vector.name}: a hand-arranged canvas is not reflowed`,
+              (vector.graph.nodes ?? []).every((node) =>
+                positions[node.id]?.x === node.position.x &&
+                positions[node.id]?.y === node.position.y), true);
+          }
         }
       } else {
         rep.check(`${vector.name} -> refused`, res.status, 400);

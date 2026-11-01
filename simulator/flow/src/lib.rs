@@ -889,7 +889,26 @@ mod tests {
             let graph = case.get("graph").expect("graph");
             let outcome = ir::validate(graph);
             match (expect_ok, &outcome) {
-                (true, Ok(_)) => {}
+                (true, Ok(canonical)) => {
+                    if case.get("layout_preserved").and_then(Value::as_bool) == Some(true) {
+                        let layout = canonical.ui_layout.as_ref().expect("layout");
+                        for node in &canonical.nodes {
+                            let input = graph["nodes"]
+                                .as_array()
+                                .and_then(|nodes| nodes.iter().find(|n| n["id"] == node.id))
+                                .expect("node");
+                            let expected = ir::Position {
+                                x: input["position"]["x"].as_f64().expect("x"),
+                                y: input["position"]["y"].as_f64().expect("y"),
+                            };
+                            assert_eq!(
+                                layout.positions[&node.id], expected,
+                                "{name}: node {} moved",
+                                node.id
+                            );
+                        }
+                    }
+                }
                 (true, Err(issues)) => panic!("{name}: expected valid, got {issues:?}"),
                 (false, Ok(_)) => panic!("{name}: expected refused, got a valid graph"),
                 (false, Err(issues)) => {
