@@ -184,6 +184,9 @@ const ERROR_RULES = {
   // v6.1 P2. The samples cannot produce a trustworthy pattern, or the engine is
   // not where the CLI expects it. Both are the caller's to fix, so both are 2.
   synthesis_refused: { exit: 2, category: 'usage' },
+  // The new pattern would change what history reads. Nothing was written; the
+  // operator has to decide whether the history or the pattern is wrong.
+  heal_refused: { exit: 6, category: 'precondition' },
   wasm_missing: { exit: 2, category: 'tooling' },
   version_conflict: {
     exit: 5,
@@ -410,7 +413,7 @@ const COMMAND_SPECS = {
   flows: {
     summary: 'Apply a flow document (apply)',
     effect: 'mutating',
-    usage: 'dakflare flows apply <file> [--dry-run] [--agent]',
+    usage: 'dakflare flows apply <file> [--dry-run] [--agent] | flows heal <id> --samples <file>',
     flags: {
       file: { type: 'string', note: 'convenience alternative to the positional <file>' },
       'dry-run': { type: 'boolean', note: 'print the diff and change nothing' },
@@ -418,10 +421,17 @@ const COMMAND_SPECS = {
         type: 'boolean',
         note: 'drop expected_previous_version from the document before writing',
       },
+      samples: { type: 'string', note: 'heal: the {body, value} examples of the new template' },
+      node: { type: 'string', note: 'heal: which extract node, default the only one' },
+      'corpus-limit': {
+        type: 'number',
+        note: 'heal: inbound messages to re-check, default 200',
+      },
     },
     examples: [
       'dakflare flows apply flow.json --dry-run',
       'dakflare flows apply flow.json',
+      'dakflare flows heal wf_orders --samples new-template.json --dry-run',
     ],
   },
   rules: {
@@ -677,6 +687,8 @@ const VALUE_FLAGS = new Set([
   'verify-d1-limit',
   'sub',
   'version',
+  'node',
+  'corpus-limit',
 ]);
 
 function parseArgv(argv) {
@@ -2670,7 +2682,14 @@ const SUMMARY_BUILDERS = {
                   : 'owner account updated',
   key: () => 'signing key read',
   up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
-  flows: (data) => (data.applied === true ? 'flow applied' : 'flow diffed, nothing written'),
+  flows: (data) =>
+    data.healed === true
+      ? `flow healed to v${data.to_version}`
+      : data.healed === false
+        ? 'heal refused, nothing written'
+        : data.applied === true
+          ? 'flow applied'
+          : 'flow diffed, nothing written',
   extract: (data) => (data.pattern ? 'pattern synthesized' : 'nothing synthesized'),
   trace: (data) => `verdict ${data.verdict ?? 'unknown'}`,
   mcp: () => 'served MCP on stdio',
@@ -2931,6 +2950,262 @@ async function commandAuthInvites(argv) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
   }
+  return 0;
+}
+
+/* ─────────────────── drift and healing (v6.1 P5) ─────────────────── */
+
+/**
+ * `flows heal <id> --samples <file>` — re-derive a broken extract, but only if it
+ * still reads the history the same way.
+ *
+ * The gate is the point. A new pattern that fixes today's template and silently
+ * changes what yesterday's messages extract would turn a visible drift into an
+ * invisible one, so every historical body the OLD pattern matched must produce the
+ * SAME value through the new one, byte for byte. One difference and nothing is
+ * written.
+ */
+async function commandFlowsHeal(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('flows');
+  assertCommandFlags(flags, 'flows');
+  const json = MODE.json;
+
+  const flowId = stringFlag(flags, 'id') ?? rest[0];
+  if (!flowId) throw usage('dakflare flows heal <flow-id> --samples <file>');
+  const samplesFile = stringFlag(flags, 'samples');
+  if (samplesFile === undefined) throw usage('--samples <file> is required: the new examples');
+
+  const corpusLimitFlag = stringFlag(flags, 'corpus-limit');
+  const corpusLimit = corpusLimitFlag === undefined ? 200 : Number(corpusLimitFlag);
+  if (!Number.isFinite(corpusLimit) || corpusLimit < 1 || corpusLimit > 500) {
+    throw usage('--corpus-limit must be between 1 and 500');
+  }
+
+  const cfg = requireConfig();
+  const current = await api(cfg, 'GET', `/v1/admin/workflows/${encodeURIComponent(flowId)}`);
+  if (current.status === 404) {
+    throw new CliError(`no flow ${flowId}`, 3, { error: 'not_found', flow_id: flowId });
+  }
+  if (current.status !== 200) throw requestFailure('read the flow', current);
+  const flow = current.data?.workflow ?? {};
+  const graph = flow.graph ?? {};
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+
+  // Which extract node broke. Named explicitly, or the only one there is.
+  const extracts = nodes.filter((node) => node.type === 'extract');
+  const nodeId = stringFlag(flags, 'node');
+  const target =
+    nodeId === undefined
+      ? extracts.length === 1
+        ? extracts[0]
+        : null
+      : extracts.find((node) => node.id === nodeId) ?? null;
+  if (target === null) {
+    throw usage(
+      extracts.length === 0
+        ? `${flowId} has no extract node to heal`
+        : `--node is required: ${flowId} has ${extracts.length} extract nodes (${extracts.map((n) => n.id).join(', ')})`
+    );
+  }
+
+  /* ---- the new pattern, from the samples ---------------------------- */
+  const samplesDoc = readJsonDocument(samplesFile);
+  const samples = Array.isArray(samplesDoc) ? samplesDoc : samplesDoc.samples;
+  if (!Array.isArray(samples) || samples.length === 0) {
+    throw usage(`${samplesFile}: expected { "samples": [ { "body", "value" } ] } or a bare array`);
+  }
+  const group =
+    stringFlag(flags, 'group') ??
+    (typeof samplesDoc?.group === 'string' ? samplesDoc.group : undefined);
+
+  const engine = await loadFlowEngine();
+  const synthesized = callFlowEngine(engine, 'synthesize_json', {
+    samples,
+    negatives: Array.isArray(samplesDoc?.negatives) ? samplesDoc.negatives : [],
+    ...(group === undefined ? {} : { group }),
+  });
+  if (synthesized.ok !== true) {
+    if (json) {
+      emitJson(
+        {
+          ok: false,
+          error: 'synthesis_refused',
+          reason: synthesized.reason,
+          message: synthesized.message,
+          healed: false,
+        },
+        MODE
+      );
+      return exitCodeFor('synthesis_refused');
+    }
+    out(fail(`Refused: ${synthesized.message}`));
+    out(`  reason         ${synthesized.reason}`);
+    return exitCodeFor('synthesis_refused');
+  }
+  const newPattern = synthesized.result.pattern;
+
+  /* ---- the corpus: what the OLD pattern reads today ------------------ */
+  const deviceId =
+    typeof flow.device_id === 'string' && flow.device_id !== ''
+      ? flow.device_id
+      : (await resolveDevice(cfg, stringFlag(flags, 'device'))).deviceId;
+
+  const listed = await api(
+    cfg,
+    'GET',
+    `/v1/messages?device_id=${encodeURIComponent(deviceId)}&limit=${Math.round(corpusLimit)}`
+  );
+  if (listed.status !== 200) throw requestFailure('read the history for the gate', listed);
+  const corpus = (listed.data?.messages ?? []).filter((row) => row.direction === 'in');
+
+  const oldPattern = String(target.data?.pattern ?? '');
+  const groupName = synthesized.result.group;
+  let regexOld = null;
+  let regexNew = null;
+  try {
+    regexOld = oldPattern === '' ? null : new RegExp(oldPattern);
+    regexNew = new RegExp(newPattern);
+  } catch (error) {
+    throw new CliError(`a pattern does not compile in JavaScript: ${error.message}`, 1, {
+      error: 'bad_response',
+    });
+  }
+
+  const breakage = [];
+  let matchedBefore = 0;
+  for (const row of corpus) {
+    const body = String(row.body ?? '');
+    const before = regexOld === null ? null : regexOld.exec(body);
+    const valueBefore = before?.groups?.[groupName] ?? null;
+    if (valueBefore === null) continue;
+    matchedBefore += 1;
+    const after = regexNew.exec(body);
+    const valueAfter = after?.groups?.[groupName] ?? null;
+    if (valueAfter !== valueBefore) {
+      breakage.push({
+        message_id: row.id,
+        local_id: row.local_id,
+        expected: valueBefore,
+        actual: valueAfter,
+      });
+    }
+  }
+
+  const gate = {
+    device_id: deviceId,
+    checked: corpus.length,
+    matched_before: matchedBefore,
+    broken: breakage.length,
+  };
+
+  if (breakage.length > 0) {
+    if (json) {
+      emitJson(
+        {
+          ok: false,
+          error: 'heal_refused',
+          healed: false,
+          flow_id: flowId,
+          node_id: target.id,
+          pattern: newPattern,
+          gate,
+          breakage: breakage.slice(0, 10),
+          message: `${breakage.length} historical message(s) would extract differently`,
+        },
+        MODE
+      );
+      return exitCodeFor('heal_refused');
+    }
+    out(fail(`Refused: the new pattern changes ${breakage.length} of ${matchedBefore} historical extractions`));
+    for (const row of breakage.slice(0, 5)) {
+      out(`  ${row.local_id ?? row.message_id}  expected ${JSON.stringify(row.expected)}, got ${JSON.stringify(row.actual)}`);
+    }
+    out(muted('  nothing was written; a heal must not turn a visible drift into an invisible one'));
+    return exitCodeFor('heal_refused');
+  }
+
+  /* ---- write it, guarded on the version we read ---------------------- */
+  const healedGraph = {
+    ...graph,
+    nodes: nodes.map((node) =>
+      node.id === target.id
+        ? { ...node, data: { ...(node.data ?? {}), pattern: newPattern } }
+        : node
+    ),
+  };
+
+  if (flags['dry-run'] === true) {
+    if (json) {
+      emitJson(
+        {
+          ok: true,
+          healed: false,
+          dry_run: true,
+          flow_id: flowId,
+          node_id: target.id,
+          from_version: flow.version,
+          pattern: newPattern,
+          gate,
+        },
+        MODE
+      );
+      return 0;
+    }
+    out(`Would heal ${flowId} (v${flow.version})`);
+    out(`  node           ${target.id}`);
+    out(`  pattern        ${newPattern}`);
+    out(`  gate           ${matchedBefore} of ${corpus.length} historical messages still read identically`);
+    out(muted('  --dry-run: nothing was written'));
+    return 0;
+  }
+
+  const written = await api(cfg, 'PUT', `/v1/admin/workflows/${encodeURIComponent(flowId)}`, {
+    name: flow.name,
+    graph: healedGraph,
+    ...(flow.device_id === undefined || flow.device_id === null ? {} : { device_id: flow.device_id }),
+    enabled: flow.enabled !== false,
+    expected_previous_version: flow.version,
+  });
+  if (written.status === 409) {
+    if (json) emitJson({ ok: false, error: 'version_conflict', ...(written.data ?? {}), healed: false }, MODE);
+    else out(warn(`Refused: ${written.data?.message ?? 'the flow changed while healing'}`));
+    return exitCodeFor('version_conflict');
+  }
+  if (written.status !== 200) {
+    if (written.data?.error === 'workflow_invalid') {
+      const issues = written.data.details ?? [];
+      if (json) emitJson({ ok: false, error: 'workflow_invalid', details: issues, healed: false }, MODE);
+      else {
+        out(fail(`Refused: the healed graph has ${issues.length} issue(s)`));
+        for (const issue of issues) out(`  ${issue.path}: ${issue.message}`);
+      }
+      return exitCodeFor('workflow_invalid');
+    }
+    throw requestFailure('write the healed flow', written);
+  }
+
+  const result = written.data?.workflow ?? {};
+  if (json) {
+    emitJson(
+      {
+        ok: true,
+        healed: true,
+        flow_id: flowId,
+        node_id: target.id,
+        from_version: flow.version,
+        to_version: result.version,
+        pattern: newPattern,
+        gate,
+      },
+      MODE
+    );
+    return 0;
+  }
+  out(`Healed ${flowId}: v${flow.version} -> v${result.version ?? '?'}`);
+  out(`  node           ${target.id}`);
+  out(`  pattern        ${newPattern}`);
+  out(`  gate           ${matchedBefore} of ${corpus.length} historical messages read identically`);
   return 0;
 }
 
@@ -3614,6 +3889,7 @@ async function commandFlows(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('flows');
   if (sub === 'apply') return commandFlowsApply(rest);
+  if (sub === 'heal') return commandFlowsHeal(rest);
   err(`dakflare: unknown flows subcommand "${sub}"`);
   err('try `dakflare flows --help`');
   return 2;

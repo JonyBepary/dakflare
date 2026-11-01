@@ -1038,6 +1038,44 @@ figure is reference only.
 
 ---
 
+### 4.9 Extraction drift and healing (6.1.0 P5)
+
+An `extract` node whose pattern stops matching is the quietest failure in the
+system: the message was accepted, the flow ran, and it stopped at a step that said
+nothing. Nothing errors and nothing retries.
+
+**Detection.** Every miss is recorded in `extract_misses` with the flow, the node,
+the **capture group** it was looking for and a bounded body preview. Two misses in
+an hour raise one `extraction_drift` alert whose detail names the flow, the node
+and the field. "The `order` group stopped matching" is actionable; "the flow
+halted" is not.
+
+Alert identity is one open alert per device, because that is the partial unique
+index the alerts table already has on `(device_id, kind)`. Two flows drifting at
+once therefore share the slot, and the second is not announced until the first is
+acknowledged. The detail always names the flow, so the console is not ambiguous,
+but it is a known limit rather than a design.
+
+**Healing.** `dakflare flows heal <flow-id> --samples <file>` re-derives the
+pattern from new examples and gates it on the real history:
+
+1. Synthesize the new pattern from `--samples`, with the same engine the Worker
+   runs (`flow.wasm`, offline).
+2. Read the last `--corpus-limit` inbound bodies for the device.
+3. For every body the OLD pattern matched, the NEW pattern must capture the SAME
+   value, byte for byte. One difference and nothing is written.
+4. Write it with `expected_previous_version`, so a concurrent edit is a 409 rather
+   than a lost change.
+
+The gate is the point: a pattern that fixes today's template and quietly changes
+what yesterday's messages extract would turn a visible drift into an invisible
+one. A refusal prints the first few offenders with expected and actual values, and
+exits `6`.
+
+A dry run reports the same gate and writes nothing.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -1202,7 +1240,7 @@ after a human answers cannot cause a second SMS.
 | `status` | `<command-id>`, `--device <id>`, `--wait [d]`, `--until <s>` | Inspects live delivery state from DO SQLite queue. |
 | `auth` | `bootstrap`, `invite`, `invites`, `reset`, `mint-agent-token --name <t> --scope <a,b> [--device <id>] [--ttl <s>] [--max-per-hour <n>]`, `agent-tokens [--all]`, `revoke-agent-token <id> --yes`, `approvals [--state S]`, `approve <id> [--for 15m]`, `reject <id>`, `grants [--token <id>] [--live]`, `grants revoke <grant-id> --yes` | Accounts and the agent control plane. Agent tokens are a third credential, not a role: `mint-agent-token` prints the value once and stores a digest; `approve` picks a duration from the ladder (1m/5m/15m/30m/1h/1d/7d/30d), clamps it to the scope's ceiling and says when it did. `--agent` never prompts, so pass `--yes` on the revoking subcommands. |
 | `audit` | `--tail [n]`, `--actor <lbl>`, `--limit <n>` | Reads operational audit trail from `/v1/admin/audit`. |
-| `flows` | `apply <file> [--dry-run]` | Writes one flow document. The file is `{id, name, graph, device_id?, enabled?, expected_previous_version?}` or a bare `{nodes, edges}`. `--dry-run` returns `data.dry_run_diff` (added/removed/changed nodes and edges, capture variables, layout) and writes nothing. A stale `expected_previous_version` exits `5` and names the stored version; a refused graph exits `2` with every issue and its path. |
+| `flows` | `apply <file> [--dry-run]`, `heal <id> --samples <file> [--node <id>] [--corpus-limit <n>] [--dry-run]` | `apply` writes one flow document. The file is `{id, name, graph, device_id?, enabled?, expected_previous_version?}` or a bare `{nodes, edges}`. `--dry-run` returns `data.dry_run_diff` (added/removed/changed nodes and edges, capture variables, layout) and writes nothing. A stale `expected_previous_version` exits `5` and names the stored version; a refused graph exits `2` with every issue and its path. |
 | `rules` | `apply <file> [--dry-run]`, `test --peer <e164> --body <text> [--device <id>]` | `apply` writes one rule or a `{rules: [...]}` document and reports create/update/unchanged per rule. `test` evaluates **every** rule and says why each would or would not reply (`disabled`, `sender_mismatch`, `body_mismatch`, `cooldown`, `hourly_cap`), which is the honest answer to "why did this message get no reply". |
 | `extract` | `synthesize --samples <file> [--group <name>] [--verify-d1-limit <n>] [--device <id>]` | Derives a regex from `{body, value}` examples and proves it against them and against a negative corpus before printing it. Refuses an ambiguous or unanchorable example with a named reason and exit `2`. Runs offline against the bundled `flow.wasm`. `--verify-d1-limit` reports how many recent inbound bodies matched, which is a match count, not a correctness check. |
 | `trace` | `<id> [--device <id>]` | One id, the whole story: the inbound row and its automation bookkeeping from D1, the command, timers and sockets from the device object, the matching audit rows, and an approval request when that is what the id names. The first line is one of the seven verdicts in §4.7. |
@@ -1361,6 +1399,7 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+- **Extraction drift and healing (6.1.0 P5), 12 checks:** a flow with one extract node is written, its template changes underneath it, and two misses in an hour raise `extraction_drift` naming the flow and the field; a heal whose new pattern would change two historical extractions exits 6 and leaves the stored version at 1; a heal that covers both templates bumps the version to 2 with a gate that re-checked the real history and broke nothing.
 - **MCP (6.1.0 P4), 32 checks:** `server/discover` advertises 2026-07-28 and names the server; a request with no version claim is `-32022` naming the supported list; `tools/list` returns seven tools, each with an `outputSchema`, and carries `ttlMs`/`cacheScope`; a `Mcp-Param-Device-Id` or `Mcp-Name` that disagrees with the body is `-32020`; a token with only `messages:read` sees fewer tools and cannot call `send_sms`; a send with no grant is `input_required`, and after a human approves, the retry sends; and the CLI bridge returns the same seven names and the same trace answer as the endpoint.
 - **Provenance (6.1.0 P3), 23 checks:** all seven `summary_verdict` values are produced by real fixtures, including `paused_hitl_approval` from an agent's unanswered request, `suppressed_cooldown` and `suppressed_hourly_cap` from rules that matched and were held, and `replied`/`queued`/`failed` by driving the reply command through the state machine with the device's own lease token. That set is asserted to be exactly seven. `alerts`, `dlq` and `ws inspect` answer, and an id nobody owns resolves to `kind: unknown`.
 - **By-example synthesis (6.1.0 P2), 9 checks:** two bKash examples produce `(?:TrxID|Txn\s+ID)[\s:=]*…` with precision and recall of 1.0 and a negative corpus that matched nothing; the value is a shape rather than the example string; and a value that appears twice is refused with `value_ambiguous` and exit 2.

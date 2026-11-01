@@ -2424,6 +2424,131 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── extraction drift and healing (v6.1 P5) ───────────────────────────── */
+  console.log('-- extraction drift and healing --');
+  {
+    const rep = new Report('drift');
+    const tag = crypto.randomBytes(3).toString('hex');
+    const flowId = `wf_drift_${tag}`;
+    const home = fs.mkdtempSync('/tmp/opencode/dakflare-heal-');
+    const runCli = (...args) =>
+      spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, NO_COLOR: '1', WORKER_URL },
+      });
+    const docOf = (run) => JSON.parse((run.stdout ?? '').trim().split('\n').pop());
+    fs.mkdirSync(path.join(home, '.config', 'dakflare'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.config', 'dakflare', 'config.json'),
+      JSON.stringify({ url: WORKER_URL, token: ADMIN_TOKEN })
+    );
+
+    const postInbound = async (localId, body) =>
+      device(identity, 'POST', '/v1/sms/incoming/batch', {
+        messages: [{ local_id: localId, sender: '+8801700000600', body, received_at: new Date().toISOString() }],
+        acks: [],
+      });
+
+    const created = await admin('PUT', `/v1/admin/workflows/${flowId}`, {
+      name: 'Drift probe',
+      enabled: true,
+      graph: {
+        nodes: [
+          { id: 't1', type: 'trigger', data: { kind: 'incoming' } },
+          { id: 'x1', type: 'extract', data: { source: 'body', pattern: 'order (?<order>[A-Z0-9]{6})' } },
+          { id: 's1', type: 'send_sms', data: { to: '{{sender}}', body: 'Order {{order}} confirmed.' } },
+          { id: 'e1', type: 'stop', data: {} },
+        ],
+        edges: [
+          { id: 'a', source: 't1', target: 'x1' },
+          { id: 'b', source: 'x1', target: 's1' },
+          { id: 'c', source: 's1', target: 'e1' },
+        ],
+      },
+    });
+    rep.check('a flow with one extract node -> 200', created.status, 200);
+
+    // Drift is one open alert per device (the alerts table's partial unique index
+    // is on (device_id, kind)), so a drifted flow from an earlier run would hide
+    // this one. Clear the slate first; the alert names its flow in `detail`.
+    for (const row of (await admin('GET', '/v1/admin/alerts')).data?.alerts ?? []) {
+      if (row.kind === 'extraction_drift') await admin('POST', `/v1/admin/alerts/${row.id}/ack`);
+    }
+
+    /* ---- the history the old pattern reads --------------------------- */
+    await postInbound(`heal_old_a_${tag}`, 'order ABC123 is on its way');
+    await postInbound(`heal_old_b_${tag}`, 'order XYZ789 has shipped');
+
+    /* ---- the template changes: two misses in an hour ------------------ */
+    await postInbound(`heal_new_a_${tag}`, 'Your order #AB12 changed format, ref TXN99.');
+    await postInbound(`heal_new_b_${tag}`, 'Another one with ref TXN77.');
+
+    const alerts = (await admin('GET', '/v1/admin/alerts')).data?.alerts ?? [];
+    const drift = alerts.find((row) => row.kind === 'extraction_drift');
+    rep.check('two misses in an hour raise extraction_drift', drift?.kind, 'extraction_drift');
+    const detail = (() => {
+      try {
+        return JSON.parse(drift?.detail ?? '{}');
+      } catch {
+        return {};
+      }
+    })();
+    rep.check('...naming the flow that drifted', detail.flow_id, flowId);
+    rep.check('...and the field that stopped matching', detail.field, 'order');
+
+    /* ---- a heal that would change history is refused ------------------ */
+    const narrow = path.join(home, 'narrow.json');
+    fs.writeFileSync(
+      narrow,
+      JSON.stringify({
+        group: 'order',
+        samples: [
+          { body: 'Your order #AB12 changed format, ref TXN99.', value: 'TXN99' },
+          { body: 'Another one with ref TXN77.', value: 'TXN77' },
+        ],
+      })
+    );
+    const refused = runCli('flows', 'heal', flowId, '--samples', narrow, '--agent');
+    rep.check('a heal that breaks history exits 6', refused.status, 6);
+    rep.checkFn('...naming heal_refused and how many it would break', () => {
+      const doc = docOf(refused);
+      return doc.status === 'error' && doc.error?.code === 'heal_refused' && doc.error?.details?.gate?.broken >= 1;
+    });
+    const untouched = await admin('GET', `/v1/admin/workflows/${flowId}`);
+    rep.check('...and nothing was written', untouched.data?.workflow?.version, 1);
+
+    /* ---- a heal that covers both templates is accepted ---------------- */
+    const union = path.join(home, 'union.json');
+    fs.writeFileSync(
+      union,
+      JSON.stringify({
+        group: 'order',
+        samples: [
+          { body: 'order ABC123 is on its way', value: 'ABC123' },
+          { body: 'order XYZ789 has shipped', value: 'XYZ789' },
+          { body: 'Another one with ref TXN77.', value: 'TXN77' },
+        ],
+      })
+    );
+    const healed = runCli('flows', 'heal', flowId, '--samples', union, '--agent');
+    rep.check('a heal that keeps every historical extraction exits 0', healed.status, 0);
+    const healedDoc = docOf(healed).data ?? {};
+    rep.check('...bumps the version', healedDoc.to_version, 2);
+    rep.check('...and reports a gate with nothing broken', healedDoc.gate?.broken, 0);
+    rep.checkFn('...having re-checked the real history', () => (healedDoc.gate?.matched_before ?? 0) >= 2);
+
+    const after = await admin('GET', `/v1/admin/workflows/${flowId}`);
+    rep.checkFn('...and the stored pattern is the new one', () =>
+      String(after.data?.workflow?.graph?.nodes?.find((node) => node.id === 'x1')?.data?.pattern ?? '')
+        .includes('order'));
+
+    /* ---- teardown ----------------------------------------------------- */
+    await admin('DELETE', `/v1/admin/workflows/${flowId}`);
+    if (drift?.id !== undefined) await admin('POST', `/v1/admin/alerts/${drift.id}/ack`);
+    fs.rmSync(home, { recursive: true, force: true });
+    run(rep);
+  }
+
   /* ── MCP (v6.1 P4) ─────────────────────────────────────────────────────── */
   console.log('-- MCP --');
   {
