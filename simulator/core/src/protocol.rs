@@ -517,6 +517,46 @@ impl DeviceClient {
         Ok(value.get("commands").cloned().unwrap_or(Value::Array(vec![])))
     }
 
+    /// `GET /v1/device/approvals` — the grants waiting for this handset.
+    ///
+    /// The deployment only returns a request to the device named in
+    /// `target.device_id`, so an empty list is the honest "nothing waiting"
+    /// rather than a privacy filter the phone has to apply.
+    pub async fn list_approvals(&self) -> Result<Vec<Approval>, ProtocolError> {
+        let value = self.signed_get("/v1/device/approvals").await?;
+        let list = value
+            .get("approvals")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProtocolError::Shape("no approvals array in response".into()))?;
+
+        list.iter()
+            .map(|entry| {
+                serde_json::from_value(entry.clone())
+                    .map_err(|e| ProtocolError::Shape(format!("approval shape: {e}")))
+            })
+            .collect()
+    }
+
+    /// `POST /v1/device/approvals/:id/approve` — grant a duration.
+    ///
+    /// The reply is parsed strictly: a success status without the granted
+    /// seconds is a shape error, never a grant the UI could show by default.
+    pub async fn approve(&self, id: &str, duration_s: i64) -> Result<ApprovalGrant, ProtocolError> {
+        let path = approval_path(id, "approve")?;
+        let value = self
+            .signed_post(&path, json!({ "duration_s": duration_s }))
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|e| ProtocolError::Shape(format!("approval grant shape: {e}")))
+    }
+
+    /// `POST /v1/device/approvals/:id/reject` — answer no.
+    pub async fn reject(&self, id: &str) -> Result<(), ProtocolError> {
+        let path = approval_path(id, "reject")?;
+        self.signed_post(&path, json!({})).await?;
+        Ok(())
+    }
+
     /// `POST /v1/sms/status/batch` — report a terminal state for commands this
     /// device collected.
     ///

@@ -51,6 +51,11 @@ import {
   handleGrantsList,
 } from "./routes/approvals";
 import { handleDlq, handleTrace, handleWsInspect } from "./routes/trace";
+import {
+  handleDeviceApprovalApprove,
+  handleDeviceApprovalReject,
+  handleDeviceApprovals,
+} from "./routes/device-approvals";
 import { handleMcpRequest } from "./mcp/server";
 import { AuthorityGuard } from "./authority-guard";
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
@@ -942,6 +947,26 @@ export default {
     if (method === "GET" && pathname === "/v1/rules") {
       return withDevice(req, env, ctx, (r, e, deviceId) => handleRulesGet(r, e, deviceId));
     }
+    // Approvals, answered from the handset. Device-authenticated because the phone
+    // is the party who can see whether sending is safe, and it may only answer a
+    // request whose target names it.
+    if (method === "GET" && pathname === "/v1/device/approvals") {
+      return withDevice(req, env, ctx, (_r, e, deviceId) => handleDeviceApprovals(e, deviceId));
+    }
+    const deviceApprovalMatch = pathname.match(
+      /^\/v1\/device\/approvals\/([^/]+)\/(approve|reject)$/
+    );
+    if (method === "POST" && deviceApprovalMatch) {
+      const approvalId = decodeURIComponent(deviceApprovalMatch[1]);
+      const decision = deviceApprovalMatch[2];
+      const meta = requestMeta(req);
+      return withDevice(req, env, ctx, (_r, e, deviceId, body) =>
+        decision === "approve"
+          ? handleDeviceApprovalApprove(body, e, deviceId, approvalId, meta)
+          : handleDeviceApprovalReject(e, deviceId, approvalId, meta)
+      );
+    }
+
     if (method === "GET" && pathname === "/v1/flows") {
       return withDevice(req, env, ctx, (_r, e, deviceId) => handleDeviceFlows(e, deviceId));
     }

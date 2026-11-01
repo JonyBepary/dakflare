@@ -119,25 +119,59 @@ async function recordExtractMiss(
     const misses = Number(row?.misses ?? 0);
     if (misses < 2) return;
 
-    // `INSERT OR IGNORE` plus the partial unique index on (device_id, kind) for
-    // open rows: a template that breaks every message shouts once, not once per
-    // message.
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO alerts (id, device_id, kind, raised_at, detail)
-       VALUES (?, ?, 'extraction_drift', ?, ?)`
+    // One open drift alert per device, because that is the partial unique index the
+    // alerts table has on (device_id, kind). Rather than let a second drifting flow
+    // be swallowed by the first, the alert's detail is a LIST: every flow currently
+    // drifting, refreshed on each miss. An operator acknowledges it when they have
+    // dealt with all of them, and until then nothing is hidden.
+    const entry = {
+      flow_id: input.flowId,
+      flow_version: input.flowVersion,
+      node_id: input.nodeId,
+      field,
+      misses_last_hour: misses,
+      last_miss_at: now,
+    };
+
+    const open = await env.DB.prepare(
+      `SELECT id, detail FROM alerts
+        WHERE device_id = ? AND kind = 'extraction_drift'
+          AND acknowledged_at IS NULL AND resolved_at IS NULL
+        LIMIT 1`
     )
-      .bind(
-        crypto.randomUUID(),
-        input.deviceId,
-        now,
-        JSON.stringify({
-          flow_id: input.flowId,
-          flow_version: input.flowVersion,
-          node_id: input.nodeId,
-          field,
-          misses_last_hour: misses,
-        })
+      .bind(input.deviceId)
+      .first<{ id: string; detail: string | null }>();
+
+    if (open === null) {
+      await env.DB.prepare(
+        `INSERT INTO alerts (id, device_id, kind, raised_at, detail)
+         VALUES (?, ?, 'extraction_drift', ?, ?)`
       )
+        .bind(
+          crypto.randomUUID(),
+          input.deviceId,
+          now,
+          JSON.stringify({ drifts: [entry] })
+        )
+        .run();
+      return;
+    }
+
+    let drifts: unknown[] = [];
+    try {
+      const parsed = JSON.parse(open.detail ?? "{}") as { drifts?: unknown[] };
+      if (Array.isArray(parsed.drifts)) drifts = parsed.drifts;
+    } catch {
+      // A detail this code cannot read is replaced rather than merged: a stale
+      // shape must not stop the current drift from being recorded.
+    }
+    const merged = drifts.filter(
+      (candidate) => (candidate as { flow_id?: unknown })?.flow_id !== input.flowId
+    );
+    merged.push(entry);
+
+    await env.DB.prepare(`UPDATE alerts SET detail = ? WHERE id = ?`)
+      .bind(JSON.stringify({ drifts: merged }), open.id)
       .run();
   } catch (error) {
     console.error(`[flow] could not record an extract miss for ${input.flowId}: ${String(error)}`);

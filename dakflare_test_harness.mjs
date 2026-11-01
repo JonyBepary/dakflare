@@ -2493,8 +2493,11 @@ async function cmdSuite() {
         return {};
       }
     })();
-    rep.check('...naming the flow that drifted', detail.flow_id, flowId);
-    rep.check('...and the field that stopped matching', detail.field, 'order');
+    // One open alert per device, so the detail is a LIST of every flow currently
+    // drifting rather than the first one to trip it.
+    const drifted = (detail.drifts ?? []).find((row) => row.flow_id === flowId);
+    rep.check('...naming the flow that drifted', drifted?.flow_id, flowId);
+    rep.check('...and the field that stopped matching', drifted?.field, 'order');
 
     /* ---- a heal that would change history is refused ------------------ */
     const narrow = path.join(home, 'narrow.json');
@@ -2924,6 +2927,49 @@ async function cmdSuite() {
     const tHitl = await traceOf(asked.approval_request.id);
     rep.check('paused_hitl_approval: the request is waiting on a person', tHitl.verdict, 'paused_hitl_approval');
     seen.add(tHitl.verdict);
+
+    // The handset can answer it too: it is the party who can see whether sending
+    // is safe, and it may only answer a request that names it.
+    const askedSend = {
+      device_id: identity.deviceId,
+      to: '+8801700000199',
+      body: 'prov hitl',
+    };
+    const approveFromPhone = async (duration) =>
+      device(identity, 'POST', `/v1/device/approvals/${asked.approval_request.id}/approve`, {
+        duration_s: duration,
+      });
+
+    const deviceList = await device(identity, 'GET', '/v1/device/approvals');
+    rep.check('the handset lists the request that names it', deviceList.status, 200);
+    const listed = (deviceList.data?.approvals ?? []).find(
+      (row) => row.id === asked.approval_request.id
+    );
+    rep.check('...with the same ladder the console offers', (listed?.ladder_s ?? []).length, 8);
+    rep.check('...and the scope ceiling', listed?.max_s, 3600);
+
+    const unknownApproval = await device(
+      identity, 'POST', '/v1/device/approvals/not-a-real-request/approve', { duration_s: 60 }
+    );
+    rep.check('an unknown request from the handset -> 404', unknownApproval.status, 404);
+
+    const phoneApproved = await approveFromPhone(900);
+    rep.check('the handset approves for 15 minutes', phoneApproved.status, 200);
+    rep.check('...granting what it asked for', phoneApproved.data?.granted_s, 900);
+    rep.check('...and reporting the ceiling', phoneApproved.data?.max_s, 3600);
+
+    const phoneOverAsk = await approveFromPhone(2_592_000);
+    rep.check('a second answer to a decided request -> 409', phoneOverAsk.status, 409);
+
+    const sentAfterApproval = await fetch(WORKER_URL + '/v1/sms/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agent.data.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(askedSend),
+    });
+    rep.check('the agent send now goes out -> 200', sentAfterApproval.status, 200);
 
     rep.check('all seven verdicts are reachable', seen.size, 7);
 
