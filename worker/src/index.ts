@@ -51,6 +51,7 @@ import {
   handleGrantsList,
 } from "./routes/approvals";
 import { handleDlq, handleTrace, handleWsInspect } from "./routes/trace";
+import { handleMcpRequest } from "./mcp/server";
 import { AuthorityGuard } from "./authority-guard";
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
 import { scopeForAction } from "./lib/agent-scopes";
@@ -261,6 +262,63 @@ async function withAdmin(
 }
 
 /**
+ * `POST /v1/mcp` — the MCP endpoint.
+ *
+ * A static `dkf_agt_` bearer, checked before anything else. This is NOT MCP
+ * authorization and the docs say so: MCP authorization, when implemented, is an
+ * OAuth 2.1 resource server with RFC 9728 metadata and a `WWW-Authenticate`
+ * challenge that points at it. There is no authorization server here to point at,
+ * so the challenge is a bare `Bearer` and a conformant OAuth client cannot
+ * negotiate this endpoint. It is the same credential the CLI holds, and the
+ * `agent_tokens` table is what an OAuth front door would read anyway.
+ */
+async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
+  const bearer = readBearer(req);
+  if (bearer === null) return mcpUnauthorized("missing bearer token");
+
+  const token = await resolveAgentToken(env, bearer);
+  if (token === null) return mcpUnauthorized("unknown or revoked token");
+
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `mcp:${token.id}` });
+    if (!success) {
+      return Response.json(
+        { error: "rate_limited", message: "too many MCP requests for this token" },
+        { status: 429 }
+      );
+    }
+  }
+
+  await recordTokenUse(env, token.id);
+
+  return handleMcpRequest(req, env, {
+    userId: null,
+    label: `agent:${token.name}`,
+    role: "agent",
+    canGrantOwner: false,
+    agentTokenId: token.id,
+    agentDeviceId: token.device_id,
+    agentScopes: token.scopes,
+  });
+}
+
+/**
+ * A 401 a client can act on.
+ *
+ * No `resource_metadata` parameter: there is no protected-resource document to
+ * point at, and inventing a URL for one would be worse than the bare challenge.
+ */
+function mcpUnauthorized(reason: string): Response {
+  return Response.json(
+    { error: "unauthorized", message: reason },
+    {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Bearer realm="dakflare", error="invalid_token"' },
+    }
+  );
+}
+
+/**
  * Admin gate. Three credentials:
  *
  *   a Better Auth session with role owner/admin, for a person;
@@ -364,6 +422,7 @@ async function withAgentAccess(
     canGrantOwner: false,
     agentTokenId: token.id,
     agentDeviceId: token.device_id,
+    agentScopes: token.scopes,
   });
 }
 
@@ -530,6 +589,15 @@ export default {
 
     if (method === "POST" && pathname === "/v1/device/pair") {
       return handleDevicePair(req, env);
+    }
+
+    /* ---- MCP (v6.1 P4) -------------------------------------------------- */
+    // Its own auth, its own error envelope (JSON-RPC), and its own protocol
+    // versioning: everything an MCP client expects, none of which the admin gate
+    // speaks. Resolve the credential first; the tool registry is then filtered to
+    // the scopes it holds, so `tools/list` is the permission surface.
+    if (method === "POST" && pathname === "/v1/mcp") {
+      return handleMcpRoute(req, env);
     }
 
     /* ---- Better Auth: /api/auth/* ------------------------------------- */

@@ -459,6 +459,20 @@ const COMMAND_SPECS = {
       'dakflare extract synthesize --samples bKash.json --group trx_id --verify-d1-limit 200',
     ],
   },
+  mcp: {
+    summary: 'Serve this deployment over MCP on stdio (serve)',
+    effect: 'read',
+    usage: 'dakflare mcp serve [--token <t> | --token-file <path>] [--version <v>]',
+    flags: {
+      token: { type: 'string', note: 'agent token; prefer --token-file' },
+      'token-file': { type: 'string', note: 'read the agent token from a file' },
+      version: { type: 'string', note: 'protocol revision, default 2026-07-28' },
+    },
+    examples: [
+      'dakflare mcp serve --token-file ~/.dakflare-agent-token',
+      'dakflare mcp serve --token "$DKF_AGENT_TOKEN"',
+    ],
+  },
   trace: {
     summary: 'Explain one id: message, command or approval request',
     effect: 'read',
@@ -662,6 +676,7 @@ const VALUE_FLAGS = new Set([
   'group',
   'verify-d1-limit',
   'sub',
+  'version',
 ]);
 
 function parseArgv(argv) {
@@ -2658,6 +2673,7 @@ const SUMMARY_BUILDERS = {
   flows: (data) => (data.applied === true ? 'flow applied' : 'flow diffed, nothing written'),
   extract: (data) => (data.pattern ? 'pattern synthesized' : 'nothing synthesized'),
   trace: (data) => `verdict ${data.verdict ?? 'unknown'}`,
+  mcp: () => 'served MCP on stdio',
   alerts: (data) => `${(data.alerts ?? []).length} open alerts`,
   dlq: (data) => `${(data.dead_letters ?? []).length} dead letters`,
   ws: (data) => `${(data.sockets ?? []).length} sockets`,
@@ -2915,6 +2931,151 @@ async function commandAuthInvites(argv) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
   }
+  return 0;
+}
+
+/* ───────────────────────── MCP over stdio (v6.1 P4) ───────────────────────── */
+
+/**
+ * The protocol revision this bridge speaks.
+ *
+ * It is the one the Worker serves. A client may name another in `_meta`; the
+ * bridge passes that through so the Worker answers `-32022` with the supported
+ * list, which is more useful than the bridge guessing.
+ */
+const MCP_DEFAULT_VERSION = '2026-07-28';
+
+/** Methods whose `params.name` must also travel as an `Mcp-Name` header. */
+const MCP_NAMED_METHODS = new Set(['tools/call', 'resources/read', 'prompts/get']);
+
+async function commandMcp(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('mcp');
+  if (sub === 'serve') return commandMcpServe(rest);
+  err(`dakflare: unknown mcp subcommand "${sub}"`);
+  err('try `dakflare mcp --help`');
+  return 2;
+}
+
+/**
+ * `mcp serve` — stdio JSON-RPC on one side, the Worker's `/v1/mcp` on the other.
+ *
+ * Deliberately a bridge and not a second server: the tools, their schemas and
+ * their answers are the Worker's. That is what makes "the CLI and the Worker
+ * answer the same call identically" true by construction instead of something
+ * two implementations have to keep in step.
+ *
+ * stdout carries only protocol messages. Diagnostics go to stderr, because a
+ * stray line on stdout is a parse error for the client.
+ */
+async function commandMcpServe(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('mcp');
+  assertCommandFlags(flags, 'mcp');
+
+  const cfg = readConfig().cfg;
+  const tokenFile = stringFlag(flags, 'token-file');
+  let token = stringFlag(flags, 'token');
+  if (token === undefined && tokenFile !== undefined) {
+    const resolved = expandHome(tokenFile);
+    try {
+      token = fs.readFileSync(resolved, 'utf8').trim();
+    } catch (error) {
+      throw new CliError(`cannot read ${resolved}: ${error?.code ?? error?.message}`, 2, {
+        error: 'usage',
+      });
+    }
+  }
+  if (token === undefined) token = cfg?.token;
+  if (token === undefined || token === '') {
+    throw usage('an agent token is required: pass --token or --token-file');
+  }
+  const base = (cfg?.url ?? '').replace(/\/+$/, '');
+  if (base === '') {
+    throw new CliError('no Worker URL configured; run `dakflare init` first', 2, {
+      error: 'no_config',
+    });
+  }
+
+  const version = stringFlag(flags, 'version') ?? MCP_DEFAULT_VERSION;
+
+  const forward = async (message) => {
+    const method = typeof message.method === 'string' ? message.method : '';
+    const metaVersion = message?.params?._meta?.['io.modelcontextprotocol/protocolVersion'];
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'MCP-Protocol-Version': typeof metaVersion === 'string' ? metaVersion : version,
+      'Mcp-Method': method,
+    };
+    if (MCP_NAMED_METHODS.has(method) && typeof message?.params?.name === 'string') {
+      headers['Mcp-Name'] = message.params.name;
+    }
+
+    let response;
+    try {
+      response = await fetch(`${base}/v1/mcp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(message),
+      });
+    } catch (error) {
+      return {
+        jsonrpc: '2.0',
+        id: message.id ?? null,
+        error: { code: -32000, message: `cannot reach ${base}: ${String(error?.message ?? error)}` },
+      };
+    }
+
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      // A non-JSON answer is an HTTP failure in front of the endpoint (401, 429,
+      // 403). Surface it as a JSON-RPC error rather than dying: the client is
+      // told, and the bridge stays up.
+      return {
+        jsonrpc: '2.0',
+        id: message.id ?? null,
+        error: { code: -32000, message: `HTTP ${response.status}: ${text.slice(0, 200)}` },
+      };
+    }
+  };
+
+  // Line-delimited JSON-RPC. Notifications (no id) still get forwarded: the
+  // Worker answers what it answers and the client ignores an empty body.
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const pending = [];
+
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (trimmed === '') return;
+    let message;
+    try {
+      message = JSON.parse(trimmed);
+    } catch (error) {
+      process.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32700, message: `parse error: ${error.message}` },
+        })}\n`
+      );
+      return;
+    }
+    // Serialised on purpose: the protocol allows concurrency, but one line per
+    // request in one order out is far easier to debug, and a gateway call is
+    // quick. A work queue keeps the ordering while still allowing overlap.
+    const job = pending[pending.length - 1] ?? Promise.resolve();
+    const next = job.then(async () => {
+      const answer = await forward(message);
+      if (message.id !== undefined) process.stdout.write(`${JSON.stringify(answer)}\n`);
+    });
+    pending.push(next);
+  });
+
+  await new Promise((resolve) => rl.on('close', resolve));
+  await Promise.all(pending);
   return 0;
 }
 
@@ -4408,6 +4569,22 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
 Roles: owner, admin, member. Agent tokens are a third credential, not a role: they
 may ASK, and a time-boxed grant decides what they may DO. --agent never prompts,
 so pass --yes on the revoking subcommands.`,
+  mcp: `Usage: dakflare mcp serve [--token <t> | --token-file <path>] [--version <v>]
+
+Bridges stdio MCP to this deployment. One JSON-RPC message per line in, one out;
+every request is forwarded to the Worker's /v1/mcp with the Mcp-Method and
+Mcp-Name headers the revision requires, so the tools, the schemas and the answers
+are the Worker's, not a second implementation.
+
+Point an MCP client at it:
+
+  { "mcpServers": { "dakflare": {
+      "command": "dakflare", "args": ["mcp", "serve", "--token-file", "/path/token"] } } }
+
+The token is a dkf_agt_ agent token, and the tool list is filtered to the scopes
+it holds. There is no admin token here: an MCP client gets an agent's reach, not
+an operator's.`,
+
   trace: `Usage: dakflare trace <id> [--device <id>] [--agent]
 
 One id, the whole story: the inbound row and its automation bookkeeping from D1,
@@ -4580,6 +4757,7 @@ const COMMANDS = {
   rules: commandRules,
   extract: commandExtract,
   trace: commandTrace,
+  mcp: commandMcp,
   alerts: commandAlerts,
   dlq: commandDlq,
   ws: commandWs,

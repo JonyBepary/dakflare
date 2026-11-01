@@ -34,6 +34,8 @@ export interface AdminActor extends AuditActor {
   agentTokenId?: string;
   /** The handset that token is bound to, or null when it is fleet-wide. */
   agentDeviceId?: string | null;
+  /** What the token may attempt. Read by the MCP tool registry. */
+  agentScopes?: string[];
 }
 
 export interface AuditEvent {

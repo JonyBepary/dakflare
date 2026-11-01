@@ -1,0 +1,418 @@
+{
+  "protocol_version": "2026-07-28",
+  "generated_by": "worker/scripts/mcp-contract.mjs",
+  "note": "Generated from tools/list. Do not edit by hand: run the script with --write. `x-mcp-header` on an inputSchema property becomes an `Mcp-Param-{name}` request header, is allowed on string, integer and boolean properties only, and a mismatch is answered with -32020.",
+  "tools": [
+    {
+      "name": "list_devices",
+      "title": "List devices",
+      "description": "List the paired handsets with their labels, SIM slots, last contact and FCM state. Start here if you do not know a device id.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "archived": {
+            "description": "Include archived handsets.",
+            "type": "boolean"
+          }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "device_id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "last_seen": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "fcm": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "device_id"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_messages",
+      "title": "Read messages",
+      "description": "Newest-first message log for one handset, with the reply fate of each row. Use it to see what actually arrived and what automation did about it.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The handset this applies to, e.g. dev63f3953f417d587f.",
+            "x-mcp-header": "Device-Id"
+          },
+          "limit": {
+            "description": "Rows, default 50.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "device_id"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "local_id": {
+                  "type": "string"
+                },
+                "direction": {
+                  "type": "string"
+                },
+                "peer": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "received_at": {
+                  "type": "number"
+                },
+                "reply_verdict": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "local_id",
+                "direction",
+                "peer",
+                "body",
+                "received_at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "messages",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "command_status",
+      "title": "Command status",
+      "description": "The delivery state of one outbound command: PENDING, LEASED, DISPATCHED, SENT, DELIVERED, FAILED or EXPIRED. SENT means the radio accepted it, not that it was delivered.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "description": "The command id a send returned."
+          },
+          "device_id": {
+            "type": "string",
+            "description": "The handset this applies to, e.g. dev63f3953f417d587f."
+          }
+        },
+        "required": [
+          "command_id",
+          "device_id"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "command_id": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command_id",
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_flows",
+      "title": "List flows",
+      "description": "Every workflow on this deployment, with its node count and version.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {}
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "workflows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "node_count": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "enabled"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "workflows"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_flow",
+      "title": "Get flow",
+      "description": "One workflow as the canonical IR: nodes, typed edges and the computed layout. Read it before changing anything.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The workflow id."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "graph": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "version",
+                  "graph"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "workflow"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "trace",
+      "title": "Trace one id",
+      "description": "Explain one message, command or approval request: the verdict, why, the automation that ran, and the device object's timers and sockets.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A message id, local id, command id or approval request id."
+          },
+          "device_id": {
+            "type": "string",
+            "description": "The handset this applies to, e.g. dev63f3953f417d587f."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "why": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "verdict",
+          "kind",
+          "why"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "send_sms",
+      "title": "Send SMS",
+      "description": "Queue one outbound SMS. An agent token needs a time-boxed authority grant covering the recipient; without one this returns an input-required result naming the approval to obtain, and sends nothing.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The handset this applies to, e.g. dev63f3953f417d587f."
+          },
+          "to": {
+            "type": "string",
+            "description": "E.164 recipient, e.g. +8801540196080."
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Message text."
+          },
+          "idempotency_key": {
+            "description": "A retry with the same key returns the same command instead of a second SMS.",
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "device_id",
+          "to",
+          "body"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "type": "string"
+          },
+          "sent": {
+            "type": "boolean"
+          },
+          "approval_request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sent"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

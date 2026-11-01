@@ -2424,6 +2424,227 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── MCP (v6.1 P4) ─────────────────────────────────────────────────────── */
+  console.log('-- MCP --');
+  {
+    const rep = new Report('mcp');
+    const VERSION = '2026-07-28';
+    const CAPS = { elicitation: { form: {} } };
+
+    const mcpCall = async (token, method, params, headers = {}) => {
+      const res = await fetch(`${WORKER_URL}/v1/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'MCP-Protocol-Version': VERSION,
+          'Mcp-Method': method,
+          ...headers,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Math.floor(Math.random() * 1e6),
+          method,
+          params: {
+            ...(params ?? {}),
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': VERSION,
+              'io.modelcontextprotocol/clientInfo': { name: 'harness', version: '0' },
+              'io.modelcontextprotocol/clientCapabilities': CAPS,
+            },
+          },
+        }),
+      });
+      return { status: res.status, data: await res.json().catch(() => null) };
+    };
+
+    const mint = async (name, scopes) =>
+      (await admin('POST', '/v1/admin/agent-tokens', { name, scopes, max_per_hour: 10 })).data;
+
+    const full = await mint('mcp harness', [
+      'messages:read', 'devices:read', 'flows:read', 'sms:send',
+    ]);
+
+    /* ---- discover --------------------------------------------------- */
+    const discover = await mcpCall(full.token, 'server/discover');
+    rep.check('server/discover -> 200', discover.status, 200);
+    rep.check('...advertises the current revision',
+      (discover.data?.result?.supportedVersions ?? []).includes(VERSION), true);
+    rep.check('...names this server',
+      discover.data?.result?._meta?.['io.modelcontextprotocol/serverInfo']?.name, 'dakflare');
+
+    const noVersion = await fetch(`${WORKER_URL}/v1/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${full.token}`,
+        'Content-Type': 'application/json',
+        'Mcp-Method': 'tools/list',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} }),
+    });
+    const noVersionBody = await noVersion.json().catch(() => null);
+    rep.check('a request with no version claim -> 400', noVersion.status, 400);
+    rep.check('...is -32022', noVersionBody?.error?.code, -32022);
+    rep.check('...and names the supported version',
+      (noVersionBody?.error?.data?.supported ?? []).includes(VERSION), true);
+
+    /* ---- tools/list -------------------------------------------------- */
+    const list = await mcpCall(full.token, 'tools/list');
+    const tools = list.data?.result?.tools ?? [];
+    rep.check('tools/list -> 200', list.status, 200);
+    rep.check('seven tools', tools.length, 7);
+    rep.check('...every one carries an outputSchema',
+      tools.every((tool) => tool.outputSchema !== undefined), true);
+    rep.check('...the result carries ttlMs and cacheScope',
+      typeof list.data?.result?.ttlMs === 'number' &&
+      typeof list.data?.result?.cacheScope === 'string', true);
+    rep.checkFn('...x-mcp-header sits on a string property, never a number', () => {
+      for (const tool of tools) {
+        for (const property of Object.values(tool.inputSchema?.properties ?? {})) {
+          if (property['x-mcp-header'] === undefined) continue;
+          if (!['string', 'integer', 'boolean'].includes(property.type)) return `${tool.name} annotates ${property.type}`;
+        }
+      }
+      return true;
+    });
+
+    const deviceHeader = tools
+      .find((tool) => tool.name === 'read_messages')
+      ?.inputSchema?.properties?.device_id?.['x-mcp-header'];
+    rep.check('read_messages mirrors device_id into a header', deviceHeader, 'Device-Id');
+
+    /* ---- header agreement -------------------------------------------- */
+    const mismatch = await mcpCall(
+      full.token,
+      'tools/call',
+      { name: 'read_messages', arguments: { device_id: 'dev_here', limit: 1 } },
+      { 'Mcp-Name': 'read_messages', 'Mcp-Param-Device-Id': 'dev_somewhere_else' }
+    );
+    rep.check('a Mcp-Param-Device-Id that disagrees with the body -> 400', mismatch.status, 400);
+    rep.check('...is -32020', mismatch.data?.error?.code, -32020);
+
+    const nameMismatch = await mcpCall(
+      full.token,
+      'tools/call',
+      { name: 'trace', arguments: { id: 'x' } },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    rep.check('an Mcp-Name that disagrees with the body -> -32020', nameMismatch.data?.error?.code, -32020);
+
+    /* ---- structured results ------------------------------------------ */
+    const traceCall = await mcpCall(
+      full.token, 'tools/call',
+      { name: 'trace', arguments: { id: 'no-such-id-anywhere' } },
+      { 'Mcp-Name': 'trace' }
+    );
+    rep.check('tools/call -> 200', traceCall.status, 200);
+    rep.check('...returns structured content', typeof traceCall.data?.result?.structuredContent?.verdict, 'string');
+    rep.check('...and a text block for a model to read',
+      Array.isArray(traceCall.data?.result?.content) && traceCall.data.result.content[0].type, 'text');
+
+    /* ---- the scope is the tool list ---------------------------------- */
+    const narrow = await mint('mcp narrow', ['messages:read']);
+    const narrowList = await mcpCall(narrow.token, 'tools/list');
+    const narrowTools = (narrowList.data?.result?.tools ?? []).map((tool) => tool.name);
+    rep.check('a read-only token sees fewer tools', narrowTools.length < 7, true);
+    rep.check('...and does not see send_sms', narrowTools.includes('send_sms'), false);
+    const denied = await mcpCall(
+      narrow.token, 'tools/call',
+      { name: 'send_sms', arguments: { device_id: identity.deviceId, to: '+8801700000300', body: 'nope' } },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    // The SDK answers an unregistered tool with `-32602` (invalid params) rather
+    // than `-32601`; both are "there is no such tool", and what matters is that
+    // the call never reaches a handler.
+    rep.check('calling it anyway -> an error, not a send',
+      [-32601, -32602].includes(denied.data?.error?.code), true);
+    const deniedCommands = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=20`);
+    rep.check('...and nothing was queued',
+      (deniedCommands.data?.messages ?? []).some((row) => row.body === 'nope'), false);
+
+    /* ---- MRTR: the approval round ------------------------------------ */
+    const recipient = '+8801700000400';
+    const asked = await mcpCall(
+      full.token, 'tools/call',
+      { name: 'send_sms', arguments: { device_id: identity.deviceId, to: recipient, body: 'mcp round' } },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    rep.check('a send with no grant -> input_required', asked.data?.result?.resultType, 'input_required');
+    const inputRequest = asked.data?.result?.inputRequests?.approval;
+    rep.check('...carrying an elicitation', inputRequest?.method, 'elicitation/create');
+    rep.checkFn('...whose message names the approval to obtain', () =>
+      String(inputRequest?.params?.message ?? '').includes('auth approve'));
+    rep.check('...and opaque requestState',
+      typeof asked.data?.result?.requestState, 'string');
+
+    const approvalId = JSON.parse(asked.data.result.requestState).approval_request_id;
+    const approved = await admin('POST', `/v1/admin/approvals/${approvalId}/approve`, { duration_s: 300 });
+    rep.check('a human approves the request', approved.status, 200);
+
+    const retried = await mcpCall(
+      full.token, 'tools/call',
+      {
+        name: 'send_sms',
+        arguments: { device_id: identity.deviceId, to: recipient, body: 'mcp round' },
+        inputResponses: { approval: { action: 'accept', content: { decision: 'retry' } } },
+      },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    rep.check('the retry with inputResponses sends', retried.data?.result?.structuredContent?.sent, true);
+    rep.check('...and names the command',
+      typeof retried.data?.result?.structuredContent?.command_id, 'string');
+
+    /* ---- the CLI speaks the same contract ---------------------------- */
+    const cliHome = fs.mkdtempSync('/tmp/opencode/dakflare-mcp-');
+    const tokenFile = path.join(cliHome, 'agent-token');
+    fs.writeFileSync(tokenFile, full.token);
+    // The bridge reads the Worker URL from the same config `init` writes; only the
+    // credential comes from the file, because an MCP client gets an agent's reach.
+    fs.mkdirSync(path.join(cliHome, '.config', 'dakflare'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cliHome, '.config', 'dakflare', 'config.json'),
+      JSON.stringify({ url: WORKER_URL, token: full.token })
+    );
+    // A real client sends the per-request envelope; the bridge forwards whatever
+    // it is given, so this is the client's job, not the bridge's.
+    const meta = {
+      'io.modelcontextprotocol/protocolVersion': VERSION,
+      'io.modelcontextprotocol/clientInfo': { name: 'harness', version: '0' },
+      'io.modelcontextprotocol/clientCapabilities': CAPS,
+    };
+    const stdin = [
+      JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: meta } }),
+      JSON.stringify({
+        jsonrpc: '2.0', id: 2, method: 'tools/call',
+        params: { name: 'trace', arguments: { id: 'no-such-id-anywhere' }, _meta: meta },
+      }),
+    ].join('\n') + '\n';
+    const bridged = spawnSync(
+      process.execPath,
+      [path.join(HERE, 'cli', 'bin', 'dakflare.js'), 'mcp', 'serve', '--token-file', tokenFile],
+      { input: stdin, encoding: 'utf8', env: { ...process.env, HOME: cliHome, NO_COLOR: '1' } }
+    );
+    const lines = (bridged.stdout ?? '').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    rep.check('the CLI bridge answers tools/list', (lines[0]?.result?.tools ?? []).length, 7);
+    rep.checkFn('...with the same tool names as the endpoint', () => {
+      const bridgeNames = (lines[0].result.tools ?? []).map((tool) => tool.name).sort();
+      const workerNames = tools.map((tool) => tool.name).sort();
+      return JSON.stringify(bridgeNames) === JSON.stringify(workerNames);
+    });
+    rep.checkFn('...and the same trace answer', () => {
+      const viaBridge = lines[1]?.result?.structuredContent;
+      const viaWorker = traceCall.data?.result?.structuredContent;
+      return viaBridge?.verdict === viaWorker?.verdict && viaBridge?.kind === viaWorker?.kind;
+    });
+    fs.rmSync(cliHome, { recursive: true, force: true });
+
+    /* ---- teardown ----------------------------------------------------- */
+    for (const token of [full, narrow]) {
+      await admin('DELETE', `/v1/admin/agent-tokens/${token.id}`);
+    }
+    run(rep);
+  }
+
   /* ── provenance: seven verdicts (v6.1 P3) ─────────────────────────────── */
   console.log('-- provenance: seven verdicts --');
   {

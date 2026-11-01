@@ -962,6 +962,82 @@ what "quiet" means.
 
 ---
 
+### 4.8 MCP (6.1.0 P4)
+
+`POST /v1/mcp` speaks protocol revision **2026-07-28**, built on
+`createMcpHandler` from `@modelcontextprotocol/server` rather than a hand-rolled
+route. The handler already does the four things a hand-rolled one gets wrong: the
+per-request envelope claim and `MCP-Protocol-Version` check, `Mcp-Method`/
+`Mcp-Name` agreement with the body, the `server/discover` answer, and MRTR. The
+suite proves each of those rather than asserting them here.
+
+Three things the handler deliberately does not do, which the Worker does:
+
+1. **Authentication.** The entry performs no token verification. The route
+   resolves a `dkf_agt_` bearer first and only then builds a handler bound to it.
+2. **Origin and Host validation.** The handler is validation-free so it can be
+   mounted anywhere; the Worker applies the SDK's own checks in front of it.
+3. **Scope.** The tool registry is filtered by the token's scopes, so `tools/list`
+   **is** the permission surface. An out-of-scope tool is simply not registered,
+   which answers `-32601`/`-32602` instead of leaking a name the caller cannot use.
+
+The seven tools map one-to-one onto routes that already exist, and each one calls
+that route's handler with the same actor. "The tool and the HTTP route agree" is
+therefore true by construction, not by a test that keeps two copies in step.
+
+| Tool | Scope | Route it wraps |
+|---|---|---|
+| `list_devices` | `devices:read` | `GET /v1/devices` |
+| `read_messages` | `messages:read` | `GET /v1/messages` |
+| `command_status` | `messages:read` | `GET /v1/sms/commands/:id` |
+| `list_flows` | `flows:read` | `GET /v1/admin/workflows` |
+| `get_flow` | `flows:read` | `GET /v1/admin/workflows/:id` |
+| `trace` | `messages:read` | `reply-fate-trace` |
+| `send_sms` | `sms:send` | `POST /v1/sms/send`, authority gate included |
+
+`send_sms` is the only one that does more than forward: when the authority gate
+answers `202 approval_required` the tool returns an MRTR `input_required` result
+carrying the request id, the target and the scope's ceiling. The client takes it
+to a human, the human approves in the console or on the handset, and the retry
+re-runs the same tool. **The retry re-reads the authority store**, so nothing the
+client says in `inputResponses` can widen a permission: the round is stateless on
+the server side and cannot be spoofed.
+
+`x-mcp-header` is used on `read_messages.device_id`, which mirrors into
+`Mcp-Param-Device-Id`. The property is a string, on a statically reachable path,
+and a disagreement with the body is `-32020`.
+
+#### 4.8.1 The published contract
+
+`contracts/mcp-tools.json` is generated from the running endpoint by
+`worker/scripts/mcp-contract.mjs`, which reads `tools/list` and writes the exact
+schemas a client codes against. `--check` re-derives it and fails on drift, so a
+tool change without a regenerated contract is a build failure rather than a
+surprise for the next client author. It is generated rather than hand-written
+because the contract has to BE what the server serves.
+
+#### 4.8.2 Authorization is not conformant, and says so
+
+MCP authorization is optional, but a server that implements it is an OAuth 2.1
+resource server: RFC 9728 protected-resource metadata, `401` with a
+`WWW-Authenticate` challenge naming it, `scopes_supported`. This endpoint takes a
+static `dkf_agt_` bearer and answers a bare `Bearer` challenge with no
+`resource_metadata`, because there is no authorization server to point at. That
+works with the clients in use and it is the credential the CLI already holds, but
+a conformant OAuth client cannot negotiate it. `agent_tokens` stores hashes and
+scopes, so the OAuth phase is a new front door on the same table.
+
+`dakflare mcp serve` bridges stdio to this endpoint, one JSON-RPC message per line
+in and out, adding the `Mcp-Method` and `Mcp-Name` headers the revision requires.
+It is a bridge and not a second server, which is what makes the CLI and the Worker
+answer the same call identically.
+
+Budget: the Worker is 5.1 MiB uncompressed / 1.1 MiB gzipped with the SDK and
+`zod`, against a 64 MiB ceiling. There is no compressed-size limit; the gzip
+figure is reference only.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -1112,7 +1188,7 @@ though `send` is a mutating command: an `approval_required` and an
 `agent_quota_exceeded` both mean the action did **not** happen, so repeating it
 after a human answers cannot cause a second SMS.
 
-### 6.3 Complete 22-Command CLI Matrix
+### 6.3 Complete 23-Command CLI Matrix
 
 | Command | Flags | Description & Semantics |
 |---|---|---|
@@ -1133,6 +1209,7 @@ after a human answers cannot cause a second SMS.
 | `alerts` | `[--all]` | Open alerts, newest first. A device that comes back resolves its own alert, so open means unresolved **and** unacknowledged. |
 | `dlq` | `[--device <id>] [--limit <n>]` | Dead letters from the device object: tasks that failed past their retry budget. Max 200 per call. |
 | `ws` | `inspect [--device <id>]` | What the object thinks its sockets are: socket id, accepted time, last liveness evidence, how long quiet, readyState. The same evidence the push path uses to close a stale socket. |
+| `mcp` | `serve [--token <t> \| --token-file <path>] [--version <v>]` | Bridges stdio MCP to `POST /v1/mcp`: one JSON-RPC message per line in and out, with the `Mcp-Method` and `Mcp-Name` headers the revision requires. A bridge, not a second server, so the tools and answers are the Worker's. The token is a `dkf_agt_` agent token and the tool list is filtered to its scopes. |
 | `key` | `fingerprint [--keystore <path>] [--alias <name>]` | Computes SHA-256 fingerprint of the release signing keystore. |
 | `capabilities` | `--agent` | Emits self-describing JSON manifest of all commands, effects (`read`, `mutating`, `destructive`), and flags. |
 | `describe` | `<command>`, `--agent` | Emits two-line purpose, usage, and flag list for a given command. |
@@ -1284,6 +1361,7 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+- **MCP (6.1.0 P4), 32 checks:** `server/discover` advertises 2026-07-28 and names the server; a request with no version claim is `-32022` naming the supported list; `tools/list` returns seven tools, each with an `outputSchema`, and carries `ttlMs`/`cacheScope`; a `Mcp-Param-Device-Id` or `Mcp-Name` that disagrees with the body is `-32020`; a token with only `messages:read` sees fewer tools and cannot call `send_sms`; a send with no grant is `input_required`, and after a human approves, the retry sends; and the CLI bridge returns the same seven names and the same trace answer as the endpoint.
 - **Provenance (6.1.0 P3), 23 checks:** all seven `summary_verdict` values are produced by real fixtures, including `paused_hitl_approval` from an agent's unanswered request, `suppressed_cooldown` and `suppressed_hourly_cap` from rules that matched and were held, and `replied`/`queued`/`failed` by driving the reply command through the state machine with the device's own lease token. That set is asserted to be exactly seven. `alerts`, `dlq` and `ws inspect` answer, and an id nobody owns resolves to `kind: unknown`.
 - **By-example synthesis (6.1.0 P2), 9 checks:** two bKash examples produce `(?:TrxID|Txn\s+ID)[\s:=]*…` with precision and recall of 1.0 and a negative corpus that matched nothing; the value is a shape rather than the example string; and a value that appears twice is refused with `value_ambiguous` and exit 2.
 - **The flow IR (6.1.0 P1), 62 checks:** the same 15 vectors run through both runtimes, the four accepted shapes land with a computed `ui_layout` covering every node and a `node.position` that mirrors it, the eleven refused shapes are `400 workflow_invalid` with the offending path, and a stale `expected_previous_version` is `409` naming the stored version.
