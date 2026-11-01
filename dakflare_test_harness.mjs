@@ -2353,6 +2353,77 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── by-example synthesis (v6.1 P2) ──────────────────────────────────── */
+  console.log('-- by-example synthesis --');
+  {
+    const rep = new Report('synthesis');
+
+    // Driven through the shipped command, in a throwaway HOME, so this proves the
+    // binary an operator runs rather than a function that happens to exist.
+    const home = fs.mkdtempSync('/tmp/opencode/dakflare-synth-');
+    const runCli = (...args) =>
+      spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, NO_COLOR: '1' },
+      });
+    const docOf = (run) => JSON.parse(run.stdout.trim().split('\n').pop());
+
+    const bKash = path.join(home, 'bkash.json');
+    fs.writeFileSync(
+      bKash,
+      JSON.stringify({
+        group: 'trx_id',
+        samples: [
+          {
+            body: 'You have received Tk 500.00 from 01712345678. TrxID: DHK1234ABC at 2026-11-01 10:22.',
+            value: 'DHK1234ABC',
+          },
+          {
+            body: 'Payment of Tk 250.00 received. Txn ID= DHK5678XYZ on 01-11-2026.',
+            value: 'DHK5678XYZ',
+          },
+        ],
+        negatives: ['Your daily limit is Tk 25000. Dial *247# for help.'],
+      })
+    );
+
+    const synthesized = runCli('extract', 'synthesize', '--samples', bKash, '--agent');
+    rep.check('two bKash examples synthesize a pattern -> exit 0', synthesized.status, 0);
+    const pattern = docOf(synthesized).data ?? {};
+    rep.checkFn('the pattern anchors on both labels as one alternation', () =>
+      String(pattern.pattern).startsWith('(?:TrxID|Txn\\s+ID)[\\s:=]*'));
+    rep.check('...both anchors are named', (pattern.anchors ?? []).length, 2);
+    rep.check('...precision on the samples is 1.0', pattern.precision, 1);
+    rep.check('...recall on the samples is 1.0', pattern.recall, 1);
+    rep.check('...the negative corpus was checked', pattern.negatives, 1);
+    rep.checkFn('...and the value is a shape, not the example itself', () =>
+      String(pattern.value_shape).includes('[A-Za-z0-9]') &&
+      !String(pattern.value_shape).includes('DHK1234ABC'));
+
+    // A value that appears twice cannot be anchored, and guessing which one is
+    // the extraction is how half the traffic gets the wrong number.
+    const ambiguous = path.join(home, 'ambiguous.json');
+    fs.writeFileSync(
+      ambiguous,
+      JSON.stringify({
+        samples: [
+          { body: 'TrxID: DHK1234ABC. The code DHK1234ABC is final.', value: 'DHK1234ABC' },
+        ],
+      })
+    );
+    const refused = runCli('extract', 'synthesize', '--samples', ambiguous, '--agent');
+    rep.check('a value that appears twice -> exit 2', refused.status, 2);
+    rep.checkFn('...named synthesis_refused with the reason', () => {
+      const doc = docOf(refused);
+      return doc.status === 'error' &&
+        doc.error?.code === 'synthesis_refused' &&
+        doc.error?.details?.reason === 'value_ambiguous';
+    });
+
+    fs.rmSync(home, { recursive: true, force: true });
+    run(rep);
+  }
+
   /* ── agent control plane (v6.1 P0) ─────────────────────────────────────── */
   console.log('-- agent control plane (v6.1 P0) --');
   {

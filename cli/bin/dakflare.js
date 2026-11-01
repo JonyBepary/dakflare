@@ -181,6 +181,10 @@ const ERROR_RULES = {
   // `details` carries the issues. A lost race is a conflict and retrying with the
   // version the response names is the fix.
   workflow_invalid: { exit: 2, category: 'usage' },
+  // v6.1 P2. The samples cannot produce a trustworthy pattern, or the engine is
+  // not where the CLI expects it. Both are the caller's to fix, so both are 2.
+  synthesis_refused: { exit: 2, category: 'usage' },
+  wasm_missing: { exit: 2, category: 'tooling' },
   version_conflict: {
     exit: 5,
     category: 'conflict',
@@ -436,6 +440,25 @@ const COMMAND_SPECS = {
       'dakflare rules test --peer +8801540196080 --body "PAID 500"',
     ],
   },
+  extract: {
+    summary: 'Derive an extraction pattern from examples (synthesize)',
+    effect: 'read',
+    usage:
+      'dakflare extract synthesize --samples <file> [--group <name>] [--verify-d1-limit <n>] [--device <id>]',
+    flags: {
+      samples: { type: 'string', note: 'JSON file of {body, value} pairs, and optional negatives' },
+      group: { type: 'string', note: 'capture-group name, default "value"' },
+      'verify-d1-limit': {
+        type: 'number',
+        note: 'also run the pattern over this many recent inbound messages',
+      },
+      device: { type: 'string', note: 'with --verify-d1-limit, which handset to read' },
+    },
+    examples: [
+      'dakflare extract synthesize --samples bKash.json',
+      'dakflare extract synthesize --samples bKash.json --group trx_id --verify-d1-limit 200',
+    ],
+  },
   capabilities: {
     summary: 'List every command with its effect and flags',
     effect: 'read',
@@ -599,6 +622,9 @@ const VALUE_FLAGS = new Set([
   'file',
   'id',
   'peer',
+  'samples',
+  'group',
+  'verify-d1-limit',
 ]);
 
 function parseArgv(argv) {
@@ -2593,6 +2619,7 @@ const SUMMARY_BUILDERS = {
   key: () => 'signing key read',
   up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
   flows: (data) => (data.applied === true ? 'flow applied' : 'flow diffed, nothing written'),
+  extract: (data) => (data.pattern ? 'pattern synthesized' : 'nothing synthesized'),
   rules: (data) =>
     data.applied === true
       ? `${(data.rules ?? []).length} rules applied`
@@ -2847,6 +2874,221 @@ async function commandAuthInvites(argv) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
   }
+  return 0;
+}
+
+/* ─────────────────── extract: by-example synthesis (v6.1 P2) ─────────────────── */
+
+/**
+ * Where the flow engine can be found.
+ *
+ * The CLI is zero-dependency, so the only way it can run the SAME synthesis the
+ * Worker runs is the committed `flow.wasm`. It is looked up beside the CLI first
+ * (which is where a packaged copy would live) and then in this repository, so a
+ * checkout works with no build step and one binary is committed rather than two.
+ */
+function flowWasmCandidates() {
+  return [
+    path.join(__dirname, '..', 'lib', 'flow.wasm'),
+    path.join(__dirname, '..', '..', 'worker', 'src', 'wasm', 'flow.wasm'),
+    path.join(process.cwd(), 'worker', 'src', 'wasm', 'flow.wasm'),
+  ];
+}
+
+function flowWasmPath() {
+  for (const candidate of flowWasmCandidates()) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new CliError(
+    'flow.wasm not found. Run simulator/flow-wasm/build.sh, or install the CLI where it ships with the binary.',
+    2,
+    { error: 'wasm_missing', looked_in: flowWasmCandidates() }
+  );
+}
+
+let flowEngine = null;
+
+/** Instantiate once per process. The module imports nothing, so `{}` is right. */
+async function loadFlowEngine() {
+  if (flowEngine !== null) return flowEngine;
+  const bytes = fs.readFileSync(flowWasmPath());
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  flowEngine = instance.exports;
+  return flowEngine;
+}
+
+/**
+ * Call one `*_json` export. The ABI is `[u32 LE length][JSON]` at the returned
+ * pointer, and both buffers belong to the module.
+ */
+function callFlowEngine(engine, name, payload) {
+  const fn = engine[name];
+  if (typeof fn !== 'function') {
+    throw new CliError(`this flow.wasm has no ${name} export; rebuild it`, 2, {
+      error: 'wasm_missing',
+    });
+  }
+  const input = new TextEncoder().encode(JSON.stringify(payload));
+  const inputPtr = engine.alloc(input.byteLength);
+  new Uint8Array(engine.memory.buffer, inputPtr, input.byteLength).set(input);
+
+  let outputPtr;
+  try {
+    outputPtr = fn(inputPtr, input.byteLength);
+  } finally {
+    engine.dealloc(inputPtr, input.byteLength);
+  }
+
+  // Views are created after the call: alloc/run can grow memory and detach any
+  // buffer captured earlier.
+  const view = new DataView(engine.memory.buffer);
+  const length = view.getUint32(outputPtr, true);
+  const bytes = new Uint8Array(engine.memory.buffer, outputPtr + 4, length).slice();
+  engine.dealloc(outputPtr, 4 + length);
+
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new CliError(`${name} returned something that is not JSON`, 1, { error: 'bad_response' });
+  }
+}
+
+async function commandExtract(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('extract');
+  if (sub === 'synthesize') return commandExtractSynthesize(rest);
+  err(`dakflare: unknown extract subcommand "${sub}"`);
+  err('try `dakflare extract --help`');
+  return 2;
+}
+
+/**
+ * `extract synthesize --samples <file>` — derive a pattern, and prove it.
+ *
+ * The engine refuses rather than guesses, so a refusal is a real answer and it is
+ * reported with its reason instead of as a generic failure.
+ */
+async function commandExtractSynthesize(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('extract');
+  assertCommandFlags(flags, 'extract');
+  const json = MODE.json;
+
+  const file = stringFlag(flags, 'samples') ?? rest[0];
+  if (!file) throw usage('dakflare extract synthesize --samples <file>');
+
+  const doc = readJsonDocument(file);
+  const samples = Array.isArray(doc) ? doc : doc.samples;
+  if (!Array.isArray(samples) || samples.length === 0) {
+    throw usage(`${file}: expected { "samples": [ { "body", "value" } ] } or a bare array`);
+  }
+  for (const [index, sample] of samples.entries()) {
+    if (
+      sample === null ||
+      typeof sample !== 'object' ||
+      typeof sample.body !== 'string' ||
+      typeof sample.value !== 'string'
+    ) {
+      throw usage(`${file}: samples[${index}] needs a string body and a string value`);
+    }
+  }
+  const negatives = Array.isArray(doc?.negatives)
+    ? doc.negatives.filter((entry) => typeof entry === 'string')
+    : [];
+  const group = stringFlag(flags, 'group') ?? (typeof doc?.group === 'string' ? doc.group : undefined);
+
+  const engine = await loadFlowEngine();
+  const answer = callFlowEngine(engine, 'synthesize_json', {
+    samples,
+    negatives,
+    ...(group === undefined ? {} : { group }),
+  });
+
+  if (answer.ok !== true) {
+    const reason = answer.reason ?? 'synthesis_refused';
+    const message = answer.message ?? 'the samples cannot produce a trustworthy pattern';
+    if (json) {
+      emitJson({ ok: false, error: 'synthesis_refused', reason, message }, MODE);
+      return exitCodeFor('synthesis_refused');
+    }
+    out(fail(`Refused: ${message}`));
+    out(`  reason         ${reason}`);
+    out(muted('  nothing was written; the pattern is only returned when it proves itself'));
+    return exitCodeFor('synthesis_refused');
+  }
+
+  const result = answer.result ?? {};
+
+  /* ---- optional: how it behaves on real history ---------------------- */
+  let history = null;
+  if (flags['verify-d1-limit'] !== undefined) {
+    const limit = Number(flags['verify-d1-limit']);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 1000) {
+      throw usage('--verify-d1-limit must be between 1 and 1000');
+    }
+    const cfg = requireConfig();
+    const { deviceId } = await resolveDevice(cfg, stringFlag(flags, 'device'));
+    const listed = await api(
+      cfg,
+      'GET',
+      `/v1/messages?device_id=${encodeURIComponent(deviceId)}&limit=${Math.round(limit)}`
+    );
+    if (listed.status !== 200) throw requestFailure('read message history', listed);
+    const inbound = (listed.data?.messages ?? []).filter((row) => row.direction === 'in');
+
+    // JavaScript's RegExp, because that is what the Worker and the console use to
+    // preview. The synthesized pattern is checked to be portable (no RE2-only
+    // constructs) by the engine before it is returned.
+    let matched = 0;
+    let regex = null;
+    try {
+      regex = new RegExp(result.pattern);
+    } catch (error) {
+      throw new CliError(`the pattern does not run in JavaScript: ${error.message}`, 1, {
+        error: 'bad_response',
+        pattern: result.pattern,
+      });
+    }
+    for (const row of inbound) {
+      if (regex.test(String(row.body ?? ''))) matched += 1;
+    }
+    // History has no ground truth: this says how many bodies the pattern finds a
+    // value in, not whether those values were the right ones.
+    history = {
+      device_id: deviceId,
+      checked: inbound.length,
+      matched,
+      match_rate: inbound.length === 0 ? null : matched / inbound.length,
+    };
+  }
+
+  if (json) {
+    emitJson(
+      {
+        ok: true,
+        ...result,
+        ...(history === null ? {} : { history }),
+      },
+      MODE
+    );
+    return 0;
+  }
+
+  out(`Synthesized a pattern from ${result.samples} example${result.samples === 1 ? '' : 's'}`);
+  out(`  pattern        ${result.pattern}`);
+  out(`  group          ${result.group}`);
+  out(`  anchors        ${(result.anchors ?? []).join(' | ')}`);
+  out(`  value shape    ${result.value_shape}`);
+  out(`  precision      ${result.precision.toFixed(2)} on the samples given`);
+  out(`  recall         ${result.recall.toFixed(2)} on the samples given`);
+  if (result.negatives > 0) out(`  negatives      ${result.negatives} bodies, none matched`);
+  if (history !== null) {
+    out(`  history        ${history.matched} of ${history.checked} inbound messages matched`);
+    out(muted('                 (history has no expected value, so this is a match count)'));
+  }
+  out('');
+  out(muted('  Use it as an extract node: "pattern" takes the regex, and the group becomes'));
+  out(muted(`  {{${result.group}}}.`));
   return 0;
 }
 
@@ -3936,6 +4178,28 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
 Roles: owner, admin, member. Agent tokens are a third credential, not a role: they
 may ASK, and a time-boxed grant decides what they may DO. --agent never prompts,
 so pass --yes on the revoking subcommands.`,
+  extract: `Usage: dakflare extract synthesize --samples <file> [options]
+
+  synthesize --samples <file>      derive a regex from real messages, and prove it
+
+The file is { "samples": [ { "body": "...", "value": "..." } ], "negatives": [ "..." ],
+"group": "trx_id" } or a bare array of {body, value}. Every value must appear
+exactly ONCE in its body: twice is refused rather than guessed, because a pattern
+derived from an ambiguous span extracts the wrong number from half the traffic and
+there is no way to tell which half.
+
+The pattern is returned only after it has been run against every sample (exactly
+one match, capturing exactly the expected value) and every negative (no match), so
+precision and recall in the response are measured, not claimed.
+
+  --group <name>          capture-group name, default "value"
+  --verify-d1-limit <n>   also run it over n recent inbound messages from the
+                          deployment. History has no ground truth, so that reports
+                          HOW MANY matched, not whether the matches were right.
+
+Runs offline against the bundled flow.wasm: the same engine the Worker uses, so
+what this prints is what a flow will do.`,
+
   flows: `Usage: dakflare flows apply <file> [--dry-run] [--agent]
 
   apply <file>    write one flow document and let the Worker compute its layout
@@ -4047,6 +4311,7 @@ const COMMANDS = {
   auth: commandAuth,
   flows: commandFlows,
   rules: commandRules,
+  extract: commandExtract,
   key: commandKey,
 };
 

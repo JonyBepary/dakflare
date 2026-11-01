@@ -877,6 +877,53 @@ race is `409 version_conflict` naming the stored version.
 
 ---
 
+### 4.6 By-example synthesis (6.1.0 P2)
+
+An operator knows what the value looks like in two real messages. Writing the
+pattern by hand means guessing the label, the separator and the shape of the
+value, and being wrong in a way that surfaces three weeks later as a missing
+extraction. `simulator/flow/src/prose_synth.rs` derives the pattern instead, and
+proves it before returning anything.
+
+```
+1. locate    each expected value must occur EXACTLY ONCE in its body
+2. anchor    walk back: separator run, then the label (a space inside two words
+             stays part of the label, so "Txn ID" is one label)
+3. reconcile different labels become a bounded alternation, whitespace as \s+
+4. shape     common literal head and tail of the values, a character class in the
+             middle, length bounds from what was seen
+5. prove     compile, run against every sample, then every negative
+```
+
+A single example is generalised over its whole value rather than taken literally:
+a pattern that can only ever match the message it came from is not an extraction
+rule.
+
+Refusals, each with a reason the caller can act on: `value_absent`,
+`value_ambiguous` (the value occurs twice, so the span cannot be anchored),
+`no_anchor` (nothing before the value), `too_many_anchor_variants` (the examples
+describe more than one template), `pattern_invalid`, `verification_failed` (the
+pattern does not extract the expected value from a sample) and `negative_matched`
+(the pattern matches a body it must not).
+
+Two bKash examples produce, and then verify:
+
+```
+(?:TrxID|Txn\s+ID)[\s:=]*(?<trx_id>DHK[A-Za-z0-9]{7})
+```
+
+with `precision 1.0` and `recall 1.0` on the samples given, and zero matches on
+the negative corpus. Those numbers are measured, not claimed: they are the result
+of running the compiled pattern over the corpus it was handed.
+
+The engine is `flow.wasm`, so `dakflare extract synthesize` runs offline against
+the same binary the Worker executes. `--verify-d1-limit <n>` additionally runs the
+pattern over the last n inbound messages of a deployment; history has no expected
+value, so that reports **how many bodies matched**, never whether the match was
+right, and it says so.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -1027,7 +1074,7 @@ though `send` is a mutating command: an `approval_required` and an
 `agent_quota_exceeded` both mean the action did **not** happen, so repeating it
 after a human answers cannot cause a second SMS.
 
-### 6.3 Complete 17-Command CLI Matrix
+### 6.3 Complete 18-Command CLI Matrix
 
 | Command | Flags | Description & Semantics |
 |---|---|---|
@@ -1043,6 +1090,7 @@ after a human answers cannot cause a second SMS.
 | `audit` | `--tail [n]`, `--actor <lbl>`, `--limit <n>` | Reads operational audit trail from `/v1/admin/audit`. |
 | `flows` | `apply <file> [--dry-run]` | Writes one flow document. The file is `{id, name, graph, device_id?, enabled?, expected_previous_version?}` or a bare `{nodes, edges}`. `--dry-run` returns `data.dry_run_diff` (added/removed/changed nodes and edges, capture variables, layout) and writes nothing. A stale `expected_previous_version` exits `5` and names the stored version; a refused graph exits `2` with every issue and its path. |
 | `rules` | `apply <file> [--dry-run]`, `test --peer <e164> --body <text> [--device <id>]` | `apply` writes one rule or a `{rules: [...]}` document and reports create/update/unchanged per rule. `test` evaluates **every** rule and says why each would or would not reply (`disabled`, `sender_mismatch`, `body_mismatch`, `cooldown`, `hourly_cap`), which is the honest answer to "why did this message get no reply". |
+| `extract` | `synthesize --samples <file> [--group <name>] [--verify-d1-limit <n>] [--device <id>]` | Derives a regex from `{body, value}` examples and proves it against them and against a negative corpus before printing it. Refuses an ambiguous or unanchorable example with a named reason and exit `2`. Runs offline against the bundled `flow.wasm`. `--verify-d1-limit` reports how many recent inbound bodies matched, which is a match count, not a correctness check. |
 | `key` | `fingerprint [--keystore <path>] [--alias <name>]` | Computes SHA-256 fingerprint of the release signing keystore. |
 | `capabilities` | `--agent` | Emits self-describing JSON manifest of all commands, effects (`read`, `mutating`, `destructive`), and flags. |
 | `describe` | `<command>`, `--agent` | Emits two-line purpose, usage, and flag list for a given command. |
@@ -1194,7 +1242,8 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
-- **The flow IR (6.1.0 P1), 57 checks:** the same 15 vectors run through both runtimes, the four accepted shapes land with a computed `ui_layout` covering every node and a `node.position` that mirrors it, the eleven refused shapes are `400 workflow_invalid` with the offending path, and a stale `expected_previous_version` is `409` naming the stored version.
+- **By-example synthesis (6.1.0 P2), 9 checks:** two bKash examples produce `(?:TrxID|Txn\s+ID)[\s:=]*…` with precision and recall of 1.0 and a negative corpus that matched nothing; the value is a shape rather than the example string; and a value that appears twice is refused with `value_ambiguous` and exit 2.
+- **The flow IR (6.1.0 P1), 62 checks:** the same 15 vectors run through both runtimes, the four accepted shapes land with a computed `ui_layout` covering every node and a `node.position` that mirrors it, the eleven refused shapes are `400 workflow_invalid` with the offending path, and a stale `expected_previous_version` is `409` naming the stored version.
 - **The agent blast radius (6.1.0 P0), 52 checks:** a minted `dkf_agt_` token reads only what its scopes allow, cannot revoke a device, mint another token, read the grant table or approve its own request; a production send with no grant is `202 approval_required` and sends nothing; the same ask returns the same request; a 30-day request is clamped to one hour and says so; a grant covers its named recipients and not others; revoking a grant and revoking a token both take effect on the very next request; the third send against a budget of two is `429 agent_quota_exceeded`; and the CLI, driven by an agent token, exits `6`, `6`, `0` and `4` for those four outcomes.
 
 `simulator/core` additionally proves, without a network, that a recorded command keeps its lease token, that the ack body is `{"acks":[{"command_id":…,"claim_token":…}]}`, and that a row with no token (a composer send) sends no request at all.

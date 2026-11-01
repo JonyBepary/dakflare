@@ -76,6 +76,47 @@ pub unsafe extern "C" fn validate_json(ptr: *const u8, len: usize) -> *mut u8 {
     frame(validate_payload(input))
 }
 
+/// Derive a regex from examples, or say why it will not.
+///
+/// Input is `{ samples: [{body, value}], negatives?: [string], group?: string }`.
+/// Returns `{"ok":true,"result":{pattern, group, precision, recall, ...}}` or
+/// `{"ok":false,"reason":...,"message":...}`. The result is only returned after
+/// the pattern has been run against every sample and every negative, so an `ok`
+/// here is a measured claim rather than a guess.
+///
+/// # Safety
+/// `ptr`/`len` must describe a buffer allocated with `alloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn synthesize_json(ptr: *const u8, len: usize) -> *mut u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    frame(synthesize_payload(input))
+}
+
+fn synthesize_payload(input: &[u8]) -> Vec<u8> {
+    let request: dakflare_flow::SynthRequest = match serde_json::from_slice(input) {
+        Ok(request) => request,
+        Err(error) => {
+            return serde_json::to_vec(&json!({
+                "ok": false,
+                "reason": "bad_request",
+                "message": format!("expected {{ samples: [{{body, value}}] }}: {error}"),
+            }))
+            .unwrap_or_else(|_| b"{\"ok\":false}".to_vec())
+        }
+    };
+
+    match dakflare_flow::synthesize(&request) {
+        Ok(result) => serde_json::to_vec(&json!({ "ok": true, "result": result }))
+            .unwrap_or_else(|e| issues_json(&e.to_string())),
+        Err(failure) => serde_json::to_vec(&json!({
+            "ok": false,
+            "reason": failure.reason,
+            "message": failure.message,
+        }))
+        .unwrap_or_else(|_| b"{\"ok\":false}".to_vec()),
+    }
+}
+
 /// Validate, then place every node. Returns `{"ok":true,"algorithm":...,"positions":{...}}`.
 ///
 /// # Safety

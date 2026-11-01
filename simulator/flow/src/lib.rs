@@ -19,6 +19,9 @@
 //! touches a clock.
 
 pub mod ir;
+pub mod prose_synth;
+
+pub use prose_synth::{synthesize, Sample, SynthFailure, SynthOutcome, SynthRequest, SynthResult};
 
 use std::collections::BTreeMap;
 
