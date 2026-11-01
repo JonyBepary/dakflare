@@ -851,12 +851,20 @@ fn guarded(
                                 .actions
                                 .iter()
                                 .enumerate()
-                                .map(|(index, action)| match action {
-                                    Action::SendSms { to, body } => serde_json::json!({
+                                // Only a send is something this device performs.
+                                // v6.1 added `Delay` and `Webhook`; the handset
+                                // runs flows synchronously and makes no outbound
+                                // calls, so both are dropped here and the core
+                                // already logged that it did. The match stays
+                                // exhaustive so a new action type is a compile
+                                // error rather than something silently skipped.
+                                .filter_map(|(index, action)| match action {
+                                    Action::SendSms { to, body } => Some(serde_json::json!({
                                         "to": to,
                                         "body": body,
                                         "local_id": reply_local_id(&outcome.local_id, index),
-                                    }),
+                                    })),
+                                    Action::Delay { .. } | Action::Webhook { .. } => None,
                                 })
                                 .collect()
                         });
