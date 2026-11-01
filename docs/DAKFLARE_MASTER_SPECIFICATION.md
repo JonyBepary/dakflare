@@ -1007,6 +1007,32 @@ the server side and cannot be spoofed.
 `Mcp-Param-Device-Id`. The property is a string, on a statically reachable path,
 and a disagreement with the body is `-32020`.
 
+#### 4.7.1 Answering from the handset
+
+The phone is the party who can see whether sending is safe: credit, signal, the
+right number. So it can answer an approval, with three **device-authenticated**
+routes rather than the admin ones:
+
+```
+GET  /v1/device/approvals
+POST /v1/device/approvals/:id/approve   { "duration_s": 900 }
+POST /v1/device/approvals/:id/reject
+```
+
+The authorisation rule is narrow and visible: a device may only answer a request
+whose `target.device_id` is **that device**. A request with no device in its target
+is fleet-wide and stays an operator decision, because a handset answering for the
+whole fleet is exactly the unbounded authority this layer exists to prevent.
+
+The list carries `ladder_s` and `max_s` with each request, so the handset sheet
+cannot drift from the policy, and the duration is clamped by the same
+`decideApproval` the console and the CLI use. An answer names the handset in the
+audit row (`via: "handset"`), so "who allowed this" is answerable.
+
+One trap worth recording: these handlers take the body **as text**. `withDevice`
+consumes the request to verify the signature, so a handler that reads `req` again
+throws, and a 500 on the only route a handset has is worse than a 400.
+
 #### 4.8.1 The published contract
 
 `contracts/mcp-tools.json` is generated from the running endpoint by

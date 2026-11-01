@@ -317,6 +317,56 @@ fn normalize_label(label: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Where a pending grant applies. Recipients are what the agent asked to text;
+/// a device id is the handset the deployment routed the request to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalTarget {
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// One pending approval from `GET /v1/device/approvals`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub id: String,
+    pub scope: String,
+    pub target: ApprovalTarget,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub requested_at: i64,
+    pub expires_at: i64,
+    pub ladder_s: Vec<i64>,
+    pub max_s: i64,
+}
+
+/// The deployment's answer to an approval. `clamped` says the scope's ceiling
+/// shortened what was asked for, so `granted_s` is the only honest number to
+/// show as granted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalGrant {
+    pub granted_s: i64,
+    pub requested_s: i64,
+    pub clamped: bool,
+    pub max_s: i64,
+    pub expires_at: i64,
+}
+
+/// An approval id becomes a path segment, so reject anything that is not a
+/// plain token before it is interpolated.
+fn approval_path(id: &str, action: &str) -> Result<String, ProtocolError> {
+    let valid = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(ProtocolError::Shape(format!("invalid approval id: {id}")));
+    }
+    Ok(format!("/v1/device/approvals/{id}/{action}"))
+}
+
 impl DeviceClient {
     pub fn new(
         target: Target,
@@ -1075,6 +1125,63 @@ mod tests {
             parse_pair_link("dakflare://pair?u=https%3A%2F%2Fx&c=%GG1122334455"),
             Err(PairLinkError::BadEncoding)
         );
+    }
+
+    #[test]
+    fn approvals_parse_the_published_wire_shape() {
+        let approval: Approval = serde_json::from_str(
+            r#"{
+                "id": "82b1b513-6807-4c04-9a38-bd8a9627f325",
+                "scope": "sms:send:production",
+                "target": {
+                    "recipients": ["+8801540196080"],
+                    "device_id": "devecb9748c95b5395a"
+                },
+                "reason": null,
+                "requested_at": 1793526200000,
+                "expires_at": 1793527100000,
+                "ladder_s": [60, 300, 900, 1800, 3600, 86400, 604800, 2592000],
+                "max_s": 3600
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(approval.id, "82b1b513-6807-4c04-9a38-bd8a9627f325");
+        assert_eq!(approval.scope, "sms:send:production");
+        assert_eq!(approval.target.recipients, vec!["+8801540196080"]);
+        assert_eq!(
+            approval.target.device_id.as_deref(),
+            Some("devecb9748c95b5395a")
+        );
+        assert_eq!(approval.reason, None);
+        assert_eq!(approval.ladder_s.len(), 8);
+        assert_eq!(approval.max_s, 3600);
+    }
+
+    #[test]
+    fn approval_grant_requires_every_reported_field() {
+        let grant: ApprovalGrant = serde_json::from_str(
+            r#"{"granted_s":900,"requested_s":1800,"clamped":true,"max_s":900,"expires_at":1793527100000}"#,
+        )
+        .unwrap();
+        assert_eq!(grant.granted_s, 900);
+        assert_eq!(grant.requested_s, 1800);
+        assert!(grant.clamped);
+        assert_eq!(grant.max_s, 900);
+
+        // A 200 that says only "ok" is not a grant, and must not become one.
+        assert!(serde_json::from_value::<ApprovalGrant>(json!({"ok": true})).is_err());
+    }
+
+    #[test]
+    fn approval_paths_reject_tokens_that_could_escape_the_segment() {
+        assert_eq!(
+            approval_path("82b1b513-6807-4c04-9a38-bd8a9627f325", "approve").unwrap(),
+            "/v1/device/approvals/82b1b513-6807-4c04-9a38-bd8a9627f325/approve"
+        );
+        assert!(approval_path("../admin", "approve").is_err());
+        assert!(approval_path("", "reject").is_err());
+        assert!(approval_path("id/extra", "reject").is_err());
     }
 }
 

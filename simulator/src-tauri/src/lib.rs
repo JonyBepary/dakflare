@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use dakflare_core::{
-    CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow, MAX_SEARCH_HITS, Message, NewDevice,
-    ProtocolError, Retention, RetentionStatus, SearchHits, Store, Target,
-    carrier::flush_pending, check_send, drain_outbox, inject_inbound, parse_pair_link,
-    sync_flows as sync_flows_core,
+    Approval, ApprovalGrant, CachedFlow, Device, DeviceClient, DeviceFacts, FlowRunRow,
+    MAX_SEARCH_HITS, Message, NewDevice, ProtocolError, Retention, RetentionStatus, SearchHits,
+    Store, Target, carrier::flush_pending, check_send, drain_outbox, inject_inbound,
+    parse_pair_link, sync_flows as sync_flows_core,
 };
 use serde::Serialize;
 #[cfg(target_os = "android")]
@@ -365,6 +365,86 @@ async fn purge_messages(state: State<'_, AppState>, device_id: String) -> Result
 async fn revoke_device(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
     let (client, _device) = client_for(&state, &device_id).await?;
     client.revoke().await.map_err(|e| e.to_string())
+}
+
+/* -------------------------------------------------------------- approvals */
+
+/// Turn a protocol failure into a sentence the approval sheet can show.
+///
+/// The 404/409/410 cases all mean the same thing to the person holding the
+/// phone: this request is no longer theirs to answer. Saying so is what stops a
+/// double tap from becoming a second decision.
+fn approval_failure(error: ProtocolError) -> String {
+    match error {
+        ProtocolError::Status { status, body, .. }
+            if matches!(status, 404 | 409 | 410) =>
+        {
+            format!(
+                "This request is no longer waiting. It may have expired or been answered \
+                 elsewhere. Refresh the list. ({body})"
+            )
+        }
+        ProtocolError::Http(error) => format!(
+            "Could not reach the worker: {error}. Check the connection, then refresh."
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// `GET /v1/device/approvals` for this handset.
+#[tauri::command]
+async fn list_approvals(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Vec<Approval>, String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    let approvals = client
+        .list_approvals()
+        .await
+        .map_err(approval_failure)?;
+    // A signed answer is contact even when nothing is waiting.
+    record_contact(&state, &device_id).await;
+    Ok(approvals)
+}
+
+/// Grant a duration on one pending request.
+///
+/// The reply is the deployment's numbers, not the duration tapped here: the
+/// sheet reports `granted_s` and `clamped` so a shortened grant is never shown
+/// as the longer request.
+#[tauri::command]
+async fn approve_approval(
+    state: State<'_, AppState>,
+    device_id: String,
+    approval_id: String,
+    duration_s: i64,
+) -> Result<ApprovalGrant, String> {
+    if duration_s <= 0 {
+        return Err("Choose a duration before approving.".into());
+    }
+    let (client, _device) = client_for(&state, &device_id).await?;
+    let grant = client
+        .approve(&approval_id, duration_s)
+        .await
+        .map_err(approval_failure)?;
+    record_contact(&state, &device_id).await;
+    Ok(grant)
+}
+
+/// Answer one pending request with no.
+#[tauri::command]
+async fn reject_approval(
+    state: State<'_, AppState>,
+    device_id: String,
+    approval_id: String,
+) -> Result<(), String> {
+    let (client, _device) = client_for(&state, &device_id).await?;
+    client
+        .reject(&approval_id)
+        .await
+        .map_err(approval_failure)?;
+    record_contact(&state, &device_id).await;
+    Ok(())
 }
 
 /// Remember when this identity was paired.

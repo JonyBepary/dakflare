@@ -35,6 +35,7 @@ pub use identity::{
 };
 pub use keyvault::{KEYSTORE_PREFIX, KeyCipher, KeyVaultError, UNLOCK_ERROR};
 pub use protocol::{
-    DeviceClient, InboundMessage, PairLink, PairLinkError, PairRequest, ProtocolError,
-    SignedHeaders, Target, canonical_string, parse_pair_link, sign_request,
+    Approval, ApprovalGrant, ApprovalTarget, DeviceClient, InboundMessage, PairLink, PairLinkError,
+    PairRequest, ProtocolError, SignedHeaders, Target, canonical_string, parse_pair_link,
+    sign_request,
 };
