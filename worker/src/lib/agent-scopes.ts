@@ -151,6 +151,9 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
   "read device status": "devices:read",
   "read health": "devices:read",
   "read the audit log": "audit:read",
+  "read trace": "messages:read",
+  "read the dead letter queue": "devices:read",
+  "inspect sockets": "devices:read",
 
   // Writes.
   "send SMS": "sms:send",

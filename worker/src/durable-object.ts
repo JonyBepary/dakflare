@@ -355,6 +355,15 @@ export class DeviceGateway extends DurableObject<Env> {
     if (url.pathname === "/__commands") {
       return this.handleCommands(url);
     }
+    if (url.pathname === "/__trace") {
+      return this.handleTrace(url);
+    }
+    if (url.pathname === "/__dlq") {
+      return this.handleDeadLetters(url);
+    }
+    if (url.pathname === "/__ws") {
+      return this.handleSocketInspection();
+    }
 
     return Response.json({ error: "not_found" }, { status: 404 });
   }
@@ -856,6 +865,135 @@ export class DeviceGateway extends DurableObject<Env> {
       ws_connected: sockets.length > 0,
       queue_depth: Number(row[0]?.cnt ?? 0),
     });
+  }
+
+  /**
+   * `GET /__trace?id=…` — everything this object knows about one id.
+   *
+   * One request instead of four, and it is the only place the answer can be
+   * complete: the command row, the timers armed for it, the dead letters it left
+   * behind, and the sockets that could have carried it all live here, in object
+   * storage that D1 never sees.
+   *
+   * Matching is `instr(payload, ?) > 0` rather than `LIKE`: an id is opaque and a
+   * LIKE pattern would treat `_` in a uuid as a wildcard.
+   */
+  private handleTrace(url: URL): Response {
+    const id = url.searchParams.get("id");
+    if (id === null || id === "") return err("bad_request", 400);
+    const now = Date.now();
+
+    const commandRows = this.ctx.storage.sql
+      .exec(
+        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at,
+                claim_token, lease_until, idempotency_key
+           FROM commands WHERE command_id = ?`,
+        id
+      )
+      .toArray() as unknown as Record<string, unknown>[];
+
+    const tasks = this.ctx.storage.sql
+      .exec(
+        `SELECT id, kind, run_at, payload, attempts
+           FROM scheduled_tasks
+          WHERE instr(id, ?) > 0 OR instr(payload, ?) > 0
+          ORDER BY run_at ASC`,
+        id,
+        id
+      )
+      .toArray() as unknown as Record<string, unknown>[];
+
+    const letters = this.ctx.storage.sql
+      .exec(
+        `SELECT id, kind, payload, attempts, failed_at
+           FROM dead_letters
+          WHERE instr(id, ?) > 0 OR instr(payload, ?) > 0
+          ORDER BY failed_at DESC`,
+        id,
+        id
+      )
+      .toArray() as unknown as Record<string, unknown>[];
+
+    // The object's `devices` row is the PAIRING record (key + updated_at); liveness
+    // lives in D1 and in the sockets. Ask only for what is here.
+    const device = this.ctx.storage.sql
+      .exec(`SELECT device_id, updated_at, fcm_token IS NOT NULL AS has_fcm FROM devices LIMIT 1`)
+      .toArray() as unknown as { device_id: string; updated_at: number; has_fcm: number }[];
+
+    const depth = this.ctx.storage.sql
+      .exec(`SELECT COUNT(*) AS cnt FROM commands WHERE state IN ('PENDING', 'LEASED')`)
+      .toArray() as { cnt: number }[];
+
+    return Response.json({
+      id,
+      device: device[0] ?? null,
+      command: commandRows[0] ?? null,
+      scheduled_tasks: tasks,
+      dead_letters: letters,
+      sockets: this.socketSummary(now),
+      queue_depth: Number(depth[0]?.cnt ?? 0),
+      now,
+    });
+  }
+
+  /** `GET /__dlq?limit=N` — the object's dead letters, newest first. */
+  private handleDeadLetters(url: URL): Response {
+    const raw = Number(url.searchParams.get("limit") ?? "50");
+    const limit = Number.isFinite(raw) ? Math.min(200, Math.max(1, Math.trunc(raw))) : 50;
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT id, kind, payload, attempts, failed_at
+           FROM dead_letters ORDER BY failed_at DESC LIMIT ?`,
+        limit
+      )
+      .toArray() as unknown as Record<string, unknown>[];
+    return Response.json({ dead_letters: rows, limit });
+  }
+
+  /** `GET /__ws` — what the sockets for this device actually are right now. */
+  private handleSocketInspection(): Response {
+    return Response.json({ sockets: this.socketSummary(Date.now()), now: Date.now() });
+  }
+
+  /**
+   * One row per socket: which connection, when it was accepted, and how fresh its
+   * liveness evidence is. `stale_ms` is derived from the same
+   * `socketLastSeen` the push path uses, so the console and the close decision
+   * cannot disagree about what "quiet" means.
+   */
+  private socketSummary(now: number): Array<Record<string, unknown>> {
+    return this.ctx.getWebSockets().map((ws) => {
+      const attachment = readAttachment(ws);
+      const lastSeen = this.socketLastSeen(ws, attachment);
+      const state = this.socketStateOf(ws);
+      return {
+        socket_id: attachment.socketId,
+        connected_at: attachment.connectedAt,
+        last_seen: lastSeen,
+        quiet_ms: lastSeen === null ? null : now - lastSeen,
+        state,
+      };
+    });
+  }
+
+  private socketStateOf(ws: WebSocket): string {
+    try {
+      const candidate = ws as unknown as { readyState?: number };
+      switch (candidate.readyState) {
+        case 0:
+          return "CONNECTING";
+        case 1:
+          return "OPEN";
+        case 2:
+          return "CLOSING";
+        case 3:
+          return "CLOSED";
+        default:
+          return "UNKNOWN";
+      }
+    } catch {
+      return "UNKNOWN";
+    }
   }
 
   private handleCommandLookup(url: URL): Response {

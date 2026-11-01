@@ -50,6 +50,7 @@ import {
   handleGrantRevoke,
   handleGrantsList,
 } from "./routes/approvals";
+import { handleDlq, handleTrace, handleWsInspect } from "./routes/trace";
 import { AuthorityGuard } from "./authority-guard";
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
 import { scopeForAction } from "./lib/agent-scopes";
@@ -672,6 +673,26 @@ export default {
         decision === "approve"
           ? handleApprovalApprove(req, env, approvalId, actor)
           : handleApprovalReject(req, env, approvalId, actor)
+      );
+    }
+
+    // v6.1 P3 provenance. Reads, so a member may use them; the ids they return
+    // are the operator's own, and the trace never includes a message body that the
+    // caller could not already read from /v1/messages.
+    const traceMatch = pathname.match(/^\/v1\/admin\/trace\/([^/]+)$/);
+    if (method === "GET" && traceMatch) {
+      return withAdminAccess(req, env, "read", "read trace", (_actor) =>
+        handleTrace(env, traceMatch[1], url)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/dlq") {
+      return withAdminAccess(req, env, "read", "read the dead letter queue", (_actor) =>
+        handleDlq(env, url)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/ws") {
+      return withAdminAccess(req, env, "read", "inspect sockets", (_actor) =>
+        handleWsInspect(env, url)
       );
     }
 

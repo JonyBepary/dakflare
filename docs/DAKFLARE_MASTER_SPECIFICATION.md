@@ -924,6 +924,44 @@ right, and it says so.
 
 ---
 
+### 4.7 Provenance: one id, one verdict (6.1.0 P3)
+
+A reply goes wrong across four stores and the operator sees one symptom: the
+message was not answered. `dakflare trace <id>` joins them and reduces them to one
+of seven verdicts plus the lines that justify it.
+
+| Verdict | Means | Derived from |
+|---|---|---|
+| `replied` | the radio accepted the reply | command state `SENT`/`DELIVERED` |
+| `queued` | a reply exists, not yet accepted | `PENDING`/`LEASED`/`DISPATCHED` |
+| `failed` | the reply ended dead | `FAILED`/`EXPIRED` |
+| `suppressed_cooldown` | a rule matched, its cooldown was open | **recorded at decision time** |
+| `suppressed_hourly_cap` | a rule matched, its cap was spent | **recorded at decision time** |
+| `no_match` | automation ran, nothing matched | the absence of all of the above |
+| `paused_hitl_approval` | an agent asked, nobody has answered | `approval_requests` |
+
+Six of the seven are derivable at read time. The two suppressions are not: a
+cooldown is measured against `now`, so re-evaluating an hour later answers "would
+reply", which is the opposite of what happened. `0004_provenance.sql` adds
+`messages.reply_verdict` and `reply_verdict_detail_json`, written by the rule
+pipeline at the moment of the decision, and holding only those two values.
+
+The id may be a message, a command or an approval request. That order matters: an
+approval request is the only one of the three that is a question rather than a
+record, and "this is paused for a human" has no message row to derive from.
+
+The device's Durable Object answers `/__trace?id=` with the command, the timers
+armed for it, the dead letters it left, and its sockets. One request, because
+those four things exist only there and a cached answer would describe a moment
+that has passed. `reply-fate-trace.ts` joins that with D1 and `audit_log`.
+
+The same object answers `/__dlq` and `/__ws`, which are the `dakflare dlq` and
+`dakflare ws inspect` verbs. Socket inspection reports the same liveness evidence
+the push path uses to decide a socket is stale, so the two cannot disagree about
+what "quiet" means.
+
+---
+
 ## 5. Operations, Deployment & CI/CD (`docs/OPS_DEPLOY.md`)
 
 ### 5.1 The Two Configurations (Canonical vs Tooling)
@@ -1074,7 +1112,7 @@ though `send` is a mutating command: an `approval_required` and an
 `agent_quota_exceeded` both mean the action did **not** happen, so repeating it
 after a human answers cannot cause a second SMS.
 
-### 6.3 Complete 18-Command CLI Matrix
+### 6.3 Complete 22-Command CLI Matrix
 
 | Command | Flags | Description & Semantics |
 |---|---|---|
@@ -1091,6 +1129,10 @@ after a human answers cannot cause a second SMS.
 | `flows` | `apply <file> [--dry-run]` | Writes one flow document. The file is `{id, name, graph, device_id?, enabled?, expected_previous_version?}` or a bare `{nodes, edges}`. `--dry-run` returns `data.dry_run_diff` (added/removed/changed nodes and edges, capture variables, layout) and writes nothing. A stale `expected_previous_version` exits `5` and names the stored version; a refused graph exits `2` with every issue and its path. |
 | `rules` | `apply <file> [--dry-run]`, `test --peer <e164> --body <text> [--device <id>]` | `apply` writes one rule or a `{rules: [...]}` document and reports create/update/unchanged per rule. `test` evaluates **every** rule and says why each would or would not reply (`disabled`, `sender_mismatch`, `body_mismatch`, `cooldown`, `hourly_cap`), which is the honest answer to "why did this message get no reply". |
 | `extract` | `synthesize --samples <file> [--group <name>] [--verify-d1-limit <n>] [--device <id>]` | Derives a regex from `{body, value}` examples and proves it against them and against a negative corpus before printing it. Refuses an ambiguous or unanchorable example with a named reason and exit `2`. Runs offline against the bundled `flow.wasm`. `--verify-d1-limit` reports how many recent inbound bodies matched, which is a match count, not a correctness check. |
+| `trace` | `<id> [--device <id>]` | One id, the whole story: the inbound row and its automation bookkeeping from D1, the command, timers and sockets from the device object, the matching audit rows, and an approval request when that is what the id names. The first line is one of the seven verdicts in §4.7. |
+| `alerts` | `[--all]` | Open alerts, newest first. A device that comes back resolves its own alert, so open means unresolved **and** unacknowledged. |
+| `dlq` | `[--device <id>] [--limit <n>]` | Dead letters from the device object: tasks that failed past their retry budget. Max 200 per call. |
+| `ws` | `inspect [--device <id>]` | What the object thinks its sockets are: socket id, accepted time, last liveness evidence, how long quiet, readyState. The same evidence the push path uses to close a stale socket. |
 | `key` | `fingerprint [--keystore <path>] [--alias <name>]` | Computes SHA-256 fingerprint of the release signing keystore. |
 | `capabilities` | `--agent` | Emits self-describing JSON manifest of all commands, effects (`read`, `mutating`, `destructive`), and flags. |
 | `describe` | `<command>`, `--agent` | Emits two-line purpose, usage, and flag list for a given command. |
@@ -1242,6 +1284,7 @@ The conformance battery falsifies:
 - **A lost push recovers at expiry:** the socket carrying the frame closes, a second socket connects, `hello` does **not** steal the still-`LEASED` command, and at expiry that live socket receives it again with a fresh `claim_token` which acks to `DISPATCHED`. The expired lease's token stays rejected.
 - **The harness and the Worker agree on the lease window:** the measured time from lease to revert is checked against `LEASE_MS`, so a harness started without `dev.sh`'s exports fails loudly instead of testing the wrong duration.
 - **Retired vocabulary:** a body carrying `ack_command_ids` is `400`, which is what stops a v5.2.1 handset from failing silently.
+- **Provenance (6.1.0 P3), 23 checks:** all seven `summary_verdict` values are produced by real fixtures, including `paused_hitl_approval` from an agent's unanswered request, `suppressed_cooldown` and `suppressed_hourly_cap` from rules that matched and were held, and `replied`/`queued`/`failed` by driving the reply command through the state machine with the device's own lease token. That set is asserted to be exactly seven. `alerts`, `dlq` and `ws inspect` answer, and an id nobody owns resolves to `kind: unknown`.
 - **By-example synthesis (6.1.0 P2), 9 checks:** two bKash examples produce `(?:TrxID|Txn\s+ID)[\s:=]*…` with precision and recall of 1.0 and a negative corpus that matched nothing; the value is a shape rather than the example string; and a value that appears twice is refused with `value_ambiguous` and exit 2.
 - **The flow IR (6.1.0 P1), 62 checks:** the same 15 vectors run through both runtimes, the four accepted shapes land with a computed `ui_layout` covering every node and a `node.position` that mirrors it, the eleven refused shapes are `400 workflow_invalid` with the offending path, and a stale `expected_previous_version` is `409` naming the stored version.
 - **The agent blast radius (6.1.0 P0), 52 checks:** a minted `dkf_agt_` token reads only what its scopes allow, cannot revoke a device, mint another token, read the grant table or approve its own request; a production send with no grant is `202 approval_required` and sends nothing; the same ask returns the same request; a 30-day request is clamped to one hour and says so; a grant covers its named recipients and not others; revoking a grant and revoking a token both take effect on the very next request; the third send against a budget of two is `429 agent_quota_exceeded`; and the CLI, driven by an agent token, exits `6`, `6`, `0` and `4` for those four outcomes.

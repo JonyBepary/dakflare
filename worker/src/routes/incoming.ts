@@ -466,9 +466,11 @@ export async function handleIncomingBatch(
     const ruleCandidates = acceptedInbound.filter((message) => message.autoReply === 0);
     if (ruleCandidates.length > 0) {
       try {
-        const replied = await applyRules(env, deviceId, ruleCandidates, now);
-        if (replied.size > 0) {
-          flowMessages = acceptedMessages.filter((message) => !replied.has(message.localId));
+        const outcome = await applyRules(env, deviceId, ruleCandidates, now);
+        if (outcome.replied.size > 0) {
+          flowMessages = acceptedMessages.filter(
+            (message) => !outcome.replied.has(message.localId)
+          );
         }
       } catch (error) {
         // A rule-engine failure must not fail the upload; the messages are durable.
@@ -544,7 +546,8 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
 
   const rows = await env.DB.prepare(
     `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply,
-            reply_source, reply_ref, reply_command_id, reply_state, reply_error
+            reply_source, reply_ref, reply_command_id, reply_state, reply_error,
+            reply_verdict
        FROM messages
       WHERE device_id = ? AND received_at < ?
       ORDER BY received_at DESC, id DESC
@@ -565,14 +568,28 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
  * the in-memory history immediately, so two matching messages in one batch cannot
  * both bypass a cooldown or an hourly cap.
  */
+export interface RuleOutcome {
+  /** Local ids a rule replied to. */
+  replied: Set<string>;
+  /**
+   * Local ids a rule MATCHED and was held back on, with the reason.
+   *
+   * Recorded at the moment of the decision because it cannot be recomputed: the
+   * cooldown is measured against `now`, so re-evaluating an hour later would say
+   * "would reply", which is the opposite of what happened.
+   */
+  suppressed: Map<string, { verdict: "suppressed_cooldown" | "suppressed_hourly_cap"; detail: Record<string, unknown> }>;
+}
+
 async function applyRules(
   env: Env,
   deviceId: string,
   messages: AcceptedInbound[],
   now: number
-): Promise<Set<string>> {
+): Promise<RuleOutcome> {
   const replied = new Set<string>();
-  if (messages.length === 0) return replied;
+  const suppressed: RuleOutcome["suppressed"] = new Map();
+  if (messages.length === 0) return { replied, suppressed };
 
   const rows = await env.DB.prepare(
     `SELECT id, name, enabled, priority, matcher_type, matcher_value,
@@ -585,7 +602,7 @@ async function applyRules(
     .bind(deviceId)
     .all<RuleRecord>();
   const rules = rows.results ?? [];
-  if (rules.length === 0) return replied;
+  if (rules.length === 0) return { replied, suppressed };
 
   // Cooldown may be longer than the hourly window, so look back far enough for
   // whichever limit is stricter. The query is device-first and indexed.
@@ -608,6 +625,25 @@ async function applyRules(
       { peer: message.sender, body: message.body },
       { deviceId, now, hits }
     );
+
+    // A rule that matched and was held back is the only "nothing went out" reason
+    // that has to be recorded: every other one is derivable from rows that outlive
+    // it. The highest-priority such rule names the reason.
+    const held = evaluations.find(
+      (evaluation) => !evaluation.matched && (evaluation.reason === "cooldown" || evaluation.reason === "hourly_cap")
+    );
+    if (held !== undefined) {
+      suppressed.set(message.localId, {
+        verdict: held.reason === "cooldown" ? "suppressed_cooldown" : "suppressed_hourly_cap",
+        detail: {
+          rule_id: held.rule_id,
+          rule_name: held.name,
+          cooldown_s: held.rule?.cooldown_s ?? null,
+          max_per_hour: held.rule?.max_per_hour ?? null,
+          as_of: now,
+        },
+      });
+    }
 
     for (const evaluation of evaluations) {
       if (!evaluation.matched) continue;
@@ -650,11 +686,31 @@ async function applyRules(
 
       hits.push({ rule_id: evaluation.rule_id, device_id: deviceId, replied_at: now });
       replied.add(message.localId);
+      // A message that replied was not suppressed, whatever a lower-priority rule
+      // would have said about its own cooldown.
+      suppressed.delete(message.localId);
       break;
     }
   }
 
-  return replied;
+  if (suppressed.size > 0) {
+    try {
+      await env.DB.batch(
+        [...suppressed.entries()].map(([localId, entry]) =>
+          env.DB.prepare(
+            `UPDATE messages SET reply_verdict = ?, reply_verdict_detail_json = ?
+              WHERE device_id = ? AND local_id = ?`
+          ).bind(entry.verdict, JSON.stringify(entry.detail), deviceId, localId)
+        )
+      );
+    } catch (error) {
+      // Provenance is diagnostic. A message that was not answered still was not
+      // answered, whether or not the reason reached D1.
+      console.error(`[rules] could not record suppression for ${deviceId}: ${String(error)}`);
+    }
+  }
+
+  return { replied, suppressed };
 }
 
 /** Default 50, hard maximum 200. */

@@ -2424,6 +2424,189 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── provenance: seven verdicts (v6.1 P3) ─────────────────────────────── */
+  console.log('-- provenance: seven verdicts --');
+  {
+    const rep = new Report('provenance');
+
+    const traceOf = async (id) =>
+      (await admin('GET', `/v1/admin/trace/${encodeURIComponent(id)}?device_id=${identity.deviceId}`))
+        .data;
+    const postInbound = async (localId, sender, body) =>
+      device(identity, 'POST', '/v1/sms/incoming/batch', {
+        messages: [{ local_id: localId, sender, body, received_at: new Date().toISOString() }],
+        acks: [],
+      });
+    const inboundRow = async (localId) => {
+      const listed = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=100`);
+      return (listed.data?.messages ?? []).find((row) => row.local_id === localId);
+    };
+    /**
+     * Move a reply command to a terminal state the way the phone would.
+     *
+     * It cannot assume a fresh poll will hand it over: if a socket from an earlier
+     * section is still listed, the push already leased the command and a poll
+     * returns nothing. So it reads the object's own row for the claim token and
+     * acks with whatever lease exists, then reports the status.
+     */
+    const driveReply = async (commandId, status) => {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const trace = await admin(
+          'GET', `/v1/admin/trace/${commandId}?device_id=${identity.deviceId}`
+        );
+        const command = trace.data?.durable_object?.command;
+        if (command === null || command === undefined) break;
+        if (['DISPATCHED', 'SENT', 'DELIVERED', 'FAILED', 'EXPIRED'].includes(command.state)) break;
+
+        if (command.state === 'LEASED' && typeof command.claim_token === 'string') {
+          await device(identity, 'POST', '/v1/sms/outgoing/poll', {
+            acks: [{ command_id: commandId, claim_token: command.claim_token }],
+          });
+        } else {
+          const poll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+          const polled = (poll.data?.commands ?? []).find((row) => row.command_id === commandId);
+          if (polled !== undefined) {
+            await device(identity, 'POST', '/v1/sms/outgoing/poll', {
+              acks: [{ command_id: commandId, claim_token: polled.claim_token }],
+            });
+          }
+        }
+        await sleep(120);
+      }
+      await device(identity, 'POST', '/v1/sms/status/batch', {
+        updates: [{ command_id: commandId, status }],
+      });
+    };
+
+    // Local ids are unique per device, so a fixed one would resolve to the PREVIOUS
+    // run's row (and its reply command, already driven to SENT). Every id this
+    // section writes carries a run suffix.
+    const runTag = crypto.randomBytes(3).toString('hex');
+    const lid = (name) => `prov_${name}_${runTag}`;
+
+    const created = [];
+    const makeRule = async (bodyKeyword, extra) => {
+      const id = `prov_${crypto.randomBytes(3).toString('hex')}`;
+      created.push(id);
+      const res = await admin('POST', '/v1/rules', {
+        id,
+        name: `provenance ${bodyKeyword}`,
+        matcher: { type: 'prefix', value: '+880' },
+        body_matcher: { type: 'keyword', value: bodyKeyword },
+        reply_template: 'ack',
+        ...extra,
+      });
+      rep.check(`create a rule for ${bodyKeyword} -> 200`, res.status, 200);
+      return id;
+    };
+
+    // The set of verdicts the trace actually returns. The exit criterion is that
+    // this ends with all seven in it.
+    const seen = new Set();
+
+    /* ---- no_match ---------------------------------------------------- */
+    await postInbound(lid('nomatch'), '+8801700000100', 'nothing here matches anything');
+    const nothing = await inboundRow(lid('nomatch'));
+    const tNothing = await traceOf(nothing.id);
+    rep.check('no_match: a message nothing matched', tNothing.verdict, 'no_match');
+    seen.add(tNothing.verdict);
+
+    /* ---- queued, then replied ---------------------------------------- */
+    await makeRule('prov-reply', { priority: 10 });
+    await postInbound(lid('reply'), '+8801700000101', 'prov-reply hello');
+    const replyRow = await inboundRow(lid('reply'));
+    rep.check('a rule replied and the row records the command', typeof replyRow?.reply_command_id, 'string');
+    const tQueued = await traceOf(replyRow.id);
+    rep.check('queued: the reply has not reached the radio', tQueued.verdict, 'queued');
+    seen.add(tQueued.verdict);
+
+    await driveReply(replyRow.reply_command_id, 'SENT');
+    const tReplied = await traceOf(replyRow.id);
+    rep.check('replied: the radio accepted the reply', tReplied.verdict, 'replied');
+    seen.add(tReplied.verdict);
+
+    /* ---- failed ------------------------------------------------------ */
+    await makeRule('prov-fail', { priority: 11 });
+    await postInbound(lid('fail'), '+8801700000102', 'prov-fail now');
+    const failRow = await inboundRow(lid('fail'));
+    await driveReply(failRow.reply_command_id, 'FAILED');
+    const tFailed = await traceOf(failRow.id);
+    rep.check('failed: the reply command ended FAILED', tFailed.verdict, 'failed');
+    seen.add(tFailed.verdict);
+
+    /* ---- suppressed by cooldown -------------------------------------- */
+    await makeRule('prov-cool', { cooldown_s: 300, priority: 20 });
+    await postInbound(lid('cool_1'), '+8801700000103', 'prov-cool one');
+    await postInbound(lid('cool_2'), '+8801700000104', 'prov-cool two');
+    const coolRow = await inboundRow(lid('cool_2'));
+    const tCool = await traceOf(coolRow.id);
+    rep.check('suppressed_cooldown: the rule matched and was held back', tCool.verdict, 'suppressed_cooldown');
+    rep.checkFn('...and the trace names the rule that held it', () => {
+      const ruleId = tCool.message?.reply_verdict_detail?.rule_id;
+      return typeof ruleId === 'string' && (tCool.why ?? []).some((line) => String(line).includes(ruleId));
+    });
+    seen.add(tCool.verdict);
+
+    /* ---- suppressed by the hourly cap -------------------------------- */
+    await makeRule('prov-cap', { max_per_hour: 1, cooldown_s: 0, priority: 30 });
+    await postInbound(lid('cap_1'), '+8801700000105', 'prov-cap one');
+    await postInbound(lid('cap_2'), '+8801700000106', 'prov-cap two');
+    const capRow = await inboundRow(lid('cap_2'));
+    const tCap = await traceOf(capRow.id);
+    rep.check('suppressed_hourly_cap: the cap was already spent', tCap.verdict, 'suppressed_hourly_cap');
+    seen.add(tCap.verdict);
+
+    /* ---- paused for a human ------------------------------------------ */
+    const agent = await admin('POST', '/v1/admin/agent-tokens', {
+      name: 'provenance probe',
+      scopes: ['sms:send'],
+    });
+    const ask = await fetch(WORKER_URL + '/v1/sms/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agent.data.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        device_id: identity.deviceId,
+        to: '+8801700000199',
+        body: 'prov hitl',
+      }),
+    });
+    const asked = await ask.json();
+    rep.check('an agent send with no grant -> 202', ask.status, 202);
+    const tHitl = await traceOf(asked.approval_request.id);
+    rep.check('paused_hitl_approval: the request is waiting on a person', tHitl.verdict, 'paused_hitl_approval');
+    seen.add(tHitl.verdict);
+
+    rep.check('all seven verdicts are reachable', seen.size, 7);
+
+    /* ---- the other verbs --------------------------------------------- */
+    const alerts = await admin('GET', '/v1/admin/alerts');
+    rep.check('alerts list -> 200', alerts.status, 200);
+    rep.check('...is an array', Array.isArray(alerts.data?.alerts), true);
+
+    const dlq = await admin('GET', `/v1/admin/dlq?device_id=${identity.deviceId}&limit=5`);
+    rep.check('dead letters -> 200', dlq.status, 200);
+    rep.check('...is an array', Array.isArray(dlq.data?.dead_letters), true);
+
+    const sockets = await admin('GET', `/v1/admin/ws?device_id=${identity.deviceId}`);
+    rep.check('socket inspection -> 200', sockets.status, 200);
+    rep.check('...is an array', Array.isArray(sockets.data?.sockets), true);
+
+    const unknown = await traceOf('no-such-id-anywhere');
+    rep.check('an id nobody owns -> kind unknown', unknown.kind, 'unknown');
+
+    /* ---- teardown ------------------------------------------------------ */
+    await admin('DELETE', `/v1/admin/agent-tokens/${agent.data.id}`);
+    for (const id of created) await admin('DELETE', `/v1/admin/rules/${id}`);
+    const remaining = (await admin('GET', '/v1/admin/rules')).data?.rules ?? [];
+    rep.check('the suite deleted every rule it created here',
+      remaining.filter((row) => created.includes(row.id)).length, 0);
+
+    run(rep);
+  }
+
   /* ── agent control plane (v6.1 P0) ─────────────────────────────────────── */
   console.log('-- agent control plane (v6.1 P0) --');
   {

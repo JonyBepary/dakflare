@@ -459,6 +459,42 @@ const COMMAND_SPECS = {
       'dakflare extract synthesize --samples bKash.json --group trx_id --verify-d1-limit 200',
     ],
   },
+  trace: {
+    summary: 'Explain one id: message, command or approval request',
+    effect: 'read',
+    usage: 'dakflare trace <id> [--device <id>] [--agent]',
+    flags: {
+      device: { type: 'string', note: 'disambiguate a local id, which is per device' },
+    },
+    examples: [
+      'dakflare trace 6cb13963-f33c-49d0-b87f-2cc72844a426',
+      'dakflare trace 567f8234-dec5-48f9-81ca-32e0b6531fe9 --agent',
+    ],
+  },
+  alerts: {
+    summary: 'Open operator alerts, newest first',
+    effect: 'read',
+    usage: 'dakflare alerts [--all] [--agent]',
+    flags: { all: { type: 'boolean', note: 'include acknowledged and resolved alerts' } },
+    examples: ['dakflare alerts', 'dakflare alerts --all --agent'],
+  },
+  dlq: {
+    summary: "A device object's dead letters, newest first",
+    effect: 'read',
+    usage: 'dakflare dlq [--device <id>] [--limit <n>]',
+    flags: {
+      device: { type: 'string', note: 'default is the freshest paired device' },
+      limit: { type: 'number', note: 'rows, 1-200, default 50' },
+    },
+    examples: ['dakflare dlq', 'dakflare dlq --device dev63f3953f417d587f --limit 10 --agent'],
+  },
+  ws: {
+    summary: "Inspect a device's live sockets (inspect)",
+    effect: 'read',
+    usage: 'dakflare ws inspect [--device <id>]',
+    flags: { device: { type: 'string', note: 'default is the freshest paired device' } },
+    examples: ['dakflare ws inspect', 'dakflare ws inspect --device dev63f3953f417d587f --agent'],
+  },
   capabilities: {
     summary: 'List every command with its effect and flags',
     effect: 'read',
@@ -625,6 +661,7 @@ const VALUE_FLAGS = new Set([
   'samples',
   'group',
   'verify-d1-limit',
+  'sub',
 ]);
 
 function parseArgv(argv) {
@@ -2620,6 +2657,10 @@ const SUMMARY_BUILDERS = {
   up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
   flows: (data) => (data.applied === true ? 'flow applied' : 'flow diffed, nothing written'),
   extract: (data) => (data.pattern ? 'pattern synthesized' : 'nothing synthesized'),
+  trace: (data) => `verdict ${data.verdict ?? 'unknown'}`,
+  alerts: (data) => `${(data.alerts ?? []).length} open alerts`,
+  dlq: (data) => `${(data.dead_letters ?? []).length} dead letters`,
+  ws: (data) => `${(data.sockets ?? []).length} sockets`,
   rules: (data) =>
     data.applied === true
       ? `${(data.rules ?? []).length} rules applied`
@@ -2873,6 +2914,195 @@ async function commandAuthInvites(argv) {
   for (const invite of invites) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
+  }
+  return 0;
+}
+
+/* ─────────────────────── provenance (v6.1 P3) ─────────────────────── */
+
+/** `trace <id>` — one id, the whole story, and one word for it. */
+async function commandTrace(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('trace');
+  assertCommandFlags(flags, 'trace');
+  const json = MODE.json;
+
+  const id = stringFlag(flags, 'id') ?? rest[0];
+  if (!id) throw usage('dakflare trace <id> [--device <id>]');
+  const device = stringFlag(flags, 'device');
+  const cfg = requireConfig();
+
+  const query = device === undefined ? '' : `?device_id=${encodeURIComponent(device)}`;
+  const result = await api(cfg, 'GET', `/v1/admin/trace/${encodeURIComponent(id)}${query}`);
+  if (result.status !== 200) throw requestFailure('trace', result);
+
+  const trace = result.data ?? {};
+  if (json) {
+    emitJson({ ok: true, ...trace }, MODE);
+    return 0;
+  }
+
+  out(`${trace.verdict}  (${trace.kind})`);
+  for (const line of trace.why ?? []) out(`  ${line}`);
+  if ((trace.warnings ?? []).length > 0) {
+    out('');
+    for (const warning of trace.warnings) out(warn(`  ${warning}`));
+  }
+
+  const message = trace.message;
+  if (message) {
+    out('');
+    out(`  message        ${message.local_id}`);
+    out(`  direction      ${message.direction}  ${message.peer}`);
+    out(`  received       ${iso(message.received_at)}`);
+    if (message.reply_source) {
+      out(`  automation     ${message.reply_source}${message.reply_ref ? ` ${message.reply_ref}` : ''}`);
+    }
+    if (message.reply_command_id) out(`  reply command  ${message.reply_command_id}`);
+  }
+
+  const command = trace.command;
+  if (command?.state) out(`  command state  ${command.state}`);
+
+  const flows = trace.automation?.flows ?? [];
+  if (flows.length > 0) {
+    out(`  flows          ${flows.map((run) => `${run.flow_id} v${run.flow_version} ${run.outcome}`).join(', ')}`);
+  }
+
+  const approval = trace.approval;
+  if (approval) {
+    out(`  scope          ${approval.scope}`);
+    out(`  target         ${describeTarget(approval.target)}`);
+    out(`  requested      ${iso(approval.requested_at)}  expires ${iso(approval.expires_at)}`);
+    if (approval.live) out(`  approve        dakflare auth approve ${approval.id} --for 15m`);
+  }
+
+  const object = trace.durable_object;
+  if (object) {
+    out('');
+    out(`  object         queue ${object.queue_depth ?? '?'}, sockets ${(object.sockets ?? []).length}`);
+    for (const task of object.scheduled_tasks ?? []) {
+      out(`    timer        ${task.kind} at ${iso(task.run_at)}${task.attempts ? ` (attempt ${task.attempts})` : ''}`);
+    }
+    for (const letter of object.dead_letters ?? []) {
+      out(`    dead letter  ${letter.kind} after ${letter.attempts} attempts at ${iso(letter.failed_at)}`);
+    }
+  }
+
+  const audit = trace.audit ?? [];
+  if (audit.length > 0) {
+    out('');
+    out(`  audit          ${audit.length} row${audit.length === 1 ? '' : 's'}`);
+    for (const row of audit.slice(0, 5)) {
+      out(`    ${iso(row.at)}  ${row.action}${row.actor_label ? ` by ${row.actor_label}` : ''}`);
+    }
+  }
+  return 0;
+}
+
+/** `alerts` — the open ones by default, the history on request. */
+async function commandAlerts(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('alerts');
+  assertCommandFlags(flags, 'alerts');
+  const json = MODE.json;
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'GET', `/v1/admin/alerts${flags.all === true ? '?all=1' : ''}`);
+  if (result.status !== 200) throw requestFailure('alerts', result);
+  const alerts = result.data?.alerts ?? [];
+
+  if (json) {
+    emitJson({ ok: true, alerts }, MODE);
+    return 0;
+  }
+  if (alerts.length === 0) {
+    out('no open alerts');
+    return 0;
+  }
+  out(`Alerts (${alerts.length})`);
+  for (const alert of alerts) {
+    const device = alert.label ?? alert.device_id ?? 'fleet';
+    const state = alert.resolved_at ? 'resolved' : alert.acknowledged_at ? 'acknowledged' : 'open';
+    out(`  ${String(device).padEnd(22)} ${String(alert.kind).padEnd(16)} ${state.padEnd(13)} ${iso(alert.raised_at)}`);
+  }
+  return 0;
+}
+
+/** `dlq` — the alarms that gave up. */
+async function commandDlq(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('dlq');
+  assertCommandFlags(flags, 'dlq');
+  const json = MODE.json;
+  const cfg = requireConfig();
+
+  const limitFlag = stringFlag(flags, 'limit');
+  const limit = limitFlag === undefined ? 50 : Number(limitFlag);
+  if (!Number.isFinite(limit) || limit < 1 || limit > 200) {
+    throw usage('--limit must be between 1 and 200');
+  }
+  const { deviceId } = await resolveDevice(cfg, stringFlag(flags, 'device'));
+
+  const result = await api(
+    cfg,
+    'GET',
+    `/v1/admin/dlq?device_id=${encodeURIComponent(deviceId)}&limit=${Math.round(limit)}`
+  );
+  if (result.status !== 200) throw requestFailure('read the dead letter queue', result);
+  const letters = result.data?.dead_letters ?? [];
+
+  if (json) {
+    emitJson({ ok: true, device_id: deviceId, dead_letters: letters }, MODE);
+    return 0;
+  }
+  if (letters.length === 0) {
+    out(`no dead letters on ${deviceId}`);
+    return 0;
+  }
+  out(`Dead letters on ${deviceId} (${letters.length})`);
+  for (const letter of letters) {
+    out(`  ${String(letter.kind).padEnd(18)} ${String(letter.attempts).padStart(2)} attempts  ${iso(letter.failed_at)}`);
+    out(`    ${letter.id}`);
+    if (letter.payload && letter.payload !== '{}') out(muted(`    ${String(letter.payload).slice(0, 160)}`));
+  }
+  return 0;
+}
+
+/** `ws inspect` — what the object thinks its sockets are, and how quiet. */
+async function commandWs(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('ws');
+  if (sub !== 'inspect') {
+    err(`dakflare: unknown ws subcommand "${sub}"`);
+    err('try `dakflare ws --help`');
+    return 2;
+  }
+
+  const { flags } = parseArgv(rest);
+  if (flags.help) return printHelp('ws');
+  assertCommandFlags(flags, 'ws');
+  const json = MODE.json;
+  const cfg = requireConfig();
+  const { deviceId } = await resolveDevice(cfg, stringFlag(flags, 'device'));
+
+  const result = await api(cfg, 'GET', `/v1/admin/ws?device_id=${encodeURIComponent(deviceId)}`);
+  if (result.status !== 200) throw requestFailure('inspect sockets', result);
+  const sockets = result.data?.sockets ?? [];
+
+  if (json) {
+    emitJson({ ok: true, device_id: deviceId, sockets }, MODE);
+    return 0;
+  }
+  if (sockets.length === 0) {
+    out(`no sockets open on ${deviceId}`);
+    return 0;
+  }
+  out(`Sockets on ${deviceId} (${sockets.length})`);
+  for (const socket of sockets) {
+    const quiet = socket.quiet_ms === null ? 'no liveness evidence' : `quiet ${humanDuration(socket.quiet_ms / 1000)}`;
+    out(`  ${String(socket.socket_id).slice(0, 8)}  ${String(socket.state).padEnd(10)} ${quiet}`);
+    out(muted(`    accepted ${iso(socket.connected_at)}`));
   }
   return 0;
 }
@@ -4178,6 +4408,43 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
 Roles: owner, admin, member. Agent tokens are a third credential, not a role: they
 may ASK, and a time-boxed grant decides what they may DO. --agent never prompts,
 so pass --yes on the revoking subcommands.`,
+  trace: `Usage: dakflare trace <id> [--device <id>] [--agent]
+
+One id, the whole story: the inbound row and its automation bookkeeping from D1,
+the command, its timers and its sockets from the device object, the matching audit
+rows, and an approval request if that is what the id is.
+
+The first line is a verdict, and there are seven of them:
+
+  replied               the radio accepted the reply
+  queued                a reply is queued, not yet accepted
+  failed                the reply command ended FAILED or EXPIRED
+  suppressed_cooldown   a rule matched, its cooldown was still open
+  suppressed_hourly_cap a rule matched, its hourly cap was spent
+  no_match              automation ran and nothing matched
+  paused_hitl_approval  an agent asked to send this and nobody has answered
+
+The lines under it are why, with the rule id and the numbers where they exist.`,
+
+  alerts: `Usage: dakflare alerts [--all] [--agent]
+
+Open alerts, newest first. An alert is a fact about a device (silent too long), not
+a deployment metric. A device that comes back resolves its own alert, so "open"
+means unresolved AND unacknowledged. --all includes the history.`,
+
+  dlq: `Usage: dakflare dlq [--device <id>] [--limit <n>]
+
+Dead letters from the device object: tasks that failed past their retry budget.
+They are the alarms that gave up, so they are worth reading before they are
+cleared. Max 200 rows per call.`,
+
+  ws: `Usage: dakflare ws inspect [--device <id>]
+
+What the device object thinks its sockets are: socket id, when it was accepted,
+its last liveness evidence, how long it has been quiet, and its readyState. This
+is the same evidence the push path uses to decide a socket is stale, so it cannot
+disagree with what actually gets closed.`,
+
   extract: `Usage: dakflare extract synthesize --samples <file> [options]
 
   synthesize --samples <file>      derive a regex from real messages, and prove it
@@ -4312,6 +4579,10 @@ const COMMANDS = {
   flows: commandFlows,
   rules: commandRules,
   extract: commandExtract,
+  trace: commandTrace,
+  alerts: commandAlerts,
+  dlq: commandDlq,
+  ws: commandWs,
   key: commandKey,
 };
 
