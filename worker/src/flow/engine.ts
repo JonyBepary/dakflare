@@ -12,11 +12,17 @@
 
 import flowModule from "../wasm/flow.wasm";
 
-export interface FlowAction {
-  type: "send_sms";
-  to: string;
-  body: string;
-}
+/**
+ * What the interpreter asks the caller to DO, in the order the graph visits it.
+ *
+ * `delay` and `webhook` are produced by v6.1 graphs. The Worker's dispatch loop
+ * performs `send_sms` and names the other two rather than ignoring them, so a
+ * flow that uses one is visibly partial instead of quietly different.
+ */
+export type FlowAction =
+  | { type: "send_sms"; to: string; body: string }
+  | { type: "delay"; seconds: number }
+  | { type: "webhook"; url: string; body: string };
 
 export interface FlowStep {
   node_id: string;

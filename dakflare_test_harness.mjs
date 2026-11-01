@@ -2262,6 +2262,85 @@ async function cmdSuite() {
     run(rep);
   }
 
+  /* ── flow IR v2 (v6.1 P1) ─────────────────────────────────────────────── */
+  console.log('-- flow IR v2 --');
+  {
+    const rep = new Report('flow IR');
+
+    // The same vector file `simulator/flow` is tested against. If the Worker's
+    // copy and the Rust one disagree, one of them fails here.
+    const vectors = JSON.parse(
+      fs.readFileSync(path.join(HERE, 'test-support', 'flow-ir-vectors.json'), 'utf8')
+    );
+    const created = [];
+
+    for (const vector of vectors) {
+      const id = `ir_${crypto.randomBytes(4).toString('hex')}`;
+      const res = await admin('PUT', `/v1/admin/workflows/${id}`, {
+        name: 'IR vector',
+        graph: vector.graph,
+      });
+
+      if (vector.ok) {
+        rep.check(`${vector.name} -> accepted`, res.status, 200);
+        if (res.status === 200) {
+          created.push(id);
+          const graph = res.data?.workflow?.graph ?? {};
+          const positions = graph.ui_layout?.positions ?? {};
+          rep.check(`${vector.name}: ui_layout names the algorithm`,
+            graph.ui_layout?.algorithm, 'rank-v1');
+          rep.check(`${vector.name}: every node has a position`,
+            (graph.nodes ?? []).every((node) => positions[node.id] !== undefined), true);
+          // The transitional mirror: v6.0 readers still find node.position.
+          rep.check(`${vector.name}: node.position mirrors the layout`,
+            (graph.nodes ?? []).every((node) =>
+              node.position?.x === positions[node.id]?.x &&
+              node.position?.y === positions[node.id]?.y), true);
+        }
+      } else {
+        rep.check(`${vector.name} -> refused`, res.status, 400);
+        rep.check(`${vector.name}: names workflow_invalid`, res.data?.error, 'workflow_invalid');
+        rep.checkFn(`${vector.name}: the issue says why`, () =>
+          JSON.stringify(res.data?.details ?? []).includes(vector.contains));
+      }
+    }
+
+    // The optimistic guard is one conditional UPDATE, so a stale version loses.
+    const conflictId = `ir_${crypto.randomBytes(4).toString('hex')}`;
+    const first = await admin('PUT', `/v1/admin/workflows/${conflictId}`, {
+      name: 'conflict probe',
+      graph: vectors.find((vector) => vector.ok).graph,
+    });
+    rep.check('create a workflow -> 200', first.status, 200);
+    if (first.status === 200) created.push(conflictId);
+    const version = first.data?.workflow?.version;
+    rep.check(' ...starts at version 1', version, 1);
+
+    const fresh = await admin('PUT', `/v1/admin/workflows/${conflictId}`, {
+      name: 'conflict probe',
+      graph: vectors.find((vector) => vector.ok).graph,
+      expected_previous_version: version,
+    });
+    rep.check('a write with the current version -> 200', fresh.status, 200);
+    rep.check(' ...bumps the version', fresh.data?.workflow?.version, 2);
+
+    const stale = await admin('PUT', `/v1/admin/workflows/${conflictId}`, {
+      name: 'conflict probe',
+      graph: vectors.find((vector) => vector.ok).graph,
+      expected_previous_version: version,
+    });
+    rep.check('a write with the stale version -> 409', stale.status, 409);
+    rep.check(' ...names version_conflict', stale.data?.error, 'version_conflict');
+    rep.check(' ...and the current version to retry against', stale.data?.current_version, 2);
+
+    for (const id of created) await admin('DELETE', `/v1/admin/workflows/${id}`);
+    const remaining = (await admin('GET', '/v1/admin/workflows')).data?.workflows ?? [];
+    rep.check('the suite deleted every workflow it created',
+      remaining.filter((row) => created.includes(row.id)).length, 0);
+
+    run(rep);
+  }
+
   /* ── agent control plane (v6.1 P0) ─────────────────────────────────────── */
   console.log('-- agent control plane (v6.1 P0) --');
   {

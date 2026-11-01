@@ -241,25 +241,72 @@ export async function handleWorkflowPut(
     deviceId = input.device_id;
   }
 
+  // Optimistic concurrency, as ONE statement.
+  //
+  // D1 exposes no isolation level beyond a single statement plus atomic
+  // `batch()`, so a SELECT-then-UPDATE would let two consoles both read version 3
+  // and both write version 4, silently discarding one. The guard lives in the
+  // WHERE clause and the answer is `meta.changes`.
+  let expected: number | null = null;
+  if (input.expected_previous_version !== undefined && input.expected_previous_version !== null) {
+    if (
+      typeof input.expected_previous_version !== "number" ||
+      !Number.isInteger(input.expected_previous_version) ||
+      input.expected_previous_version < 0
+    ) {
+      return err("bad_request", 400);
+    }
+    expected = input.expected_previous_version;
+  }
+
   const validation = validateWorkflowGraph(input.graph);
   if (!validation.ok) return workflowInvalid(validation.issues);
 
   const graph: Graph = validation.graph;
   const now = Date.now();
+  const serialized = JSON.stringify(graph);
 
-  await env.DB.prepare(
-    `INSERT INTO workflows (id, name, enabled, device_id, graph, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       name = excluded.name,
-       enabled = excluded.enabled,
-       device_id = excluded.device_id,
-       graph = excluded.graph,
-       version = workflows.version + 1,
-       updated_at = excluded.updated_at`
-  )
-    .bind(id, name, enabled, deviceId, JSON.stringify(graph), now, now)
-    .run();
+  if (expected !== null) {
+    const updated = await env.DB.prepare(
+      `UPDATE workflows
+          SET name = ?, enabled = ?, device_id = ?, graph = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?`
+    )
+      .bind(name, enabled, deviceId, serialized, now, id, expected)
+      .run();
+
+    if (Number(updated.meta?.changes ?? 0) === 0) {
+      // Either the row is gone or somebody else wrote first. The current version
+      // is the one fact the caller needs to retry against, so it is named.
+      const current = await selectWorkflow(env, id);
+      return Response.json(
+        {
+          error: "version_conflict",
+          message:
+            current === null
+              ? "this workflow no longer exists"
+              : `expected version ${expected}, the stored version is ${current.version}`,
+          expected_previous_version: expected,
+          current_version: current?.version ?? null,
+        },
+        { status: 409 }
+      );
+    }
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO workflows (id, name, enabled, device_id, graph, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         enabled = excluded.enabled,
+         device_id = excluded.device_id,
+         graph = excluded.graph,
+         version = workflows.version + 1,
+         updated_at = excluded.updated_at`
+    )
+      .bind(id, name, enabled, deviceId, serialized, now, now)
+      .run();
+  }
 
   const row = await selectWorkflow(env, id);
   if (!row) {

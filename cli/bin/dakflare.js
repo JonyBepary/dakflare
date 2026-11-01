@@ -177,6 +177,16 @@ const ERROR_RULES = {
   not_grantable: { exit: 4, category: 'permission' },
   bad_target: { exit: 2, category: 'usage' },
   not_found: { exit: 3, category: 'not_found' },
+  // v6.1 P1. A refused graph is the caller's document, so it is a usage error and
+  // `details` carries the issues. A lost race is a conflict and retrying with the
+  // version the response names is the fix.
+  workflow_invalid: { exit: 2, category: 'usage' },
+  version_conflict: {
+    exit: 5,
+    category: 'conflict',
+    retryable: true,
+    fix: 're-read the workflow, merge, and retry with the current version',
+  },
 
   no_device: { exit: 6, category: 'precondition', remediation: 'dakflare pair', fix: 'pair a handset first' },
   bad_health: { exit: 6, category: 'precondition', remediation: 'dakflare doctor --json', fix: 'see which check fails' },
@@ -393,6 +403,39 @@ const COMMAND_SPECS = {
       'dakflare up --email you@example.com --yes',
     ],
   },
+  flows: {
+    summary: 'Apply a flow document (apply)',
+    effect: 'mutating',
+    usage: 'dakflare flows apply <file> [--dry-run] [--agent]',
+    flags: {
+      file: { type: 'string', note: 'convenience alternative to the positional <file>' },
+      'dry-run': { type: 'boolean', note: 'print the diff and change nothing' },
+      force: {
+        type: 'boolean',
+        note: 'drop expected_previous_version from the document before writing',
+      },
+    },
+    examples: [
+      'dakflare flows apply flow.json --dry-run',
+      'dakflare flows apply flow.json',
+    ],
+  },
+  rules: {
+    summary: 'Apply or test auto-reply rules (apply|test)',
+    effect: 'mutating',
+    usage: 'dakflare rules <apply|test> [options]',
+    flags: {
+      file: { type: 'string', note: 'apply: a rule or a {rules:[...]} document' },
+      'dry-run': { type: 'boolean', note: 'apply: print the diff and change nothing' },
+      peer: { type: 'string', note: 'test: the E.164 sender to evaluate' },
+      body: { type: 'string', note: 'test: the message body to evaluate' },
+      device: { type: 'string', note: 'test: evaluate as this device' },
+    },
+    examples: [
+      'dakflare rules apply rules.json --dry-run',
+      'dakflare rules test --peer +8801540196080 --body "PAID 500"',
+    ],
+  },
   capabilities: {
     summary: 'List every command with its effect and flags',
     effect: 'read',
@@ -553,6 +596,9 @@ const VALUE_FLAGS = new Set([
   'max-per-hour',
   'for',
   'state',
+  'file',
+  'id',
+  'peer',
 ]);
 
 function parseArgv(argv) {
@@ -2546,6 +2592,13 @@ const SUMMARY_BUILDERS = {
                   : 'owner account updated',
   key: () => 'signing key read',
   up: (data) => (data.url ? `deployed ${data.url}` : 'planned the install'),
+  flows: (data) => (data.applied === true ? 'flow applied' : 'flow diffed, nothing written'),
+  rules: (data) =>
+    data.applied === true
+      ? `${(data.rules ?? []).length} rules applied`
+      : data.matches
+        ? `${(data.matches ?? []).length} rules evaluated`
+        : 'rules diffed, nothing written',
   capabilities: (data) => `${(data.commands ?? []).length} commands`,
   describe: (data) => `${data.command ?? 'command'} described`,
   schema: (data) => `${data.command ?? 'command'} schema`,
@@ -2793,6 +2846,364 @@ async function commandAuthInvites(argv) {
   for (const invite of invites) {
     const used = invite.used_at ? 'used' : 'open';
     out(`  ${invite.email.padEnd(28)} ${String(invite.role).padEnd(9)} ${used}`);
+  }
+  return 0;
+}
+
+/* ───────────────────────── flows and rules (v6.1 P1) ───────────────────────── */
+
+/** Read a JSON document from disk, with a message that names the file. */
+function readJsonDocument(file) {
+  const resolved = expandHome(String(file));
+  let text;
+  try {
+    text = fs.readFileSync(resolved, 'utf8');
+  } catch (error) {
+    throw new CliError(`cannot read ${resolved}: ${error?.code ?? error?.message ?? error}`, 2, {
+      error: 'usage',
+      path: resolved,
+    });
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new CliError(`${resolved} is not valid JSON: ${error.message}`, 2, {
+      error: 'usage',
+      path: resolved,
+    });
+  }
+}
+
+const stableJson = (value) => {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return 'null';
+  }
+};
+
+const captureGroupsOf = (graph) => {
+  const names = new Set();
+  for (const node of graph?.nodes ?? []) {
+    if (node.type !== 'extract' || typeof node.data?.pattern !== 'string') continue;
+    for (const match of node.data.pattern.matchAll(/\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g)) {
+      names.add(match[1]);
+    }
+  }
+  return [...names].sort();
+};
+
+/**
+ * A structural diff of two graphs.
+ *
+ * It answers "what would change", not "what was re-serialised": node and edge
+ * ids, their data, the variables the graph can bind, and whether the layout
+ * moved. A dry run whose diff is empty is the honest way to say nothing happens.
+ */
+function diffGraphs(before, after) {
+  const beforeNodes = new Map((before?.nodes ?? []).map((node) => [node.id, node]));
+  const afterNodes = new Map((after?.nodes ?? []).map((node) => [node.id, node]));
+  const beforeEdges = new Map((before?.edges ?? []).map((edge) => [edge.id, edge]));
+  const afterEdges = new Map((after?.edges ?? []).map((edge) => [edge.id, edge]));
+
+  const addedNodes = [...afterNodes.keys()].filter((id) => !beforeNodes.has(id)).sort();
+  const removedNodes = [...beforeNodes.keys()].filter((id) => !afterNodes.has(id)).sort();
+  const changedNodes = [...afterNodes.keys()]
+    .filter((id) => beforeNodes.has(id))
+    .filter((id) => {
+      const beforeNode = beforeNodes.get(id);
+      const afterNode = afterNodes.get(id);
+      return (
+        beforeNode.type !== afterNode.type ||
+        stableJson(beforeNode.data) !== stableJson(afterNode.data)
+      );
+    })
+    .sort();
+
+  const addedEdges = [...afterEdges.keys()].filter((id) => !beforeEdges.has(id)).sort();
+  const removedEdges = [...beforeEdges.keys()].filter((id) => !afterEdges.has(id)).sort();
+  const changedEdges = [...afterEdges.keys()]
+    .filter((id) => beforeEdges.has(id))
+    .filter((id) => stableJson(beforeEdges.get(id)) !== stableJson(afterEdges.get(id)))
+    .sort();
+
+  const beforeVariables = captureGroupsOf(before);
+  const afterVariables = captureGroupsOf(after);
+
+  const beforePositions = new Map(
+    (before?.nodes ?? []).map((node) => [node.id, stableJson(node.position ?? null)])
+  );
+  const layoutChanged = (after?.nodes ?? []).some(
+    (node) => beforePositions.has(node.id) && beforePositions.get(node.id) !== stableJson(node.position ?? null)
+  );
+
+  return {
+    added_nodes: addedNodes,
+    removed_nodes: removedNodes,
+    changed_nodes: changedNodes,
+    added_edges: addedEdges,
+    removed_edges: removedEdges,
+    changed_edges: changedEdges,
+    added_variables: afterVariables.filter((name) => !beforeVariables.includes(name)),
+    removed_variables: beforeVariables.filter((name) => !afterVariables.includes(name)),
+    layout_changed: layoutChanged,
+    empty:
+      addedNodes.length === 0 &&
+      removedNodes.length === 0 &&
+      changedNodes.length === 0 &&
+      addedEdges.length === 0 &&
+      removedEdges.length === 0 &&
+      changedEdges.length === 0,
+  };
+}
+
+function printDiff(diff) {
+  if (diff.empty) {
+    out('No structural change.');
+    return;
+  }
+  const line = (label, values) => {
+    if (values.length === 0) return;
+    out(`  ${label.padEnd(16)} ${values.join(', ')}`);
+  };
+  line('nodes added', diff.added_nodes);
+  line('nodes removed', diff.removed_nodes);
+  line('nodes changed', diff.changed_nodes);
+  line('edges added', diff.added_edges);
+  line('edges removed', diff.removed_edges);
+  line('edges changed', diff.changed_edges);
+  line('vars added', diff.added_variables);
+  line('vars removed', diff.removed_variables);
+  if (diff.layout_changed) out(`  ${'layout'.padEnd(16)} positions would move`);
+}
+
+async function commandFlows(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('flows');
+  if (sub === 'apply') return commandFlowsApply(rest);
+  err(`dakflare: unknown flows subcommand "${sub}"`);
+  err('try `dakflare flows --help`');
+  return 2;
+}
+
+/**
+ * `flows apply <file>` — write one flow document.
+ *
+ * The file is `{ id, name, graph, device_id?, enabled?, expected_previous_version? }`
+ * or a bare `{ nodes, edges }` with `--id` and the name taken from the file name.
+ * A bare graph is what an agent produces: it has no coordinates, and the Worker
+ * computes `ui_layout` on save.
+ */
+async function commandFlowsApply(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('flows');
+  assertCommandFlags(flags, 'flows');
+  const json = MODE.json;
+
+  const file = stringFlag(flags, 'file') ?? rest[0];
+  if (!file) throw usage('dakflare flows apply <file> [--dry-run]');
+  const doc = readJsonDocument(file);
+
+  const graph = doc.graph ?? (Array.isArray(doc.nodes) ? doc : null);
+  if (graph === null) throw usage(`${file} has no graph: expected { graph } or { nodes, edges }`);
+
+  const id =
+    typeof doc.id === 'string' && doc.id !== ''
+      ? doc.id
+      : path.basename(String(file)).replace(/\.json$/i, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+  const name = typeof doc.name === 'string' && doc.name !== '' ? doc.name : id;
+  const cfg = requireConfig();
+
+  if (flags['dry-run'] === true) {
+    const current = await api(cfg, 'GET', `/v1/admin/workflows/${encodeURIComponent(id)}`);
+    if (current.status !== 200 && current.status !== 404) {
+      throw requestFailure('read the current flow', current);
+    }
+    const before = current.status === 200 ? current.data?.workflow?.graph ?? null : null;
+    const diff = diffGraphs(before, graph);
+    if (json) {
+      emitJson(
+        {
+          ok: true,
+          applied: false,
+          dry_run: true,
+          id,
+          name,
+          existed: before !== null,
+          version: current.data?.workflow?.version ?? null,
+          dry_run_diff: diff,
+        },
+        MODE
+      );
+      return 0;
+    }
+    out(`${before === null ? 'Would create' : 'Would update'} flow "${name}" (${id})`);
+    printDiff(diff);
+    out(muted('  --dry-run: nothing was written'));
+    return 0;
+  }
+
+  const payload = { name, graph };
+  if (doc.device_id !== undefined) payload.device_id = doc.device_id;
+  if (doc.enabled !== undefined) payload.enabled = doc.enabled;
+  if (flags.force !== true && doc.expected_previous_version !== undefined) {
+    payload.expected_previous_version = doc.expected_previous_version;
+  }
+
+  const result = await api(cfg, 'PUT', `/v1/admin/workflows/${encodeURIComponent(id)}`, payload);
+  if (result.status === 409) {
+    if (json) emitJson({ ok: false, error: 'version_conflict', ...(result.data ?? {}) }, MODE);
+    else {
+      out(warn(`Refused: ${result.data?.message ?? 'the flow changed while you were editing it'}`));
+      out(`  current version ${result.data?.current_version ?? 'unknown'}`);
+    }
+    return exitCodeFor('version_conflict');
+  }
+  if (result.status !== 200) {
+    if (result.data?.error === 'workflow_invalid') {
+      const issues = result.data.details ?? [];
+      if (json) {
+        emitJson({ ok: false, error: 'workflow_invalid', details: issues }, MODE);
+      } else {
+        out(fail(`Refused: ${issues.length} issue${issues.length === 1 ? '' : 's'}`));
+        for (const issue of issues) out(`  ${issue.path === '' ? '(graph)' : issue.path}: ${issue.message}`);
+      }
+      return exitCodeFor('workflow_invalid');
+    }
+    throw requestFailure('apply the flow', result);
+  }
+
+  const workflow = result.data?.workflow ?? {};
+  if (json) {
+    emitJson({ ok: true, applied: true, id: workflow.id ?? id, version: workflow.version, nodes: (workflow.graph?.nodes ?? []).length }, MODE);
+    return 0;
+  }
+  out(`Applied flow "${workflow.name ?? name}" (${workflow.id ?? id})`);
+  out(`  version        ${workflow.version ?? '?'}`);
+  out(`  nodes          ${(workflow.graph?.nodes ?? []).length}`);
+  out(`  layout         ${workflow.graph?.ui_layout?.algorithm ?? 'none'}`);
+  return 0;
+}
+
+async function commandRules(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('rules');
+  if (sub === 'apply') return commandRulesApply(rest);
+  if (sub === 'test') return commandRulesTest(rest);
+  err(`dakflare: unknown rules subcommand "${sub}"`);
+  err('try `dakflare rules --help`');
+  return 2;
+}
+
+/** `rules apply <file>` — one rule, or `{ rules: [...] }`. */
+async function commandRulesApply(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('rules');
+  assertCommandFlags(flags, 'rules');
+  const json = MODE.json;
+
+  const file = stringFlag(flags, 'file') ?? rest[0];
+  if (!file) throw usage('dakflare rules apply <file> [--dry-run]');
+  const doc = readJsonDocument(file);
+  const rules = Array.isArray(doc) ? doc : Array.isArray(doc.rules) ? doc.rules : [doc];
+  if (rules.length === 0) throw usage(`${file} contains no rules`);
+  if (!rules.every((rule) => rule && typeof rule === 'object' && typeof rule.id === 'string')) {
+    throw usage(`${file}: every rule needs a string id`);
+  }
+
+  const cfg = requireConfig();
+  const existing = await api(cfg, 'GET', '/v1/admin/rules');
+  if (existing.status !== 200) throw requestFailure('read the current rules', existing);
+  const before = new Map((existing.data?.rules ?? []).map((rule) => [rule.id, rule]));
+
+  if (flags['dry-run'] === true) {
+    const diff = rules.map((rule) => ({
+      id: rule.id,
+      action: before.has(rule.id) ? 'update' : 'create',
+      changed_fields: before.has(rule.id)
+        ? Object.keys(rule).filter((key) => stableJson(rule[key]) !== stableJson(before.get(rule.id)[key]))
+        : [],
+    }));
+    if (json) {
+      emitJson({ ok: true, applied: false, dry_run: true, dry_run_diff: diff }, MODE);
+      return 0;
+    }
+    out(`Would apply ${rules.length} rule${rules.length === 1 ? '' : 's'}`);
+    for (const row of diff) {
+      const detail = row.action === 'create' ? 'create' : row.changed_fields.length === 0
+        ? 'unchanged'
+        : `update (${row.changed_fields.join(', ')})`;
+      out(`  ${row.id.padEnd(28)} ${detail}`);
+    }
+    out(muted('  --dry-run: nothing was written'));
+    return 0;
+  }
+
+  const applied = [];
+  for (const rule of rules) {
+    const result = await api(cfg, 'POST', '/v1/rules', rule);
+    if (result.status !== 200) {
+      if (json) {
+        emitJson(
+          {
+            ok: false,
+            error: apiErrorBody(result.data, result.status),
+            rule_id: rule.id,
+            applied,
+          },
+          MODE
+        );
+        return exitCodeFor(apiErrorBody(result.data, result.status));
+      }
+      throw requestFailure(`apply rule ${rule.id}`, result);
+    }
+    applied.push(rule.id);
+  }
+
+  if (json) {
+    emitJson({ ok: true, applied: true, rules: applied }, MODE);
+    return 0;
+  }
+  out(`Applied ${applied.length} rule${applied.length === 1 ? '' : 's'}`);
+  for (const id of applied) out(`  ${id}`);
+  return 0;
+}
+
+/** `rules test --peer <e164> --body <text>` — why would this message reply. */
+async function commandRulesTest(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('rules');
+  assertCommandFlags(flags, 'rules');
+  const json = MODE.json;
+
+  const peer = stringFlag(flags, 'peer');
+  const body = stringFlag(flags, 'body');
+  if (!peer) throw usage('--peer is required');
+  if (body === undefined) throw usage('--body is required');
+  const device = stringFlag(flags, 'device');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'POST', '/v1/admin/rules/test', {
+    peer,
+    body,
+    ...(device === undefined ? {} : { device_id: device }),
+  });
+  if (result.status !== 200) throw requestFailure('test the rules', result);
+
+  const matches = result.data?.matches ?? [];
+  if (json) {
+    emitJson({ ok: true, peer, body, matches }, MODE);
+    return 0;
+  }
+  if (matches.length === 0) {
+    out('No rules evaluated: there is nothing to match.');
+    return 0;
+  }
+  out(`Evaluated ${matches.length} rule${matches.length === 1 ? '' : 's'} for ${peer}`);
+  for (const match of matches) {
+    const state = match.matched ? 'would reply' : 'no reply';
+    out(`  ${String(match.rule_id).padEnd(28)} ${state.padEnd(11)} ${match.reason ?? ''}`);
+    if (match.matched && match.reply_preview) out(`    ${match.reply_preview}`);
   }
   return 0;
 }
@@ -3478,6 +3889,31 @@ follows it with --wait. Takes the same --until and returns the same exit codes a
 Roles: owner, admin, member. Agent tokens are a third credential, not a role: they
 may ASK, and a time-boxed grant decides what they may DO. --agent never prompts,
 so pass --yes on the revoking subcommands.`,
+  flows: `Usage: dakflare flows apply <file> [--dry-run] [--agent]
+
+  apply <file>    write one flow document and let the Worker compute its layout
+
+The file is { "id", "name", "graph", "device_id"?, "enabled"?,
+"expected_previous_version"? } or a bare { "nodes", "edges" } with --id and the
+name taken from the file name. A bare graph needs no coordinates: the canonical
+IR ranks every node by its longest distance from the trigger and places it, so
+an agent can author a flow without knowing anything about the canvas.
+
+--dry-run prints a structural diff (nodes, edges, variables, layout) as
+data.dry_run_diff and writes nothing. A stale expected_previous_version exits 5
+and names the current version to retry against. A refused graph exits 2 and
+prints every issue with its path.`,
+
+  rules: `Usage: dakflare rules <apply|test> [options]
+
+  apply <file>     write one rule or a { "rules": [ ... ] } document
+  test --peer <e164> --body <text> [--device <id>]
+                   evaluate every rule and say why each would or would not reply
+
+apply --dry-run reports create/update/unchanged per rule and writes nothing.
+test is the honest answer to "why did this message get no reply": disabled,
+sender_mismatch, body_mismatch and cooldown are all reported, not just matches.`,
+
   up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
 
 Provisions the deployment on the account \`cf\` is logged into: creates the D1
@@ -3562,6 +3998,8 @@ const COMMANDS = {
   examples: commandExamples,
   audit: commandAudit,
   auth: commandAuth,
+  flows: commandFlows,
+  rules: commandRules,
   key: commandKey,
 };
 

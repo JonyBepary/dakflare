@@ -46,7 +46,7 @@ pub fn run_flows(flows: &[RemoteFlow], local_id: &str, sender: &str, body: &str)
     let mut reports = Vec::new();
 
     for flow in flows {
-        let graph: dakflare_flow::Graph = match serde_json::from_value(flow.graph.clone()) {
+        let graph: dakflare_flow::FlowGraph = match serde_json::from_value(flow.graph.clone()) {
             Ok(graph) => graph,
             Err(_) => {
                 reports.push(FlowRunReport {

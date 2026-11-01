@@ -157,7 +157,11 @@ pub async fn receive_and_reply(
 
     let mut actions = Vec::new();
     for (index, action) in run.actions.iter().enumerate() {
-        let Action::SendSms { to, body } = action;
+        // Same rule as above: only a send is something this device performs, and
+        // the other kinds are named rather than fallen through.
+        let Action::SendSms { to, body } = action else {
+            continue;
+        };
         let outbound_local_id = reply_local_id(&inbound_local_id, index);
 
         if store
@@ -287,8 +291,12 @@ pub async fn inject_inbound(
         if !flows.is_empty() {
             let local = run_flows(flows, &local_id, sender, body);
             for action in &local.actions {
-                // `Action` has one variant today; an explicit match keeps new
-                // action types from being silently ignored when they land.
+                // An explicit match, so a new action type is a compile error here
+                // rather than something silently ignored at runtime. v6.1 added
+                // `Delay` and `Webhook`; this device cannot perform either without
+                // blocking the carrier or making an outbound call, so both are
+                // skipped LOUDLY. The flow still replies, and the log says which
+                // part of it the handset did not do.
                 match action {
                     dakflare_flow::Action::SendSms { to, body } => {
                         let outbound_id = format!("out-{}", random_hex(8)?);
@@ -303,6 +311,16 @@ pub async fn inject_inbound(
                                     Some(&outbound_id),
                                 )
                                 .await?,
+                        );
+                    }
+                    dakflare_flow::Action::Delay { seconds } => {
+                        eprintln!(
+                            "[carrier] flow delay of {seconds}s skipped: the handset runs flows synchronously"
+                        );
+                    }
+                    dakflare_flow::Action::Webhook { .. } => {
+                        eprintln!(
+                            "[carrier] flow webhook skipped: the handset makes no outbound calls"
                         );
                     }
                 }

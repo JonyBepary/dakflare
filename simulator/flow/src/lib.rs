@@ -5,48 +5,37 @@
 //! desktop simulator, on Android, and in the Worker's WASM fallback. The caller
 //! performs the actions.
 //!
-//! The graph shape is the one the dashboard canvas produces and the Worker
-//! validates:
+//! The graph is the canonical IR (`ir.rs`), which is what the dashboard canvas
+//! produces and the Worker validates:
 //!
 //! ```text
 //! trigger -> extract -> condition -true->  send_sms -> stop
 //!                                  \-false-> stop
 //! ```
+//!
+//! Nine kinds, all of them pure. `delay`, `webhook` and `send_sms` become
+//! ACTIONS in the order the graph visits them, so a caller that performs the
+//! list in order gets the ordering the graph asked for and this crate never
+//! touches a clock.
+
+pub mod ir;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const MAX_STEPS: usize = 50;
+pub use ir::{FlowGraph, Issue, UiLayout};
+
+pub use ir::{Edge, Node, Position};
+
+use ir::{
+    named_groups, template_names, MAX_DELAY_SECONDS, MAX_SMS_BODY_CHARS, MAX_STEPS,
+};
 
 /* ------------------------------------------------------------------ input */
 
-#[derive(Debug, Deserialize)]
-pub struct Graph {
-    pub nodes: Vec<Node>,
-    pub edges: Vec<Edge>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Node {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(default)]
-    pub data: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Edge {
-    pub id: String,
-    pub source: String,
-    pub target: String,
-    #[serde(rename = "sourceHandle", default)]
-    pub source_handle: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Message {
     pub sender: String,
     pub body: String,
@@ -56,7 +45,7 @@ pub struct Message {
 
 #[derive(Debug, Deserialize)]
 pub struct RunInput {
-    pub graph: Graph,
+    pub graph: FlowGraph,
     pub message: Message,
 }
 
@@ -65,17 +54,22 @@ pub struct RunInput {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
+    /// Wait `seconds`, then continue. The caller owns the clock.
+    Delay { seconds: i64 },
+    /// POST `body` to `url`. The caller owns the network.
+    Webhook { url: String, body: String },
+    /// Send one SMS. The caller owns the radio.
     SendSms { to: String, body: String },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Step {
     pub node_id: String,
     pub kind: String,
     pub detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunResult {
     pub matched: bool,
     pub outcome: String,
@@ -84,6 +78,11 @@ pub struct RunResult {
     pub steps: Vec<Step>,
     pub error: Option<String>,
 }
+
+/// A trace IS a run: every step, every action, every variable it settled on. The
+/// name exists because that is how it is consumed (`dakflare rules test`,
+/// `flows apply --dry-run`), not because it is a different value.
+pub type SimulationTrace = RunResult;
 
 impl RunResult {
     fn new(matched: bool, outcome: &str) -> Self {
@@ -134,11 +133,40 @@ fn default_source() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetVarData {
+    name: String,
+    #[serde(default)]
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConditionData {
     left: String,
     op: String,
     #[serde(default)]
     right: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwitchData {
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    cases: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DelayData {
+    #[serde(default)]
+    seconds: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhookData {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    body: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,7 +181,7 @@ struct SendSmsData {
 /// nodes produce `outcome = "error"` with a message.
 pub fn run(input: &RunInput) -> RunResult {
     let graph = &input.graph;
-    let trigger = match graph.nodes.iter().find(|n| n.kind == "trigger") {
+    let trigger = match graph.nodes.iter().find(|node| node.kind == "trigger") {
         Some(node) => node,
         None => {
             let mut result = RunResult::new(false, "no_trigger");
@@ -196,13 +224,10 @@ pub fn run(input: &RunInput) -> RunResult {
         }
         steps += 1;
 
-        let outgoing: Vec<&Edge> = graph.edges.iter().filter(|e| e.source == current.id).collect();
-
+        let outgoing = graph.outgoing(&current.id);
         let next: Option<&Node> = match current.kind.as_str() {
-            "trigger" => {
-                outline(&mut result, current, "forward");
-                next_node(graph, outgoing.first().copied())
-            }
+            "trigger" => next_node(graph, outgoing.first().copied()),
+
             "extract" => {
                 let data: ExtractData = match serde_json::from_value(current.data.clone()) {
                     Ok(data) => data,
@@ -214,6 +239,7 @@ pub fn run(input: &RunInput) -> RunResult {
                 };
                 let regex = match regex::RegexBuilder::new(&data.pattern)
                     .case_insensitive(data.flags.as_deref() == Some("i"))
+                    .size_limit(1 << 20)
                     .build()
                 {
                     Ok(regex) => regex,
@@ -237,6 +263,20 @@ pub fn run(input: &RunInput) -> RunResult {
                     .push(step(current, &format!("captured {}", captured.join(", "))));
                 next_node(graph, outgoing.first().copied())
             }
+
+            "set_var" => {
+                let data: SetVarData = match serde_json::from_value(current.data.clone()) {
+                    Ok(data) => data,
+                    Err(e) => return fail(result, format!("set_var data: {e}")),
+                };
+                let value = render(&data.value, &result.variables);
+                result.variables.insert(data.name.clone(), value.clone());
+                result
+                    .steps
+                    .push(step(current, &format!("{}={value}", data.name)));
+                next_node(graph, outgoing.first().copied())
+            }
+
             "condition" => {
                 let data: ConditionData = match serde_json::from_value(current.data.clone()) {
                     Ok(data) => data,
@@ -248,7 +288,9 @@ pub fn run(input: &RunInput) -> RunResult {
                     "equals" => left == right,
                     "not_equals" => left != right,
                     "contains" => left.contains(&right),
-                    "matches" => regex::Regex::new(&right)
+                    "matches" => regex::RegexBuilder::new(&right)
+                        .size_limit(1 << 20)
+                        .build()
                         .map(|re| re.is_match(&left))
                         .unwrap_or(false),
                     "exists" => !left.is_empty(),
@@ -271,6 +313,63 @@ pub fn run(input: &RunInput) -> RunResult {
                     }
                 }
             }
+
+            "switch" => {
+                let data: SwitchData = match serde_json::from_value(current.data.clone()) {
+                    Ok(data) => data,
+                    Err(e) => return fail(result, format!("switch data: {e}")),
+                };
+                let value = render(&data.value, &result.variables);
+                let handle = data
+                    .cases
+                    .iter()
+                    .position(|case| *case == value)
+                    .map(|index| format!("case:{index}"))
+                    .unwrap_or_else(|| "default".to_string());
+                result
+                    .steps
+                    .push(step(current, &format!("{value} -> {handle}")));
+                let edge = outgoing
+                    .iter()
+                    .find(|e| e.source_handle.as_deref() == Some(handle.as_str()))
+                    .copied();
+                match edge {
+                    Some(edge) => next_node(graph, Some(edge)),
+                    None => {
+                        result.outcome = "halted".into();
+                        result.steps.push(step(current, "branch not connected"));
+                        return result;
+                    }
+                }
+            }
+
+            "delay" => {
+                let data: DelayData = match serde_json::from_value(current.data.clone()) {
+                    Ok(data) => data,
+                    Err(e) => return fail(result, format!("delay data: {e}")),
+                };
+                let seconds = data.seconds.clamp(1, MAX_DELAY_SECONDS);
+                result
+                    .steps
+                    .push(step(current, &format!("delay {seconds}s")));
+                result.actions.push(Action::Delay { seconds });
+                next_node(graph, outgoing.first().copied())
+            }
+
+            "webhook" => {
+                let data: WebhookData = match serde_json::from_value(current.data.clone()) {
+                    Ok(data) => data,
+                    Err(e) => return fail(result, format!("webhook data: {e}")),
+                };
+                let url = render(&data.url, &result.variables);
+                let body = render(&data.body, &result.variables);
+                result
+                    .steps
+                    .push(step(current, &format!("would POST {url}")));
+                result.actions.push(Action::Webhook { url, body });
+                next_node(graph, outgoing.first().copied())
+            }
+
             "send_sms" => {
                 let data: SendSmsData = match serde_json::from_value(current.data.clone()) {
                     Ok(data) => data,
@@ -278,17 +377,25 @@ pub fn run(input: &RunInput) -> RunResult {
                 };
                 let to = render(&data.to, &result.variables);
                 let body = render(&data.body, &result.variables);
+                if body.chars().count() > MAX_SMS_BODY_CHARS {
+                    return fail(
+                        result,
+                        format!("rendered body exceeds {MAX_SMS_BODY_CHARS} characters"),
+                    );
+                }
                 result
                     .steps
                     .push(step(current, &format!("would send to {to}")));
                 result.actions.push(Action::SendSms { to, body });
                 next_node(graph, outgoing.first().copied())
             }
+
             "stop" => {
                 result.steps.push(step(current, "stop"));
                 result.outcome = "delivered".into();
                 return result;
             }
+
             other => return fail(result, format!("unknown node type '{other}'")),
         };
 
@@ -302,9 +409,9 @@ pub fn run(input: &RunInput) -> RunResult {
     }
 }
 
-fn next_node<'a>(graph: &'a Graph, edge: Option<&Edge>) -> Option<&'a Node> {
+fn next_node<'a>(graph: &'a FlowGraph, edge: Option<&Edge>) -> Option<&'a Node> {
     let edge = edge?;
-    graph.nodes.iter().find(|n| n.id == edge.target)
+    graph.node(&edge.target)
 }
 
 fn fail(mut result: RunResult, message: String) -> RunResult {
@@ -319,10 +426,6 @@ fn step(node: &Node, detail: &str) -> Step {
         kind: node.kind.clone(),
         detail: detail.to_string(),
     }
-}
-
-fn outline(result: &mut RunResult, node: &Node, detail: &str) {
-    result.steps.push(step(node, detail));
 }
 
 /* --------------------------------------------------------------- helpers */
@@ -347,15 +450,17 @@ fn matches_filter(value: &str, filter: Option<&Filter>) -> bool {
         "regex" => filter
             .value
             .as_deref()
-            .and_then(|v| regex::Regex::new(v).ok())
+            .and_then(|v| regex::RegexBuilder::new(v).size_limit(1 << 20).build().ok())
             .map(|re| re.is_match(value))
             .unwrap_or(false),
         _ => false,
     }
 }
 
-/// `{{name}}` substitution. Unknown names resolve to an empty string; the graph
-/// validator rejects them at save time, so this is only a last-resort guard.
+/// `{{name}}` substitution. `vars.name` is accepted as an alias, because that is
+/// the spelling agent-authored graphs use. Unknown names resolve to an empty
+/// string; the validator rejects them at save time, so this is a last-resort
+/// guard.
 fn render(template: &str, variables: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -367,7 +472,8 @@ fn render(template: &str, variables: &BTreeMap<String, String>) -> String {
             out.push_str(&rest[open..]);
             return out;
         };
-        let name = after[..close].trim();
+        let raw = after[..close].trim();
+        let name = raw.strip_prefix("vars.").unwrap_or(raw);
         out.push_str(variables.get(name).map(String::as_str).unwrap_or(""));
         rest = &after[close + 2..];
     }
@@ -375,18 +481,36 @@ fn render(template: &str, variables: &BTreeMap<String, String>) -> String {
     out
 }
 
-/* ----------------------------------------------------------------- tests */
+/// Re-exported so a caller does not have to import `ir` to print the version.
+pub fn flow_ir_version_value() -> &'static str {
+    ir::IR_SCHEMA
+}
+
+/// Names in a template, for callers that render nothing but want to preview.
+pub fn referenced_variables(template: &str) -> Vec<String> {
+    template_names(template)
+}
+
+/// Capture groups a pattern declares, for the dashboard's variable menu.
+pub fn declared_groups(pattern: &str) -> Vec<String> {
+    named_groups(pattern)
+}
+
+/// Parse a value into the IR without validating it. Test and migration helper.
+pub fn graph_from_value(value: Value) -> Result<FlowGraph, serde_json::Error> {
+    serde_json::from_value(value)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn graph(value: Value) -> Graph {
+    fn graph(value: Value) -> FlowGraph {
         serde_json::from_value(value).unwrap()
     }
 
-    fn code_flow() -> Graph {
+    fn code_flow() -> FlowGraph {
         graph(json!({
             "nodes": [
                 { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
@@ -409,7 +533,7 @@ mod tests {
         }))
     }
 
-    fn run_with(graph: Graph, sender: &str, body: &str) -> RunResult {
+    fn run_with(graph: FlowGraph, sender: &str, body: &str) -> RunResult {
         run(&RunInput {
             graph,
             message: Message {
@@ -457,7 +581,7 @@ mod tests {
         assert!(filtered.actions.is_empty());
     }
 
-    fn code_flow_with_prefix() -> Graph {
+    fn code_flow_with_prefix() -> FlowGraph {
         let mut g = code_flow();
         g.nodes[0].data = json!({ "kind": "incoming", "body": { "mode": "prefix", "value": "CODE" } });
         g
@@ -471,8 +595,7 @@ mod tests {
                 { "id": "c1", "type": "condition", "data": {
                     "left": "{{body}}", "op": "equals", "right": "STOP" } },
                 { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "bye" } },
-                { "id": "e1", "type": "stop", "data": {} },
-                { "id": "e2", "type": "stop", "data": {} }
+                { "id": "e1", "type": "stop", "data": {} }
             ],
             "edges": [
                 { "id": "a", "source": "t1", "target": "c1" },
@@ -494,8 +617,7 @@ mod tests {
                 { "id": "c1", "type": "condition", "data": {
                     "left": "{{body}}", "op": "equals", "right": "STOP" } },
                 { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "bye" } },
-                { "id": "e1", "type": "stop", "data": {} },
-                { "id": "e2", "type": "stop", "data": {} }
+                { "id": "e1", "type": "stop", "data": {} }
             ],
             "edges": [
                 { "id": "a", "source": "t1", "target": "c1" },
@@ -577,4 +699,214 @@ mod tests {
         let result = run_with(g, "+1", "loop");
         assert_eq!(result.outcome, "error");
     }
+
+    /* ---- the four kinds v2 added ------------------------------------- */
+
+    fn v2_flow() -> FlowGraph {
+        graph(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "x1", "type": "extract", "data": {
+                    "source": "body", "pattern": "amount (?<amount>[0-9]+)" } },
+                { "id": "v1", "type": "set_var", "data": {
+                    "name": "note", "value": "amount={{vars.amount}}" } },
+                { "id": "w1", "type": "switch", "data": {
+                    "value": "{{amount}}", "cases": ["100", "200"] } },
+                { "id": "d1", "type": "delay", "data": { "seconds": 30 } },
+                { "id": "h1", "type": "webhook", "data": {
+                    "url": "https://example.test/hook", "body": "note={{note}}" } },
+                { "id": "s1", "type": "send_sms", "data": {
+                    "to": "{{sender}}", "body": "{{note}}" } },
+                { "id": "e1", "type": "stop", "data": {} },
+                { "id": "e2", "type": "stop", "data": {} },
+                { "id": "e3", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "x1" },
+                { "id": "b", "source": "x1", "target": "v1" },
+                { "id": "c", "source": "v1", "target": "w1" },
+                { "id": "d", "source": "w1", "target": "d1", "sourceHandle": "case:0" },
+                { "id": "e", "source": "w1", "target": "e2", "sourceHandle": "case:1" },
+                { "id": "f", "source": "w1", "target": "e3", "sourceHandle": "default" },
+                { "id": "g", "source": "d1", "target": "h1" },
+                { "id": "h", "source": "h1", "target": "s1" },
+                { "id": "i", "source": "s1", "target": "e1" }
+            ]
+        }))
+    }
+
+    #[test]
+    fn set_var_switch_delay_and_webhook_run_in_order() {
+        let result = run_with(v2_flow(), "+8801000000000", "amount 100");
+        assert_eq!(result.outcome, "delivered");
+        assert_eq!(result.variables.get("note").map(String::as_str), Some("amount=100"));
+        assert_eq!(
+            result.actions,
+            vec![
+                Action::Delay { seconds: 30 },
+                Action::Webhook {
+                    url: "https://example.test/hook".into(),
+                    body: "note=amount=100".into(),
+                },
+                Action::SendSms {
+                    to: "+8801000000000".into(),
+                    body: "amount=100".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn switch_falls_through_to_default() {
+        let result = run_with(v2_flow(), "+8801000000000", "amount 999");
+        assert_eq!(result.outcome, "delivered");
+        assert!(result.actions.is_empty(), "the default branch is a stop");
+        assert_eq!(
+            result.steps.last().map(|step| step.node_id.as_str()),
+            Some("e3")
+        );
+    }
+
+    /* ---- the IR itself ----------------------------------------------- */
+
+    fn validate(value: Value) -> Result<FlowGraph, Vec<Issue>> {
+        ir::validate(&value)
+    }
+
+    #[test]
+    fn a_valid_graph_gets_a_layout_for_every_node() {
+        let canonical = validate(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "hi" } },
+                { "id": "e1", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "s1" },
+                { "id": "b", "source": "s1", "target": "e1" }
+            ]
+        }))
+        .expect("valid graph");
+
+        let layout = canonical.ui_layout.expect("layout is always computed");
+        assert_eq!(layout.algorithm, ir::LAYOUT_ALGORITHM);
+        assert_eq!(layout.positions.len(), 3);
+        // Ranks become columns, so the flow reads left to right.
+        assert_eq!(layout.positions["t1"], Position { x: 0, y: 0 });
+        assert_eq!(layout.positions["s1"].x, 280);
+        assert_eq!(layout.positions["e1"].x, 560);
+    }
+
+    #[test]
+    fn a_cycle_is_refused_with_an_edge_and_a_node() {
+        let issues = validate(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "s1", "type": "send_sms", "data": { "to": "{{sender}}", "body": "a" } },
+                { "id": "s2", "type": "send_sms", "data": { "to": "{{sender}}", "body": "b" } }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "s1" },
+                { "id": "b", "source": "s1", "target": "s2" },
+                { "id": "c", "source": "s2", "target": "s1" }
+            ]
+        }))
+        .expect_err("a cycle must be refused");
+
+        let message = issues
+            .iter()
+            .map(|issue| format!("{} {}", issue.path, issue.message))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(message.contains("cycle"), "{message}");
+        assert!(message.contains("s1"), "the cycle must name a node: {message}");
+    }
+
+    #[test]
+    fn a_variable_bound_on_only_one_branch_is_refused() {
+        let issues = validate(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "c1", "type": "condition", "data": {
+                    "left": "{{body}}", "op": "contains", "right": "amount" } },
+                { "id": "x1", "type": "extract", "data": {
+                    "source": "body", "pattern": "amount (?<amount>[0-9]+)" } },
+                { "id": "s1", "type": "send_sms", "data": {
+                    "to": "{{sender}}", "body": "{{amount}}" } },
+                { "id": "e1", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "c1" },
+                { "id": "b", "source": "c1", "target": "x1", "sourceHandle": "true" },
+                { "id": "c", "source": "c1", "target": "s1", "sourceHandle": "false" },
+                { "id": "d", "source": "x1", "target": "s1" },
+                { "id": "e", "source": "s1", "target": "e1" }
+            ]
+        }))
+        .expect_err("{{amount}} is not bound on every path");
+
+        assert!(
+            issues.iter().any(|issue| issue.message.contains("not bound on every path")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_variable_nobody_binds_is_refused_with_its_name() {
+        let issues = validate(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "s1", "type": "send_sms", "data": {
+                    "to": "{{sender}}", "body": "{{vars.amount}}" } },
+                { "id": "e1", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "s1" },
+                { "id": "b", "source": "s1", "target": "e1" }
+            ]
+        }))
+        .expect_err("an unbound variable must be refused");
+
+        assert!(
+            issues.iter().any(|issue| issue.message.contains("never bound") && issue.message.contains("amount")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn the_shared_vectors_agree_with_this_validator() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-support/flow-ir-vectors.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let vectors: Value = serde_json::from_str(&text).expect("vectors are JSON");
+        let cases = vectors.as_array().expect("vectors are an array");
+        assert!(cases.len() >= 8, "the vector file is the shared contract");
+
+        for case in cases {
+            let name = case.get("name").and_then(Value::as_str).unwrap_or("?");
+            let expect_ok = case.get("ok").and_then(Value::as_bool).expect("ok");
+            let graph = case.get("graph").expect("graph");
+            let outcome = ir::validate(graph);
+            match (expect_ok, &outcome) {
+                (true, Ok(_)) => {}
+                (true, Err(issues)) => panic!("{name}: expected valid, got {issues:?}"),
+                (false, Ok(_)) => panic!("{name}: expected refused, got a valid graph"),
+                (false, Err(issues)) => {
+                    if let Some(contains) = case.get("contains").and_then(Value::as_str) {
+                        let joined = issues
+                            .iter()
+                            .map(|issue| format!("{} {}", issue.path, issue.message))
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        assert!(
+                            joined.contains(contains),
+                            "{name}: expected an issue containing {contains:?}, got {joined}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
+

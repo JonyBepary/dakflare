@@ -132,7 +132,15 @@ export async function dispatchFlows(
       if (!result.matched || result.outcome !== "delivered") continue;
 
       for (const action of result.actions) {
-        if (action.type !== "send_sms") continue;
+        if (action.type !== "send_sms") {
+          // v6.1 kinds the Worker does not perform. Named, not skipped in
+          // silence: a flow that waits or posts somewhere is running partially,
+          // and the operator has to be able to see that in the log.
+          console.warn(
+            `[flow] ${workflow.id}: '${action.type}' action skipped (unsupported by the Worker dispatch)`
+          );
+          continue;
+        }
         if (!action.to || !action.body) continue;
 
         try {

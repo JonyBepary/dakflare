@@ -411,8 +411,17 @@ export async function evaluateRules(
       }
     }
 
+    // A compiled rule always ends in a send; the interpreter's other action
+    // kinds cannot appear here, and `send_sms` is the only one with a body.
+    const first = result.actions[0];
     evaluations.push(
-      evaluation(rule, true, "matched", matchedText, result.actions[0]?.body ?? "")
+      evaluation(
+        rule,
+        true,
+        "matched",
+        matchedText,
+        first !== undefined && first.type === "send_sms" ? first.body : ""
+      )
     );
   }
 
