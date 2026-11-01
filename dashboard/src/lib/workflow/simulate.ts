@@ -10,13 +10,23 @@
  */
 
 import type { FlowEdge, FlowNode } from './graph';
-import { extractGroupNames, nodeData } from './graph';
+import {
+	caseHandle,
+	extractGroupNames,
+	nodeData,
+	normalizeTemplateName,
+	switchCases
+} from './graph';
 import type {
 	ConditionData,
+	DelayData,
 	ExtractData,
 	SendSmsData,
+	SetVarData,
 	StopData,
-	TriggerData
+	SwitchData,
+	TriggerData,
+	WebhookData
 } from '$lib/types';
 
 export interface SimulationInput {
@@ -78,7 +88,8 @@ function resolveTemplate(
 	warnings: Set<string>
 ): string {
 	return value.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_whole, raw: string) => {
-		const name = raw.trim();
+		// `{{vars.name}}` is the same name as `{{name}}`, exactly as in the IR.
+		const name = normalizeTemplateName(raw.trim());
 		if (Object.hasOwn(variables, name)) return variables[name];
 		warnings.add(`No value for {{${name}}} on this path — treated as empty.`);
 		return '';
@@ -249,6 +260,41 @@ export function simulate(
 			continue;
 		}
 
+		if (node.type === 'set_var') {
+			const data = nodeData<SetVarData>(node);
+			const name = (data.name ?? '').trim();
+			const value = resolveTemplate(data.value ?? '', variables, warnings);
+			if (!name) {
+				steps.push({
+					nodeId: node.id,
+					tone: 'danger',
+					text: 'This step has no variable name, so there is nothing to store. Give it a name in the inspector.'
+				});
+				return {
+					entered: true,
+					outcome: 'error',
+					summary: 'The flow stopped at Set variable, which has no name.',
+					visitedNodes,
+					visitedEdges,
+					variables,
+					sms,
+					steps,
+					warnings: [...warnings]
+				};
+			}
+			variables[name] = value;
+			steps.push({
+				nodeId: node.id,
+				tone: 'ok',
+				text: `Set ${name} = ${value === '' ? '(empty)' : `“${value}”`}.`
+			});
+			const edge = outgoing[0];
+			if (!edge) break;
+			visitedEdges.push(edge.id);
+			current = byId.get(edge.target);
+			continue;
+		}
+
 		if (node.type === 'condition') {
 			const data = nodeData<ConditionData>(node);
 			const left = resolveTemplate(data.left ?? '', variables, warnings);
@@ -304,6 +350,79 @@ export function simulate(
 			continue;
 		}
 
+		if (node.type === 'switch') {
+			const data = nodeData<SwitchData>(node);
+			const value = resolveTemplate(data.value ?? '', variables, warnings);
+			const cases = switchCases(node);
+			// Exact match on the rendered value, first case wins, default otherwise.
+			const index = cases.findIndex((entry) => entry === value);
+			const handle = index >= 0 ? caseHandle(index) : 'default';
+			const headline =
+				index >= 0
+					? `“${value}” matches case ${index + 1}`
+					: cases.length === 0
+						? 'This switch has no cases'
+						: `No case matches “${value}”`;
+			steps.push({
+				nodeId: node.id,
+				tone: index >= 0 ? 'ok' : 'muted',
+				text: `${headline}, so ${
+					handle === 'default' ? 'the default branch' : `the ${handle} branch`
+				} runs.`
+			});
+			const edge = outgoing.find((item) => (item.sourceHandle ?? '') === handle);
+			if (!edge) {
+				steps.push({
+					nodeId: node.id,
+					tone: 'warn',
+					text:
+						handle === 'default'
+							? 'The default branch is not connected, so the flow stops.'
+							: `The ${handle} branch is not connected, so the flow stops.`
+				});
+				break;
+			}
+			visitedEdges.push(edge.id);
+			current = byId.get(edge.target);
+			continue;
+		}
+
+		if (node.type === 'delay') {
+			const data = nodeData<DelayData>(node);
+			const seconds = Number(data.seconds);
+			const waitable = Number.isFinite(seconds) && seconds > 0;
+			steps.push({
+				nodeId: node.id,
+				tone: waitable ? 'muted' : 'warn',
+				text: waitable
+					? `Would wait ${seconds === 1 ? '1 second' : `${seconds} seconds`} before the next step.`
+					: 'No wait is set, so this step would pass straight through.'
+			});
+			const edge = outgoing[0];
+			if (!edge) break;
+			visitedEdges.push(edge.id);
+			current = byId.get(edge.target);
+			continue;
+		}
+
+		if (node.type === 'webhook') {
+			const data = nodeData<WebhookData>(node);
+			const url = resolveTemplate(data.url ?? '', variables, warnings);
+			const payload = resolveTemplate(data.body ?? '', variables, warnings);
+			steps.push({
+				nodeId: node.id,
+				tone: 'muted',
+				text: payload
+					? `Would POST to ${url || '(no address)'} with “${payload}”.`
+					: `Would POST to ${url || '(no address)'} with an empty body.`
+			});
+			const edge = outgoing[0];
+			if (!edge) break;
+			visitedEdges.push(edge.id);
+			current = byId.get(edge.target);
+			continue;
+		}
+
 		if (node.type === 'send_sms') {
 			const data = nodeData<SendSmsData>(node);
 			const to = resolveTemplate(data.to ?? '', variables, warnings);
@@ -319,6 +438,25 @@ export function simulate(
 			visitedEdges.push(edge.id);
 			current = byId.get(edge.target);
 			continue;
+		}
+
+		if (node.type === 'unsupported') {
+			steps.push({
+				nodeId: node.id,
+				tone: 'danger',
+				text: `This step is a “${node.unsupportedType || 'unknown'}” step. This console cannot read it, so the preview stops here.`
+			});
+			return {
+				entered: true,
+				outcome: 'error',
+				summary: 'The preview stopped at a step this console does not support.',
+				visitedNodes,
+				visitedEdges,
+				variables,
+				sms,
+				steps,
+				warnings: [...warnings]
+			};
 		}
 
 		if (node.type === 'stop') {

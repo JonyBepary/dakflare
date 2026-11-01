@@ -1077,8 +1077,11 @@ The Web Console is an operator console built with Svelte 5.57 and SvelteKit 3.0.
   - Live RE2 validator checks regexes against catastrophic backtracking and lookaheads.
   - Actions: `[Save Rule]`, `[Cancel]`, `[Test Rules]` (opens `RuleTestPanel.svelte` for dry-run simulation).
 * **Automation: Workflows (`/admin/workflows/edit`):**
-  - Node canvas (`@xyflow/svelte`): Pan/zoom, connect edges, drag nodes (`Trigger`, `Condition`, `Extract`, `SendSms`, `Stop`).
-  - Actions: `[Save Workflow]` (validates DAG acyclicity via DFS), `[Simulate Flow]` (`SimulationPanel.svelte`), `[Workflow Settings]` (`WorkflowSettings.svelte`).
+  - Node canvas (`@xyflow/svelte`): Pan/zoom, connect edges, drag nodes. All nine IR kinds are on the palette: `Trigger`, `Extract`, `Set var`, `Condition`, `Switch`, `Delay`, `Webhook`, `Send SMS`, `Stop`.
+  - A `switch` card draws one labelled source handle per case plus `default`, and the inspector adds, renames and removes cases while keeping the outgoing edges consistent. A `condition` keeps its `true`/`false` handles, and no other kind accepts one.
+  - Placement prefers the node's own `position`, then `ui_layout.positions` from the Worker, then a spaced fallback, so an agent-authored graph with no coordinates at all lands legibly and a hand-arranged canvas is never shuffled.
+  - A kind the console does not know renders as an `unsupported` card that keeps its data and its wiring visible and writes its real type back on save, instead of being dropped from the document.
+  - Actions: `[Save Workflow]` (validates DAG acyclicity via DFS), `[Simulate Flow]` (`SimulationPanel.svelte`, which previews all nine kinds), `[Workflow Settings]` (`WorkflowSettings.svelte`).
 * **Security (`/admin/security`):**
   - Passkeys: `[Register New Passkey]`, `[Revoke Passkey]`.
   - Authenticator 2FA: `[Enable TOTP]` wizard, QR display, 10 recovery codes modal (`RecoveryCodes.svelte`).

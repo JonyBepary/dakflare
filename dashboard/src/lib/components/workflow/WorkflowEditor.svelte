@@ -27,11 +27,16 @@
 	import ValidationList from '$lib/components/workflow/ValidationList.svelte';
 	import WorkflowSettings from '$lib/components/workflow/WorkflowSettings.svelte';
 	import ConditionNode from '$lib/components/workflow/ConditionNode.svelte';
+	import DelayNode from '$lib/components/workflow/DelayNode.svelte';
 	import ExtractNode from '$lib/components/workflow/ExtractNode.svelte';
 	import FlowEdgeComponent from '$lib/components/workflow/FlowEdge.svelte';
 	import SendSmsNode from '$lib/components/workflow/SendSmsNode.svelte';
+	import SetVarNode from '$lib/components/workflow/SetVarNode.svelte';
 	import StopNode from '$lib/components/workflow/StopNode.svelte';
+	import SwitchNode from '$lib/components/workflow/SwitchNode.svelte';
 	import TriggerNode from '$lib/components/workflow/TriggerNode.svelte';
+	import UnsupportedNode from '$lib/components/workflow/UnsupportedNode.svelte';
+	import WebhookNode from '$lib/components/workflow/WebhookNode.svelte';
 
 	import { ApiError, describeError, getWorkflow, readWorkflowIssues, saveWorkflow } from '$lib/api';
 	import { ROUTES } from '$lib/paths';
@@ -41,6 +46,7 @@
 		NODE_LIMIT,
 		NODE_META,
 		RE_DEVICE_ID,
+		applySwitchCase,
 		createDraft,
 		createEdge,
 		createNode,
@@ -48,11 +54,13 @@
 		fromGraph,
 		mapServerIssues,
 		nodeSummary,
+		sourceHandles,
 		toGraph,
 		validateWorkflow,
 		type EditorIssue,
 		type FlowEdge,
-		type FlowNode
+		type FlowNode,
+		type SwitchCaseOp
 	} from '$lib/workflow/graph';
 	import { simulate, type SimulationInput, type SimulationResult } from '$lib/workflow/simulate';
 	import { setContext } from 'svelte';
@@ -62,9 +70,16 @@
 	const NODE_TYPES: NodeTypes = {
 		trigger: TriggerNode,
 		extract: ExtractNode,
+		set_var: SetVarNode,
 		condition: ConditionNode,
+		switch: SwitchNode,
+		delay: DelayNode,
+		webhook: WebhookNode,
 		send_sms: SendSmsNode,
-		stop: StopNode
+		stop: StopNode,
+		// A kind this build does not know still gets a card, so it survives a load
+		// and is written back unchanged on save.
+		unsupported: UnsupportedNode
 	};
 
 	const EDGE_TYPES: EdgeTypes = {
@@ -199,6 +214,10 @@
 		duplicateNode(nodeId: string) {
 			duplicateNode(nodeId);
 		},
+		unsupportedKind(nodeId: string) {
+			const node = nodes.find((item) => item.id === nodeId);
+			return node?.type === 'unsupported' ? (node.unsupportedType ?? '') : '';
+		},
 		screenToFlowPosition(point) {
 			return point;
 		},
@@ -279,6 +298,23 @@
 		touch();
 	}
 
+	/**
+	 * A switch's branches are positional, so the cases and the connections have to
+	 * move together. The rewrite lives in `applySwitchCase`; this only reports it.
+	 */
+	function updateSwitchCases(nodeId: string, op: SwitchCaseOp) {
+		const edit = applySwitchCase(nodes, edges, nodeId, op);
+		nodes = edit.nodes;
+		edges = edit.edges;
+		if (simResult) clearSimulation();
+		touch();
+		if (op.kind === 'add') {
+			announce = 'Case added. Connect it from its new handle.';
+		} else if (op.kind === 'remove') {
+			announce = edit.dropped > 0 ? 'Case removed, along with its connection.' : 'Case removed.';
+		}
+	}
+
 	function updateSettings(patch: { name?: string; enabled?: boolean; deviceId?: string }) {
 		if (patch.name !== undefined) name = patch.name;
 		if (patch.enabled !== undefined) enabled = patch.enabled;
@@ -344,7 +380,7 @@
 		simNodeIds = new Set();
 		simEdgeIds = new Set();
 		touch();
-		announce = `Added a ${type === 'send_sms' ? 'Send SMS' : type} step.`;
+		announce = `Added a ${NODE_META[type].title} step.`;
 		void tick().then(() => ui.revealNode(node.id));
 	}
 
@@ -361,6 +397,10 @@
 	function duplicateNode(nodeId: string) {
 		const source = nodes.find((node) => node.id === nodeId);
 		if (!source) return;
+		if (source.type === 'unsupported') {
+			announce = 'This step comes from a newer console, so it cannot be duplicated here.';
+			return;
+		}
 		if (source.type === 'trigger' && hasTrigger) {
 			announce = 'A flow can only have one trigger.';
 			return;
@@ -418,45 +458,54 @@
 		if (target.type === 'trigger') return false;
 		if (source.type === 'stop') return false;
 
-		if (source.type === 'condition') {
-			if (connection.sourceHandle !== 'true' && connection.sourceHandle !== 'false') return false;
-			if (
-				edges.some(
-					(edge) =>
-						edge.source === source.id && edge.sourceHandle === connection.sourceHandle
-				)
-			) {
-				return false;
-			}
-		} else {
-			if (connection.sourceHandle !== null && connection.sourceHandle !== undefined) return false;
-			if (edges.some((edge) => edge.source === source.id)) return false;
+		if (source.type === 'unsupported') {
+			// The editor cannot know how this step branches, so it offers at most one
+			// plain connection and leaves an existing arrangement untouched.
+			return (
+				!edges.some((edge) => edge.source === source.id) && !reaches(target.id, source.id)
+			);
+		}
+
+		const handle = connection.sourceHandle ?? '';
+		if (!sourceHandles(source).includes(handle)) return false;
+		// One connection per branch: true/false, each case, the default, or the single
+		// plain handle every other kind has.
+		if (
+			edges.some(
+				(edge) => edge.source === source.id && (edge.sourceHandle ?? '') === handle
+			)
+		) {
+			return false;
 		}
 
 		return !reaches(target.id, source.id);
 	}
 
+	function handleOf(connection: Connection): string | undefined {
+		const handle = connection.sourceHandle ?? '';
+		return handle === '' ? undefined : handle;
+	}
+
+	function handleLabel(handle: string | undefined): string {
+		if (!handle) return '';
+		if (handle === 'default') return 'default';
+		const match = /^case:(\d+)$/.exec(handle);
+		if (match) return `case ${Number(match[1]) + 1}`;
+		return handle;
+	}
+
 	function beforeConnect(connection: Connection): FlowEdge | false {
 		if (!isValidConnection(connection)) return false;
-		const source = nodes.find((node) => node.id === connection.source);
-		const handle =
-			source?.type === 'condition'
-				? (connection.sourceHandle as 'true' | 'false')
-				: undefined;
-		const edge = createEdge(connection.source, connection.target, handle, edges);
+		const edge = createEdge(connection.source, connection.target, handleOf(connection), edges);
 		edge.type = 'smoothstep';
 		return edge;
 	}
 
 	function afterConnect(connection: Connection) {
-		const source = nodes.find((node) => node.id === connection.source);
-		const handle =
-			source?.type === 'condition'
-				? (connection.sourceHandle as 'true' | 'false')
-				: undefined;
+		const handle = handleOf(connection);
 		if (simResult) clearSimulation();
 		touch();
-		announce = handle ? `Connected the ${handle} branch.` : 'Steps connected.';
+		announce = handle ? `Connected the ${handleLabel(handle)} branch.` : 'Steps connected.';
 	}
 
 	function connectEnded(
@@ -818,6 +867,7 @@
 						{edges}
 						{issues}
 						onupdate={(patch) => updateNodeData(selectedNode?.id ?? '', patch)}
+						oncases={(op) => updateSwitchCases(selectedNode?.id ?? '', op)}
 						ondelete={() => selectedNode && removeNode(selectedNode.id)}
 						onselect={selectOnly}
 					/>

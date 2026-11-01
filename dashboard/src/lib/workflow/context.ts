@@ -14,6 +14,8 @@ export interface WorkflowCanvasUi {
 	readonly activeEdgeIds: Set<string>;
 	deleteNode(id: string): void;
 	duplicateNode(id: string): void;
+	/** The kind a node carried before the canvas turned it into an unsupported card. */
+	unsupportedKind(id: string): string;
 	/** Screen → canvas coordinates, supplied by the component rendered inside SvelteFlow. */
 	screenToFlowPosition(point: { x: number; y: number }): { x: number; y: number };
 	revealNode(id: string): void;

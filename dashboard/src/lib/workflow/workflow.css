@@ -104,8 +104,10 @@
 	background: var(--df-border-control);
 }
 
-/* The type is the only thing colour-coded: trigger / extract / condition /
-   send / stop are shapes of work, not states of health. */
+/* The type is the only thing colour-coded, and it groups work by family rather
+   than spending nine hues: entry (coral), read (sky), compute (lilac), branch
+   (butter), defer and end (stone), send (mint). A patterned bar marks the second
+   member of a family, so a switch reads next to a condition without repeating it. */
 .wf-node-trigger::before {
 	background: var(--df-accent-fill);
 }
@@ -114,8 +116,32 @@
 	background: var(--df-state-info-ink);
 }
 
+.wf-node-set_var::before {
+	background: var(--df-state-filter-ink);
+}
+
 .wf-node-condition::before {
 	background: var(--df-state-warn-ink);
+}
+
+.wf-node-switch::before {
+	background: repeating-linear-gradient(
+		to bottom,
+		var(--df-state-warn-ink) 0 4px,
+		transparent 4px 7px
+	);
+}
+
+.wf-node-delay::before {
+	background: repeating-linear-gradient(
+		to bottom,
+		var(--df-state-neutral-ink) 0 4px,
+		transparent 4px 8px
+	);
+}
+
+.wf-node-webhook::before {
+	background: linear-gradient(to bottom, var(--df-state-info-ink), var(--df-state-filter-ink));
 }
 
 .wf-node-send_sms::before {
@@ -124,6 +150,36 @@
 
 .wf-node-stop::before {
 	background: var(--df-state-neutral-ink);
+}
+
+/* A kind this build does not know: hatched, so it never reads as a normal step. */
+.wf-node-unsupported {
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--df-state-danger-ink) 40%, var(--df-border-hairline));
+}
+
+.wf-node-unsupported::before {
+	background: repeating-linear-gradient(
+		to bottom,
+		var(--df-state-danger-ink) 0 3px,
+		transparent 3px 6px
+	);
+}
+
+.wf-unsupported-note {
+	display: flex;
+	margin-top: 8px;
+}
+
+.wf-unsupported-tag {
+	padding: 1px 6px;
+	border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 32%, var(--df-border-hairline));
+	border-radius: var(--df-p-radius-xs);
+	color: var(--df-state-danger-ink);
+	font-family: var(--df-p-font-mono);
+	font-size: var(--df-p-text-2xs);
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
 }
 
 .wf-node.is-selected {
@@ -235,6 +291,16 @@
 	font-size: var(--df-p-text-2xs);
 	letter-spacing: 0.05em;
 	color: var(--df-text-meta);
+}
+
+/* A switch labels each handle with its case value, so the key needs the room. */
+.wf-branch-key-wide {
+	flex: 0 1 auto;
+	width: auto;
+	max-width: 96px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .wf-branch-rule {

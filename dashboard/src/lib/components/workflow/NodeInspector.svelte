@@ -6,28 +6,38 @@
 		BodyMode,
 		ConditionData,
 		ConditionOp,
+		DelayData,
 		ExtractData,
 		ModeSpec,
 		SendSmsData,
 		SenderMode,
+		SetVarData,
 		StopData,
-		TriggerData
+		SwitchData,
+		TriggerData,
+		WebhookData
 	} from '$lib/types';
 	import {
+		MAX_CASES,
+		MAX_DELAY_SECONDS,
+		MIN_DELAY_SECONDS,
 		NODE_META,
 		SMS_BODY_LIMIT,
 		SMS_TO_LIMIT,
-		branchTarget,
 		checkRegex,
 		extractGroupNames,
 		fieldErrorsForNode,
+		handleTarget,
 		issuesForNode,
 		nodeData,
 		nodeSummary,
+		switchBranches,
+		switchCases,
 		templateVariables,
 		type EditorIssue,
 		type FlowEdge,
-		type FlowNode
+		type FlowNode,
+		type SwitchCaseOp
 	} from '$lib/workflow/graph';
 
 	let {
@@ -36,6 +46,7 @@
 		edges,
 		issues,
 		onupdate,
+		oncases,
 		ondelete,
 		onselect
 	}: {
@@ -44,6 +55,7 @@
 		edges: FlowEdge[];
 		issues: EditorIssue[];
 		onupdate: (patch: Record<string, unknown>) => void;
+		oncases: (op: SwitchCaseOp) => void;
 		ondelete: () => void;
 		onselect: (id: string) => void;
 	} = $props();
@@ -51,9 +63,15 @@
 	const HELP: Record<string, string> = {
 		trigger: 'Starts the flow when a matching message arrives.',
 		extract: 'Pulls a value out of the message with a named capture group.',
+		set_var: 'Names a value so later steps can use it with a template.',
 		condition: 'Sends the flow down the true or false branch.',
+		switch: 'Compares one value against a list of cases, with a default for the rest.',
+		delay: 'Waits before the next step runs.',
+		webhook: 'Posts to an https address, with a body built from templates.',
 		send_sms: 'Writes a message. In this console it is previewed, not sent.',
-		stop: 'Ends the flow. Nothing after this step runs.'
+		stop: 'Ends the flow. Nothing after this step runs.',
+		unsupported:
+			'This step comes from a newer build than this console. It is kept as it is.'
 	};
 
 	const meta = $derived(NODE_META[node.type]);
@@ -69,6 +87,13 @@
 	const condition = $derived(nodeData<ConditionData>(node));
 	const sms = $derived(nodeData<SendSmsData>(node));
 	const stop = $derived(nodeData<StopData>(node));
+	const setVar = $derived(nodeData<SetVarData>(node));
+	const switchData = $derived(nodeData<SwitchData>(node));
+	const delay = $derived(nodeData<DelayData>(node));
+	const webhook = $derived(nodeData<WebhookData>(node));
+
+	const cases = $derived(node.type === 'switch' ? switchCases(node) : []);
+	const switchBranchList = $derived(node.type === 'switch' ? switchBranches(node) : []);
 
 	const senderMode = $derived(trigger.sender?.mode ?? 'any');
 	const bodyMode = $derived(trigger.body?.mode ?? 'any');
@@ -76,8 +101,8 @@
 		checkRegex(extract.pattern ?? '', extract.flags === 'i' ? 'i' : '')
 	);
 	const matchCheck = $derived(checkRegex(condition.right ?? ''));
-	const trueTarget = $derived(branchTarget(node, 'true', edges, nodes));
-	const falseTarget = $derived(branchTarget(node, 'false', edges, nodes));
+	const trueTarget = $derived(handleTarget(node, 'true', edges, nodes));
+	const falseTarget = $derived(handleTarget(node, 'false', edges, nodes));
 
 	function setSender(patch: Partial<ModeSpec<SenderMode>>) {
 		const current = trigger.sender ?? { mode: 'any' as SenderMode };
@@ -271,6 +296,52 @@
 					</ul>
 				</div>
 			{/if}
+		{:else if node.type === 'set_var'}
+			<div class="field">
+				<label class="label" for={`setvar-name-${node.id}`}>Variable name</label>
+				<input
+					id={`setvar-name-${node.id}`}
+					class="input input-mono"
+					placeholder="note"
+					value={setVar.name ?? ''}
+					oninput={(event) => onupdate({ name: event.currentTarget.value })}
+					aria-label="Variable name"
+					aria-invalid={error('name') ? 'true' : undefined}
+					aria-describedby={describedBy('name', `setvar-name-hint-${node.id}`)}
+					spellcheck="false"
+					autocomplete="off"
+				/>
+				{#if error('name')}
+					<p class="field-error" id={`err-${node.id}-name`}>{error('name')}</p>
+				{/if}
+				<p class="hint" id={`setvar-name-hint-${node.id}`}>
+					Letters, digits and underscores. Later steps read it as {'{{note}}'}.
+				</p>
+			</div>
+
+			<div class="field">
+				<label class="label" for={`setvar-value-${node.id}`}>Value</label>
+				<textarea
+					id={`setvar-value-${node.id}`}
+					class="input"
+					rows="2"
+					placeholder={'amount={{amount}}'}
+					value={setVar.value ?? ''}
+					oninput={(event) => onupdate({ value: event.currentTarget.value })}
+					aria-label="Value to store"
+					aria-invalid={error('value') ? 'true' : undefined}
+					aria-describedby={describedBy('value', `setvar-vars-${node.id}`)}
+					spellcheck="false"
+				></textarea>
+				{#if error('value')}
+					<p class="field-error" id={`err-${node.id}-value`}>{error('value')}</p>
+				{/if}
+				<p class="hint">Text, variables, or both. The value is computed when the flow reaches this step.</p>
+			</div>
+
+			<div class="field" id={`setvar-vars-${node.id}`}>
+				<VariableHints {variables} />
+			</div>
 		{:else if node.type === 'condition'}
 			<div class="field">
 				<label class="label" for={`condition-left-${node.id}`}>Value to test</label>
@@ -363,6 +434,212 @@
 					are required.
 				</p>
 			</div>
+		{:else if node.type === 'switch'}
+			<div class="field">
+				<label class="label" for={`switch-value-${node.id}`}>Value to compare</label>
+				<input
+					id={`switch-value-${node.id}`}
+					class="input input-mono"
+					placeholder={'{{code}}'}
+					value={switchData.value ?? ''}
+					oninput={(event) => onupdate({ value: event.currentTarget.value })}
+					aria-label="Value to compare"
+					aria-invalid={error('value') ? 'true' : undefined}
+					aria-describedby={describedBy('value', `switch-value-hint-${node.id}`)}
+					spellcheck="false"
+					autocomplete="off"
+				/>
+				{#if error('value')}
+					<p class="field-error" id={`err-${node.id}-value`}>{error('value')}</p>
+				{/if}
+				<p class="hint" id={`switch-value-hint-${node.id}`}>
+					The value is filled in first, then compared with each case.
+				</p>
+			</div>
+
+			<div class="field">
+				<span class="label" id={`switch-cases-${node.id}`}>
+					Cases
+					<span class="case-count">{cases.length} of {MAX_CASES}</span>
+				</span>
+				<p class="hint" id={`switch-cases-hint-${node.id}`}>
+					A case runs when the value is exactly the same text. Anything else takes the default
+					branch.
+				</p>
+				<ol class="case-list" aria-labelledby={`switch-cases-${node.id}`}>
+					{#each cases as label, caseIndex (caseIndex)}
+						<li class="case-row">
+							<span class="case-index mono" aria-hidden="true">{caseIndex + 1}</span>
+							<input
+								class="input input-mono case-input"
+								aria-label={`Case ${caseIndex + 1} value`}
+								value={label}
+								oninput={(event) =>
+									oncases({ kind: 'rename', index: caseIndex, value: event.currentTarget.value })}
+								aria-invalid={error(`cases[${caseIndex}]`) ? 'true' : undefined}
+								aria-describedby={error(`cases[${caseIndex}]`)
+									? `err-${node.id}-case-${caseIndex}`
+									: undefined}
+								spellcheck="false"
+								autocomplete="off"
+							/>
+							<button
+								type="button"
+								class="btn btn-ghost btn-icon btn-sm case-remove"
+								onclick={() => oncases({ kind: 'remove', index: caseIndex })}
+								disabled={cases.length <= 1}
+								aria-label={`Remove case ${caseIndex + 1}`}
+								title={cases.length <= 1
+									? 'A switch needs at least one case'
+									: `Remove case ${caseIndex + 1} and its connection`}
+							>
+								<Icon name="x" size={12} />
+							</button>
+						</li>
+						{#if error(`cases[${caseIndex}]`)}
+							<li class="case-error" id={`err-${node.id}-case-${caseIndex}`}>
+								<Icon name="alert" size={11} />
+								<span>{error(`cases[${caseIndex}]`)}</span>
+							</li>
+						{/if}
+					{/each}
+				</ol>
+				<div class="case-foot">
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => oncases({ kind: 'add' })}
+						disabled={cases.length >= MAX_CASES}
+						title={cases.length >= MAX_CASES
+							? `A switch holds at most ${MAX_CASES} cases`
+							: 'Add a case with an empty value'}
+					>
+						<Icon name="plus" size={12} /> Add case
+					</button>
+					{#if error('cases')}
+						<p class="field-error">{error('cases')}</p>
+					{/if}
+				</div>
+			</div>
+
+			<div class="branches">
+				<p class="eyebrow">Where each branch goes</p>
+				{#each switchBranchList as branch (branch.handle)}
+					{@const target = handleTarget(node, branch.handle, edges, nodes)}
+					<div class="branch-row">
+						<span class="branch-key case-key {branch.index === null ? 'default' : ''}">
+							{branch.index === null ? 'default' : branch.label.trim() || `case ${branch.index + 1}`}
+						</span>
+						<span class="branch-arrow" aria-hidden="true"><Icon name="arrow-up-right" size={11} /></span>
+						{#if target}
+							<button
+								type="button"
+								class="link-btn branch-target"
+								onclick={() => target && onselect(target.id)}
+							>
+								{NODE_META[target.type].title}
+							</button>
+						{:else}
+							<span class="branch-missing">Not connected</span>
+						{/if}
+					</div>
+				{/each}
+				<p class="hint">
+					Drag from a case handle to connect it. Renaming a case keeps its connection; removing
+					one drops only that branch, and the cases below it move up.
+				</p>
+			</div>
+		{:else if node.type === 'delay'}
+			<div class="field">
+				<label class="label" for={`delay-seconds-${node.id}`}>Wait</label>
+				<div class="duration-row">
+					<input
+						id={`delay-seconds-${node.id}`}
+						class="input input-mono duration-input"
+						type="number"
+						inputmode="numeric"
+						min={MIN_DELAY_SECONDS}
+						max={MAX_DELAY_SECONDS}
+						step="1"
+						value={Number.isFinite(Number(delay.seconds)) ? Number(delay.seconds) : ''}
+						onchange={(event) => onupdate({ seconds: Number(event.currentTarget.value) })}
+						aria-label="Seconds to wait"
+						aria-invalid={error('seconds') ? 'true' : undefined}
+						aria-describedby={describedBy('seconds', `delay-hint-${node.id}`)}
+					/>
+					<span class="duration-unit">seconds</span>
+				</div>
+				{#if error('seconds')}
+					<p class="field-error" id={`err-${node.id}-seconds`}>{error('seconds')}</p>
+				{/if}
+				<p class="hint" id={`delay-hint-${node.id}`}>
+					From {MIN_DELAY_SECONDS} to {MAX_DELAY_SECONDS} seconds. Step off the field or press
+					Enter to apply it.
+				</p>
+			</div>
+
+			<div class="presets" role="group" aria-label="Common waits">
+				{#each [10, 30, 60, 120, 300] as preset (preset)}
+					<button
+						type="button"
+						class="btn btn-sm preset"
+						onclick={() => onupdate({ seconds: preset })}
+						aria-pressed={Number(delay.seconds) === preset}
+						title={`Wait ${preset} seconds`}
+					>
+						{preset < 60 ? `${preset}s` : `${preset / 60}m`}
+					</button>
+				{/each}
+			</div>
+		{:else if node.type === 'webhook'}
+			<div class="field">
+				<label class="label" for={`hook-url-${node.id}`}>Address</label>
+				<input
+					id={`hook-url-${node.id}`}
+					class="input input-mono"
+					type="url"
+					placeholder="https://example.com/hook"
+					value={webhook.url ?? ''}
+					oninput={(event) => onupdate({ url: event.currentTarget.value })}
+					aria-label="Webhook address"
+					aria-invalid={error('url') ? 'true' : undefined}
+					aria-describedby={describedBy('url', `hook-hint-${node.id}`)}
+					spellcheck="false"
+					autocomplete="off"
+				/>
+				{#if error('url')}
+					<p class="field-error" id={`err-${node.id}-url`}>{error('url')}</p>
+				{/if}
+				<p class="hint" id={`hook-hint-${node.id}`}>
+					An https address. It can hold variables, for example {'{{order_id}}'} in a path.
+				</p>
+			</div>
+
+			<div class="field">
+				<label class="label" for={`hook-body-${node.id}`}>
+					Body <span class="optional">optional</span>
+				</label>
+				<textarea
+					id={`hook-body-${node.id}`}
+					class="input"
+					rows="3"
+					placeholder={'order={{order_id}}'}
+					value={webhook.body ?? ''}
+					oninput={(event) => onupdate({ body: event.currentTarget.value })}
+					aria-label="Webhook body"
+					aria-invalid={error('body') ? 'true' : undefined}
+					aria-describedby={describedBy('body', `hook-vars-${node.id}`)}
+					spellcheck="false"
+				></textarea>
+				{#if error('body')}
+					<p class="field-error" id={`err-${node.id}-body`}>{error('body')}</p>
+				{/if}
+				<p class="hint">Sent as the request body. Leave it empty to send nothing.</p>
+			</div>
+
+			<div class="field" id={`hook-vars-${node.id}`}>
+				<VariableHints {variables} />
+			</div>
 		{:else if node.type === 'send_sms'}
 			<div class="field">
 				<label class="label" for={`sms-to-${node.id}`}>To</label>
@@ -428,6 +705,23 @@
 					<p class="field-error">{error('reason')}</p>
 				{/if}
 				<p class="hint">A note for whoever reads the flow later. It is not sent anywhere.</p>
+			</div>
+		{:else if node.type === 'unsupported'}
+			<div class="field">
+				<p class="hint">
+					This step is a “{node.unsupportedType || 'unknown'}” step, which this console does
+					not know. Its data is kept untouched, and saving writes it back exactly as it
+					arrived.
+				</p>
+				<pre class="data-peek mono" aria-label="Step data as stored">{JSON.stringify(
+					node.data,
+					null,
+					2
+				)}</pre>
+				<p class="hint">
+					Update the console to edit this step. To remove it from the flow, delete it here and
+					reconnect its neighbours.
+				</p>
 			</div>
 		{/if}
 
@@ -597,6 +891,132 @@
 	.branch-missing {
 		font-size: 11.5px;
 		color: var(--df-state-danger-ink);
+	}
+
+	.case-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.case-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.case-index {
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		flex: none;
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+	}
+
+	.case-input {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.case-remove {
+		flex: none;
+	}
+
+	.case-remove:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.case-error {
+		display: flex;
+		align-items: flex-start;
+		gap: 5px;
+		margin-left: 24px;
+		font-size: var(--df-p-text-2xs);
+		line-height: 1.4;
+		color: var(--df-state-danger-ink);
+	}
+
+	.case-error :global(svg) {
+		margin-top: 1px;
+		flex: none;
+	}
+
+	.case-foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--df-p-space-2);
+	}
+
+	.case-key {
+		max-width: 96px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-transform: none;
+		letter-spacing: 0;
+		color: var(--df-text-secondary);
+	}
+
+	.case-key.default {
+		color: var(--df-text-meta);
+	}
+
+	.case-count {
+		margin-left: 4px;
+		font-family: var(--df-p-font-mono);
+		font-size: 10px;
+		color: var(--df-text-meta);
+	}
+
+	.duration-row {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+	}
+
+	.duration-input {
+		width: 92px;
+	}
+
+	.duration-unit {
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+	}
+
+	.presets {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.preset[aria-pressed='true'] {
+		background: var(--df-accent-soft);
+		border-color: color-mix(in srgb, var(--df-accent-text) 32%, var(--df-border-hairline));
+		color: var(--df-text-primary);
+	}
+
+	.data-peek {
+		margin: 0;
+		padding: var(--df-p-space-2);
+		max-height: 220px;
+		overflow: auto;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		font-size: 10px;
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 
 	.node-issues {

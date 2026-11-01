@@ -221,7 +221,23 @@ export interface RuleTestResult {
 
 /* --------------------------------------------------------------- workflows */
 
-export type WorkflowNodeType = 'trigger' | 'extract' | 'condition' | 'send_sms' | 'stop';
+/**
+ * The nine kinds the Worker, the phone and this console share (`dakflare.flow/v2`).
+ *
+ * The console is the slow-moving half: a graph authored elsewhere may already use
+ * a tenth kind. `WorkflowNode['type']` therefore stays a plain string on the wire
+ * and the canvas keeps what it cannot name, instead of dropping it.
+ */
+export type WorkflowNodeType =
+	| 'trigger'
+	| 'extract'
+	| 'set_var'
+	| 'condition'
+	| 'switch'
+	| 'delay'
+	| 'webhook'
+	| 'send_sms'
+	| 'stop';
 
 export interface WorkflowPosition {
 	x: number;
@@ -230,8 +246,10 @@ export interface WorkflowPosition {
 
 export interface WorkflowNode {
 	id: string;
-	type: WorkflowNodeType;
-	position: WorkflowPosition;
+	/** One of `WorkflowNodeType`, or a kind a newer build introduced. */
+	type: string;
+	/** Mirrored by the Worker from `ui_layout`; absent on a graph signed by hand. */
+	position?: WorkflowPosition;
 	data: Record<string, unknown>;
 }
 
@@ -239,13 +257,25 @@ export interface WorkflowEdge {
 	id: string;
 	source: string;
 	target: string;
-	sourceHandle?: 'true' | 'false';
+	/**
+	 * The branch the edge leaves by: `true`/`false` for a condition,
+	 * `case:<index>` or `default` for a switch, absent for every other kind.
+	 */
+	sourceHandle?: string;
 	label?: string;
+}
+
+/** Where the Worker put each node. Authoritative when a node has no position of its own. */
+export interface WorkflowUiLayout {
+	algorithm: string;
+	positions: Record<string, WorkflowPosition>;
 }
 
 export interface WorkflowGraph {
 	nodes: WorkflowNode[];
 	edges: WorkflowEdge[];
+	/** `rank-v1` from the Worker. The canvas prefers a node's own position. */
+	ui_layout?: WorkflowUiLayout;
 }
 
 export interface WorkflowSummary {
@@ -306,6 +336,29 @@ export interface ConditionData {
 	left: string;
 	op: ConditionOp;
 	right?: string;
+}
+
+export interface SetVarData {
+	name: string;
+	/** A template; `{{name}}` and `{{vars.name}}` both resolve. */
+	value: string;
+}
+
+export interface SwitchData {
+	/** A template, rendered before the cases are compared. */
+	value: string;
+	/** One to eight exact values. Branch handles are positional: `case:0`, `case:1`, ... */
+	cases: string[];
+}
+
+export interface DelayData {
+	/** Whole seconds, 1 to 300. */
+	seconds: number;
+}
+
+export interface WebhookData {
+	url: string;
+	body: string;
 }
 
 export interface SendSmsData {

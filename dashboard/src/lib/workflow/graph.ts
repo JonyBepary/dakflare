@@ -16,29 +16,49 @@ import type { Edge, Node } from '@xyflow/svelte';
 import type { IconName } from '$lib/components/Icon.svelte';
 import type {
 	ConditionData,
+	DelayData,
 	ExtractData,
 	SendSmsData,
+	SetVarData,
 	StopData,
+	SwitchData,
 	TriggerData,
+	WebhookData,
 	WorkflowEdge,
 	WorkflowGraph,
 	WorkflowIssue,
-	WorkflowNodeType
+	WorkflowNodeType,
+	WorkflowUiLayout
 } from '$lib/types';
 
-export type FlowNode = Node<Record<string, unknown>, WorkflowNodeType>;
+/**
+ * A card on the canvas. `unsupported` is not a kind of step: it is the shape the
+ * editor gives a node whose `type` it does not know, so the node and its data
+ * survive a load and can be handed back on save.
+ */
+export type CanvasNodeType = WorkflowNodeType | 'unsupported';
+
+export type FlowNode = Node<Record<string, unknown>, CanvasNodeType> & {
+	/** The original `type` string of an unsupported node, kept for a round trip. */
+	unsupportedType?: string;
+};
 export type FlowEdge = Edge<Record<string, unknown>, 'smoothstep'>;
 
+/** The nine kinds, in the order the palette shows them (the Worker's order). */
 export const NODE_TYPES: WorkflowNodeType[] = [
 	'trigger',
 	'extract',
+	'set_var',
 	'condition',
+	'switch',
+	'delay',
+	'webhook',
 	'send_sms',
 	'stop'
 ];
 
 export const NODE_META: Record<
-	WorkflowNodeType,
+	CanvasNodeType,
 	{ title: string; icon: IconName; blurb: string }
 > = {
 	trigger: {
@@ -51,10 +71,30 @@ export const NODE_META: Record<
 		icon: 'braces',
 		blurb: 'Pull data out with a pattern'
 	},
+	set_var: {
+		title: 'Set variable',
+		icon: 'key',
+		blurb: 'Name a value for later steps'
+	},
 	condition: {
 		title: 'Condition',
 		icon: 'branch',
 		blurb: 'Branch on a value'
+	},
+	switch: {
+		title: 'Switch',
+		icon: 'workflow',
+		blurb: 'One branch per case'
+	},
+	delay: {
+		title: 'Delay',
+		icon: 'clock',
+		blurb: 'Wait before the next step'
+	},
+	webhook: {
+		title: 'Webhook',
+		icon: 'external',
+		blurb: 'POST to an https address'
 	},
 	send_sms: {
 		title: 'Send SMS',
@@ -65,14 +105,41 @@ export const NODE_META: Record<
 		title: 'Stop',
 		icon: 'stop',
 		blurb: 'End this flow here'
+	},
+	unsupported: {
+		title: 'Unsupported step',
+		icon: 'alert',
+		blurb: 'From a newer build of the console'
 	}
 };
 
-export const NODE_LIMIT = 50;
-export const EDGE_LIMIT = 100;
+/** What a card can be told without the editor knowing the component. */
+export function metaFor(type: CanvasNodeType | string): (typeof NODE_META)[CanvasNodeType] {
+	const table = NODE_META as Record<string, (typeof NODE_META)[CanvasNodeType]>;
+	return table[type] ?? NODE_META.unsupported;
+}
+
+export function isWorkflowNodeType(value: unknown): value is WorkflowNodeType {
+	return typeof value === 'string' && (NODE_TYPES as string[]).includes(value);
+}
+
+/**
+ * The same ceilings as `worker/src/lib/flow-ir.ts` (`MAX_NODES`, `MAX_EDGES`).
+ *
+ * They were 50 and 100 here, which meant an agent could `flows apply` a 60-node
+ * document the API accepted and then find Save disabled in the editor. One
+ * number, enforced by the side that stores it, mirrored here so the canvas never
+ * refuses a graph the Worker would take.
+ */
+export const NODE_LIMIT = 200;
+export const EDGE_LIMIT = 400;
 export const NAME_LIMIT = 120;
 export const SMS_TO_LIMIT = 32;
 export const SMS_BODY_LIMIT = 4096;
+export const MAX_CASES = 8;
+export const MAX_TEMPLATE_CHARS = 2048;
+export const MIN_DELAY_SECONDS = 1;
+export const MAX_DELAY_SECONDS = 300;
 
 const BUILTIN_VARIABLES = ['sender', 'body', 'received_at'] as const;
 const RESERVED_GROUPS = new Set<string>(BUILTIN_VARIABLES);
@@ -116,8 +183,16 @@ export function defaultData(type: WorkflowNodeType): Record<string, unknown> {
 			return { kind: 'incoming', sender: { mode: 'any' }, body: { mode: 'any' } };
 		case 'extract':
 			return { source: 'body', pattern: '', flags: '' };
+		case 'set_var':
+			return { name: '', value: '' };
 		case 'condition':
 			return { left: '', op: 'equals', right: '' };
+		case 'switch':
+			return { value: '{{body}}', cases: [''] };
+		case 'delay':
+			return { seconds: 30 };
+		case 'webhook':
+			return { url: '', body: '' };
 		case 'send_sms':
 			return { to: '{{sender}}', body: '' };
 		case 'stop':
@@ -160,7 +235,9 @@ function cleanData(data: Record<string, unknown>): Record<string, unknown> {
 export function toGraph(nodes: readonly FlowNode[], edges: readonly FlowEdge[]): WorkflowGraph {
 	const workflowNodes = nodes.map((node) => ({
 		id: node.id,
-		type: node.type as WorkflowNodeType,
+		// An unsupported card puts its original kind back, so saving a graph the
+		// console only half understands does not rewrite it.
+		type: node.type === 'unsupported' ? (node.unsupportedType ?? 'unsupported') : node.type,
 		position: {
 			x: Math.round(node.position.x * 100) / 100,
 			y: Math.round(node.position.y * 100) / 100
@@ -174,7 +251,7 @@ export function toGraph(nodes: readonly FlowNode[], edges: readonly FlowEdge[]):
 			source: edge.source,
 			target: edge.target
 		};
-		if (edge.sourceHandle === 'true' || edge.sourceHandle === 'false') {
+		if (typeof edge.sourceHandle === 'string' && edge.sourceHandle.length > 0) {
 			next.sourceHandle = edge.sourceHandle;
 		}
 		if (typeof edge.label === 'string' && edge.label.length > 0) next.label = edge.label;
@@ -184,27 +261,67 @@ export function toGraph(nodes: readonly FlowNode[], edges: readonly FlowEdge[]):
 	return { nodes: workflowNodes, edges: workflowEdges };
 }
 
+function finite(value: unknown): number | null {
+	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function positionOf(value: unknown): { x: number; y: number } | null {
+	if (!value || typeof value !== 'object') return null;
+	const point = value as { x?: unknown; y?: unknown };
+	const x = finite(point.x);
+	const y = finite(point.y);
+	return x === null || y === null ? null : { x, y };
+}
+
+function layoutOf(value: unknown): Record<string, { x: number; y: number }> {
+	if (!value || typeof value !== 'object') return {};
+	const positions = (value as WorkflowUiLayout).positions;
+	if (!positions || typeof positions !== 'object') return {};
+	const out: Record<string, { x: number; y: number }> = {};
+	for (const [id, point] of Object.entries(positions)) {
+		const placed = positionOf(point);
+		if (placed) out[id] = placed;
+	}
+	return out;
+}
+
+/**
+ * Last resort for a node the layout does not mention, which only happens when a
+ * document reaches the console without a Worker pass. Nothing lands on 0,0: a
+ * stack of cards on one spot cannot be untangled by hand.
+ */
+function loosePosition(index: number): { x: number; y: number } {
+	return { x: 40 + (index % 4) * 280, y: 120 + Math.floor(index / 4) * 160 };
+}
+
 export function fromGraph(graph: WorkflowGraph | null | undefined): {
 	nodes: FlowNode[];
 	edges: FlowEdge[];
 } {
 	const rawNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
 	const rawEdges = Array.isArray(graph?.edges) ? graph.edges : [];
+	const layout = layoutOf(graph?.ui_layout);
 
-	const nodes: FlowNode[] = rawNodes
-		.filter((node) => node && typeof node.id === 'string' && NODE_TYPES.includes(node.type))
-		.map((node) => ({
+	const nodes: FlowNode[] = [];
+	rawNodes.forEach((node, index) => {
+		if (!node || typeof node.id !== 'string') return;
+		const kind = isWorkflowNodeType(node.type) ? node.type : null;
+		// A node's own position is the operator's arrangement and wins. Only a node
+		// without one falls back to the Worker's layout.
+		const position = positionOf(node.position) ?? layout[node.id] ?? loosePosition(index);
+		nodes.push({
 			id: node.id,
-			type: node.type,
-			position: {
-				x: Number.isFinite(node.position?.x) ? node.position.x : 0,
-				y: Number.isFinite(node.position?.y) ? node.position.y : 0
-			},
+			type: kind ?? 'unsupported',
+			...(kind === null
+				? { unsupportedType: typeof node.type === 'string' ? node.type : '' }
+				: {}),
+			position,
 			data:
 				node.data && typeof node.data === 'object' && !Array.isArray(node.data)
 					? ({ ...node.data } as Record<string, unknown>)
 					: {}
-		}));
+		});
+	});
 
 	const known = new Set(nodes.map((node) => node.id));
 	const edges: FlowEdge[] = rawEdges
@@ -222,7 +339,7 @@ export function fromGraph(graph: WorkflowGraph | null | undefined): {
 				target: edge.target,
 				type: 'smoothstep'
 			};
-			if (edge.sourceHandle === 'true' || edge.sourceHandle === 'false') {
+			if (typeof edge.sourceHandle === 'string' && edge.sourceHandle.length > 0) {
 				next.sourceHandle = edge.sourceHandle;
 			}
 			if (typeof edge.label === 'string') next.label = edge.label;
@@ -235,7 +352,7 @@ export function fromGraph(graph: WorkflowGraph | null | undefined): {
 export function createEdge(
 	source: string,
 	target: string,
-	sourceHandle: 'true' | 'false' | undefined,
+	sourceHandle: string | undefined,
 	edges: readonly FlowEdge[]
 ): FlowEdge {
 	const edge: FlowEdge = {
@@ -306,18 +423,71 @@ export function stopSummary(data: StopData): string {
 	return data.reason?.trim() ? data.reason.trim() : 'Flow ends here';
 }
 
+export function setVarSummary(data: SetVarData): string {
+	const name = data.name?.trim();
+	const value = data.value?.replace(/\s+/g, ' ').trim();
+	if (!name) return 'No variable name yet';
+	if (!value) return `${name} · no value yet`;
+	return `${name} = ${value.length > 30 ? `${value.slice(0, 30)}…` : value}`;
+}
+
+export function switchSummary(data: SwitchData): string {
+	const cases = Array.isArray(data.cases) ? data.cases : [];
+	const filled = cases.filter((value) => value.trim().length > 0);
+	if (!data.value?.trim()) return 'No value chosen yet';
+	if (filled.length === 0) return `${data.value} · no cases yet`;
+	return `${data.value} · ${filled.length} ${filled.length === 1 ? 'case' : 'cases'} + default`;
+}
+
+export function delaySummary(data: DelayData): string {
+	const seconds = Number(data.seconds);
+	if (!Number.isFinite(seconds)) return 'No wait set yet';
+	if (seconds === 1) return 'Wait 1 second';
+	if (seconds < 60) return `Wait ${seconds} seconds`;
+	if (seconds % 60 === 0) return `Wait ${seconds / 60} ${seconds === 60 ? 'minute' : 'minutes'}`;
+	const minutes = Math.floor(seconds / 60);
+	const rest = seconds % 60;
+	return `Wait ${minutes}m ${rest}s`;
+}
+
+export function webhookSummary(data: WebhookData): string {
+	const url = data.url?.trim();
+	if (!url) return 'No address yet';
+	const short = url.replace(/^https?:\/\//, '');
+	return `POST ${short.length > 34 ? `${short.slice(0, 34)}…` : short}`;
+}
+
+/** The branch handle a case uses. Positional on purpose: the IR numbers cases. */
+export function caseHandle(index: number): string {
+	return `case:${index}`;
+}
+
+export const DEFAULT_HANDLE = 'default';
+
 export function nodeSummary(node: FlowNode): string {
 	switch (node.type) {
 		case 'trigger':
 			return triggerSummary(nodeData<TriggerData>(node));
 		case 'extract':
 			return extractSummary(nodeData<ExtractData>(node));
+		case 'set_var':
+			return setVarSummary(nodeData<SetVarData>(node));
 		case 'condition':
 			return conditionSummary(nodeData<ConditionData>(node));
+		case 'switch':
+			return switchSummary(nodeData<SwitchData>(node));
+		case 'delay':
+			return delaySummary(nodeData<DelayData>(node));
+		case 'webhook':
+			return webhookSummary(nodeData<WebhookData>(node));
 		case 'send_sms':
 			return sendSummary(nodeData<SendSmsData>(node));
 		case 'stop':
 			return stopSummary(nodeData<StopData>(node));
+		case 'unsupported':
+			return node.unsupportedType
+				? `${node.unsupportedType} · kept as it is`
+				: 'Kept as it is';
 	}
 }
 
@@ -370,14 +540,23 @@ export function extractGroupNames(pattern: string): string[] {
 	return names;
 }
 
+/** Names a node binds for the rest of the path: extract groups and set_var names. */
+export function boundNamesOf(node: FlowNode): string[] {
+	if (node.type === 'extract') {
+		return extractGroupNames(nodeData<ExtractData>(node).pattern ?? '');
+	}
+	if (node.type === 'set_var') {
+		const name = nodeData<SetVarData>(node).name ?? '';
+		return RE_GROUP_NAME.test(name) && !RESERVED_GROUPS.has(name) ? [name] : [];
+	}
+	return [];
+}
+
 /** Every template name the flow can resolve right now, built-ins first. */
 export function templateVariables(nodes: readonly FlowNode[]): string[] {
 	const names = new Set<string>(BUILTIN_VARIABLES);
 	for (const node of nodes) {
-		if (node.type !== 'extract') continue;
-		for (const name of extractGroupNames(nodeData<ExtractData>(node).pattern ?? '')) {
-			names.add(name);
-		}
+		for (const name of boundNamesOf(node)) names.add(name);
 	}
 	return [...names];
 }
@@ -409,6 +588,11 @@ export function checkRegex(pattern: string, flags = ''): RegexCheck {
 	};
 }
 
+/** `{{vars.name}}` is the same variable as `{{name}}`; the Worker strips the alias. */
+export function normalizeTemplateName(name: string): string {
+	return name.startsWith('vars.') ? name.slice(5) : name;
+}
+
 export function templateNames(value: string): { names: string[]; unterminated: boolean } {
 	const names: string[] = [];
 	let from = 0;
@@ -417,7 +601,7 @@ export function templateNames(value: string): { names: string[]; unterminated: b
 		if (open === -1) return { names, unterminated: false };
 		const close = value.indexOf('}}', open + 2);
 		if (close === -1) return { names, unterminated: true };
-		names.push(value.slice(open + 2, close).trim());
+		names.push(normalizeTemplateName(value.slice(open + 2, close).trim()));
 		from = close + 2;
 	}
 }
@@ -513,6 +697,12 @@ export function structuralIssues(
 			return;
 		}
 
+		if (node.type === 'unsupported') {
+			// The console does not know this kind's shape or its rules. Leaving it
+			// alone is the only honest check it can make.
+			return;
+		}
+
 		if (node.type === 'condition') {
 			const handles = new Set(outs.map((edge) => edge.sourceHandle));
 			if (outs.length !== 2) {
@@ -527,6 +717,55 @@ export function structuralIssues(
 					message: ins.length
 						? 'Connect both the true and false branches.'
 						: 'Connect both branches so the flow knows where to go.'
+				});
+			}
+			return;
+		}
+
+		if (node.type === 'switch') {
+			const cases = switchCases(node);
+			const expected = cases.length + 1;
+			if (outs.length !== expected) {
+				issues.push({
+					path,
+					message: `A switch with ${cases.length} ${cases.length === 1 ? 'case' : 'cases'} needs ${expected} connections: one per case and one for the default (found ${outs.length}).`
+				});
+			}
+			const seen = new Set<string>();
+			for (const edge of outs) {
+				const handle = edge.sourceHandle ?? '';
+				const at = `edges[${edges.indexOf(edge)}]`;
+				if (seen.has(handle)) {
+					issues.push({
+						path: at,
+						message: 'Two connections leave the same branch. Remove one of them.'
+					});
+					continue;
+				}
+				seen.add(handle);
+				if (handle === 'default') continue;
+				const match = /^case:(\d+)$/.exec(handle);
+				if (!match) {
+					issues.push({
+						path: at,
+						message:
+							handle === ''
+								? 'This connection has no branch. Drag it from one of the case handles.'
+								: `“${handle}” is not a branch of this switch. Drag the connection from a case or the default.`
+					});
+					continue;
+				}
+				if (Number(match[1]) >= cases.length) {
+					issues.push({
+						path: at,
+						message: `This connection leaves case ${Number(match[1]) + 1}, which no longer exists. Reconnect it to a case or the default.`
+					});
+				}
+			}
+			if (!seen.has('default')) {
+				issues.push({
+					path,
+					message: 'Connect the default branch, so a value that matches no case has somewhere to go.'
 				});
 			}
 			return;
@@ -612,6 +851,8 @@ export function fieldIssues(nodes: readonly FlowNode[], edges: readonly FlowEdge
 		const add = (field: string, message: string) =>
 			issues.push({ path: field ? `${base}.${field}` : base, message });
 
+		if (node.type === 'unsupported') return;
+
 		if (node.type === 'trigger') {
 			const trigger = data as unknown as TriggerData;
 			if (trigger.kind !== 'incoming') {
@@ -684,6 +925,31 @@ export function fieldIssues(nodes: readonly FlowNode[], edges: readonly FlowEdge
 			return;
 		}
 
+		if (node.type === 'set_var') {
+			const setVar = data as unknown as SetVarData;
+			const name = typeof setVar.name === 'string' ? setVar.name : '';
+			if (!name.trim()) {
+				add('name', 'Name the variable, for example note.');
+			} else if (!RE_GROUP_NAME.test(name)) {
+				add('name', 'Use up to 32 letters, digits or underscores, starting with a letter or an underscore.');
+			} else if (RESERVED_GROUPS.has(name)) {
+				add('name', `“${name}” is a built-in name. Choose another one.`);
+			} else {
+				const owner = groupOwners.get(name);
+				if (owner !== undefined) {
+					add('name', `“${name}” is already bound by an earlier step. Choose another name, or remove that step.`);
+				} else {
+					groupOwners.set(name, index);
+				}
+			}
+			if (typeof setVar.value !== 'string' || !setVar.value.trim()) {
+				add('value', 'Add the value to store. Text and {{variables}} both work.');
+			} else if (setVar.value.length > MAX_TEMPLATE_CHARS) {
+				add('value', `Value must be ${MAX_TEMPLATE_CHARS} characters or fewer.`);
+			}
+			return;
+		}
+
 		if (node.type === 'condition') {
 			const condition = data as unknown as ConditionData;
 			if (typeof condition.left !== 'string' || !condition.left.trim()) {
@@ -702,6 +968,72 @@ export function fieldIssues(nodes: readonly FlowNode[], edges: readonly FlowEdge
 			if (condition.op === 'matches') {
 				const check = checkRegex(condition.right);
 				if (!check.valid) add('right', `Regex rejected: ${check.error}`);
+			}
+			return;
+		}
+
+		if (node.type === 'switch') {
+			const branch = data as unknown as SwitchData;
+			const value = typeof branch.value === 'string' ? branch.value : '';
+			if (!value.trim()) {
+				add('value', 'Choose the value to compare, for example {{body}}.');
+			} else if (value.length > MAX_TEMPLATE_CHARS) {
+				add('value', `Value must be ${MAX_TEMPLATE_CHARS} characters or fewer.`);
+			}
+			const cases = switchCases(node);
+			if (cases.length === 0) {
+				add('cases', 'Add at least one case, so the switch has something to match.');
+			} else if (cases.length > MAX_CASES) {
+				add('cases', `A switch holds at most ${MAX_CASES} cases. Remove one before saving.`);
+			}
+			const seen = new Map<string, number>();
+			cases.forEach((label, caseIndex) => {
+				if (!label.trim()) {
+					add(`cases[${caseIndex}]`, `Fill in case ${caseIndex + 1}, or remove it.`);
+					return;
+				}
+				const first = seen.get(label);
+				if (first !== undefined) {
+					add(
+						`cases[${caseIndex}]`,
+						`“${label}” is already case ${first + 1}. Remove the duplicate, because only the first match runs.`
+					);
+					return;
+				}
+				seen.set(label, caseIndex);
+			});
+			return;
+		}
+
+		if (node.type === 'delay') {
+			const seconds = Number((data as unknown as DelayData).seconds);
+			if (
+				!Number.isInteger(seconds) ||
+				seconds < MIN_DELAY_SECONDS ||
+				seconds > MAX_DELAY_SECONDS
+			) {
+				add(
+					'seconds',
+					`Choose a whole number of seconds from ${MIN_DELAY_SECONDS} to ${MAX_DELAY_SECONDS}.`
+				);
+			}
+			return;
+		}
+
+		if (node.type === 'webhook') {
+			const hook = data as unknown as WebhookData;
+			const url = typeof hook.url === 'string' ? hook.url : '';
+			if (!url.trim()) {
+				add('url', 'Add the https address to call.');
+			} else if (!(url.startsWith('https://') || url.startsWith('http://127.0.0.1'))) {
+				add('url', 'Only https addresses can be called. Start the address with https://.');
+			} else if (url.length > MAX_TEMPLATE_CHARS) {
+				add('url', `Address must be ${MAX_TEMPLATE_CHARS} characters or fewer.`);
+			}
+			if (typeof hook.body !== 'string') {
+				add('body', 'Add the body to send. Leave it empty to send nothing.');
+			} else if (hook.body.length > MAX_TEMPLATE_CHARS) {
+				add('body', `Body must be ${MAX_TEMPLATE_CHARS} characters or fewer.`);
 			}
 			return;
 		}
@@ -726,19 +1058,22 @@ export function fieldIssues(nodes: readonly FlowNode[], edges: readonly FlowEdge
 		}
 	});
 
-	/* Templates are checked last: they may name a group from any extract node. */
+	/* Templates are checked last: they may name a variable from any earlier step. */
 	const allowed = new Set<string>(BUILTIN_VARIABLES);
 	nodes.forEach((node) => {
-		if (node.type !== 'extract') return;
-		for (const name of extractGroupNames(nodeData<ExtractData>(node).pattern ?? '')) {
-			allowed.add(name);
-		}
+		for (const name of boundNamesOf(node)) allowed.add(name);
 	});
 	nodes.forEach((node, index) => {
 		const data = node.data as Record<string, unknown>;
 		const fields: Array<[string, unknown]> = [];
-		if (node.type === 'condition') {
+		if (node.type === 'set_var') {
+			fields.push(['value', data.value]);
+		} else if (node.type === 'condition') {
 			fields.push(['left', data.left], ['right', data.right]);
+		} else if (node.type === 'switch') {
+			fields.push(['value', data.value]);
+		} else if (node.type === 'webhook') {
+			fields.push(['url', data.url], ['body', data.body]);
 		} else if (node.type === 'send_sms') {
 			fields.push(['to', data.to], ['body', data.body]);
 		}
@@ -756,7 +1091,7 @@ export function fieldIssues(nodes: readonly FlowNode[], edges: readonly FlowEdge
 				if (!allowed.has(name)) {
 					issues.push({
 						path: `nodes[${index}].data.${field}`,
-						message: `Unknown variable “{{${name}}}”. Add it from an extract node or use sender, body or received_at.`
+						message: `Unknown variable “{{${name}}}”. Add it from an extract or set variable step, or use sender, body or received_at.`
 					});
 				}
 			}
@@ -791,24 +1126,36 @@ export function edgeIssues(edges: readonly FlowEdge[], nodes: readonly FlowNode[
 		if (edge.source === edge.target) {
 			issues.push({ path: `${path}.target`, message: 'A node cannot connect to itself.' });
 		}
-		if (source && source.type !== 'condition' && edge.sourceHandle) {
+		const handle = edge.sourceHandle ?? '';
+		if (source?.type === 'condition') {
+			if (!handle) {
+				issues.push({
+					path: `${path}.sourceHandle`,
+					message: 'Drag this connection from the true or false handle.'
+				});
+			} else if (handle !== 'true' && handle !== 'false') {
+				issues.push({
+					path: `${path}.sourceHandle`,
+					message: 'A condition connects from its true or false handle.'
+				});
+			}
+		} else if (source?.type === 'switch') {
+			if (!handle) {
+				issues.push({
+					path: `${path}.sourceHandle`,
+					message: 'Drag this connection from a case handle or the default handle.'
+				});
+			} else if (handle !== DEFAULT_HANDLE && !/^case:\d+$/.test(handle)) {
+				issues.push({
+					path: `${path}.sourceHandle`,
+					message: 'A switch connects from a case or the default.'
+				});
+			}
+		} else if (source && source.type !== 'unsupported' && handle) {
 			issues.push({
 				path: `${path}.sourceHandle`,
-				message: 'Only a condition can use true/false branches.'
+				message: 'Only a condition or a switch uses branches. Redraw this connection from the plain handle.'
 			});
-		}
-		if (source && source.type === 'condition' && !edge.sourceHandle) {
-			issues.push({
-				path: `${path}.sourceHandle`,
-				message: 'Choose the true or false branch for this connection.'
-			});
-		}
-		if (
-			edge.sourceHandle !== undefined &&
-			edge.sourceHandle !== 'true' &&
-			edge.sourceHandle !== 'false'
-		) {
-			issues.push({ path: `${path}.sourceHandle`, message: 'Branch must be true or false.' });
 		}
 	});
 
@@ -884,21 +1231,136 @@ export function fieldErrorsForNode(
 	return errors;
 }
 
-/** Resolve the target at the end of a condition's true/false branch. */
-export function branchTarget(
+/* ------------------------------------------------------------ switch cases */
+
+/** The cases a switch declares, index-aligned. Anything that is not a string reads as empty. */
+export function switchCaseList(data: SwitchData): string[] {
+	const raw = data.cases;
+	if (!Array.isArray(raw)) return [];
+	return raw.map((value) => (typeof value === 'string' ? value : ''));
+}
+
+export function switchCases(node: FlowNode): string[] {
+	return switchCaseList(nodeData<SwitchData>(node));
+}
+
+export interface SwitchBranch {
+	handle: string;
+	label: string;
+	/** Null for the default branch. */
+	index: number | null;
+}
+
+/** Every source handle a switch draws, in order: one per case, then default. */
+export function switchBranchesOf(data: SwitchData): SwitchBranch[] {
+	const branches = switchCaseList(data).map((label, index) => ({
+		handle: caseHandle(index),
+		label,
+		index
+	}));
+	return [...branches, { handle: DEFAULT_HANDLE, label: 'default', index: null }];
+}
+
+export function switchBranches(node: FlowNode): SwitchBranch[] {
+	return switchBranchesOf(nodeData<SwitchData>(node));
+}
+
+/** Every source handle a node offers. A plain node has one, unnamed. */
+export function sourceHandles(node: FlowNode): string[] {
+	switch (node.type) {
+		case 'stop':
+			return [];
+		case 'condition':
+			return ['true', 'false'];
+		case 'switch':
+			return switchBranches(node).map((branch) => branch.handle);
+		default:
+			return [''];
+	}
+}
+
+export type SwitchCaseOp =
+	| { kind: 'rename'; index: number; value: string }
+	| { kind: 'add'; value?: string }
+	| { kind: 'remove'; index: number };
+
+export interface SwitchCaseEdit {
+	nodes: FlowNode[];
+	edges: FlowEdge[];
+	/** Connections dropped because the case they left is gone. */
+	dropped: number;
+}
+
+/**
+ * Edit a switch's cases and keep the canvas honest.
+ *
+ * Branch handles are positional (`case:0`, `case:1`, ...), so removing a case in
+ * the middle of the list shifts every later case up one. The connections shift
+ * with their cases, and only the removed case loses its branch.
+ */
+export function applySwitchCase(
+	nodes: readonly FlowNode[],
+	edges: readonly FlowEdge[],
+	nodeId: string,
+	op: SwitchCaseOp
+): SwitchCaseEdit {
+	const node = nodes.find((item) => item.id === nodeId);
+	if (!node || node.type !== 'switch') return { nodes: [...nodes], edges: [...edges], dropped: 0 };
+
+	const previous = switchCases(node);
+	let cases: string[];
+	let nextEdges: readonly FlowEdge[] = edges;
+	let dropped = 0;
+
+	if (op.kind === 'add') {
+		if (previous.length >= MAX_CASES) return { nodes: [...nodes], edges: [...edges], dropped: 0 };
+		cases = [...previous, op.value ?? ''];
+	} else if (op.kind === 'rename') {
+		if (op.index < 0 || op.index >= previous.length) {
+			return { nodes: [...nodes], edges: [...edges], dropped: 0 };
+		}
+		cases = previous.map((value, index) => (index === op.index ? op.value : value));
+	} else {
+		if (op.index < 0 || op.index >= previous.length) {
+			return { nodes: [...nodes], edges: [...edges], dropped: 0 };
+		}
+		cases = previous.filter((_value, index) => index !== op.index);
+		nextEdges = edges.flatMap((edge) => {
+			const handle = edge.sourceHandle ?? '';
+			if (edge.source !== nodeId || handle === '') return [edge];
+			const match = /^case:(\d+)$/.exec(handle);
+			if (!match) return [edge];
+			const at = Number(match[1]);
+			if (at === op.index) {
+				dropped += 1;
+				return [];
+			}
+			if (at > op.index) return [{ ...edge, sourceHandle: caseHandle(at - 1) }];
+			return [edge];
+		});
+	}
+
+	const nextNodes = nodes.map((item) =>
+		item.id === nodeId ? { ...item, data: { ...item.data, cases } } : item
+	);
+	return { nodes: nextNodes, edges: [...nextEdges], dropped };
+}
+
+/** Resolve the target at the end of any branch handle. */
+export function handleTarget(
 	node: FlowNode,
-	handle: 'true' | 'false',
+	handle: string,
 	edges: readonly FlowEdge[],
 	nodes: readonly FlowNode[]
 ): FlowNode | null {
-	const edge = edges.find((item) => item.source === node.id && item.sourceHandle === handle);
+	const edge = edges.find((item) => item.source === node.id && (item.sourceHandle ?? '') === handle);
 	if (!edge) return null;
 	return nodes.find((item) => item.id === edge.target) ?? null;
 }
 
 export function nodeLabel(node: FlowNode | null): string {
 	if (!node) return 'nothing';
-	const title = NODE_META[node.type].title;
+	const title = metaFor(node.type).title;
 	if (node.type === 'stop') return 'Stop';
 	if (node.type === 'condition') return 'Condition';
 	return title;

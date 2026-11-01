@@ -154,7 +154,7 @@
 				{/if}
 
 				<div class="sim-block">
-					<p class="eyebrow">Captured variables</p>
+					<p class="eyebrow">Variables on this path</p>
 					{#if captured.length > 0}
 						<dl class="var-table">
 							{#each captured as [name, value] (name)}
@@ -165,7 +165,7 @@
 							{/each}
 						</dl>
 					{:else}
-						<p class="hint">No capture groups ran on this path.</p>
+						<p class="hint">No capture group or variable was set on this path.</p>
 					{/if}
 				</div>
 

@@ -4,7 +4,7 @@
 	import { Handle, NodeToolbar, Position } from '@xyflow/svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 	import { WORKFLOW_UI, type WorkflowCanvasUi } from '$lib/workflow/context';
-	import type { WorkflowNodeType } from '$lib/types';
+	import type { CanvasNodeType } from '$lib/workflow/graph';
 
 	let {
 		nodeId,
@@ -18,7 +18,7 @@
 		children
 	}: {
 		nodeId: string;
-		type: WorkflowNodeType;
+		type: CanvasNodeType;
 		icon: IconName;
 		title: string;
 		summary: string;
