@@ -49,6 +49,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -2360,7 +2361,7 @@ async function cmdSuite() {
 
     // Driven through the shipped command, in a throwaway HOME, so this proves the
     // binary an operator runs rather than a function that happens to exist.
-    const home = fs.mkdtempSync('/tmp/opencode/dakflare-synth-');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-synth-'));
     const runCli = (...args) =>
       spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
         encoding: 'utf8',
@@ -2430,7 +2431,7 @@ async function cmdSuite() {
     const rep = new Report('drift');
     const tag = crypto.randomBytes(3).toString('hex');
     const flowId = `wf_drift_${tag}`;
-    const home = fs.mkdtempSync('/tmp/opencode/dakflare-heal-');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-heal-'));
     const runCli = (...args) =>
       spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
         encoding: 'utf8',
@@ -2723,7 +2724,7 @@ async function cmdSuite() {
       typeof retried.data?.result?.structuredContent?.command_id, 'string');
 
     /* ---- the CLI speaks the same contract ---------------------------- */
-    const cliHome = fs.mkdtempSync('/tmp/opencode/dakflare-mcp-');
+    const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-mcp-'));
     const tokenFile = path.join(cliHome, 'agent-token');
     fs.writeFileSync(tokenFile, full.token);
     // The bridge reads the Worker URL from the same config `init` writes; only the
@@ -3195,7 +3196,7 @@ async function cmdSuite() {
       (await agentApi(agent.data.token, 'GET', '/v1/messages')).status, 401);
 
     /* the CLI, as an agent: exit codes are part of the contract ------------- */
-    const cliHome = fs.mkdtempSync('/tmp/opencode/dakflare-agent-cli-');
+    const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-agent-cli-'));
     const cliConfigDir = path.join(cliHome, '.config', 'dakflare');
     fs.mkdirSync(cliConfigDir, { recursive: true });
     const cliToken = await mint('p0 cli', ['sms:send', 'messages:read', 'devices:read'], {

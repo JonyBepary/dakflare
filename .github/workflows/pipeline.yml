@@ -122,6 +122,14 @@ jobs:
       # creates devices, rules and messages.
       WORKER_URL: http://127.0.0.1:8787
       STUB_URL: http://127.0.0.1:8790
+      # The lease window is the suite's one timing assertion, and a loaded runner
+      # can spend longer than 6 s getting the second socket connected. The expiry
+      # task then finds no socket, the re-delivery never happens, and the command
+      # comes back PENDING with no token, which reads like a product bug and is a
+      # stopwatch. `dev.sh` passes LEASE_MS to the Worker as `--var`; the harness
+      # reads HARNESS_LEASE_MS. Both sides must name the same number.
+      LEASE_MS: "15000"
+      HARNESS_LEASE_MS: "15000"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
