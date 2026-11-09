@@ -19,11 +19,10 @@ import { err } from "../lib/errors";
  */
 export async function handleAlertsList(env: Env, requestUrl: URL): Promise<Response> {
   const includeAcknowledged = requestUrl.searchParams.get("all") === "1";
-  // "Open" is unresolved *and* unacknowledged. A device that came back online
-  // resolves its alert automatically, so it must not keep showing here.
+  // "Open" is unresolved *and* unacknowledged on active (non-archived) devices.
   const where = includeAcknowledged
-    ? ""
-    : "WHERE a.acknowledged_at IS NULL AND a.resolved_at IS NULL";
+    ? "WHERE (d.device_id IS NOT NULL AND d.archived_at IS NULL)"
+    : "WHERE a.acknowledged_at IS NULL AND a.resolved_at IS NULL AND (d.device_id IS NOT NULL AND d.archived_at IS NULL)";
 
   const rows = await env.DB.prepare(
     `SELECT a.id, a.device_id, d.label AS label, a.kind, a.raised_at,
@@ -36,6 +35,24 @@ export async function handleAlertsList(env: Env, requestUrl: URL): Promise<Respo
   ).all();
 
   return Response.json({ alerts: rows.results ?? [] });
+}
+
+/**
+ * `POST /v1/admin/alerts/ack-all` — acknowledge all currently open alerts.
+ */
+export async function handleAlertsAckAll(env: Env): Promise<Response> {
+  const acknowledgedAt = Date.now();
+  const res = await env.DB.prepare(
+    `UPDATE alerts SET acknowledged_at = ? WHERE acknowledged_at IS NULL`
+  )
+    .bind(acknowledgedAt)
+    .run();
+
+  return Response.json({
+    ok: true,
+    acknowledged_count: Number(res.meta?.changes ?? 0),
+    acknowledged_at: acknowledgedAt,
+  });
 }
 
 /**

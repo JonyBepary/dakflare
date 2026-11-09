@@ -62,11 +62,13 @@ export async function handleHealth(env: Env): Promise<Response> {
   try {
     const row = (await env.DB.prepare(
       `SELECT
-         (SELECT COUNT(*) FROM devices)       AS devices,
+         (SELECT COUNT(*) FROM devices WHERE archived_at IS NULL) AS devices,
          (SELECT COUNT(*) FROM messages)      AS messages,
          (SELECT COUNT(*) FROM rules)         AS rules,
          (SELECT COUNT(*) FROM pairing_codes WHERE expires_at > ?) AS pairing_codes,
-         (SELECT COUNT(*) FROM alerts WHERE acknowledged_at IS NULL) AS open_alerts,
+         (SELECT COUNT(*) FROM alerts a
+            JOIN devices d ON d.device_id = a.device_id
+           WHERE a.acknowledged_at IS NULL AND a.resolved_at IS NULL AND d.archived_at IS NULL) AS open_alerts,
          (SELECT MAX(received_at) FROM messages) AS last_message_at`
     ).bind(Date.now()).first()) as Record<string, unknown> | null;
 

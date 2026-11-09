@@ -27,6 +27,7 @@ reading all of them:
 | `skills/dakflare-provision/` | installing, deploying, repairing, pairing or revoking |
 | `skills/dakflare-messaging/` | sending, following, retrying, or reading delivery state |
 | `skills/dakflare-flows/` | writing or debugging an auto-reply graph |
+| `skills/dakflare-agents/` | managing agent tokens, approvals, authority grants, or MCP |
 
 The layout is the standard `skills/<name>/SKILL.md` shape, so `npx skills add` can
 install them into another repository unchanged.

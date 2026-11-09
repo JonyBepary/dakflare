@@ -357,6 +357,77 @@ pub fn template_names(template: &str) -> Vec<String> {
 
 /* ------------------------------------------------------------- validation */
 
+pub fn is_blocked_webhook_host(url: &str) -> bool {
+    if !url.starts_with("https://") {
+        return true;
+    }
+    let rest = &url["https://".len()..];
+    let host_part = rest
+        .split(&['/', ':', '?', '#'][..])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let host = host_part.trim();
+    if host.is_empty() {
+        return true;
+    }
+
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".internal")
+        || host.ends_with(".local")
+    {
+        return true;
+    }
+
+    // Check IPv4
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4 {
+        if let (Ok(a), Ok(b), Ok(c), Ok(d)) = (
+            parts[0].parse::<u16>(),
+            parts[1].parse::<u16>(),
+            parts[2].parse::<u16>(),
+            parts[3].parse::<u16>(),
+        ) {
+            if a > 255 || b > 255 || c > 255 || d > 255 {
+                return true;
+            }
+            let (a, b) = (a as u8, b as u8);
+            if a == 0 || a == 10 || a == 127 {
+                return true;
+            }
+            if a == 169 && b == 254 {
+                return true;
+            }
+            if a == 172 && (16..=31).contains(&b) {
+                return true;
+            }
+            if a == 192 && b == 168 {
+                return true;
+            }
+            if a == 100 && (64..=127).contains(&b) {
+                return true;
+            }
+            return false;
+        }
+    }
+
+    // Check IPv6
+    if host.starts_with('[') && host.ends_with(']') {
+        let inner = &host[1..host.len() - 1];
+        if inner == "::1"
+            || inner == "0:0:0:0:0:0:0:1"
+            || inner.starts_with("fe80:")
+            || inner.starts_with("fc00:")
+            || inner.starts_with("fd")
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Validate a document and return its canonical form.
 ///
 /// The canonical form drops unknown node/edge keys, folds legacy `position` into
@@ -611,11 +682,18 @@ pub fn validate(raw: &Value) -> Validation {
             }
             "webhook" => {
                 let parsed: WebhookData = serde_json::from_value(data.clone()).unwrap_or_default();
-                if !(parsed.url.starts_with("https://") || parsed.url.starts_with("http://127.0.0.1")) {
-                    issues.push(
-                        format!("{path}.data.url"),
-                        "must be an https:// URL",
-                    );
+                if !parsed.url.is_empty() {
+                    if !parsed.url.starts_with("https://") {
+                        issues.push(
+                            format!("{path}.data.url"),
+                            "must be an https:// URL",
+                        );
+                    } else if is_blocked_webhook_host(&parsed.url) {
+                        issues.push(
+                            format!("{path}.data.url"),
+                            "must not target a loopback, private, or metadata address",
+                        );
+                    }
                 }
                 check_template(&parsed.url, &format!("{path}.data.url"), index, &mut templates, &mut issues);
                 check_template(&parsed.body, &format!("{path}.data.body"), index, &mut templates, &mut issues);

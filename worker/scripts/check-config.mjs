@@ -84,6 +84,8 @@ function cloudflareConfigNames(file) {
 }
 
 const cfNames = cloudflareConfigNames(path.join(ROOT, "cloudflare.config.ts"));
+const cfTemplateNames = cloudflareConfigNames(path.join(ROOT, "cloudflare.config.template.ts"));
+const wranglerTemplate = bindingNames(path.join(ROOT, "wrangler.template.toml"));
 
 const flatLocalNames = [
   ...local.bindings.map((b) => b.split(":")[1]),
@@ -99,6 +101,19 @@ if (cfNames) {
   if (onlyCf.length) cfDrift.push(`only in cloudflare.config.ts: ${onlyCf.join(", ")}`);
 }
 
+const templateDrift = [];
+if (cfTemplateNames && cfNames) {
+  const onlyCf = cfNames.filter((n) => !cfTemplateNames.includes(n));
+  const onlyTmpl = cfTemplateNames.filter((n) => !cfNames.includes(n));
+  if (onlyCf.length) templateDrift.push(`in cloudflare.config.ts but missing in template: ${onlyCf.join(", ")}`);
+  if (onlyTmpl.length) templateDrift.push(`in cloudflare.config.template.ts but missing in config: ${onlyTmpl.join(", ")}`);
+}
+for (const key of ["bindings", "ratelimits", "vars"]) {
+  const a = JSON.stringify(local[key]);
+  const b = JSON.stringify(wranglerTemplate[key]);
+  if (a !== b) templateDrift.push(`wrangler.toml vs wrangler.template.toml ${key}: local=${a} template=${b}`);
+}
+
 const diffs = [];
 for (const key of ["bindings", "ratelimits", "vars"]) {
   const a = JSON.stringify(local[key]);
@@ -109,13 +124,15 @@ for (const key of ["crons", "observability"]) {
   if (local[key] !== account[key]) diffs.push(`${key}: local=${local[key]} account=${account[key]}`);
 }
 
-if (diffs.length || cfDrift.length) {
+if (diffs.length || cfDrift.length || templateDrift.length) {
   console.error("config drift detected:");
   for (const d of diffs) console.error(`  - wrangler.toml vs wrangler.account.toml — ${d}`);
   for (const d of cfDrift) console.error(`  - wrangler.toml vs cloudflare.config.ts — ${d}`);
+  for (const d of templateDrift) console.error(`  - template config drift — ${d}`);
   process.exit(1);
 }
 console.log(
   `config in sync: ${local.bindings.length} bindings, ${local.ratelimits.length} limiters, ${local.vars.length} vars` +
-  (cfNames ? `, cloudflare.config.ts ${cfNames.length} bindings` : "")
+  (cfNames ? `, cloudflare.config.ts ${cfNames.length} bindings` : "") +
+  (cfTemplateNames ? `, templates verified` : "")
 );

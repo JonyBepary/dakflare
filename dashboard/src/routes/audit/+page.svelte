@@ -492,10 +492,18 @@
 
 	.table-wrap {
 		overflow-x: auto;
+		position: relative;
 	}
 
 	.audit-table {
 		min-width: 760px;
+	}
+
+	.audit-table th {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		background: var(--df-c-table-head-bg, var(--df-surface-card));
 	}
 
 	.col-at {

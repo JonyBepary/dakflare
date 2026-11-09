@@ -12,7 +12,7 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
  * fresh empty database. A fork replaces it with this file.
  *
  * Create the resources first, or let `cf deploy` / `wrangler deploy` provision them:
- *   npx wrangler d1 create sms_gateway
+ *   cf d1 create sms_gateway
  *   npx wrangler kv namespace create KV
  */
 
@@ -20,6 +20,8 @@ export default defineConfig({
 	worker: {
 		name: "dakflare-worker",
 		compatibilityDate: "2026-04-07",
+		// better-auth imports node:crypto in its password utilities.
+		compatibilityFlags: ["nodejs_compat"],
 		entrypoint: "src/index.ts",
 		previewUrls: false,
 
@@ -28,34 +30,71 @@ export default defineConfig({
 			headSamplingRate: 1,
 		},
 
+		/**
+		 * Replaces wrangler.toml's `[[migrations]] new_sqlite_classes = ["DeviceGateway"]`.
+		 * `storage: "sqlite"` matches the deployed backend exactly.
+		 */
 		exports: {
 			DeviceGateway: exports.durableObject({ storage: "sqlite" }),
+			// The single globally named failed-auth counter (lib/auth-limits.ts).
+			AuthGuard: exports.durableObject({ storage: "sqlite" }),
+			// The single globally named authority-grant expiry timer (v6.1 P0).
+			AuthorityGuard: exports.durableObject({ storage: "sqlite" }),
 		},
 
-		triggers: [triggers.scheduled({ schedule: "17 3 * * *" })],
+		triggers: [
+			triggers.scheduled({
+				schedule: "17 3 * * *",
+			}),
+		],
 
 		env: {
+			// ── inline configuration ────────────────────────────────────────────
+			// Admin auth gate: `legacy` keeps ADMIN_TOKEN; `new` uses Better Auth
+			// sessions via requireRole() (see worker/src/lib/config.ts authMode).
+			AUTH_LOCKOUT_WINDOW_SECONDS: bindings.text("900"),
+			// The free-tier password factor: the browser runs PBKDF2, the Worker
+			// only peppers and compares. Without this var the factor is `off`, so
+			// a cf deploy silently disabled password sign-in that wrangler.toml
+			// had been enabling.
+			AUTH_PASSWORD_MODE: bindings.text("client-derived"),
+			// Magic link is advertised but sends nothing until RESEND_API_KEY is
+			// a Worker secret; the sandbox sender is fine until a domain exists.
+			MAGIC_LINK_FROM: bindings.text("DakFlare <onboarding@resend.dev>"),
+			MAGIC_LINK_TTL_SECONDS: bindings.text("900"),
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
-			// Per-device daily inbound row budget. D1's daily rows-written allowance is
-			// shared by the whole deployment, so one looping device must not be able to
-			// spend it for everyone. Clamped to [100, 100000].
 			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
-			// AGPL-3.0 §13: point `/source` at YOUR fork.
+			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/OWNER/dakflare"),
 
+			// ── storage ─────────────────────────────────────────────────────────
 			// `id` is optional for D1 — provisioning fills it in on first deploy.
-			DB: bindings.d1({ name: "sms_gateway" }),
-
+			DB: bindings.d1({
+				name: "sms_gateway",
+				id: "<D1_DATABASE_ID>",
+			}),
 			// KV needs a namespace id: run `npx wrangler kv namespace create KV` and paste it.
-			KV: bindings.kv({ id: "<KV_NAMESPACE_ID>" }),
+			KV: bindings.kv({
+				id: "<KV_NAMESPACE_ID>",
+			}),
 
+			// ── Durable Object ──────────────────────────────────────────────────
 			DEVICE: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "DeviceGateway",
 			}),
+			AUTH_GUARD: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "AuthGuard",
+			}),
+			AUTHORITY_GUARD: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "AuthorityGuard",
+			}),
 
+			// ── rate limiting (hardening S3) ────────────────────────────────────
 			PAIR_LIMITER: bindings.rateLimit({
 				namespace: "1001",
 				simple: { limit: 30, period: 60 },
@@ -68,17 +107,22 @@ export default defineConfig({
 				namespace: "1003",
 				simple: { limit: 600, period: 60 },
 			}),
-			// Separate binding, not the same limiter under another key: sharing
-			// PAIR_LIMITER let one client drain the shared bucket and deny pairing
-			// to everyone else in the colo.
+			AUTH_FAIL_LIMITER: bindings.rateLimit({
+				namespace: "1004",
+				simple: { limit: 120, period: 60 },
+			}),
 			PAIR_GLOBAL_LIMITER: bindings.rateLimit({
 				namespace: "1005",
 				simple: { limit: 300, period: 60 },
 			}),
-			// Counts FAILED device authentication only, per client IP.
-			AUTH_FAIL_LIMITER: bindings.rateLimit({
-				namespace: "1004",
-				simple: { limit: 120, period: 60 },
+			// Failed-auth lockout backstop (see lib/auth-limits.ts).
+			AUTH_ACCOUNT_LIMITER: bindings.rateLimit({
+				namespace: "1006",
+				simple: { limit: 5, period: 60 },
+			}),
+			AUTH_IP_LIMITER: bindings.rateLimit({
+				namespace: "1007",
+				simple: { limit: 20, period: 60 },
 			}),
 		},
 	},

@@ -167,6 +167,7 @@
 
 	<Notice scope="flows" />
 
+	{#if import.meta.env.DEV}
 	<section class="sheet" aria-labelledby="carrier-title">
 		<div class="sheet-head">
 			<h2 class="sheet-title" id="carrier-title">Carrier simulator</h2>
@@ -255,4 +256,5 @@
 			here removes local rows only.
 		</p>
 	</section>
+	{/if}
 </section>

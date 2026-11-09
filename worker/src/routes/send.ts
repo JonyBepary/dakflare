@@ -29,7 +29,7 @@ import {
 } from "../lib/config";
 import { internalError } from "./pair";
 import { enqueueOutboundCommand } from "../lib/commands";
-import { enforceAgentSend } from "../lib/agent-send";
+import { enforceAgentSend, rollbackAgentSend } from "../lib/agent-send";
 
 interface CommandPayload {
   command_id: string;
@@ -102,16 +102,26 @@ export async function handleSend(
 
   // Shared with the rules pipeline so the command id / message row pairing cannot
   // drift between an operator send and an automated reply.
-  const queued = await enqueueOutboundCommand(env, {
-    deviceId,
-    commandId,
-    to,
-    body,
-    priority,
-    expiresAt,
-    idempotencyKey,
-  });
-  if (!queued.ok) return internalError();
+  let queued;
+  try {
+    queued = await enqueueOutboundCommand(env, {
+      deviceId,
+      commandId,
+      to,
+      body,
+      priority,
+      expiresAt,
+      idempotencyKey,
+    });
+  } catch (error) {
+    console.error(`[send] enqueue failed: ${String(error)}`);
+    await rollbackAgentSend(env, actor?.agentTokenId, authority.grantId, 1);
+    return internalError();
+  }
+  if (!queued.ok) {
+    await rollbackAgentSend(env, actor?.agentTokenId, authority.grantId, 1);
+    return internalError();
+  }
 
   // A replay created nothing: the command and its message row already exist, and
   // an audit row here would claim this call sent something.
@@ -187,6 +197,7 @@ export async function handleSendBatch(
     deviceId,
     recipients: prepared.map((command) => command.to),
     allRecipients: true,
+    count: prepared.length,
     ...(typeof input.reason === "string" ? { reason: input.reason.slice(0, 200) } : {}),
   });
   if (!authority.ok) return authority.response;
@@ -203,9 +214,13 @@ export async function handleSendBatch(
     });
   } catch (error) {
     console.error(`[send] DO unreachable: ${String(error)}`);
+    await rollbackAgentSend(env, actor?.agentTokenId, authority.grantId, prepared.length);
     return internalError();
   }
-  if (!res.ok) return internalError();
+  if (!res.ok) {
+    await rollbackAgentSend(env, actor?.agentTokenId, authority.grantId, prepared.length);
+    return internalError();
+  }
 
   // #18: persist one outbound `messages` row per command, in a single D1 batch.
   await env.DB.batch(

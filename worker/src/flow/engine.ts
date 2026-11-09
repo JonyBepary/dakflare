@@ -32,7 +32,7 @@ export interface FlowStep {
 
 export interface FlowResult {
   matched: boolean;
-  outcome: "delivered" | "filtered" | "halted" | "no_trigger" | "error";
+  outcome: "delivered" | "filtered" | "halted" | "no_trigger" | "error" | "partial";
   actions: FlowAction[];
   variables: Record<string, string>;
   steps: FlowStep[];

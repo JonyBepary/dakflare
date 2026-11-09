@@ -1,50 +1,57 @@
 # TEMPLATE — copy to `wrangler.toml` for a fresh install.
 #
 #   cp worker/wrangler.template.toml worker/wrangler.toml
-#   npx wrangler d1 create sms_gateway        # then paste the id below, OR
-#   npx wrangler deploy                       # automatic provisioning fills them in
+#   cf d1 create sms_gateway                  # then paste the id below, OR
+#   cf deploy                                 # automatic provisioning fills them in
 #
 # Deliberately contains NO `database_id` and NO KV `id`. Those identify *one account's*
 # resources; committing them makes the repo deployable only into the author's account.
-#
-# Cloudflare's automatic provisioning: "When you run `wrangler deploy`, resources will be
-# created for you, and their IDs will be written back to your configuration file." Note
-# that this write-back happens for deploys from this repo — a deploy triggered from the
-# dashboard or GitHub creates the resources but does not write the IDs back, so keep them
-# in your own working copy either way.
 
 name = "dakflare-worker"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
-# Required by better-auth (its password utilities import `node:crypto`). The flag
-# is inert for code that does not use node: builtins, so it does not change the
-# device protocol paths.
 compatibility_flags = ["nodejs_compat"]
 preview_urls = false
 
+# ---------------------------------------------------------------------------
+# Durable Object: one DeviceGateway instance per device_id.
+# ---------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "DEVICE"
 class_name = "DeviceGateway"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["DeviceGateway"]
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
+[[durable_objects.bindings]]
+name = "AUTHORITY_GUARD"
+class_name = "AuthorityGuard"
+
+[exports.DeviceGateway]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthGuard]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthorityGuard]
+type = "durable-object"
+storage = "sqlite"
 
 # --- D1 -------------------------------------------------------------------
-# No `database_id`: provisioning creates it. If you prefer to create it yourself:
-#   npx wrangler d1 create sms_gateway
-#   npx wrangler d1 migrations apply sms_gateway --remote
 [[d1_databases]]
 binding = "DB"
 database_name = "sms_gateway"
+database_id = "<D1_DATABASE_ID>"
 
 # --- KV -------------------------------------------------------------------
-# No `id` for the same reason.
-#   npx wrangler kv namespace create KV
 [[kv_namespaces]]
 binding = "KV"
+id = "<KV_NAMESPACE_ID>"
 
-# --- Rate limiting --------------------------------------------------------
+# --- Rate limiting (hardening S3) -----------------------------------------
 [[ratelimits]]
 name = "PAIR_LIMITER"
 namespace_id = "1001"
@@ -70,13 +77,26 @@ name = "PAIR_GLOBAL_LIMITER"
 namespace_id = "1005"
 simple = { limit = 300, period = 60 }
 
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "1006"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "1007"
+simple = { limit = 20, period = 60 }
+
 [vars]
+AUTH_PASSWORD_MODE = "client-derived"
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+MAGIC_LINK_TTL_SECONDS = "900"
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
 INCOMING_ROWS_PER_DAY = "10000"
-# AGPL-3.0 §13: point this at YOUR fork. `/source` redirects here.
-SOURCE_URL = "https://github.com/JonyBepary/dakflare"
+SOURCE_URL = "https://github.com/OWNER/dakflare"
 
 [assets]
 directory = "public"
@@ -87,7 +107,3 @@ crons = ["17 3 * * *"]
 [observability]
 enabled = true
 head_sampling_rate = 1
-
-# --- Secrets (not in this file) -------------------------------------------
-#   npx wrangler secret put ADMIN_TOKEN              # required; unset fails closed
-#   npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON # optional until you want wake pushes

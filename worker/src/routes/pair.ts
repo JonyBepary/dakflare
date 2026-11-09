@@ -57,6 +57,9 @@ import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES, MAX_FCM_TOKEN_CHARS, MAX_LABEL_CHARS, clampTtlMs } from "../lib/config";
 import { MAX_WORKFLOW_NAME_CHARS } from "../lib/workflow";
+import { checkAuthLockout, recordAuthFailure, rateLimitedResponse } from "../lib/auth-limits";
+
+const RE_PAIRING_CODE = /^[0-9A-Fa-f]{12}$/;
 
 /**
  * How long a claim blocks other redeemers before it is treated as abandoned.
@@ -134,9 +137,15 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
   // alone lets an IP-rotating botnet spread across locations — but checking the
   // shared key first (or unconditionally) lets one client drain the shared budget
   // and lock every other device out of pairing.
+  const ip = req.headers.get("CF-Connecting-IP") ?? null;
+  const lockout = await checkAuthLockout(env, { email: null, ip });
+  if (lockout.locked) {
+    return rateLimitedResponse(lockout.retryAfter, "too many failed pairing attempts");
+  }
+
   if (env.PAIR_LIMITER) {
-    const ip = req.headers.get("CF-Connecting-IP") ?? "local";
-    const perIp = await env.PAIR_LIMITER.limit({ key: `ip:${ip}` });
+    const ipKey = ip ?? "local";
+    const perIp = await env.PAIR_LIMITER.limit({ key: `ip:${ipKey}` });
     if (!perIp.success) return err("rate_limited", 429);
   }
   if (env.PAIR_GLOBAL_LIMITER) {
@@ -182,7 +191,9 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
     simSlot = body.sim_slot;
   }
 
-  if (typeof pairingCode !== "string" || pairingCode === "") return err("bad_request", 400);
+  if (typeof pairingCode !== "string" || !RE_PAIRING_CODE.test(pairingCode.trim())) {
+    return err("bad_request", 400);
+  }
   if (typeof deviceId !== "string" || deviceId === "") return err("bad_request", 400);
   if (typeof publicKeySpki !== "string" || publicKeySpki === "") return err("bad_request", 400);
 
@@ -236,6 +247,7 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
         .first<{ ok: number }>();
       if (device) return err("device_exists", 409);
     }
+    await recordAuthFailure(env, { email: null, ip });
     return err("bad_request", 401);
   }
 

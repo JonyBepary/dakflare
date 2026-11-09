@@ -363,7 +363,8 @@ interface QuotaRow {
 export async function peekSendQuota(
   env: Env,
   tokenId: string,
-  now = Date.now()
+  now = Date.now(),
+  count = 1
 ): Promise<QuotaOutcome> {
   const row = await env.DB.prepare(
     `SELECT sent_current_hour, hour_window_start, max_per_hour
@@ -379,12 +380,12 @@ export async function peekSendQuota(
   const resetsAt = rolledOver ? now + QUOTA_WINDOW_MS : windowStart + QUOTA_WINDOW_MS;
   const effectiveUsed = rolledOver ? 0 : used;
 
-  if (effectiveUsed >= limit) return { ok: false, used, limit, resets_at: resetsAt };
+  if (effectiveUsed + count > limit) return { ok: false, used, limit, resets_at: resetsAt };
   return { ok: true, used, limit, resets_at: resetsAt };
 }
 
 /**
- * Spend one SMS from the token's fixed hourly window.
+ * Spend SMS from the token's fixed hourly window.
  *
  * ONE conditional UPDATE, then one read for the numbers the caller reports. The
  * condition is the whole budget check: D1 exposes no isolation level beyond a
@@ -397,27 +398,31 @@ export async function peekSendQuota(
 export async function consumeSendQuota(
   env: Env,
   tokenId: string,
-  now = Date.now()
+  now = Date.now(),
+  count = 1
 ): Promise<QuotaOutcome> {
   const updated = await env.DB.prepare(
     `UPDATE agent_tokens
-        SET sent_current_hour = CASE WHEN (? - hour_window_start) >= ? THEN 1
-                                     ELSE sent_current_hour + 1 END,
+        SET sent_current_hour = CASE WHEN (? - hour_window_start) >= ? THEN ?
+                                     ELSE sent_current_hour + ? END,
             hour_window_start  = CASE WHEN (? - hour_window_start) >= ? THEN ?
                                       ELSE hour_window_start END
       WHERE id = ?
         AND revoked_at IS NULL
-        AND ((? - hour_window_start) >= ? OR sent_current_hour < max_per_hour)`
+        AND ((? - hour_window_start) >= ? OR (sent_current_hour + ?) <= max_per_hour)`
   )
     .bind(
       now,
       QUOTA_WINDOW_MS,
+      count,
+      count,
       now,
       QUOTA_WINDOW_MS,
       now,
       tokenId,
       now,
-      QUOTA_WINDOW_MS
+      QUOTA_WINDOW_MS,
+      count
     )
     .run();
 
@@ -439,4 +444,19 @@ export async function consumeSendQuota(
     return { ok: false, used, limit, resets_at: resetsAt };
   }
   return { ok: true, used, limit, resets_at: resetsAt };
+}
+
+/** Roll back sent quota if downstream DO enqueue fails. */
+export async function rollbackSendQuota(
+  env: Env,
+  tokenId: string,
+  count = 1
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE agent_tokens
+        SET sent_current_hour = MAX(0, sent_current_hour - ?)
+      WHERE id = ?`
+  )
+    .bind(count, tokenId)
+    .run();
 }

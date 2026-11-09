@@ -18,10 +18,13 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES } from "../lib/config";
 import { RE_DEVICE_ID } from "../auth/canonical";
+import { findLiveGrant, requestApproval } from "../lib/authority";
+import { approvalResponse } from "../lib/agent-send";
 import {
   MAX_WORKFLOW_NAME_CHARS,
   RE_WORKFLOW_ID,
@@ -206,7 +209,8 @@ export async function handleWorkflowGet(env: Env, rawId: string): Promise<Respon
 export async function handleWorkflowPut(
   req: Request,
   env: Env,
-  rawId: string
+  rawId: string,
+  actor?: AdminActor
 ): Promise<Response> {
   const id = decodeSegment(rawId);
   if (id === null || !RE_WORKFLOW_ID.test(id)) return err("bad_request", 400);
@@ -214,6 +218,21 @@ export async function handleWorkflowPut(
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
+
+  if (actor?.role === "agent" && actor.agentTokenId) {
+    const live = await findLiveGrant(env, actor.agentTokenId, "flow_deploy_prod", {
+      flow_id: id,
+    });
+    if (live === null) {
+      const approval = await requestApproval(env, {
+        agentTokenId: actor.agentTokenId,
+        scope: "flow_deploy_prod",
+        target: { flow_id: id },
+        reason: typeof input.reason === "string" ? input.reason.slice(0, 200) : "Deploy workflow",
+      });
+      return approvalResponse(approval);
+    }
+  }
 
   const name = input.name;
   if (
@@ -319,10 +338,29 @@ export async function handleWorkflowPut(
 }
 
 /** `DELETE /v1/admin/workflows/:id`. */
-export async function handleWorkflowDelete(env: Env, rawId: string): Promise<Response> {
+export async function handleWorkflowDelete(
+  env: Env,
+  rawId: string,
+  actor?: AdminActor
+): Promise<Response> {
   const id = decodeSegment(rawId);
   if (id === null || !RE_WORKFLOW_ID.test(id)) {
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  if (actor?.role === "agent" && actor.agentTokenId) {
+    const live = await findLiveGrant(env, actor.agentTokenId, "flow_deploy_prod", {
+      flow_id: id,
+    });
+    if (live === null) {
+      const approval = await requestApproval(env, {
+        agentTokenId: actor.agentTokenId,
+        scope: "flow_deploy_prod",
+        target: { flow_id: id },
+        reason: "Delete workflow",
+      });
+      return approvalResponse(approval);
+    }
   }
 
   const result = await env.DB.prepare(`DELETE FROM workflows WHERE id = ?`).bind(id).run();

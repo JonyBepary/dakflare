@@ -21,6 +21,8 @@ import { MAX_BODY_BYTES, MAX_BODY_CHARS, MAX_PEER_CHARS } from "../lib/config";
 import { lintRe2 } from "../lib/re2-compat";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { compileRule, evaluateRules, type RuleRecord } from "../lib/rule-graph";
+import { findLiveGrant, requestApproval } from "../lib/authority";
+import { approvalResponse } from "../lib/agent-send";
 
 const ALLOWED_MATCHER_TYPES = new Set(["exact", "prefix", "suffix", "glob", "regex"]);
 const ALLOWED_BODY_TYPES = new Set(["keyword", "regex"]);
@@ -61,6 +63,19 @@ export async function handleRulesPost(
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
+
+  if (actor?.role === "agent" && actor.agentTokenId) {
+    const live = await findLiveGrant(env, actor.agentTokenId, "rules:write", {});
+    if (live === null) {
+      const approval = await requestApproval(env, {
+        agentTokenId: actor.agentTokenId,
+        scope: "rules:write",
+        target: {},
+        reason: typeof input.reason === "string" ? input.reason.slice(0, 200) : "Save rule",
+      });
+      return approvalResponse(approval);
+    }
+  }
 
   // Accept both the flat and the nested matcher shapes Rev B supported.
   const matcher = (input.matcher ?? null) as Record<string, unknown> | null;

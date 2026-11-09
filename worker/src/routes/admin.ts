@@ -20,6 +20,8 @@ import type { AdminActor } from "../audit";
 import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
 import { internalError } from "./pair";
+import { findLiveGrant, requestApproval } from "../lib/authority";
+import { approvalResponse } from "../lib/agent-send";
 
 /** `DELETE /v1/admin/devices/:device_id` — revoke a device in D1 and in its DO. */
 export async function handleDeviceRevoke(
@@ -44,9 +46,11 @@ export async function handleDeviceRevoke(
     return Response.json({ error: "revoke_failed" }, { status: 502 });
   }
 
-  const d1 = await env.DB.prepare(`DELETE FROM devices WHERE device_id = ?`)
-    .bind(deviceId)
-    .run();
+  const [d1] = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM devices WHERE device_id = ?`).bind(deviceId),
+    env.DB.prepare(`DELETE FROM alerts WHERE device_id = ?`).bind(deviceId),
+    env.DB.prepare(`DELETE FROM flow_runs WHERE device_id = ?`).bind(deviceId),
+  ]);
 
   await writeAudit(env, {
     action: "device.revoked",
@@ -181,8 +185,26 @@ export async function handleRulesListAdmin(env: Env): Promise<Response> {
 }
 
 /** `DELETE /v1/admin/rules/:id` — remove a rule by id. */
-export async function handleRuleDelete(env: Env, ruleId: string): Promise<Response> {
+export async function handleRuleDelete(
+  env: Env,
+  ruleId: string,
+  actor?: AdminActor
+): Promise<Response> {
   if (!ruleId) return err("bad_request", 400);
+
+  if (actor?.role === "agent" && actor.agentTokenId) {
+    const live = await findLiveGrant(env, actor.agentTokenId, "rules:write", {});
+    if (live === null) {
+      const approval = await requestApproval(env, {
+        agentTokenId: actor.agentTokenId,
+        scope: "rules:write",
+        target: {},
+        reason: "Delete rule",
+      });
+      return approvalResponse(approval);
+    }
+  }
+
   const result = await env.DB.prepare(`DELETE FROM rules WHERE id = ?`).bind(ruleId).run();
   const deleted = Number(result.meta?.changes ?? 0);
   if (deleted === 0) return Response.json({ error: "not_found" }, { status: 404 });

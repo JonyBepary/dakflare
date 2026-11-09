@@ -521,6 +521,17 @@ export async function acknowledgeAlert(
 	);
 }
 
+export async function acknowledgeAllAlerts(): Promise<{
+	ok: boolean;
+	acknowledged_count: number;
+	acknowledged_at: number;
+}> {
+	return get<{ ok: true; acknowledged_count: number; acknowledged_at: number }>(
+		'/v1/admin/alerts/ack-all',
+		{ method: 'POST' }
+	);
+}
+
 /* ----------------------------------------------------------- device history */
 
 export async function getDeviceCommands(

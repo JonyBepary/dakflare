@@ -19,7 +19,9 @@ plugins {
 // generated and is deliberately NOT read here: editing it would silently make
 // the APK disagree with the config. Bump both fields in tauri.conf.json.
 // ---------------------------------------------------------------------------
-val tauriConfig = JsonSlurper().parse(rootProject.file("../../tauri.conf.json")) as Map<*, *>
+val tauriConfigFile = rootProject.file("../../tauri.conf.json")
+val tauriConfigText = providers.fileContents(layout.projectDirectory.file(tauriConfigFile.absolutePath)).asText.get()
+val tauriConfig = JsonSlurper().parseText(tauriConfigText) as Map<*, *>
 val appVersionName = tauriConfig["version"] as? String
     ?: throw GradleException("tauri.conf.json has no \"version\"")
 val appVersionCode = (((tauriConfig["bundle"] as? Map<*, *>)?.get("android") as? Map<*, *>)

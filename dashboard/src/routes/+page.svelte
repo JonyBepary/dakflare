@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { describeError, getDeviceStatus, getDevices, getHealth } from '$lib/api';
+	import {
+		acknowledgeAllAlerts,
+		describeError,
+		getDeviceStatus,
+		getDevices,
+		getHealth
+	} from '$lib/api';
 	import type { Device, DeviceStatus, Health } from '$lib/types';
 	import {
 		devicePresence,
@@ -205,6 +211,22 @@
 			await Promise.all([loadHealth(), loadFleet()]);
 		} finally {
 			if (manual) refreshing = false;
+		}
+	}
+
+	let acknowledgingAll = $state(false);
+
+	async function handleAcknowledgeAll(): Promise<void> {
+		if (acknowledgingAll) return;
+		acknowledgingAll = true;
+		try {
+			await acknowledgeAllAlerts();
+			window.dispatchEvent(new CustomEvent(ALERTS_CHANGED_EVENT));
+			await loadHealth();
+		} catch (err) {
+			console.error('Failed to acknowledge alerts:', err);
+		} finally {
+			acknowledgingAll = false;
 		}
 	}
 
@@ -565,7 +587,17 @@
 								? 'It stays open until you acknowledge it in the banner above.'
 								: 'Acknowledge them in the banner above; they leave the open list.'}
 						</p>
-						<a class="card-link alerts-link" href={ROUTES.devices}>Open devices</a>
+						<div class="alerts-actions">
+							<a class="card-link alerts-link" href={ROUTES.devices}>Open devices</a>
+							<button
+								type="button"
+								class="btn btn-ghost btn-sm ack-all-btn"
+								onclick={handleAcknowledgeAll}
+								disabled={acknowledgingAll}
+							>
+								{acknowledgingAll ? 'Acknowledging…' : 'Acknowledge all'}
+							</button>
+						</div>
 					{:else if !alertsKnown}
 						<h2 id="alerts-heading" class="card-title">Alert state not reported</h2>
 						<p class="card-note">
@@ -913,8 +945,22 @@
 
 	.alerts-link {
 		margin-left: 0;
+		margin-top: 0;
+		align-self: center;
+	}
+
+	.alerts-actions {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-2);
 		margin-top: var(--df-p-space-2);
-		align-self: flex-start;
+	}
+
+	.ack-all-btn {
+		font-size: var(--df-p-text-xs);
+		padding: 2px 8px;
+		height: 28px;
 	}
 
 	/* ---------- automation board ---------- */

@@ -335,7 +335,7 @@ ack from a device that has lost its lease is a no-op instead of a claim.
 | `PENDING` | `LEASED` | claimed atomically by a WS push or a poll |
 | `LEASED` | `DISPATCHED` | device ack carrying the matching `claim_token` |
 | `LEASED` | `PENDING` | `lease_expiry` (60 s) or a push that never reached the device |
-| `PENDING`, `LEASED` | `EXPIRED` | `expire` alarm |
+| `PENDING`, `LEASED`, `DISPATCHED` | `EXPIRED` | `expire` alarm |
 | `DISPATCHED` | `SENT` | per-part `SENT` receipt |
 | `DISPATCHED` | `FAILED` | send failure |
 | `SENT` | `DELIVERED` | delivery receipt |
@@ -559,11 +559,14 @@ Authentication class per route. Anything not listed does not exist.
 | `POST` | `/v1/sms/send` | admin | Body `{device_id, to, body, priority?, expires_in_s?}`. Returns `{command_id}`. |
 | `POST` | `/v1/sms/send/batch` | admin | Body `{device_id, commands[]}`. Returns `{command_ids}`. |
 | `GET` | `/v1/device/ws` | device | WebSocket upgrade. Signed as a `GET` with an empty body (§2.3). |
-| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], ack_command_ids[], fcm_token?, flow_runs?}`. Each message may be `"direction": "out"` for an SMS the device sent itself (default `"in"`). `flow_runs` reports flows the device already executed. |
-| `POST` | `/v1/sms/outgoing/poll` | device | Body `{ack_command_ids[], fcm_token?}`. |
+| `POST` | `/v1/sms/incoming/batch` | device | Body `{messages[], acks?: [{command_id, claim_token}], fcm_token?, flow_runs?}`. Each message may be `"direction": "out"` for an SMS the device sent itself (default `"in"`). `flow_runs` reports flows the device already executed. |
+| `POST` | `/v1/sms/outgoing/poll` | device | Body `{acks?: [{command_id, claim_token}], fcm_token?}`. |
 | `POST` | `/v1/sms/status/batch` | device | Body `{updates[]}`. |
 | `GET` | `/v1/rules` | device | Returns global rules plus this device's own. |
 | `GET` | `/v1/flows` | device | Workflow graphs this device runs locally: fleet-wide plus its own, each with `version`. Never another device's. |
+| `GET` | `/v1/device/approvals` | device | Pending human approval requests targeting this device. |
+| `POST` | `/v1/device/approvals/:id/approve` | device | Approve an agent action request from the handset. |
+| `POST` | `/v1/device/approvals/:id/reject` | device | Reject an agent action request from the handset. |
 
 ### 11.1 Route matching order
 
@@ -578,7 +581,8 @@ behaviour is tested by firing a real alarm rather than by sleeping.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `ACK_TIMEOUT_MS` | `8000` | `DISPATCHED → PENDING` revert deadline |
+| `LEASE_MS` | `60000` | command lease duration before re-queueing (`LEASED → PENDING`) |
+| `ACK_TIMEOUT_MS` | `8000` | unacknowledged WebSocket push wake/reconnect deadline |
 | `OFFLINE_ALERT_MS` | `900000` | no-traffic alert threshold |
 | `STALE_SOCKET_MS` | `120000` | socket considered stale for push purposes |
 | `NONCE_WINDOW_MS` | `300000` | accepted `|now − ts|` window (§5.1) |
@@ -627,7 +631,7 @@ Durable Object request.
 | `messages[]` | 500 |
 | `commands[]` | 200 |
 | `updates[]` | 500 |
-| `ack_command_ids[]` | 200 — over HTTP **and** over the WebSocket `ack` |
+| `acks[]` | 200 — over HTTP **and** over the WebSocket `ack` |
 | message `body` | 4096 chars |
 | `peer` / `to` | 32 chars |
 | `local_id` / `command_id` | 128 chars |

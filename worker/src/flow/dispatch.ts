@@ -14,6 +14,7 @@
 import type { Env } from "../index";
 import { runFlow } from "./engine";
 import { enqueueOutboundCommand } from "../lib/commands";
+import { isBlockedWebhookHost } from "../lib/flow-ir";
 
 export interface AcceptedMessage {
   localId: string;
@@ -22,6 +23,10 @@ export interface AcceptedMessage {
   receivedAt: number;
 }
 
+export interface DeviceRunState {
+  completed: Set<string>;
+  partial: Set<string>;
+}
 
 function runKey(localId: string, flowId: string, version: number): string {
   return `${localId}|${flowId}|${version}`;
@@ -29,6 +34,8 @@ function runKey(localId: string, flowId: string, version: number): string {
 
 /**
  * Which (message, flow, version) triples this device already executed.
+ * Distinguishes fully-completed runs from partial runs (which completed local SMS
+ * but need Worker-side webhook or delay completion).
  *
  * Bounded by the accepted-message count (≤500 per batch), so the `IN` list stays
  * well inside SQLite's parameter limit.
@@ -37,30 +44,38 @@ async function alreadyRun(
   env: Env,
   deviceId: string,
   messages: AcceptedMessage[]
-): Promise<Set<string>> {
+): Promise<DeviceRunState> {
   const ids = messages.map((m) => m.localId);
-  if (ids.length === 0) return new Set();
+  if (ids.length === 0) return { completed: new Set(), partial: new Set() };
 
   const placeholders = ids.map(() => "?").join(", ");
   try {
     const rows = await env.DB.prepare(
-      `SELECT local_id, flow_id, flow_version
+      `SELECT local_id, flow_id, flow_version, outcome
          FROM flow_runs
         WHERE device_id = ? AND local_id IN (${placeholders})`
     )
       .bind(deviceId, ...ids)
-      .all<{ local_id: string; flow_id: string; flow_version: number }>();
+      .all<{ local_id: string; flow_id: string; flow_version: number; outcome: string }>();
 
-    return new Set(
-      (rows.results ?? []).map((row) =>
-        runKey(row.local_id, row.flow_id, Number(row.flow_version))
-      )
-    );
+    const completed = new Set<string>();
+    const partial = new Set<string>();
+
+    for (const row of rows.results ?? []) {
+      const key = runKey(row.local_id, row.flow_id, Number(row.flow_version));
+      if (row.outcome === "partial") {
+        partial.add(key);
+      } else {
+        completed.add(key);
+      }
+    }
+
+    return { completed, partial };
   } catch (error) {
     // A failed lookup means we might run something the device ran. Better a
     // possible duplicate than silently dropping automation.
     console.error(`[flow] could not read device runs: ${String(error)}`);
-    return new Set();
+    return { completed: new Set(), partial: new Set() };
   }
 }
 
@@ -145,7 +160,7 @@ async function recordExtractMiss(
 
     if (open === null) {
       await env.DB.prepare(
-        `INSERT INTO alerts (id, device_id, kind, raised_at, detail)
+        `INSERT OR IGNORE INTO alerts (id, device_id, kind, raised_at, detail)
          VALUES (?, ?, 'extraction_drift', ?, ?)`
       )
         .bind(
@@ -193,6 +208,66 @@ function captureGroupOf(graph: unknown, nodeId: string): string | null {
   return names.length === 0 ? null : names.join(",");
 }
 
+/**
+ * Require webhook URLs to either match an enabled origin in the webhooks table
+ * or have an active human authority grant covering the target URL or webhooks:write.
+ */
+export async function isAuthorizedWebhookUrl(
+  env: Env,
+  urlStr: string,
+  flowId?: string
+): Promise<boolean> {
+  if (isBlockedWebhookHost(urlStr)) return false;
+  try {
+    const targetUrl = new URL(urlStr);
+    const webhookRows = await env.DB.prepare(
+      `SELECT target_url FROM webhooks WHERE enabled = 1`
+    ).all<{ target_url: string }>();
+    if (webhookRows.results && webhookRows.results.length > 0) {
+      for (const row of webhookRows.results) {
+        try {
+          const registered = new URL(row.target_url);
+          if (registered.origin === targetUrl.origin) return true;
+        } catch {}
+      }
+    }
+
+    const now = Date.now();
+    const grantRows = await env.DB.prepare(
+      `SELECT scope, target_json FROM authority_grants
+        WHERE (scope = 'webhooks:write' OR scope = 'flow_deploy_prod')
+          AND expires_at > ? AND revoked_at IS NULL`
+    )
+      .bind(now)
+      .all<{ scope: string; target_json: string }>();
+
+    if (grantRows.results && grantRows.results.length > 0) {
+      for (const row of grantRows.results) {
+        try {
+          const target = JSON.parse(row.target_json) as {
+            url?: string;
+            allowed_origins?: string[];
+            flow_id?: string;
+          };
+          if (target.url && (target.url === urlStr || new URL(target.url).origin === targetUrl.origin)) {
+            return true;
+          }
+          if (Array.isArray(target.allowed_origins) && target.allowed_origins.includes(targetUrl.origin)) {
+            return true;
+          }
+          // Only an unscoped webhooks:write grant (never a flow_deploy_prod grant) acts as a broad webhook permit
+          if (row.scope === "webhooks:write" && !target.url && !target.allowed_origins) {
+            return true;
+          }
+        } catch {}
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 const MAX_FLOWS_PER_DEVICE = 20;
 const MAX_RUNS_PER_BATCH = 200;
 const COMMAND_TTL_MS = 86_400_000;
@@ -217,7 +292,7 @@ export async function dispatchFlows(
   const workflows = rows.results ?? [];
   if (workflows.length === 0) return 0;
 
-  // Device-first: skip any (message, flow, version) the device already ran.
+  // Device-first: skip any (message, flow, version) the device already ran to completion.
   const ranByDevice = await alreadyRun(env, deviceId, messages);
 
   let runs = 0;
@@ -233,9 +308,12 @@ export async function dispatchFlows(
     }
 
     for (const message of messages) {
-      if (ranByDevice.has(runKey(message.localId, workflow.id, Number(workflow.version)))) {
+      const key = runKey(message.localId, workflow.id, Number(workflow.version));
+      if (ranByDevice.completed.has(key)) {
         continue;
       }
+      const isPartial = ranByDevice.partial.has(key);
+
       if (runs >= MAX_RUNS_PER_BATCH) {
         console.warn(`[flow] run budget exhausted for this batch`);
         return enqueued;
@@ -277,45 +355,92 @@ export async function dispatchFlows(
         }
       }
 
-      if (!result.matched || result.outcome !== "delivered") continue;
+      if (!result.matched || (result.outcome !== "delivered" && result.outcome !== "partial")) continue;
 
+      let executedWebhookOrDelay = false;
       for (const action of result.actions) {
-        if (action.type !== "send_sms") {
-          // v6.1 kinds the Worker does not perform. Named, not skipped in
-          // silence: a flow that waits or posts somewhere is running partially,
-          // and the operator has to be able to see that in the log.
-          console.warn(
-            `[flow] ${workflow.id}: '${action.type}' action skipped (unsupported by the Worker dispatch)`
-          );
-          continue;
-        }
-        if (!action.to || !action.body) continue;
-
-        const commandId = crypto.randomUUID();
-        const queued = await enqueueOutboundCommand(env, {
-          deviceId,
-          commandId,
-          to: action.to,
-          body: action.body,
-          priority: "normal",
-          expiresAt: Date.now() + COMMAND_TTL_MS,
-        });
-        if (queued.ok) {
-          enqueued += 1;
-          try {
-            await env.DB.prepare(
-              `UPDATE messages
-                  SET auto_reply = 1, reply_source = 'flow',
-                      reply_ref = ?, reply_command_id = ?
-                WHERE device_id = ? AND local_id = ?`
-            )
-              .bind(workflow.id, queued.commandId, deviceId, message.localId)
-              .run();
-          } catch (err) {
-            console.error(
-              `[flow] could not record reply for ${message.localId}: ${String(err)}`
-            );
+        if (action.type === "send_sms") {
+          // If the handset already executed partially, it sent the SMS locally.
+          // Never send a duplicate SMS.
+          if (isPartial) {
+            continue;
           }
+          if (!action.to || !action.body) continue;
+
+          const commandId = crypto.randomUUID();
+          const queued = await enqueueOutboundCommand(env, {
+            deviceId,
+            commandId,
+            to: action.to,
+            body: action.body,
+            priority: "normal",
+            expiresAt: Date.now() + COMMAND_TTL_MS,
+          });
+          if (queued.ok) {
+            enqueued += 1;
+            try {
+              await env.DB.prepare(
+                `UPDATE messages
+                    SET auto_reply = 1, reply_source = 'flow',
+                        reply_ref = ?, reply_command_id = ?
+                  WHERE device_id = ? AND local_id = ?`
+              )
+                .bind(workflow.id, queued.commandId, deviceId, message.localId)
+                .run();
+            } catch (err) {
+              console.error(
+                `[flow] could not record reply for ${message.localId}: ${String(err)}`
+              );
+            }
+          }
+        } else if (action.type === "webhook") {
+          if (!action.url) continue;
+          if (isBlockedWebhookHost(action.url)) {
+            console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' blocked (private / SSRF destination)`);
+            continue;
+          }
+          const authorized = await isAuthorizedWebhookUrl(env, action.url, workflow.id);
+          if (!authorized) {
+            console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' refused (not authorized in webhooks table or grants)`);
+            continue;
+          }
+          try {
+            await fetch(action.url, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "User-Agent": "DakFlare-Worker/6.1",
+                "X-Dakflare-Device": deviceId,
+                "X-Dakflare-Flow": workflow.id,
+              },
+              body: action.body || "{}",
+              signal: AbortSignal.timeout(10_000),
+            });
+            executedWebhookOrDelay = true;
+          } catch (err) {
+            console.error(`[flow] ${workflow.id}: webhook delivery to ${action.url} failed: ${String(err)}`);
+          }
+        } else if (action.type === "delay") {
+          if (action.seconds > 0 && action.seconds <= 5) {
+            await new Promise((resolve) => setTimeout(resolve, action.seconds * 1000));
+            executedWebhookOrDelay = true;
+          } else {
+            console.warn(`[flow] ${workflow.id}: delay action (${action.seconds}s) logged in edge dispatch`);
+          }
+        }
+      }
+
+      if (isPartial && executedWebhookOrDelay) {
+        try {
+          await env.DB.prepare(
+            `UPDATE flow_runs
+                SET outcome = 'delivered'
+              WHERE device_id = ? AND local_id = ? AND flow_id = ? AND flow_version = ?`
+          )
+            .bind(deviceId, message.localId, workflow.id, Number(workflow.version))
+            .run();
+        } catch (err) {
+          console.error(`[flow] could not update partial flow run: ${String(err)}`);
         }
       }
     }

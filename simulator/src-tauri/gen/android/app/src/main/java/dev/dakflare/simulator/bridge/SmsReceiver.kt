@@ -172,7 +172,14 @@ class SmsReceiver : BroadcastReceiver() {
         // unknown and only a number known from another source would match.
         val ownNumbers = ownNumbers(context, appDir)
         if (ownNumbers.isEmpty()) {
-            Log.i(TAG, "self-number guard unknown; proceeding")
+            // Guard when SIM reports no number: an auto-reply loopback occurs when
+            // an action sends identical text back to the sender (echo reflection),
+            // which would loop indefinitely if the handset sent to itself.
+            if (actions.any { normalize(it.to) == normalize(sender) && it.body.trim().equals(body.trim(), ignoreCase = true) }) {
+                Log.w(TAG, "sender=${mask(sender)} echo-loop reply suppressed (blank SIM reflection protection)")
+                decline(appDir, deviceId, actions, "self_target_loop")
+                return
+            }
         } else if (normalize(sender) in ownNumbers) {
             Log.i(TAG, "sender=${mask(sender)} skip=self")
             decline(appDir, deviceId, actions, "self")
@@ -299,11 +306,20 @@ class SmsReceiver : BroadcastReceiver() {
             if (digits.length >= MIN_DIGITS) numbers += digits
         }
 
-        // The number this app last read from the radio. A receiver that cold-starts
+        // The number this app last read from the radio or preferences. A receiver that cold-starts
         // for a broadcast often gets an empty line1Number before the modem is up,
         // and an empty set turns the guard off instead of on — the one failure
         // mode that could make the gateway answer itself.
         add(NativeBridge.getDeviceFactSafely(appDir, "self_number"))
+        add(NativeBridge.getDeviceFactSafely(appDir, "configured_phone_number"))
+        add(NativeBridge.getDeviceFactSafely(appDir, "phone_number"))
+
+        try {
+            val prefs = context.getSharedPreferences("dev.dakflare.simulator.prefs", Context.MODE_PRIVATE)
+            add(prefs.getString("configured_phone_number", null))
+            add(prefs.getString("self_number", null))
+        } catch (_: Throwable) {
+        }
 
         try {
             add(context.getSystemService(TelephonyManager::class.java)?.line1Number)

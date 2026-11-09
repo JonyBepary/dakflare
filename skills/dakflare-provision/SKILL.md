@@ -48,10 +48,7 @@ dakflare pair --qr
 - **The ids are pasted, not guessed.** `d1 create` and `kv namespace create` print a
   `database_id` and an `id`; both go into `wrangler.toml` before step 2. The deploy
   fails without them, and the error does not say so.
-- **`AUTH_MODE` decides which credential works.** `legacy` accepts `ADMIN_TOKEN` as a
-  bearer; `new` requires a Better Auth session and treats `ADMIN_TOKEN` as a
-  machine-only credential sent with `X-Dakflare-Client: cli`. `doctor` reports which
-  mode the deployment is in.
+- **Unified Authentication.** Operators authenticate via email/password through Better Auth in the console; automated CLI and machine workflows use an admin token or scoped agent token. `doctor` reports token and session status.
 
 ## Repair order
 

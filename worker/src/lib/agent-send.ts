@@ -29,7 +29,7 @@ import {
   type ApprovalRecord,
   type GrantRecord,
 } from "./authority";
-import { consumeSendQuota, peekSendQuota } from "./agent-tokens";
+import { consumeSendQuota, peekSendQuota, rollbackSendQuota } from "./agent-tokens";
 import { GRANT_LADDER_S, SCOPE_CAPS } from "./agent-scopes";
 
 /** The grant scope every send is checked against. There is no unsandboxed path. */
@@ -47,6 +47,7 @@ export interface AgentSendRequest {
   recipients: string[];
   /** A batch requires the grant to cover ALL of them, not just one. */
   allRecipients: boolean;
+  count?: number;
   reason?: string;
 }
 
@@ -65,6 +66,7 @@ export async function authorizeAgentSend(
     return { ok: false, kind: "device_mismatch", boundDeviceId: identity.boundDeviceId };
   }
 
+  const count = Math.max(1, request.count ?? 1);
   const target = {
     recipients: request.recipients,
     device_id: request.deviceId,
@@ -86,7 +88,7 @@ export async function authorizeAgentSend(
   // Budget peek before the grant is spent: an approval request must not draw on
   // the hour's allowance, and a send refused for budget must not inflate
   // `use_count`. The authoritative spend below re-checks the same condition.
-  const peek = await peekSendQuota(env, identity.tokenId);
+  const peek = await peekSendQuota(env, identity.tokenId, Date.now(), count);
   if (!peek.ok) {
     return {
       ok: false,
@@ -100,7 +102,7 @@ export async function authorizeAgentSend(
   // The lookup said yes; the update is the authority. A grant revoked or expired
   // in between loses here, and the caller turns that into a fresh request rather
   // than a send.
-  const spent = await consumeGrantUse(env, grant.id);
+  const spent = await consumeGrantUse(env, grant.id, Date.now(), count);
   if (!spent) {
     const approval = await requestApproval(env, {
       agentTokenId: identity.tokenId,
@@ -113,11 +115,11 @@ export async function authorizeAgentSend(
 
   // The spend is the authority. It can lose to a concurrent request that took the
   // last slot between the peek and here, and then the send does not happen.
-  const quota = await consumeSendQuota(env, identity.tokenId);
+  const quota = await consumeSendQuota(env, identity.tokenId, Date.now(), count);
   if (!quota.ok) {
     // Roll back the grant spend: the send was refused for quota, so the grant use
     // must not be permanently consumed (invariant at line 86).
-    await rollbackGrantUse(env, grant.id);
+    await rollbackGrantUse(env, grant.id, count);
     return {
       ok: false,
       kind: "quota",
@@ -179,7 +181,7 @@ export function quotaResponse(quota: {
 }
 
 export type AgentSendEnforcement =
-  | { ok: true; grantId: string | null }
+  | { ok: true; grantId: string | null; count: number }
   | { ok: false; response: Response };
 
 /**
@@ -194,7 +196,8 @@ export async function enforceAgentSend(
   actor: { agentTokenId?: string; agentDeviceId?: string | null } | undefined,
   request: AgentSendRequest
 ): Promise<AgentSendEnforcement> {
-  if (actor?.agentTokenId === undefined) return { ok: true, grantId: null };
+  const count = Math.max(1, request.count ?? 1);
+  if (actor?.agentTokenId === undefined) return { ok: true, grantId: null, count };
 
   const authority = await authorizeAgentSend(
     env,
@@ -202,7 +205,7 @@ export async function enforceAgentSend(
     request
   );
 
-  if (authority.ok) return { ok: true, grantId: authority.grant.id };
+  if (authority.ok) return { ok: true, grantId: authority.grant.id, count };
   if (authority.kind === "approval") {
     return { ok: false, response: approvalResponse(authority.approval) };
   }
@@ -219,4 +222,19 @@ export async function enforceAgentSend(
       { status: 403 }
     ),
   };
+}
+
+/** Roll back grant use and send quota if DO enqueue fails. */
+export async function rollbackAgentSend(
+  env: Env,
+  tokenId: string | undefined,
+  grantId: string | null,
+  count = 1
+): Promise<void> {
+  if (grantId !== null) {
+    await rollbackGrantUse(env, grantId, count);
+  }
+  if (tokenId !== undefined) {
+    await rollbackSendQuota(env, tokenId, count);
+  }
 }

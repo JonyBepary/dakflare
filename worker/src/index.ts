@@ -36,7 +36,7 @@ import {
   handleRuleDelete,
   handleRulesListAdmin,
 } from "./routes/admin";
-import { handleAlertAck, handleAlertsList } from "./routes/alerts";
+import { handleAlertAck, handleAlertsAckAll, handleAlertsList } from "./routes/alerts";
 import { requireRole, type AuthUser, type Permission } from "./auth";
 import {
   handleAgentTokenList,
@@ -902,6 +902,11 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         handleAlertsList(env, url)
       );
     }
+    if (method === "POST" && pathname === "/v1/admin/alerts/ack-all") {
+      return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
+        handleAlertsAckAll(env)
+      );
+    }
     const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
     if (method === "POST" && alertAckMatch) {
       return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
@@ -924,8 +929,8 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
     if (method === "DELETE" && ruleDeleteMatch) {
       const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
-      return withAdminAccess(req, env, "write", "delete rules", (_actor) =>
-        handleRuleDelete(env, ruleId)
+      return withAdminAccess(req, env, "write", "delete rules", (actor) =>
+        handleRuleDelete(env, ruleId, actor)
       );
     }
 
@@ -944,13 +949,13 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       );
     }
     if (method === "PUT" && workflowMatch) {
-      return withAdminAccess(req, env, "write", "save workflows", (_actor) =>
-        handleWorkflowPut(req, env, workflowMatch[1])
+      return withAdminAccess(req, env, "write", "save workflows", (actor) =>
+        handleWorkflowPut(req, env, workflowMatch[1], actor)
       );
     }
     if (method === "DELETE" && workflowMatch) {
-      return withAdminAccess(req, env, "write", "delete workflows", (_actor) =>
-        handleWorkflowDelete(env, workflowMatch[1])
+      return withAdminAccess(req, env, "write", "delete workflows", (actor) =>
+        handleWorkflowDelete(env, workflowMatch[1], actor)
       );
     }
     if (method === "GET" && pathname === "/v1/devices") {

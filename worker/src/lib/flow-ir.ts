@@ -346,6 +346,57 @@ export function validateIr(raw: unknown): IrValidation {
 
 type TemplateSink = Array<{ name: string; index: number }>;
 
+export function isBlockedWebhookHost(url: string): boolean {
+  if (!url.startsWith("https://")) return true;
+  const rest = url.slice("https://".length);
+  const hostPart = rest.split(/[/:?#]/)[0].toLowerCase().trim();
+  if (hostPart === "") return true;
+
+  // Localhost and internal domain suffixes
+  if (
+    hostPart === "localhost" ||
+    hostPart.endsWith(".localhost") ||
+    hostPart.endsWith(".internal") ||
+    hostPart.endsWith(".local")
+  ) {
+    return true;
+  }
+
+  // IPv4 check
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostPart);
+  if (ipv4Match) {
+    const a = Number(ipv4Match[1]);
+    const b = Number(ipv4Match[2]);
+    const c = Number(ipv4Match[3]);
+    const d = Number(ipv4Match[4]);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true;
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 127) return true; // 127.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local / Metadata
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 Carrier CGNAT
+    return false;
+  }
+
+  // IPv6 bracketed check
+  if (hostPart.startsWith("[") && hostPart.endsWith("]")) {
+    const inner = hostPart.slice(1, -1);
+    if (
+      inner === "::1" ||
+      inner === "0:0:0:0:0:0:0:1" ||
+      inner.startsWith("fe80:") ||
+      inner.startsWith("fc00:") ||
+      inner.startsWith("fd")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function validateNodeData(
   kind: NodeKind,
   data: Record<string, unknown>,
@@ -526,8 +577,12 @@ function validateNodeData(
     }
     case "webhook": {
       const url = template(data.url, `${base}.url`);
-      if (url !== "" && !(url.startsWith("https://") || url.startsWith("http://127.0.0.1"))) {
-        collector.add(`${base}.url`, "must be an https:// URL");
+      if (url !== "") {
+        if (!url.startsWith("https://")) {
+          collector.add(`${base}.url`, "must be an https:// URL");
+        } else if (isBlockedWebhookHost(url)) {
+          collector.add(`${base}.url`, "must not target a loopback, private, or metadata address");
+        }
       }
       template(data.body, `${base}.body`);
       return;

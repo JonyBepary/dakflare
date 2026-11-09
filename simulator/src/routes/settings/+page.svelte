@@ -199,6 +199,7 @@
 				A pairing link sets this for you. Enter it by hand only when you are typing a bare code.
 			</p>
 
+			{#if import.meta.env.DEV}
 			<details class="advanced">
 				<summary>Admin overrides (lab)</summary>
 				<p>
@@ -220,6 +221,7 @@
 					<small>Stored in this app's local database. It is never sent when pairing with a code.</small>
 				</div>
 			</details>
+			{/if}
 
 			<div class="form-actions">
 				<button class="btn" type="submit" disabled={!app.backendAvailable || app.busy.target}>
@@ -476,6 +478,7 @@
 					</div>
 
 					<div class="device-actions">
+						{#if import.meta.env.DEV}
 						<button
 							class="btn small"
 							type="button"
@@ -485,6 +488,7 @@
 						>
 							Self-pair (lab)
 						</button>
+						{/if}
 						<button
 							class="btn small"
 							type="button"

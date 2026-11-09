@@ -808,5 +808,46 @@
         }
       ]
     }
+  },
+  {
+    "name": "webhook rejects metadata and private IP targets",
+    "ok": false,
+    "contains": "loopback, private, or metadata",
+    "graph": {
+      "nodes": [
+        {
+          "id": "t1",
+          "type": "trigger",
+          "data": {
+            "kind": "incoming"
+          }
+        },
+        {
+          "id": "h1",
+          "type": "webhook",
+          "data": {
+            "url": "https://169.254.169.254/latest/meta-data",
+            "body": "leak"
+          }
+        },
+        {
+          "id": "e1",
+          "type": "stop",
+          "data": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "a",
+          "source": "t1",
+          "target": "h1"
+        },
+        {
+          "id": "b",
+          "source": "h1",
+          "target": "e1"
+        }
+      ]
+    }
   }
 ]

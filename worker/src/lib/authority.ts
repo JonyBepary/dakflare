@@ -36,6 +36,8 @@ export interface GrantTarget {
   device_id?: string;
   flow_id?: string;
   rule_id?: string;
+  body_hash?: string;
+  max_uses?: number;
 }
 
 export interface GrantRecord {
@@ -109,9 +111,12 @@ export function canonicalTargetJson(target: GrantTarget): string {
   if (target.recipients !== undefined && target.recipients.length > 0) {
     ordered.recipients = [...new Set(target.recipients)].sort();
   }
-  for (const key of ["device_id", "flow_id", "rule_id"] as const) {
+  for (const key of ["device_id", "flow_id", "rule_id", "body_hash"] as const) {
     const value = target[key];
     if (typeof value === "string" && value !== "") ordered[key] = value;
+  }
+  if (typeof target.max_uses === "number" && Number.isInteger(target.max_uses) && target.max_uses > 0) {
+    ordered.max_uses = target.max_uses;
   }
   return JSON.stringify(ordered);
 }
@@ -128,8 +133,11 @@ export function parseTargetJson(json: string): GrantTarget {
       );
       if (recipients.length > 0) target.recipients = recipients;
     }
-    for (const key of ["device_id", "flow_id", "rule_id"] as const) {
+    for (const key of ["device_id", "flow_id", "rule_id", "body_hash"] as const) {
       if (typeof row[key] === "string" && row[key] !== "") target[key] = row[key] as string;
+    }
+    if (typeof row.max_uses === "number" && Number.isInteger(row.max_uses) && row.max_uses > 0) {
+      target.max_uses = row.max_uses;
     }
     return target;
   } catch {
@@ -154,10 +162,25 @@ export function targetMatches(
   request: GrantTarget,
   options: { allRecipients?: boolean } = {}
 ): boolean {
-  const constraints = Object.entries(grant).filter(([, value]) =>
-    Array.isArray(value) ? value.length > 0 : typeof value === "string" && value !== ""
+  const constraints = Object.entries(grant).filter(([key, value]) =>
+    key === "max_uses"
+      ? false
+      : Array.isArray(value)
+        ? value.length > 0
+        : typeof value === "string" && value !== ""
   );
-  if (constraints.length === 0) return false;
+  if (constraints.length === 0) {
+    // An empty grant target ({}) only matches an unscoped request ({}); it never acts as a wildcard
+    // against scoped requests (e.g. sms:send:production with recipients, or flow_deploy_prod with flow_id).
+    const requestConstraints = Object.entries(request).filter(([key, value]) =>
+      key === "max_uses"
+        ? false
+        : Array.isArray(value)
+          ? value.length > 0
+          : typeof value === "string" && value !== ""
+    );
+    return requestConstraints.length === 0;
+  }
 
   for (const [key, value] of constraints) {
     if (Array.isArray(value)) {
@@ -407,29 +430,33 @@ export async function findLiveGrant(
 export async function consumeGrantUse(
   env: Env,
   grantId: string,
-  now = Date.now()
+  now = Date.now(),
+  count = 1
 ): Promise<boolean> {
   const result = await env.DB.prepare(
     `UPDATE authority_grants
-        SET use_count = use_count + 1, last_used_at = ?
-      WHERE id = ? AND revoked_at IS NULL AND expires_at > ?`
+        SET use_count = use_count + ?, last_used_at = ?
+      WHERE id = ? AND revoked_at IS NULL AND expires_at > ?
+        AND (json_extract(target_json, '$.max_uses') IS NULL
+             OR (use_count + ?) <= CAST(json_extract(target_json, '$.max_uses') AS INTEGER))`
   )
-    .bind(now, grantId, now)
+    .bind(count, now, grantId, now, count)
     .run();
   return Number(result.meta?.changes ?? 0) > 0;
 }
 
-/** Roll back a grant use if downstream quota exhaustion prevents the send. */
+/** Roll back a grant use if downstream quota exhaustion or DO enqueue failure prevents the send. */
 export async function rollbackGrantUse(
   env: Env,
-  grantId: string
+  grantId: string,
+  count = 1
 ): Promise<void> {
   await env.DB.prepare(
     `UPDATE authority_grants
-        SET use_count = MAX(0, use_count - 1)
+        SET use_count = MAX(0, use_count - ?)
       WHERE id = ?`
   )
-    .bind(grantId)
+    .bind(count, grantId)
     .run();
 }
 
@@ -710,7 +737,12 @@ export async function decideApproval(
     };
   }
 
-  // CLAIM FIRST, then mint.
+  const targetCheck = validateTarget(approval.scope, approval.target);
+  if (!targetCheck.ok) {
+    return { ok: false, error: "bad_target", message: targetCheck.message };
+  }
+
+  // CLAIM FIRST, then mint atomically.
   //
   // Minting first let two approvers both read PENDING, both mint a grant and both
   // answer `ok: true`; `createGrant`'s supersede then silently revoked the first
@@ -720,35 +752,50 @@ export async function decideApproval(
   const claimed = await claim(env, id, "APPROVED", options.by, now);
   if (!claimed) return lostRace(env, id);
 
-  const created = await createGrant(env, {
-    agentTokenId: approval.agent_token_id,
-    scope: approval.scope,
-    target: approval.target,
-    grantedBy: options.by,
-    durationS: clamped.seconds,
-    approvalRequestId: approval.id,
-    now,
-  });
-  if (!created.ok) {
-    // Nothing was granted, so the request must not look decided. Handing it back
-    // to PENDING lets the operator retry once the cause is fixed.
-    await env.DB.prepare(
-      `UPDATE approval_requests SET state = 'PENDING', decided_by = NULL, decided_at = NULL
-        WHERE id = ? AND state = 'APPROVED' AND grant_id IS NULL`
-    )
-      .bind(id)
-      .run();
-    return {
-      ok: false,
-      error: created.error === "bad_target" ? "bad_target" : "not_grantable",
-      message: created.message,
-    };
-  }
+  const targetJson = canonicalTargetJson(approval.target);
+  const expiresAt = now + clamped.seconds * 1_000;
+  const grantId = crypto.randomUUID();
 
-  await env.DB.prepare(`UPDATE approval_requests SET grant_id = ? WHERE id = ?`)
-    .bind(created.grant.id, id)
-    .run();
+  // Atomically revoke superseded grant, insert the new grant, and link grant_id in approval_requests.
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE authority_grants SET revoked_at = ?
+        WHERE agent_token_id = ? AND scope = ? AND target_json = ? AND revoked_at IS NULL`
+    ).bind(now, approval.agent_token_id, approval.scope, targetJson),
+    env.DB.prepare(
+      `INSERT INTO authority_grants
+         (id, agent_token_id, scope, target_json, granted_by, granted_at, expires_at,
+          use_count, approval_request_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`
+    ).bind(
+      grantId,
+      approval.agent_token_id,
+      approval.scope,
+      targetJson,
+      options.by,
+      now,
+      expiresAt,
+      id
+    ),
+    env.DB.prepare(
+      `UPDATE approval_requests SET grant_id = ? WHERE id = ? AND state = 'APPROVED'`
+    ).bind(grantId, id),
+  ]);
+
+  const grantRecord: GrantRecord = {
+    id: grantId,
+    agent_token_id: approval.agent_token_id,
+    scope: approval.scope,
+    target: parseTargetJson(targetJson),
+    granted_by: options.by,
+    granted_at: now,
+    expires_at: expiresAt,
+    revoked_at: null,
+    use_count: 0,
+    last_used_at: null,
+    approval_request_id: id,
+  };
 
   const updated = await getApproval(env, id);
-  return { ok: true, approval: updated ?? approval, grant: created.grant, clamped };
+  return { ok: true, approval: updated ?? approval, grant: grantRecord, clamped };
 }
