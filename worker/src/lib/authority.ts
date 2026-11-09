@@ -419,6 +419,20 @@ export async function consumeGrantUse(
   return Number(result.meta?.changes ?? 0) > 0;
 }
 
+/** Roll back a grant use if downstream quota exhaustion prevents the send. */
+export async function rollbackGrantUse(
+  env: Env,
+  grantId: string
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE authority_grants
+        SET use_count = MAX(0, use_count - 1)
+      WHERE id = ?`
+  )
+    .bind(grantId)
+    .run();
+}
+
 export async function revokeGrant(
   env: Env,
   grantId: string,

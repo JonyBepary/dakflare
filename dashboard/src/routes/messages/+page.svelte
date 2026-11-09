@@ -44,6 +44,7 @@
 	let refreshing = $state(false);
 	let devicesError = $state<string | null>(null);
 	let messagesError = $state<string | null>(null);
+	let pageError = $state<string | null>(null);
 	let hasMore = $state(false);
 	/* Set when a full page adds nothing: every row in it shares the cursor
 	   millisecond, and `/v1/messages` has no id tiebreaker to page past that. */
@@ -117,8 +118,10 @@
 		if (reset) {
 			loading = true;
 			messagesError = null;
+			pageError = null;
 		} else {
 			loadingMore = true;
+			pageError = null;
 		}
 
 		const before = reset || messages.length === 0 ? undefined : messages[messages.length - 1].received_at + 1;
@@ -145,7 +148,11 @@
 			clock = Date.now();
 		} catch (failure) {
 			if (version === logVersion && target === selected) {
-				messagesError = describeError(failure);
+				if (reset) {
+					messagesError = describeError(failure);
+				} else {
+					pageError = describeError(failure);
+				}
 			}
 		} finally {
 			if (version === logVersion) {
@@ -242,6 +249,7 @@
 		lastUpdatedAt = null;
 		hasMore = false;
 		stalled = false;
+		pageError = null;
 		syncUrl();
 		deviceStatus = null;
 		await loadMessages(true);
@@ -311,10 +319,11 @@
 	onMount(() => {
 		void loadRuleNames();
 		let interval: ReturnType<typeof setInterval> | undefined;
+		let mounted = true;
 
 		void (async () => {
 			await loadDevices();
-			if (devicesError || devices.length === 0) return;
+			if (!mounted || devicesError || devices.length === 0) return;
 			const requested = page.url.searchParams.get('device');
 			selected =
 				requested && devices.some((device) => device.device_id === requested)
@@ -324,6 +333,7 @@
 			composeDevice = selected;
 			if (page.url.searchParams.get('compose') === '1') composeOpen = true;
 			await loadMessages(true);
+			if (!mounted) return;
 			void loadStatus();
 			lastLivePoll = Date.now();
 
@@ -345,6 +355,7 @@
 		document.addEventListener('visibilitychange', onVisible);
 
 		return () => {
+			mounted = false;
 			if (interval) clearInterval(interval);
 			if (linkedTimer) clearTimeout(linkedTimer);
 			document.removeEventListener('visibilitychange', onVisible);
@@ -682,6 +693,23 @@
 							<span class="hint">Beginning of this device’s history</span>
 						{/if}
 					</div>
+
+					{#if pageError}
+						<div style="margin: 12px 16px 0 16px;">
+							<Notice tone="danger" title="Could not load older messages">
+								<div class="row" style="gap: 12px; align-items: center;">
+									<span>{pageError}</span>
+									<button
+										type="button"
+										class="btn btn-sm btn-primary"
+										onclick={() => void loadMessages(false)}
+									>
+										<Icon name="refresh" size={13} /> Try again
+									</button>
+								</div>
+							</Notice>
+						</div>
+					{/if}
 				{/if}
 			</div>
 		</section>

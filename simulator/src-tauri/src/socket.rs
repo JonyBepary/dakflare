@@ -22,7 +22,7 @@
 use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use dakflare_core::carrier::record_commands;
@@ -50,6 +50,7 @@ static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 struct Shared {
     device_id: String,
     rx: mpsc::Receiver<Vec<String>>,
+    stop: Arc<AtomicBool>,
 }
 
 /// One wait's worth of result.
@@ -97,40 +98,58 @@ fn ensure_started(app_dir: &str, device_id: &str) -> Result<(), &'static str> {
         if shared.device_id == device_id {
             return Ok(());
         }
+        // Signal the old thread to stop its reconnection loop.
+        shared.stop.store(true, Ordering::Relaxed);
     }
 
     // A different device means a different key, so the old session is no longer
-    // useful. Its thread exits on its next read error; a new one starts here.
+    // useful. Its thread is signaled to stop; a new one starts here.
     LIVE.store(false, Ordering::Relaxed);
 
     let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
     let owned_dir = app_dir.to_string();
     let owned_device = device_id.to_string();
     std::thread::Builder::new()
         .name("dakflare-socket".to_string())
-        .spawn(move || run(owned_dir, owned_device, tx))
+        .spawn(move || run(owned_dir, owned_device, tx, thread_stop))
         .map_err(|_| "storage")?;
 
     *guard = Some(Shared {
         device_id: device_id.to_string(),
         rx,
+        stop,
     });
     Ok(())
 }
 
-fn run(app_dir: String, device_id: String, tx: mpsc::Sender<Vec<String>>) {
+fn run(
+    app_dir: String,
+    device_id: String,
+    tx: mpsc::Sender<Vec<String>>,
+    stop: Arc<AtomicBool>,
+) {
     let mut backoff = Duration::from_secs(1);
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
-        let outcome = session(&app_dir, &device_id, &tx);
+        let outcome = session(&app_dir, &device_id, &tx, &stop);
         LIVE.store(false, Ordering::Relaxed);
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
 
         if outcome.is_err() && started.elapsed() < STABLE_SESSION {
             backoff = (backoff * 2).min(BACKOFF_MAX);
         } else {
             backoff = Duration::from_secs(1);
         }
-        std::thread::sleep(backoff);
+
+        let sleep_until = Instant::now() + backoff;
+        while Instant::now() < sleep_until && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -139,6 +158,7 @@ fn session(
     app_dir: &str,
     device_id: &str,
     tx: &mpsc::Sender<Vec<String>>,
+    stop: &AtomicBool,
 ) -> Result<(), &'static str> {
     let store = crate::android::open_store_blocking(app_dir)?;
     let client = crate::android::signed_client_blocking(&store, device_id)?;
@@ -163,6 +183,9 @@ fn session(
 
     let mut awaiting_pong = false;
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         match socket.read() {
             Ok(Message::Text(text)) => {
                 awaiting_pong = false;

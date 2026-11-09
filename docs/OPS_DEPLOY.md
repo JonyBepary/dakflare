@@ -1,14 +1,17 @@
 # Deploying
 
-One deploy path, two configuration files, and a pipeline that runs the checks before it
-touches production.
+One sovereign deploy path, two configuration files, and an air-gapped CI pipeline
+that verifies every check without holding any production credentials.
 
 ```bash
-cd worker
-npm run deploy        # build the console, then `cf deploy`
+dakflare up              # provision/migrate/deploy from the local operator terminal
+# or directly:
+cd worker && npm run deploy
 ```
 
-That is what CI runs. Nothing else is required to ship.
+Deployment is **decoupled from GitHub Actions**: CI runs with zero repository secrets,
+guaranteeing complete supply-chain immunity for edge credentials while keeping production
+deployments coordinated with the physical Android handset.
 
 ## The two configs
 
@@ -36,37 +39,30 @@ binding that is `undefined` in one tool and present in the other.
 | `worker` | `tsc --noEmit`, and the three configs agree |
 | `dashboard` | the console type-checks and builds |
 | `simulator` | the phone's Svelte UI type-checks |
-| `rust` | `cargo test --locked` in `simulator/core` (89 tests) and `simulator/flow` (8) |
+| `rust` | `cargo test --locked` in `simulator/core` (92 tests) and `simulator/flow` (22) |
 | `suite` | the conformance suite against a local stack: `pair` then `suite` |
-| `deploy` | only on a push to `main`, or a manual run: build, `cf build`, `cf deploy --prebuilt`, smoke test, `doctor` |
 
-A pull request never reaches `deploy`, and the job needs every check to pass first. A manual
-run deploys whichever ref it was started on, and the `deploy` input can be turned off to run
-the checks alone.
+**Zero repository secrets:** The pipeline does not hold `CLOUDFLARE_API_TOKEN` or `ADMIN_TOKEN`.
+Forks and pull requests run the complete suite hermetically.
 
 ## First-time setup
 
-1. **API token** at `dash.cloudflare.com/profile/api-tokens`. Start from the Workers template
-   and grant: Workers Scripts:Edit, D1:Edit, Workers KV Storage:Edit, Account Settings:Read.
-   A deploy uploads the Worker and resolves bindings; it does not need zone or DNS access.
-2. **Repository secrets** (Settings, Secrets and variables, Actions):
-   - `CLOUDFLARE_API_TOKEN`, required.
-   - `CLOUDFLARE_ACCOUNT_ID`, required.
-   - `ADMIN_TOKEN`, optional. Without it the post-deploy `doctor` step is skipped rather than
-     failed. With it, a deploy that breaks health, schema or bindings fails the run.
-3. **Environment** `production` is created by the first run. Add required reviewers there if
-   a deploy should wait for a person.
-4. Verify the token from a terminal before trusting the pipeline:
-
+1. **Sign in locally to Cloudflare**:
    ```bash
-   CLOUDFLARE_API_TOKEN=... cf auth whoami
+   cf auth login
    ```
+2. **Provision and deploy**:
+   ```bash
+   dakflare up --email you@example.com
+   ```
+   `dakflare up` provisions D1 and KV, generates and writes configurations, applies D1 migrations,
+   uploads secrets from `worker/.dev.vars`, deploys the Worker, and prints the QR pairing code
+   for the physical handset.
 
-**Worker secrets are not managed here.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`,
+**Worker secrets are not managed in CI.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`,
 `RESEND_API_KEY` and `FCM_SERVICE_ACCOUNT_JSON` are set once with
-`npx wrangler secret put <NAME> --name dakflare-worker` and survive a deploy. `cf deploy
---secrets-file` exists if a deployment ever needs them uploaded by the pipeline; this one does
-not, so a deploy cannot overwrite a secret by accident.
+`npx wrangler secret put <NAME> --name dakflare-worker` (or uploaded from `worker/.dev.vars` by
+`dakflare up`) and survive a deploy. `cf deploy --secrets-file` is driven locally by `dakflare up`.
 
 ## Order of operations for a schema change
 

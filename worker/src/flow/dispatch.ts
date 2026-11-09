@@ -13,6 +13,7 @@
 
 import type { Env } from "../index";
 import { runFlow } from "./engine";
+import { enqueueOutboundCommand } from "../lib/commands";
 
 export interface AcceptedMessage {
   localId: string;
@@ -219,7 +220,6 @@ export async function dispatchFlows(
   // Device-first: skip any (message, flow, version) the device already ran.
   const ranByDevice = await alreadyRun(env, deviceId, messages);
 
-  const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   let runs = 0;
   let enqueued = 0;
 
@@ -291,22 +291,31 @@ export async function dispatchFlows(
         }
         if (!action.to || !action.body) continue;
 
-        try {
-          const response = await stub.fetch("https://do/__enqueue", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              command_id: crypto.randomUUID(),
-              to: action.to,
-              body: action.body,
-              priority: "normal",
-              expires_at: Date.now() + COMMAND_TTL_MS,
-            }),
-          });
-          if (response.ok) enqueued += 1;
-          else console.error(`[flow] enqueue rejected with ${response.status}`);
-        } catch (error) {
-          console.error(`[flow] enqueue failed: ${String(error)}`);
+        const commandId = crypto.randomUUID();
+        const queued = await enqueueOutboundCommand(env, {
+          deviceId,
+          commandId,
+          to: action.to,
+          body: action.body,
+          priority: "normal",
+          expiresAt: Date.now() + COMMAND_TTL_MS,
+        });
+        if (queued.ok) {
+          enqueued += 1;
+          try {
+            await env.DB.prepare(
+              `UPDATE messages
+                  SET auto_reply = 1, reply_source = 'flow',
+                      reply_ref = ?, reply_command_id = ?
+                WHERE device_id = ? AND local_id = ?`
+            )
+              .bind(workflow.id, queued.commandId, deviceId, message.localId)
+              .run();
+          } catch (err) {
+            console.error(
+              `[flow] could not record reply for ${message.localId}: ${String(err)}`
+            );
+          }
         }
       }
     }

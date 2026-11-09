@@ -152,6 +152,8 @@ const ERROR_RULES = {
   unauthorized: { exit: 4, category: 'permission', remediation: 'dakflare init', fix: 're-verify the admin token' },
 
   exists: { exit: 5, category: 'conflict' },
+  owner_exists: { exit: 5, category: 'conflict', fix: 'an owner already exists on this deployment' },
+  already_registered: { exit: 5, category: 'conflict', fix: 'that address already has an account' },
 
   // The agent control plane (v6.1). These are the outcomes an autonomous caller
   // has to tell apart: "a human has to decide" (6, and it becomes retryable),
@@ -209,9 +211,6 @@ const ERROR_RULES = {
 };
 
 const DEFAULT_ERROR_RULE = { exit: 1, category: 'internal', retryable: false };
-
-/** Commands whose repetition can cause a second real-world effect. */
-const MUTATING = new Set(['send', 'revoke', 'auth', 'init', 'pair']);
 
 const ruleFor = (code) => ERROR_RULES[code] ?? DEFAULT_ERROR_RULE;
 
@@ -558,6 +557,16 @@ const COMMAND_SPECS = {
     examples: ['dakflare key fingerprint', 'dakflare key fingerprint --json'],
   },
 };
+
+/**
+ * Commands whose repetition can cause a second real-world effect.
+ * Auto-derived from COMMAND_SPECS so new mutating/destructive commands are never omitted.
+ */
+const MUTATING = new Set(
+  Object.entries(COMMAND_SPECS)
+    .filter(([, spec]) => spec.effect === 'mutating' || spec.effect === 'destructive')
+    .map(([name]) => name)
+);
 
 /** The flags a command accepts, in the order it declares them. */
 const flagNames = (command) => Object.keys(COMMAND_SPECS[command]?.flags ?? {});
@@ -2004,17 +2013,17 @@ function verificationFor(command, { timedOut = false } = {}) {
   const reason =
     COMMAND_STATES[command.state] === undefined
       ? 'state_unknown'
-      : command.state === 'DELIVERED'
-      ? 'carrier_confirmed'
-      : command.state === 'SENT'
-        ? 'radio_accepted_delivery_not_claimed'
-        : command.state === 'FAILED'
-          ? 'refused'
-          : command.state === 'EXPIRED'
-            ? 'expired_before_collection'
-            : timedOut
-              ? 'timeout'
-              : 'in_flight';
+      : timedOut
+        ? 'timeout'
+        : command.state === 'DELIVERED'
+          ? 'carrier_confirmed'
+          : command.state === 'SENT'
+            ? 'radio_accepted_delivery_not_claimed'
+            : command.state === 'FAILED'
+              ? 'refused'
+              : command.state === 'EXPIRED'
+                ? 'expired_before_collection'
+                : 'in_flight';
 
   return {
     passed,
@@ -2811,7 +2820,7 @@ async function commandAuthReset(argv) {
     const message = 'that address has no account to reset';
     if (json) emitJson({ ok: false, error: 'not_registered' }, MODE);
     else out(message);
-    return 1;
+    return exitCodeFor('not_registered');
   }
   if (result.status !== 200) throw requestFailure('reset', result);
 
@@ -2864,10 +2873,11 @@ async function commandAuthBootstrap(argv) {
 
   const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email, role: 'owner' });
   if (result.status === 409) {
-    const reason = result.data?.error === 'already_registered' ? 'that address already has an account' : 'an owner already exists on this deployment';
-    if (json) emitJson({ ok: false, error: result.data?.error ?? 'owner_exists' }, MODE);
+    const code = result.data?.error === 'already_registered' ? 'already_registered' : 'owner_exists';
+    const reason = code === 'already_registered' ? 'that address already has an account' : 'an owner already exists on this deployment';
+    if (json) emitJson({ ok: false, error: code }, MODE);
     else out(reason);
-    return 1;
+    return exitCodeFor(code);
   }
   if (result.status !== 200) throw requestFailure('bootstrap', result);
 
@@ -3447,20 +3457,23 @@ async function commandAlerts(argv) {
   const result = await api(cfg, 'GET', `/v1/admin/alerts${flags.all === true ? '?all=1' : ''}`);
   if (result.status !== 200) throw requestFailure('alerts', result);
   const alerts = result.data?.alerts ?? [];
+  const enrichedAlerts = alerts.map((alert) => ({
+    ...alert,
+    state: alert.resolved_at ? 'resolved' : alert.acknowledged_at ? 'acknowledged' : 'open',
+  }));
 
   if (json) {
-    emitJson({ ok: true, alerts }, MODE);
+    emitJson({ ok: true, alerts: enrichedAlerts }, MODE);
     return 0;
   }
-  if (alerts.length === 0) {
+  if (enrichedAlerts.length === 0) {
     out('no open alerts');
     return 0;
   }
-  out(`Alerts (${alerts.length})`);
-  for (const alert of alerts) {
+  out(`Alerts (${enrichedAlerts.length})`);
+  for (const alert of enrichedAlerts) {
     const device = alert.label ?? alert.device_id ?? 'fleet';
-    const state = alert.resolved_at ? 'resolved' : alert.acknowledged_at ? 'acknowledged' : 'open';
-    out(`  ${String(device).padEnd(22)} ${String(alert.kind).padEnd(16)} ${state.padEnd(13)} ${iso(alert.raised_at)}`);
+    out(`  ${String(device).padEnd(22)} ${String(alert.kind).padEnd(16)} ${alert.state.padEnd(13)} ${iso(alert.raised_at)}`);
   }
   return 0;
 }
@@ -4294,22 +4307,27 @@ async function commandAuthAgentTokens(argv) {
   if (result.status !== 200) throw requestFailure('agent tokens', result);
 
   const tokens = result.data?.agent_tokens ?? [];
+  const now = Date.now();
+  const enrichedTokens = tokens.map((token) => {
+    const revoked = token.revoked_at !== null && token.revoked_at !== undefined;
+    const expired = !revoked && token.expires_at !== null && token.expires_at <= now;
+    const state = revoked ? 'revoked' : expired ? 'expired' : 'live';
+    return { ...token, state };
+  });
+
   if (json) {
-    emitJson({ ok: true, agent_tokens: tokens }, MODE);
+    emitJson({ ok: true, agent_tokens: enrichedTokens }, MODE);
     return 0;
   }
-  if (tokens.length === 0) {
+  if (enrichedTokens.length === 0) {
     out('no agent tokens');
     return 0;
   }
-  out(`Agent tokens (${tokens.length})`);
-  for (const token of tokens) {
-    const revoked = token.revoked_at !== null && token.revoked_at !== undefined;
-    const expired = !revoked && token.expires_at !== null && token.expires_at <= Date.now();
-    const state = revoked ? 'revoked' : expired ? 'expired' : 'live';
+  out(`Agent tokens (${enrichedTokens.length})`);
+  for (const token of enrichedTokens) {
     out(
       `  ${String(token.id).padEnd(18)} ${String(token.name).slice(0, 22).padEnd(23)} ` +
-        `${state.padEnd(8)} ${token.sent_current_hour}/${token.max_per_hour} this hour`
+        `${token.state.padEnd(8)} ${token.sent_current_hour}/${token.max_per_hour} this hour`
     );
   }
   return 0;
@@ -4478,18 +4496,24 @@ async function commandAuthGrants(argv) {
   if (result.status !== 200) throw requestFailure('grants', result);
 
   const grants = result.data?.grants ?? [];
+  const now = Date.now();
+  const enrichedGrants = grants.map((grant) => {
+    const left = Math.round((grant.expires_at - now) / 1000);
+    const state = grant.revoked_at ? 'revoked' : left > 0 ? 'live' : 'expired';
+    return { ...grant, state, time_remaining_s: Math.max(0, left) };
+  });
+
   if (json) {
-    emitJson({ ok: true, grants }, MODE);
+    emitJson({ ok: true, grants: enrichedGrants }, MODE);
     return 0;
   }
-  if (grants.length === 0) {
+  if (enrichedGrants.length === 0) {
     out('no grants');
     return 0;
   }
-  out(`Grants (${grants.length})`);
-  const now = Date.now();
-  for (const grant of grants) {
-    const left = Math.round((grant.expires_at - now) / 1000);
+  out(`Grants (${enrichedGrants.length})`);
+  for (const grant of enrichedGrants) {
+    const left = grant.time_remaining_s;
     const state = grant.revoked_at ? 'revoked' : left > 0 ? `${humanDuration(left)} left` : 'expired';
     out(`  ${grant.id}`);
     out(

@@ -710,6 +710,11 @@
 		<div class="login-card">
 			<div class="login-accent"></div>
 			<div class="login-body">
+				{#if error && gate.kind !== 'legacy' && gate.kind !== 'checking'}
+					<div class="login-error" style="margin-bottom: 16px;">
+						<Notice tone="danger">{error}</Notice>
+					</div>
+				{/if}
 				{#if gate.kind === 'checking'}
 					<p class="eyebrow">Operator access</p>
 					<h1>Sign in to the console</h1>

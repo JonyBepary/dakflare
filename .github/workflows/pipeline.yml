@@ -1,27 +1,21 @@
-name: Pipeline
+name: Conformance Pipeline
 
-# Checks on every pull request and on every push to main. A push to main that
-# passes every check deploys; a manual run deploys any ref once the checks pass.
+# Conformance gates on every pull request and push to main.
+# This pipeline runs completely air-gapped with ZERO secrets.
 #
-# Nothing here needs a secret except the deploy job, so pull requests from forks
-# still get the full check run.
+# Deployment is decoupled from GitHub Actions and sovereignly executed
+# by the operator locally via `dakflare up` using their authenticated `cf` session,
+# ensuring coordinated radio verification and zero edge credential exposure.
 
 on:
   pull_request:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      deploy:
-        description: Deploy after the checks pass
-        type: boolean
-        default: true
 
-# A new push supersedes an in-flight run on the same ref, except for main, where
-# cancelling would leave a deploy half-finished.
 concurrency:
   group: pipeline-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -179,53 +173,3 @@ jobs:
         run: |
           kill "$(cat "$RUNNER_TEMP/dev.pid")" 2>/dev/null || true
           pkill -f "wrangler dev" 2>/dev/null || true
-
-  deploy:
-    name: Deploy
-    needs: [worker, dashboard, simulator, rust, suite]
-    # Push to main, or a manual run that did not opt out. A pull request never
-    # reaches this job: it has no secrets and must not touch production.
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main'
-      || github.event_name == 'workflow_dispatch' && inputs.deploy
-    runs-on: ubuntu-latest
-    environment: production
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      # Optional: without it the doctor step is skipped, not failed.
-      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-      WORKER_URL: https://dakflare-worker.sohelahmedjony.workers.dev
-    defaults:
-      run:
-        working-directory: worker
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
-      - run: npm ci
-      # The console is static assets: it has to exist in worker/public/admin
-      # before `cf build` collects the assets directory.
-      - run: npm run build:dashboard
-      - name: Build
-        run: npx cf build
-      - name: Deploy
-        run: >-
-          npx cf deploy --prebuilt
-          --tag "${GITHUB_SHA::7}"
-          --message "CI deploy ${GITHUB_SHA}"
-      - name: Smoke test
-        working-directory: .
-        run: ./worker/scripts/smoke.sh "$WORKER_URL"
-      - name: Doctor
-        if: env.ADMIN_TOKEN != ''
-        working-directory: .
-        run: |
-          node cli/bin/dakflare.js init --url "$WORKER_URL" --token "$ADMIN_TOKEN" --force
-          node cli/bin/dakflare.js doctor

@@ -1182,18 +1182,16 @@ Asserts edge routing without requiring credentials:
 
 ### 5.5 Credentials, Forks and the Phone Build
 
-**Who authenticates as what.** `cf auth login` is a browser approval and cannot run unattended, so there are two paths:
+**Who authenticates as what.** Deployment is decoupled from GitHub Actions, eliminating the need for Cloudflare tokens in repository secrets:
 
 | Caller | Credential | Where it comes from |
 |---|---|---|
-| A person | `cf` session | `cf auth login` once; `dakflare up` then drives `cf` |
-| GitHub Actions | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | repository secrets |
-
-The deploy job needs `CLOUDFLARE_API_TOKEN` with Workers Scripts:Edit, D1:Edit, Workers KV Storage:Edit and Account Settings:Read, plus `CLOUDFLARE_ACCOUNT_ID`. `ADMIN_TOKEN` is optional and only enables the post-deploy `doctor` step; without it that step is skipped and the deploy still succeeds.
+| Operator | `cf` session | `cf auth login` once; `dakflare up` then drives `cf` |
+| GitHub Actions | None (Air-gapped) | Zero repository secrets; runs pure conformance suite |
 
 `ADMIN_TOKEN` is not a Cloudflare credential. It is the Worker's own bearer secret, checked on `/v1/admin/*`, and `cf deploy` never sends it.
 
-**Worker secrets** are not managed by the pipeline. `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`, `RESEND_API_KEY` and `FCM_SERVICE_ACCOUNT_JSON` are set once with `npx wrangler secret put <NAME> --name dakflare-worker` (or uploaded from `worker/.dev.vars` by `dakflare up`) and survive a deploy.
+**Worker secrets** are not managed by CI. `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`, `RESEND_API_KEY` and `FCM_SERVICE_ACCOUNT_JSON` are set once with `npx wrangler secret put <NAME> --name dakflare-worker` (or uploaded from `worker/.dev.vars` by `dakflare up`) and survive a deploy.
 
 **Forks.** `cloudflare.config.ts` carries this account's D1 and KV ids, so the repository deploys only into the author's account. A fork copies `cloudflare.config.template.ts`, creates its own database and namespace, and pastes the ids in; `dakflare up` does that automatically.
 

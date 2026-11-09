@@ -1061,11 +1061,13 @@ async function runRetention(env: Env): Promise<void> {
     if (changes === 0) break;
   }
 
-  // Alerts are operator history, not device state. Acknowledged ones are safe to
-  // age out with the message log; an OPEN alert is the current outage signal and
-  // is never deleted here.
+  // Alerts are operator history, not device state. Acknowledged or resolved
+  // ones are safe to age out with the message log; an OPEN alert is the current
+  // outage signal and is never deleted here.
   const alerts = await env.DB.prepare(
-    `DELETE FROM alerts WHERE acknowledged_at IS NOT NULL AND acknowledged_at < ?`
+    `DELETE FROM alerts
+      WHERE (acknowledged_at IS NOT NULL AND acknowledged_at < ?1)
+         OR (resolved_at IS NOT NULL AND resolved_at < ?1)`
   )
     .bind(cutoff)
     .run();

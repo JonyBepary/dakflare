@@ -127,7 +127,7 @@ const ALLOWED_PREDECESSORS: Readonly<Record<string, readonly string[]>> = {
   SENT: ["DISPATCHED"],
   DELIVERED: ["SENT"],
   FAILED: ["DISPATCHED", "SENT"],
-  EXPIRED: ["PENDING", "LEASED"],
+  EXPIRED: ["PENDING", "LEASED", "DISPATCHED"],
 };
 
 /** Backoff before a failed alarm task is retried, so a persistent failure cannot spin. */

@@ -25,6 +25,7 @@ import {
   consumeGrantUse,
   findLiveGrant,
   requestApproval,
+  rollbackGrantUse,
   type ApprovalRecord,
   type GrantRecord,
 } from "./authority";
@@ -114,6 +115,9 @@ export async function authorizeAgentSend(
   // last slot between the peek and here, and then the send does not happen.
   const quota = await consumeSendQuota(env, identity.tokenId);
   if (!quota.ok) {
+    // Roll back the grant spend: the send was refused for quota, so the grant use
+    // must not be permanently consumed (invariant at line 86).
+    await rollbackGrantUse(env, grant.id);
     return {
       ok: false,
       kind: "quota",
