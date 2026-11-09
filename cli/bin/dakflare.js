@@ -533,11 +533,11 @@ const COMMAND_SPECS = {
     examples: ['dakflare describe send'],
   },
   schema: {
-    summary: 'The flag contract for one command, with types',
+    summary: 'The flag contract for one command, or the state machine transitions (states)',
     effect: 'read',
-    usage: 'dakflare schema <command>',
+    usage: 'dakflare schema <command|states>',
     flags: {},
-    examples: ['dakflare schema send --agent'],
+    examples: ['dakflare schema send --agent', 'dakflare schema states --agent'],
   },
   examples: {
     summary: 'Real invocations for one command, including a failing one',
@@ -928,6 +928,15 @@ async function listDevices(cfg) {
   return devices;
 }
 
+function devicePresenceState(lastSeenMs, now = Date.now()) {
+  if (lastSeenMs === null || lastSeenMs === undefined) return 'unknown';
+  const age = Math.max(0, now - Number(lastSeenMs));
+  if (age <= 120_000) return 'live';
+  if (age <= 900_000) return 'synced';
+  if (age <= 86_400_000) return 'stale';
+  return 'offline';
+}
+
 function publicDevice(device) {
   return {
     device_id: device.device_id,
@@ -935,6 +944,7 @@ function publicDevice(device) {
     sim_slot: device.sim_slot ?? null,
     paired_at: device.paired_at ?? null,
     last_seen: device.last_seen ?? null,
+    state: devicePresenceState(device.last_seen),
     fcm: Boolean(device.fcm_token),
   };
 }
@@ -1756,8 +1766,9 @@ async function commandDevices(argv) {
 
   const idWidth = Math.max(9, ...devices.map((device) => String(device.device_id).length));
   const labelWidth = Math.max(5, ...devices.map((device) => String(device.label ?? '—').length));
+  const stateWidth = 7;
   out(
-    `  ${pad('ID', idWidth)}  ${pad('LABEL', labelWidth)}  SIM  LAST SEEN`
+    `  ${pad('ID', idWidth)}  ${pad('LABEL', labelWidth)}  SIM  ${pad('STATE', stateWidth)}  LAST SEEN`
   );
   for (const device of devices) {
     const seconds = ageSeconds(device.last_seen);
@@ -1765,7 +1776,7 @@ async function commandDevices(argv) {
       `  ${pad(device.device_id, idWidth)}  ${pad(device.label ?? '—', labelWidth)}  ${pad(
         device.sim_slot ?? '—',
         3
-      )}  ${iso(device.last_seen)} (${humanAge(seconds)})`
+      )}  ${pad(device.state ?? 'unknown', stateWidth)}  ${iso(device.last_seen)} (${humanAge(seconds)})`
     );
   }
 }
@@ -1856,6 +1867,83 @@ const UNTIL_ALIASES = {
   dispatched: 'DISPATCHED',
   sent: 'SENT',
   delivered: 'DELIVERED',
+};
+
+/**
+ * The canonical state machines catalog across the DakFlare ecosystem.
+ * Exposed to agents and tools via `dakflare schema states`.
+ */
+const STATE_MACHINES = {
+  command: {
+    initial: 'PENDING',
+    terminal: ['DELIVERED', 'FAILED', 'EXPIRED'],
+    states: Object.keys(COMMAND_STATES),
+    predecessors: {
+      PENDING: ['LEASED'],
+      LEASED: ['PENDING'],
+      DISPATCHED: ['LEASED'],
+      SENT: ['DISPATCHED'],
+      DELIVERED: ['SENT'],
+      FAILED: ['DISPATCHED', 'SENT'],
+      EXPIRED: ['PENDING', 'LEASED', 'DISPATCHED'],
+    },
+    meanings: Object.fromEntries(
+      Object.entries(COMMAND_STATES).map(([k, v]) => [k, v.meaning])
+    ),
+  },
+  grant: {
+    initial: 'ACTIVE',
+    terminal: ['EXPIRED', 'REVOKED'],
+    states: ['ACTIVE', 'EXPIRED', 'REVOKED'],
+    transitions: {
+      ACTIVE: ['EXPIRED', 'REVOKED'],
+      EXPIRED: [],
+      REVOKED: [],
+    },
+  },
+  approval: {
+    initial: 'PENDING',
+    terminal: ['APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED'],
+    states: ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED'],
+    transitions: {
+      PENDING: ['APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED'],
+      APPROVED: [],
+      REJECTED: [],
+      EXPIRED: [],
+      CANCELLED: [],
+    },
+  },
+  alert: {
+    initial: 'OPEN',
+    terminal: ['RESOLVED', 'PURGED'],
+    states: ['OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'PURGED'],
+    transitions: {
+      OPEN: ['ACKNOWLEDGED', 'RESOLVED'],
+      ACKNOWLEDGED: ['RESOLVED'],
+      RESOLVED: ['PURGED'],
+      PURGED: [],
+    },
+  },
+  token: {
+    initial: 'ACTIVE',
+    terminal: ['EXPIRED', 'REVOKED'],
+    states: ['ACTIVE', 'EXPIRED', 'REVOKED'],
+    transitions: {
+      ACTIVE: ['EXPIRED', 'REVOKED'],
+      EXPIRED: [],
+      REVOKED: [],
+    },
+  },
+  device: {
+    states: ['live', 'synced', 'stale', 'offline', 'unknown'],
+    meanings: {
+      live: 'Reachable now. An authenticated WebSocket or signed poll answered moments ago.',
+      synced: 'Reachable on next poll. Answered a signed contact recently.',
+      stale: 'May be asleep or backgrounded. Last signed contact is getting old.',
+      offline: 'No signed contact within 24h, or carrier disabled.',
+      unknown: 'No signed contact recorded yet.',
+    },
+  },
 };
 
 const WAIT_DEFAULT_MS = 30_000;
@@ -2608,6 +2696,22 @@ function commandSchema(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('schema');
   assertCommandFlags(flags, 'schema');
+
+  if (rest[0] === 'states' || rest[0] === 'lifecycle') {
+    const statesSchema = {
+      command: 'states',
+      summary: 'State machines and transition contracts across commands, grants, approvals, alerts, tokens, and presence',
+      machines: STATE_MACHINES,
+      global: ['--json', '--agent', '--help'],
+    };
+    if (MODE.json) {
+      emitJson({ ok: true, ...statesSchema }, MODE);
+      return 0;
+    }
+    out(JSON.stringify(statesSchema, null, 2));
+    return 0;
+  }
+
   const { name, spec } = specFor(rest);
 
   const properties = Object.fromEntries(

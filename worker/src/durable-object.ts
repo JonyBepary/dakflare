@@ -130,6 +130,9 @@ const ALLOWED_PREDECESSORS: Readonly<Record<string, readonly string[]>> = {
   EXPIRED: ["PENDING", "LEASED", "DISPATCHED"],
 };
 
+/** Terminal states whose settled commands no longer need background expiry alarms. */
+const TERMINAL_COMMAND_STATES: ReadonlySet<string> = new Set(["DELIVERED", "FAILED", "EXPIRED"]);
+
 /** Backoff before a failed alarm task is retried, so a persistent failure cannot spin. */
 const TASK_RETRY_BACKOFF_MS = 30_000;
 
@@ -1086,8 +1089,9 @@ export class DeviceGateway extends DurableObject<Env> {
 
     // A settled transition no longer needs its timers. `LEASED` is the only state
     // that keeps them, and `PENDING` is the state a lease was released into.
+    // Settled terminal states also cancel background expiry alarms to prevent redundant wake-ups.
     if (targetStatus !== "LEASED" && targetStatus !== "PENDING") {
-      this.cancelLeaseTimers(commandId);
+      this.cancelLeaseTimers(commandId, TERMINAL_COMMAND_STATES.has(targetStatus));
     }
     this.broadcastState(commandId, targetStatus);
     return true;
@@ -1778,11 +1782,14 @@ export class DeviceGateway extends DurableObject<Env> {
     this.syncNextAlarm();
   }
 
-  private cancelLeaseTimers(commandId: string): void {
+  private cancelLeaseTimers(commandId: string, terminal = false): void {
+    const ids = terminal
+      ? [`lease:${commandId}`, `wake:${commandId}`, `exp:${commandId}`]
+      : [`lease:${commandId}`, `wake:${commandId}`];
+    const placeholders = ids.map(() => "?").join(", ");
     const cursor = this.ctx.storage.sql.exec(
-      `DELETE FROM scheduled_tasks WHERE id IN (?, ?)`,
-      `lease:${commandId}`,
-      `wake:${commandId}`
+      `DELETE FROM scheduled_tasks WHERE id IN (${placeholders})`,
+      ...ids
     );
     if (cursor.rowsWritten > 0) this.syncNextAlarm();
   }
