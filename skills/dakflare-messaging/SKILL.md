@@ -15,6 +15,7 @@ socket is up, and up to five minutes when the phone has fallen back to polling.
 ```bash
 dakflare capabilities --agent          # every command, its effect, its flags
 dakflare schema send --agent           # the flag contract as data
+dakflare schema states --agent         # state machines and transitions
 ```
 
 ## Sending

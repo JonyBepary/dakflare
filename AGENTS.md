@@ -9,6 +9,7 @@ console, one CLI. The phone is the radio; the Worker is the coordinator.
 dakflare capabilities --agent     # every command, its effect, its flags
 dakflare describe <command>       # purpose, usage, flags
 dakflare schema <command> --agent # the flag contract as data
+dakflare schema states --agent    # state machines and transitions
 dakflare examples <command>       # real invocations
 ```
 
