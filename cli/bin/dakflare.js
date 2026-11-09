@@ -850,6 +850,8 @@ function requireConfig() {
 
 /* ───────────────────────────── HTTP ───────────────────────────── */
 
+let d1SessionBookmark = null;
+
 async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS } = {}) {
   const base = cfg.url.replace(/\/+$/, '');
   const target = `${base}${pathname}`;
@@ -864,6 +866,7 @@ async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS }
         Authorization: `Bearer ${cfg.token}`,
         Accept: 'application/json',
         'X-Dakflare-Client': 'cli',
+        ...(d1SessionBookmark ? { 'X-D1-Bookmark': d1SessionBookmark } : {}),
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -882,6 +885,9 @@ async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS }
   } finally {
     clearTimeout(timer);
   }
+
+  const incomingBookmark = response.headers.get('x-d1-bookmark');
+  if (incomingBookmark) d1SessionBookmark = incomingBookmark;
 
   const text = await response.text();
   let data = null;

@@ -138,6 +138,9 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 	unauthorizedHandler = handler;
 }
 
+/** Latest sequential consistency bookmark from D1 Read Replication. */
+let lastD1Bookmark: string | null = null;
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<RawResult<T>> {
 	const { allowStatuses = [], silentAuth = false, headers, body, ...rest } = options;
 
@@ -146,6 +149,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 	// Cookies alone are ambiguous across middleware, and the Worker contract asks for
 	// this marker on every admin call. It is not a secret; it is a routing signal.
 	requestHeaders.set('X-Admin-Session', '1');
+	if (lastD1Bookmark) {
+		requestHeaders.set('X-D1-Bookmark', lastD1Bookmark);
+	}
 	if (body !== undefined && body !== null && !requestHeaders.has('Content-Type')) {
 		requestHeaders.set('Content-Type', 'application/json');
 	}
@@ -164,6 +170,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 			throw new ApiError('The gateway did not answer in time. Try again.', 0);
 		}
 		throw new ApiError('Could not reach the gateway. Check the connection and try again.', 0);
+	}
+
+	const incomingBookmark = response.headers.get('x-d1-bookmark');
+	if (incomingBookmark) {
+		lastD1Bookmark = incomingBookmark;
 	}
 
 	const text = await response.text();

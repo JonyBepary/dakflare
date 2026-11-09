@@ -563,6 +563,72 @@ async function withDevice(
   return handler(req, env, result.deviceId, result.body);
 }
 
+interface D1SessionHelper {
+  env: Env;
+  attachBookmark: (res: Response) => Response;
+}
+
+/**
+ * Sequential consistency session helper for Cloudflare D1 Read Replication.
+ * Tracks bookmarks across requests to prevent read-after-write anomalies across replicas.
+ */
+function createD1SessionHelper(env: Env, req: Request): D1SessionHelper {
+  if (typeof env.DB?.withSession !== "function") {
+    return {
+      env,
+      attachBookmark: (res) => res,
+    };
+  }
+
+  const rawBookmark =
+    req.headers.get("x-d1-bookmark") ||
+    req.headers.get("x-session-bookmark") ||
+    undefined;
+  const bookmark = rawBookmark && rawBookmark.trim() !== "" ? rawBookmark.trim() : undefined;
+
+  let session: D1DatabaseSession;
+  try {
+    session = env.DB.withSession(bookmark);
+  } catch {
+    return {
+      env,
+      attachBookmark: (res) => res,
+    };
+  }
+
+  const sessionDb = new Proxy(session as unknown as D1Database, {
+    get(target, prop, receiver) {
+      if (prop in target) {
+        return Reflect.get(target, prop, receiver);
+      }
+      const original = (env.DB as any)[prop];
+      return typeof original === "function" ? original.bind(env.DB) : original;
+    },
+  });
+
+  return {
+    env: { ...env, DB: sessionDb },
+    attachBookmark: (res: Response) => {
+      if (!res || res.status === 101) return res;
+      try {
+        const latestBookmark = session.getBookmark();
+        if (latestBookmark && !res.headers.has("x-d1-bookmark")) {
+          const headers = new Headers(res.headers);
+          headers.set("x-d1-bookmark", latestBookmark);
+          return new Response(res.body, {
+            status: res.status,
+            statusText: res.statusText,
+            headers,
+          });
+        }
+      } catch {
+        // Fallback
+      }
+      return res;
+    },
+  };
+}
+
 export default {
   /**
    * Retention cron (hardening S6). Terminal D1 rows are pruned in bounded
@@ -579,7 +645,14 @@ export default {
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
+    const sessionHelper = createD1SessionHelper(env, req);
+    const res = await handleFetch(req, sessionHelper.env, ctx);
+    return sessionHelper.attachBookmark(res);
+  },
+} satisfies ExportedHandler<Env>;
+
+async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
     const { pathname } = url;
     const method = req.method.toUpperCase();
 
@@ -994,8 +1067,7 @@ export default {
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });
-  },
-} satisfies ExportedHandler<Env>;
+}
 
 async function runRetention(env: Env): Promise<void> {
   const days = readIntEnv(env.MESSAGE_RETENTION_DAYS, 90, 7, 3_650);
