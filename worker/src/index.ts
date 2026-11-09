@@ -596,15 +596,14 @@ function createD1SessionHelper(env: Env, req: Request): D1SessionHelper {
     };
   }
 
-  const sessionDb = new Proxy(session as unknown as D1Database, {
-    get(target, prop, receiver) {
-      if (prop in target) {
-        return Reflect.get(target, prop, receiver);
-      }
-      const original = (env.DB as any)[prop];
-      return typeof original === "function" ? original.bind(env.DB) : original;
-    },
-  });
+  const sessionDb: D1Database = {
+    prepare: (query: string) => session.prepare(query),
+    batch: <T = unknown>(statements: D1PreparedStatement[]) => session.batch<T>(statements),
+    exec: (query: string) => env.DB.exec(query),
+    dump: () => env.DB.dump(),
+    withSession: (constraintOrBookmark?: D1SessionBookmark | D1SessionConstraint) =>
+      env.DB.withSession(constraintOrBookmark),
+  };
 
   return {
     env: { ...env, DB: sessionDb },
