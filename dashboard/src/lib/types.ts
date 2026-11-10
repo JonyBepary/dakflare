@@ -296,6 +296,7 @@ export interface Workflow {
 	priority?: number;
 	cooldown_s?: number;
 	max_per_hour?: number;
+	expected_previous_version?: number | null;
 	graph: WorkflowGraph;
 	version: number;
 	created_at: number;
@@ -315,6 +316,7 @@ export interface WorkflowSaveInput {
 	priority?: number;
 	cooldown_s?: number;
 	max_per_hour?: number;
+	expected_previous_version?: number | null;
 	graph: WorkflowGraph;
 }
 

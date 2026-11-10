@@ -697,6 +697,7 @@
 				priority,
 				cooldown_s: cooldownS,
 				max_per_hour: maxPerHour,
+				expected_previous_version: hasSaved && version !== null ? version : undefined,
 				graph: toGraph(nodes, edges)
 			});
 			workflowId = saved.id;
