@@ -40,6 +40,8 @@ export default defineConfig({
 			AuthGuard: exports.durableObject({ storage: "sqlite" }),
 			// The single globally named authority-grant expiry timer (v6.1 P0).
 			AuthorityGuard: exports.durableObject({ storage: "sqlite" }),
+			// Multi-step durable flow execution (v7.0).
+			FlowExecutionWorkflow: exports.workflow({ name: "flow-execution-workflow" }),
 		},
 
 		triggers: [
@@ -79,6 +81,22 @@ export default defineConfig({
 			KV: bindings.kv({
 				id: "<KV_NAMESPACE_ID>",
 			}),
+			MEDIA_BUCKET: bindings.r2({
+				name: "dakflare-media",
+			}),
+
+			// ── Queues & Workflows (v7.0) ────────────────────────────────────────
+			WEBHOOK_QUEUE: bindings.queue({
+				name: "dakflare-webhook-queue",
+			}),
+			FLOW_WORKFLOW: bindings.workflow({
+				name: "flow-execution-workflow",
+				worker: "dakflare-worker",
+				exportName: "FlowExecutionWorkflow",
+			}),
+
+			// ── Workers AI (v7.0) ────────────────────────────────────────────────
+			AI: bindings.ai(),
 
 			// ── Durable Object ──────────────────────────────────────────────────
 			DEVICE: bindings.durableObject({

@@ -404,26 +404,62 @@ export async function dispatchFlows(
             console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' refused (not authorized in webhooks table or grants)`);
             continue;
           }
-          try {
-            await fetch(action.url, {
-              method: "POST",
+          if (env.WEBHOOK_QUEUE) {
+            await env.WEBHOOK_QUEUE.send({
+              url: action.url,
               headers: {
-                "Content-Type": "application/json",
-                "User-Agent": "DakFlare-Worker/6.1",
+                "User-Agent": "DakFlare-Worker/7.0",
                 "X-Dakflare-Device": deviceId,
                 "X-Dakflare-Flow": workflow.id,
               },
               body: action.body || "{}",
-              signal: AbortSignal.timeout(10_000),
             });
             executedWebhookOrDelay = true;
-          } catch (err) {
-            console.error(`[flow] ${workflow.id}: webhook delivery to ${action.url} failed: ${String(err)}`);
+          } else {
+            try {
+              await fetch(action.url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "User-Agent": "DakFlare-Worker/7.0",
+                  "X-Dakflare-Device": deviceId,
+                  "X-Dakflare-Flow": workflow.id,
+                },
+                body: action.body || "{}",
+                signal: AbortSignal.timeout(10_000),
+              });
+              executedWebhookOrDelay = true;
+            } catch (err) {
+              console.error(`[flow] ${workflow.id}: webhook delivery to ${action.url} failed: ${String(err)}`);
+            }
           }
         } else if (action.type === "delay") {
           if (action.seconds > 0 && action.seconds <= 5) {
             await new Promise((resolve) => setTimeout(resolve, action.seconds * 1000));
             executedWebhookOrDelay = true;
+          } else if (env.FLOW_WORKFLOW && action.seconds > 5) {
+            try {
+              await env.FLOW_WORKFLOW.create({
+                id: `wf_${workflow.id}_${message.localId}`,
+                params: {
+                  flowId: workflow.id,
+                  flowVersion: workflow.version,
+                  localId: message.localId,
+                  sender: message.sender,
+                  body: message.body,
+                  pendingSteps: [
+                    {
+                      nodeId: "delay_node",
+                      type: "delay",
+                      data: { seconds: action.seconds },
+                    },
+                  ],
+                },
+              });
+              executedWebhookOrDelay = true;
+            } catch (err) {
+              console.warn(`[flow] ${workflow.id}: workflow step creation failed: ${String(err)}`);
+            }
           } else {
             console.warn(`[flow] ${workflow.id}: delay action (${action.seconds}s) logged in edge dispatch`);
           }

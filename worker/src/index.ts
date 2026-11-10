@@ -58,6 +58,9 @@ import {
 } from "./routes/device-approvals";
 import { handleMcpRequest } from "./mcp/server";
 import { AuthorityGuard } from "./authority-guard";
+import { FlowExecutionWorkflow, type FlowWorkflowParams } from "./workflows/flow-execution";
+import { getChannelPlugin } from "./channels";
+export { FlowExecutionWorkflow };
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
 import { scopeForAction } from "./lib/agent-scopes";
 import {
@@ -108,6 +111,14 @@ export interface Env {
   DB: D1Database;
   /** Load-bearing: lib/fcm.ts caches the FCM HTTP v1 bearer token here. */
   KV: KVNamespace;
+  /** Cloudflare Workers AI binding for intent classification and text extraction. */
+  AI?: Ai;
+  /** R2 bucket for multi-channel media storage and presigned download links. */
+  MEDIA_BUCKET?: R2Bucket;
+  /** Cloudflare Queue for reliable asynchronous outbound webhook delivery. */
+  WEBHOOK_QUEUE?: Queue;
+  /** Cloudflare Workflow for multi-step execution with sleeping, retries and approvals. */
+  FLOW_WORKFLOW?: Workflow<FlowWorkflowParams>;
   /**
    * Admin bearer token. Comes from `.dev.vars` locally or `wrangler secret put`
    * remotely; it is deliberately NOT in `[vars]`. When unset, `withAdmin` fails
@@ -643,6 +654,28 @@ export default {
     ctx.waitUntil(runRetention(env));
   },
 
+  async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext): Promise<void> {
+    for (const msg of batch.messages) {
+      try {
+        const payload = msg.body as { url?: string; headers?: Record<string, string>; body?: unknown } | null;
+        if (payload?.url) {
+          const res = await fetch(payload.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(payload.headers ?? {}) },
+            body: typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {}),
+          });
+          if (!res.ok) {
+            msg.retry();
+            continue;
+          }
+        }
+        msg.ack();
+      } catch {
+        msg.retry();
+      }
+    }
+  },
+
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const sessionHelper = createD1SessionHelper(env, req);
     const res = await handleFetch(req, sessionHelper.env, ctx);
@@ -666,6 +699,99 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
 
     if (method === "POST" && pathname === "/v1/device/pair") {
       return handleDevicePair(req, env);
+    }
+
+    /* ---- Multi-Channel Webhooks (v7.0) -------------------------------- */
+    if (pathname === "/v1/channels/telegram/webhook") {
+      if (method !== "POST") return new Response("Method not allowed", { status: 405 });
+      const rawBody = await req.text();
+      const plugin = getChannelPlugin("telegram");
+      if (!plugin) return Response.json({ error: "not_found" }, { status: 404 });
+      const verified = await plugin.verifyWebhook(req, rawBody, env);
+      if (!verified) return new Response("Unauthorized", { status: 401 });
+      const messages = await plugin.parseInbound(req, rawBody, env);
+      for (const msg of messages) {
+        const convId = `conv_tg_${msg.sender}`;
+        const now = Date.now();
+        ctx.waitUntil(
+          env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
+               VALUES (?1, 'channel:telegram', ?2, 'in', ?3, ?4, ?5, 'telegram', ?6)
+               ON CONFLICT(device_id, local_id) DO NOTHING`
+            ).bind(
+              crypto.randomUUID(),
+              `tg_${msg.channelMessageId}`,
+              msg.sender,
+              msg.body,
+              msg.timestamp,
+              convId
+            ),
+            env.DB.prepare(
+              `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, last_inbound_at, created_at, updated_at)
+               VALUES (?1, 'telegram', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?4)
+               ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
+                 session_state = 'WINDOW_OPEN',
+                 last_inbound_at = excluded.last_inbound_at,
+                 updated_at = excluded.updated_at`
+            ).bind(convId, msg.sender, msg.timestamp, now),
+          ]).catch((err) => console.warn(`[telegram] failed to store message/conversation: ${String(err)}`))
+        );
+      }
+      return Response.json({ ok: true, count: messages.length });
+    }
+
+    if (pathname === "/v1/channels/whatsapp/webhook") {
+      if (method === "GET") {
+        const mode = url.searchParams.get("hub.mode");
+        const token = url.searchParams.get("hub.verify_token");
+        const challenge = url.searchParams.get("hub.challenge");
+        const expectedToken = (env as unknown as Record<string, string | undefined>).WHATSAPP_VERIFY_TOKEN;
+        if (mode === "subscribe" && (!expectedToken || token === expectedToken)) {
+          return new Response(challenge ?? "", { status: 200 });
+        }
+        return new Response("Forbidden", { status: 403 });
+      }
+
+      if (method === "POST") {
+        const rawBody = await req.text();
+        const plugin = getChannelPlugin("whatsapp");
+        if (!plugin) return Response.json({ error: "not_found" }, { status: 404 });
+        const verified = await plugin.verifyWebhook(req, rawBody, env);
+        if (!verified) return new Response("Unauthorized", { status: 401 });
+        const messages = await plugin.parseInbound(req, rawBody, env);
+        for (const msg of messages) {
+          const convId = `conv_wa_${msg.sender}`;
+          const now = Date.now();
+          const expiresAt = msg.timestamp + 24 * 3600 * 1000;
+          ctx.waitUntil(
+            env.DB.batch([
+              env.DB.prepare(
+                `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
+                 VALUES (?1, 'channel:whatsapp', ?2, 'in', ?3, ?4, ?5, 'whatsapp', ?6)
+                 ON CONFLICT(device_id, local_id) DO NOTHING`
+              ).bind(
+                crypto.randomUUID(),
+                `wa_${msg.channelMessageId}`,
+                msg.sender,
+                msg.body,
+                msg.timestamp,
+                convId
+              ),
+              env.DB.prepare(
+                `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, window_expires_at, last_inbound_at, created_at, updated_at)
+                 VALUES (?1, 'whatsapp', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?5, ?5)
+                 ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
+                   session_state = 'WINDOW_OPEN',
+                   window_expires_at = excluded.window_expires_at,
+                   last_inbound_at = excluded.last_inbound_at,
+                   updated_at = excluded.updated_at`
+              ).bind(convId, msg.sender, expiresAt, msg.timestamp, now),
+            ]).catch((err) => console.warn(`[whatsapp] failed to store message/conversation: ${String(err)}`))
+          );
+        }
+        return Response.json({ ok: true, count: messages.length });
+      }
     }
 
     /* ---- MCP (v6.1 P4) -------------------------------------------------- */
@@ -989,7 +1115,44 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       );
     }
 
-    const commandMatch = pathname.match(/^\/v1\/sms\/commands\/([^/]+)$/);
+    const channelSendMatch = pathname.match(/^\/v1\/channels\/([^/]+)\/send$/);
+    if (method === "POST" && channelSendMatch) {
+      const channel = channelSendMatch[1];
+      return withAdminAccess(req, env, "write", `send ${channel} message`, async (_actor) => {
+        const plugin = getChannelPlugin(channel);
+        if (!plugin) {
+          return Response.json(
+            { error: "not_found", message: `Channel ${channel} not found` },
+            { status: 404 }
+          );
+        }
+        let body: Record<string, unknown>;
+        try {
+          body = (await req.json()) as Record<string, unknown>;
+        } catch {
+          return Response.json({ error: "bad_request" }, { status: 400 });
+        }
+        const to = String(body.to || "");
+        const messageBody = String(body.body || "");
+        if (!to || !messageBody) {
+          return Response.json(
+            { error: "bad_request", message: "to and body required" },
+            { status: 400 }
+          );
+        }
+        const result = await plugin.sendOutbound(
+          {
+            to,
+            body: messageBody,
+            templateId: typeof body.template_id === "string" ? body.template_id : undefined,
+          },
+          env
+        );
+        return Response.json(result, { status: result.success ? 200 : 400 });
+      });
+    }
+
+    const commandMatch = pathname.match(/^\/v1\/(?:sms\/)?commands\/([^/]+)$/);
     if (method === "GET" && commandMatch) {
       const commandId = decodeURIComponent(commandMatch[1]);
       return withAdminAccess(req, env, "read", "read command status", (_actor) =>

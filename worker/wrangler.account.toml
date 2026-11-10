@@ -68,6 +68,22 @@ binding = "KV"
 id = "81f51c82606344c59cc3ca2e9e27d0a9"
 remote = true
 
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "dakflare-media"
+
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "dakflare-webhook-queue"
+
+[[workflows]]
+name = "flow-execution-workflow"
+binding = "FLOW_WORKFLOW"
+class_name = "FlowExecutionWorkflow"
+
+[ai]
+binding = "AI"
+
 [[ratelimits]]
 name = "PAIR_LIMITER"
 namespace_id = "1001"

@@ -40,6 +40,9 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+[exports.FlowExecutionWorkflow]
+type = "workflow"
+
 # --- D1 -------------------------------------------------------------------
 [[d1_databases]]
 binding = "DB"
@@ -50,6 +53,22 @@ database_id = "<D1_DATABASE_ID>"
 [[kv_namespaces]]
 binding = "KV"
 id = "<KV_NAMESPACE_ID>"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "dakflare-media"
+
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "dakflare-webhook-queue"
+
+[[workflows]]
+name = "flow-execution-workflow"
+binding = "FLOW_WORKFLOW"
+class_name = "FlowExecutionWorkflow"
+
+[ai]
+binding = "AI"
 
 # --- Rate limiting (hardening S3) -----------------------------------------
 [[ratelimits]]

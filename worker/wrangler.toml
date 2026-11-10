@@ -71,6 +71,9 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+[exports.FlowExecutionWorkflow]
+type = "workflow"
+
 # ---------------------------------------------------------------------------
 # D1 — pairing codes, device registry, message log, rules.
 # Local: `wrangler d1 migrations apply sms_gateway --local`.
@@ -91,6 +94,22 @@ database_id = "8d88069e-71cf-49a2-ba33-c150b02246b7"
 [[kv_namespaces]]
 binding = "KV"
 id = "cabb16caf192453fa17b54b6e0f9d85f"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "dakflare-media"
+
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "dakflare-webhook-queue"
+
+[[workflows]]
+name = "flow-execution-workflow"
+binding = "FLOW_WORKFLOW"
+class_name = "FlowExecutionWorkflow"
+
+[ai]
+binding = "AI"
 
 # ---------------------------------------------------------------------------
 # Rate limiting (hardening S3). Backed by the same infrastructure as WAF

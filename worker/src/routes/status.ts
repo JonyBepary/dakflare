@@ -18,6 +18,7 @@
 import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { MAX_STATUS_UPDATES } from "../lib/config";
+import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 
 /**
  * §6.1 status targets the device may report.
@@ -139,5 +140,19 @@ export async function handleCommandStatus(
   if (!res.ok) return Response.json({ error: "internal_error" }, { status: 500 });
 
   const payload = (await res.json().catch(() => null)) as { command?: unknown } | null;
-  return Response.json({ command: payload?.command ?? null });
+  const rawCommand = payload?.command as Record<string, unknown> | null | undefined;
+  if (!rawCommand) return Response.json({ command: null });
+
+  const lifecycle = computeCommandLifecycle({
+    channel: (rawCommand.channel as string) || "sms",
+    state: (rawCommand.state as string) || "PENDING",
+    created_at: Number(rawCommand.created_at) || Date.now(),
+  });
+
+  return Response.json({
+    command: {
+      ...rawCommand,
+      lifecycle,
+    },
+  });
 }

@@ -63,6 +63,7 @@
 		type SwitchCaseOp
 	} from '$lib/workflow/graph';
 	import { simulate, type SimulationInput, type SimulationResult } from '$lib/workflow/simulate';
+	import { runWasmFlow } from '$lib/workflow/wasm-engine';
 	import { setContext } from 'svelte';
 
 	let { id }: { id: string } = $props();
@@ -114,6 +115,104 @@
 	let simEdgeIds = $state<Set<string>>(new Set());
 	let canvasEl = $state<HTMLDivElement | null>(null);
 	let simulationEl = $state<HTMLDivElement | null>(null);
+
+	let viewMode = $state<'canvas' | 'simple' | 'code'>('canvas');
+	let codeText = $state('');
+	let codeError = $state<string | null>(null);
+
+	let channel = $state('all');
+	let priority = $state(100);
+	let cooldownS = $state(0);
+	let maxPerHour = $state(0);
+
+	// 50-state immutable undo/redo history
+	interface HistorySnapshot {
+		nodes: FlowNode[];
+		edges: FlowEdge[];
+		name: string;
+		enabled: boolean;
+	}
+	let history = $state.raw<HistorySnapshot[]>([]);
+	let historyIndex = $state<number>(-1);
+	let isUndoingOrRedoing = false;
+
+	function pushHistory() {
+		if (isUndoingOrRedoing) return;
+		const snapshot: HistorySnapshot = {
+			nodes: JSON.parse(JSON.stringify(nodes)),
+			edges: JSON.parse(JSON.stringify(edges)),
+			name,
+			enabled
+		};
+		const next = history.slice(0, historyIndex + 1);
+		if (next.length >= 50) next.shift();
+		next.push(snapshot);
+		history = next;
+		historyIndex = next.length - 1;
+	}
+
+	function undo() {
+		if (historyIndex <= 0) return;
+		isUndoingOrRedoing = true;
+		historyIndex -= 1;
+		const snapshot = history[historyIndex];
+		nodes = JSON.parse(JSON.stringify(snapshot.nodes));
+		edges = JSON.parse(JSON.stringify(snapshot.edges));
+		name = snapshot.name;
+		enabled = snapshot.enabled;
+		touched = true;
+		isUndoingOrRedoing = false;
+		announce = 'Undo';
+	}
+
+	function redo() {
+		if (historyIndex >= history.length - 1) return;
+		isUndoingOrRedoing = true;
+		historyIndex += 1;
+		const snapshot = history[historyIndex];
+		nodes = JSON.parse(JSON.stringify(snapshot.nodes));
+		edges = JSON.parse(JSON.stringify(snapshot.edges));
+		name = snapshot.name;
+		enabled = snapshot.enabled;
+		touched = true;
+		isUndoingOrRedoing = false;
+		announce = 'Redo';
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+			if (e.shiftKey) {
+				e.preventDefault();
+				redo();
+			} else {
+				e.preventDefault();
+				undo();
+			}
+		} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+			e.preventDefault();
+			redo();
+		}
+	}
+
+	function setViewMode(mode: 'canvas' | 'simple' | 'code') {
+		if (mode === 'code') {
+			codeText = JSON.stringify(toGraph(nodes, edges), null, 2);
+			codeError = null;
+		} else if (viewMode === 'code') {
+			try {
+				const parsed = JSON.parse(codeText);
+				const graph = fromGraph(parsed);
+				nodes = graph.nodes;
+				edges = graph.edges;
+				codeError = null;
+				touch();
+			} catch (err) {
+				codeError = (err as Error).message;
+				return;
+			}
+		}
+		viewMode = mode;
+	}
 
 	$effect(() => {
 		if (!simulateOpen) return;
@@ -167,6 +266,10 @@
 			name,
 			enabled,
 			deviceId,
+			channel,
+			priority,
+			cooldownS,
+			maxPerHour,
 			graph: toGraph(nodes, edges)
 		});
 	}
@@ -262,6 +365,10 @@
 			name = workflow.name;
 			enabled = workflow.enabled;
 			deviceId = workflow.device_id ?? '';
+			channel = workflow.channel ?? 'all';
+			priority = workflow.priority ?? 100;
+			cooldownS = workflow.cooldown_s ?? 0;
+			maxPerHour = workflow.max_per_hour ?? 0;
 			workflowId = workflow.id;
 			version = workflow.version;
 			createdAt = workflow.created_at;
@@ -288,6 +395,7 @@
 		touched = true;
 		serverDetails = [];
 		saveError = null;
+		pushHistory();
 	}
 
 	function updateNodeData(nodeId: string, patch: Record<string, unknown>) {
@@ -315,10 +423,22 @@
 		}
 	}
 
-	function updateSettings(patch: { name?: string; enabled?: boolean; deviceId?: string }) {
+	function updateSettings(patch: {
+		name?: string;
+		enabled?: boolean;
+		deviceId?: string;
+		channel?: string;
+		priority?: number;
+		cooldownS?: number;
+		maxPerHour?: number;
+	}) {
 		if (patch.name !== undefined) name = patch.name;
 		if (patch.enabled !== undefined) enabled = patch.enabled;
 		if (patch.deviceId !== undefined) deviceId = patch.deviceId;
+		if (patch.channel !== undefined) channel = patch.channel;
+		if (patch.priority !== undefined) priority = patch.priority;
+		if (patch.cooldownS !== undefined) cooldownS = patch.cooldownS;
+		if (patch.maxPerHour !== undefined) maxPerHour = patch.maxPerHour;
 		touch();
 	}
 
@@ -551,12 +671,20 @@
 				name: name.trim(),
 				enabled,
 				device_id: deviceId || null,
+				channel,
+				priority,
+				cooldown_s: cooldownS,
+				max_per_hour: maxPerHour,
 				graph: toGraph(nodes, edges)
 			});
 			workflowId = saved.id;
 			name = saved.name;
 			enabled = saved.enabled;
 			deviceId = saved.device_id ?? '';
+			channel = saved.channel ?? 'all';
+			priority = saved.priority ?? 100;
+			cooldownS = saved.cooldown_s ?? 0;
+			maxPerHour = saved.max_per_hour ?? 0;
 			version = saved.version;
 			createdAt = saved.created_at;
 			updatedAt = saved.updated_at;
@@ -590,11 +718,43 @@
 
 	/* ------------------------------------------------------------ simulation */
 
-	function runSimulation(input: SimulationInput) {
-		const result = simulate(nodes, edges, input);
-		simResult = result;
-		simNodeIds = new Set(result.visitedNodes);
-		simEdgeIds = new Set(result.visitedEdges);
+	async function runSimulation(input: SimulationInput) {
+		try {
+			const graph = toGraph(nodes, edges);
+			const wasmRes = await runWasmFlow(graph, { sender: input.sender, body: input.body });
+			const visited = wasmRes.steps.map((s) => s.node_id);
+			simNodeIds = new Set(visited);
+			const edgeSet = new Set<string>();
+			for (let i = 0; i < visited.length - 1; i++) {
+				const from = visited[i];
+				const to = visited[i + 1];
+				const edge = edges.find((e) => e.source === from && e.target === to);
+				if (edge) edgeSet.add(edge.id);
+			}
+			simEdgeIds = edgeSet;
+			simResult = {
+				entered: wasmRes.matched,
+				outcome: wasmRes.outcome === 'no_trigger' ? 'filtered' : wasmRes.outcome === 'partial' ? 'delivered' : wasmRes.outcome,
+				summary: wasmRes.outcome === 'delivered' ? 'Reply delivered via flow.wasm' : wasmRes.outcome,
+				visitedNodes: visited,
+				visitedEdges: [...edgeSet],
+				variables: wasmRes.variables,
+				sms: wasmRes.actions
+					.filter((a) => a.type === 'send_sms')
+					.map((a) => ({ nodeId: '', to: (a as { to: string }).to, body: (a as { body: string }).body })),
+				steps: wasmRes.steps.map((s) => ({
+					nodeId: s.node_id,
+					tone: s.kind === 'error' ? 'danger' : 'ok',
+					text: `${s.kind}: ${s.detail}`
+				})),
+				warnings: wasmRes.error ? [wasmRes.error] : []
+			};
+		} catch {
+			const result = simulate(nodes, edges, input);
+			simResult = result;
+			simNodeIds = new Set(result.visitedNodes);
+			simEdgeIds = new Set(result.visitedEdges);
+		}
 	}
 
 	function clearSimulation() {
@@ -613,12 +773,43 @@
 	<title>{pageTitle} · Workflows · DakFlare</title>
 </svelte:head>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <p class="sr-only" role="status" aria-live="polite">{announce}</p>
 
 <div class="page editor-page">
 	<PageHeader eyebrow="Automation" title={pageTitle} description={pageDescription}>
 		{#if !loading && !notFound && !loadError}
 			<span class="head-extras">
+				<div class="view-mode-toggle" role="group" aria-label="Editor View">
+					<button
+						type="button"
+						class="btn btn-sm view-btn"
+						class:is-active={viewMode === 'simple'}
+						onclick={() => setViewMode('simple')}
+						title="Simple sequential step list"
+					>
+						Simple
+					</button>
+					<button
+						type="button"
+						class="btn btn-sm view-btn"
+						class:is-active={viewMode === 'canvas'}
+						onclick={() => setViewMode('canvas')}
+						title="Visual canvas graph"
+					>
+						Canvas
+					</button>
+					<button
+						type="button"
+						class="btn btn-sm view-btn"
+						class:is-active={viewMode === 'code'}
+						onclick={() => setViewMode('code')}
+						title="dakflare.flow/v3 JSON IR"
+					>
+						Code
+					</button>
+				</div>
 				<Badge tone={enabled ? 'ok' : 'muted'} dot>{enabled ? 'enabled' : 'paused'}</Badge>
 				{#if version !== null}
 					<span class="mono version-chip">v{version}</span>
@@ -723,128 +914,427 @@
 					</Notice>
 				{/if}
 
-				<div class="canvas-shell" bind:this={canvasEl}>
-					<SvelteFlow
-						bind:nodes
-						bind:edges
-						nodeTypes={NODE_TYPES}
-						edgeTypes={EDGE_TYPES}
-						minZoom={0.3}
-						maxZoom={1.8}
-						snapGrid={[16, 16]}
-						deleteKey={['Backspace', 'Delete']}
-						defaultMarkerColor={null}
-						attributionPosition="bottom-center"
-						onbeforeconnect={beforeConnect}
-						onconnect={afterConnect}
-						onconnectend={connectEnded}
-						isValidConnection={isValidConnection}
-						ondelete={handleDelete}
-						onnodedragstop={() => {
-							touch();
-						}}
-					>
-						<FlowBridge />
-						<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
-						<Controls position="bottom-left" />
-						<MiniMap
-							position="bottom-right"
-							width={160}
-							height={110}
-							pannable
-							zoomable
-							nodeBorderRadius={3}
-							nodeColor="var(--df-text-meta)"
-							nodeStrokeColor="transparent"
-						/>
-						<Panel position="top-left">
-							<div class="wf-toolbar-panel">
-								<div class="toolbar-row">
-									<a
-										class="btn btn-ghost btn-icon btn-sm"
-										href={ROUTES.workflows}
-										title="Back to workflows"
-										aria-label="Back to workflows"
-									>
-										<Icon name="arrow-down-left" size={14} />
-									</a>
-									<span class="toolbar-sep" aria-hidden="true"></span>
+				{#if viewMode === 'canvas'}
+					<div class="canvas-shell" bind:this={canvasEl}>
+						<SvelteFlow
+							bind:nodes
+							bind:edges
+							nodeTypes={NODE_TYPES}
+							edgeTypes={EDGE_TYPES}
+							minZoom={0.3}
+							maxZoom={1.8}
+							snapGrid={[16, 16]}
+							deleteKey={['Backspace', 'Delete']}
+							defaultMarkerColor={null}
+							attributionPosition="bottom-center"
+							onbeforeconnect={beforeConnect}
+							onconnect={afterConnect}
+							onconnectend={connectEnded}
+							isValidConnection={isValidConnection}
+							ondelete={handleDelete}
+							onnodedragstop={() => {
+								touch();
+							}}
+						>
+							<FlowBridge />
+							<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
+							<Controls position="bottom-left" />
+							<MiniMap
+								position="bottom-right"
+								width={160}
+								height={110}
+								pannable
+								zoomable
+								nodeBorderRadius={3}
+								nodeColor="var(--df-text-meta)"
+								nodeStrokeColor="transparent"
+							/>
+							<Panel position="top-left">
+								<div class="wf-toolbar-panel">
+									<div class="toolbar-row">
+										<a
+											class="btn btn-ghost btn-icon btn-sm"
+											href={ROUTES.workflows}
+											title="Back to workflows"
+											aria-label="Back to workflows"
+										>
+											<Icon name="arrow-down-left" size={14} />
+										</a>
+										<span class="toolbar-sep" aria-hidden="true"></span>
+										<button
+											type="button"
+											class="btn btn-ghost btn-icon btn-sm"
+											onclick={undo}
+											disabled={historyIndex <= 0}
+											title="Undo (Ctrl+Z)"
+											aria-label="Undo"
+										>
+											<Icon name="undo" size={13} />
+										</button>
+										<button
+											type="button"
+											class="btn btn-ghost btn-icon btn-sm"
+											onclick={redo}
+											disabled={historyIndex >= history.length - 1}
+											title="Redo (Ctrl+Y)"
+											aria-label="Redo"
+										>
+											<Icon name="redo" size={13} />
+										</button>
+										<span class="toolbar-sep" aria-hidden="true"></span>
+										<button
+											type="button"
+											class="btn btn-primary btn-sm"
+											onclick={() => void save()}
+											disabled={!canSave}
+											aria-busy={saving}
+											title={blockedReason}
+										>
+											{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+											Save
+										</button>
+										<button
+											type="button"
+											class="btn btn-sm"
+											onclick={validateNow}
+											title="Run the structural checks"
+										>
+											<Icon name="shield" size={12} /> Validate
+										</button>
+										<button
+											type="button"
+											class="btn btn-sm"
+											class:is-active={simulateOpen}
+											onclick={openSimulation}
+											aria-expanded={simulateOpen}
+											title="Preview the flow with a sample message"
+										>
+											<Icon name="activity" size={12} /> Simulate
+										</button>
+									</div>
+									<div class="toolbar-state">
+										<span
+											class="dot {dirty
+												? 'dot-warn'
+												: blockedCount > 0
+													? 'dot-danger'
+													: 'dot-ok'}"
+											aria-hidden="true"
+										></span>
+										<span>{saveState}</span>
+										{#if blockedCount > 0}
+											<span class="toolbar-blocked">· {blockedCount} to fix</span>
+										{/if}
+										<span class="toolbar-spacer"></span>
+										<label class="switch" title="Enable or pause this flow">
+											<input
+												type="checkbox"
+												checked={enabled}
+												onchange={(event) => updateSettings({ enabled: event.currentTarget.checked })}
+											/>
+											<span class="switch-track" aria-hidden="true"><span></span></span>
+											<span class="switch-label">{enabled ? 'Enabled' : 'Paused'}</span>
+										</label>
+									</div>
+								</div>
+							</Panel>
+						</SvelteFlow>
+
+						{#if nodes.length === 0}
+							<div class="canvas-empty">
+								<span class="empty-mark"><Icon name="workflow" size={18} /></span>
+								<h2>Start with a trigger</h2>
+								<p>
+									A flow begins when a message arrives. Add the trigger, then connect the steps
+									that should run.
+								</p>
+								<button
+									type="button"
+									class="btn btn-primary btn-sm"
+									onclick={() => addNode('trigger')}
+								>
+									<Icon name="zap" size={12} /> Add trigger
+								</button>
+							</div>
+						{/if}
+					</div>
+				{:else if viewMode === 'simple'}
+					<div class="simple-shell panel">
+						<div class="view-panel-toolbar">
+							<div class="toolbar-row">
+								<a
+									class="btn btn-ghost btn-icon btn-sm"
+									href={ROUTES.workflows}
+									title="Back to workflows"
+									aria-label="Back to workflows"
+								>
+									<Icon name="arrow-down-left" size={14} />
+								</a>
+								<span class="toolbar-sep" aria-hidden="true"></span>
+								<button
+									type="button"
+									class="btn btn-ghost btn-icon btn-sm"
+									onclick={undo}
+									disabled={historyIndex <= 0}
+									title="Undo (Ctrl+Z)"
+									aria-label="Undo"
+								>
+									<Icon name="undo" size={13} />
+								</button>
+								<button
+									type="button"
+									class="btn btn-ghost btn-icon btn-sm"
+									onclick={redo}
+									disabled={historyIndex >= history.length - 1}
+									title="Redo (Ctrl+Y)"
+									aria-label="Redo"
+								>
+									<Icon name="redo" size={13} />
+								</button>
+								<span class="toolbar-sep" aria-hidden="true"></span>
+								<button
+									type="button"
+									class="btn btn-primary btn-sm"
+									onclick={() => void save()}
+									disabled={!canSave}
+									aria-busy={saving}
+									title={blockedReason}
+								>
+									{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+									Save
+								</button>
+								<button
+									type="button"
+									class="btn btn-sm"
+									onclick={validateNow}
+									title="Run the structural checks"
+								>
+									<Icon name="shield" size={12} /> Validate
+								</button>
+								<button
+									type="button"
+									class="btn btn-sm"
+									class:is-active={simulateOpen}
+									onclick={openSimulation}
+									aria-expanded={simulateOpen}
+									title="Preview the flow with a sample message"
+								>
+									<Icon name="activity" size={12} /> Simulate
+								</button>
+							</div>
+							<div class="toolbar-state">
+								<span
+									class="dot {dirty
+										? 'dot-warn'
+										: blockedCount > 0
+											? 'dot-danger'
+											: 'dot-ok'}"
+									aria-hidden="true"
+								></span>
+								<span>{saveState}</span>
+								{#if blockedCount > 0}
+									<span class="toolbar-blocked">· {blockedCount} to fix</span>
+								{/if}
+								<span class="toolbar-spacer"></span>
+								<label class="switch" title="Enable or pause this flow">
+									<input
+										type="checkbox"
+										checked={enabled}
+										onchange={(event) => updateSettings({ enabled: event.currentTarget.checked })}
+									/>
+									<span class="switch-track" aria-hidden="true"><span></span></span>
+									<span class="switch-label">{enabled ? 'Enabled' : 'Paused'}</span>
+								</label>
+							</div>
+						</div>
+
+						<div class="simple-steps-container">
+							{#if nodes.length === 0}
+								<div class="canvas-empty">
+									<span class="empty-mark"><Icon name="workflow" size={18} /></span>
+									<h2>Start with a trigger</h2>
+									<p>
+										A flow begins when a message arrives. Add the trigger, then connect the steps
+										that should run.
+									</p>
 									<button
 										type="button"
 										class="btn btn-primary btn-sm"
-										onclick={() => void save()}
-										disabled={!canSave}
-										aria-busy={saving}
-										title={blockedReason}
+										onclick={() => addNode('trigger')}
 									>
-										{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
-										Save
-									</button>
-									<button
-										type="button"
-										class="btn btn-sm"
-										onclick={validateNow}
-										title="Run the structural checks"
-									>
-										<Icon name="shield" size={12} /> Validate
-									</button>
-									<button
-										type="button"
-										class="btn btn-sm"
-										class:is-active={simulateOpen}
-										onclick={openSimulation}
-										aria-expanded={simulateOpen}
-										title="Preview the flow with a sample message"
-									>
-										<Icon name="activity" size={12} /> Simulate
+										<Icon name="zap" size={12} /> Add trigger
 									</button>
 								</div>
-								<div class="toolbar-state">
-									<span
-										class="dot {dirty
-											? 'dot-warn'
-											: blockedCount > 0
-												? 'dot-danger'
-												: 'dot-ok'}"
-										aria-hidden="true"
-									></span>
-									<span>{saveState}</span>
-									{#if blockedCount > 0}
-										<span class="toolbar-blocked">· {blockedCount} to fix</span>
-									{/if}
-									<span class="toolbar-spacer"></span>
-									<label class="switch" title="Enable or pause this flow">
-										<input
-											type="checkbox"
-											checked={enabled}
-											onchange={(event) => updateSettings({ enabled: event.currentTarget.checked })}
-										/>
-										<span class="switch-track" aria-hidden="true"><span></span></span>
-										<span class="switch-label">{enabled ? 'Enabled' : 'Paused'}</span>
-									</label>
+							{:else}
+								<div class="simple-steps-list">
+									{#each nodes as node, index (node.id)}
+										<div
+											class="simple-step-card"
+											class:is-selected={node.selected}
+											onclick={() => selectOnly(node.id)}
+											role="button"
+											tabindex="0"
+											onkeydown={(e) => {
+												if (e.key === 'Enter' || e.key === ' ') selectOnly(node.id);
+											}}
+										>
+											<div class="step-num mono">{index + 1}</div>
+											<div class="step-content">
+												<div class="step-header">
+													<strong class="step-title">{NODE_META[node.type]?.title ?? node.type}</strong>
+													<Badge tone="neutral">{node.type}</Badge>
+												</div>
+												<div class="step-desc">{nodeSummary(node)}</div>
+											</div>
+											<div class="step-actions">
+												<button
+													type="button"
+													class="btn btn-ghost btn-icon btn-sm"
+													onclick={(e) => {
+														e.stopPropagation();
+														removeNode(node.id);
+													}}
+													title="Delete step"
+													aria-label="Delete step"
+												>
+													<Icon name="trash" size={13} />
+												</button>
+											</div>
+										</div>
+										{#if index < nodes.length - 1}
+											<div class="simple-step-connector" aria-hidden="true">
+												<Icon name="chevron-down" size={14} />
+											</div>
+										{/if}
+									{/each}
 								</div>
-							</div>
-						</Panel>
-					</SvelteFlow>
-
-					{#if nodes.length === 0}
-						<div class="canvas-empty">
-							<span class="empty-mark"><Icon name="workflow" size={18} /></span>
-							<h2>Start with a trigger</h2>
-							<p>
-								A flow begins when a message arrives. Add the trigger, then connect the steps
-								that should run.
-							</p>
-							<button
-								type="button"
-								class="btn btn-primary btn-sm"
-								onclick={() => addNode('trigger')}
-							>
-								<Icon name="zap" size={12} /> Add trigger
-							</button>
+							{/if}
 						</div>
-					{/if}
-				</div>
+					</div>
+				{:else if viewMode === 'code'}
+					<div class="code-shell panel">
+						<div class="view-panel-toolbar">
+							<div class="toolbar-row">
+								<a
+									class="btn btn-ghost btn-icon btn-sm"
+									href={ROUTES.workflows}
+									title="Back to workflows"
+									aria-label="Back to workflows"
+								>
+									<Icon name="arrow-down-left" size={14} />
+								</a>
+								<span class="toolbar-sep" aria-hidden="true"></span>
+								<button
+									type="button"
+									class="btn btn-ghost btn-icon btn-sm"
+									onclick={undo}
+									disabled={historyIndex <= 0}
+									title="Undo (Ctrl+Z)"
+									aria-label="Undo"
+								>
+									<Icon name="undo" size={13} />
+								</button>
+								<button
+									type="button"
+									class="btn btn-ghost btn-icon btn-sm"
+									onclick={redo}
+									disabled={historyIndex >= history.length - 1}
+									title="Redo (Ctrl+Y)"
+									aria-label="Redo"
+								>
+									<Icon name="redo" size={13} />
+								</button>
+								<span class="toolbar-sep" aria-hidden="true"></span>
+								<button
+									type="button"
+									class="btn btn-primary btn-sm"
+									onclick={() => void save()}
+									disabled={!canSave}
+									aria-busy={saving}
+									title={blockedReason}
+								>
+									{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+									Save
+								</button>
+								<button
+									type="button"
+									class="btn btn-sm"
+									onclick={validateNow}
+									title="Run the structural checks"
+								>
+									<Icon name="shield" size={12} /> Validate
+								</button>
+								<button
+									type="button"
+									class="btn btn-sm"
+									class:is-active={simulateOpen}
+									onclick={openSimulation}
+									aria-expanded={simulateOpen}
+									title="Preview the flow with a sample message"
+								>
+									<Icon name="activity" size={12} /> Simulate
+								</button>
+							</div>
+							<div class="toolbar-state">
+								<span
+									class="dot {dirty
+										? 'dot-warn'
+										: blockedCount > 0
+											? 'dot-danger'
+											: 'dot-ok'}"
+									aria-hidden="true"
+								></span>
+								<span>{saveState}</span>
+								{#if blockedCount > 0}
+									<span class="toolbar-blocked">· {blockedCount} to fix</span>
+								{/if}
+								<span class="toolbar-spacer"></span>
+								<label class="switch" title="Enable or pause this flow">
+									<input
+										type="checkbox"
+										checked={enabled}
+										onchange={(event) => updateSettings({ enabled: event.currentTarget.checked })}
+									/>
+									<span class="switch-track" aria-hidden="true"><span></span></span>
+									<span class="switch-label">{enabled ? 'Enabled' : 'Paused'}</span>
+								</label>
+							</div>
+						</div>
+
+						<div class="code-editor-container">
+							<div class="code-editor-header">
+								<span class="eyebrow mono">dakflare.flow/v3 JSON</span>
+								{#if codeError}
+									<Badge tone="danger">Syntax error</Badge>
+								{:else}
+									<Badge tone="ok">Valid JSON</Badge>
+								{/if}
+							</div>
+							{#if codeError}
+								<div class="code-error-banner mono">{codeError}</div>
+							{/if}
+							<textarea
+								class="code-textarea mono"
+								bind:value={codeText}
+								oninput={() => {
+									try {
+										const parsed = JSON.parse(codeText);
+										const graph = fromGraph(parsed);
+										nodes = graph.nodes;
+										edges = graph.edges;
+										codeError = null;
+										touch();
+									} catch (err) {
+										codeError = (err as Error).message;
+									}
+								}}
+								spellcheck="false"
+								rows="26"
+								placeholder="Paste or write dakflare.flow/v3 JSON here..."
+							></textarea>
+						</div>
+					</div>
+				{/if}
 
 				{#if simulateOpen}
 					<div class="simulation-slot" bind:this={simulationEl}>
@@ -876,6 +1366,10 @@
 						{name}
 						{enabled}
 						{deviceId}
+						{channel}
+						{priority}
+						{cooldownS}
+						{maxPerHour}
 						{workflowId}
 						{version}
 						{createdAt}
@@ -1279,5 +1773,179 @@
 		.switch-track > span {
 			transition: none;
 		}
+	}
+
+	.view-mode-toggle {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		gap: 2px;
+	}
+
+	.view-btn {
+		padding: 3px 10px;
+		font-size: var(--df-p-text-xs);
+		border-radius: var(--df-p-radius-xs);
+		background: transparent;
+		border: none;
+		color: var(--df-text-meta);
+	}
+
+	.view-btn.is-active {
+		background: var(--df-surface-card);
+		color: var(--df-text-main);
+		font-weight: 500;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+	}
+
+	.simple-shell,
+	.code-shell {
+		display: flex;
+		flex-direction: column;
+		height: 640px;
+		background: var(--df-surface-card);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		overflow: hidden;
+	}
+
+	.view-panel-toolbar {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		background: var(--df-surface-well);
+		border-bottom: 1px solid var(--df-border-hairline);
+	}
+
+	.simple-steps-container {
+		flex: 1;
+		overflow-y: auto;
+		padding: var(--df-p-space-4);
+	}
+
+	.simple-steps-list {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		max-width: 520px;
+		margin: 0 auto;
+	}
+
+	.simple-step-card {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-3);
+		width: 100%;
+		padding: var(--df-p-space-3);
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		cursor: pointer;
+		transition: border-color 0.15s ease, background 0.15s ease;
+	}
+
+	.simple-step-card:hover {
+		border-color: var(--df-border-strong);
+	}
+
+	.simple-step-card.is-selected {
+		border-color: var(--df-brand);
+		background: var(--df-surface-card);
+	}
+
+	.step-num {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-card);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		color: var(--df-text-meta);
+		flex: none;
+	}
+
+	.step-content {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.step-header {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		margin-bottom: 2px;
+	}
+
+	.step-title {
+		font-size: var(--df-p-text-sm);
+	}
+
+	.step-desc {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.simple-step-connector {
+		display: flex;
+		justify-content: center;
+		color: var(--df-text-meta);
+		opacity: 0.6;
+	}
+
+	.code-editor-container {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+		padding: var(--df-p-space-3);
+	}
+
+	.code-editor-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: var(--df-p-space-2);
+	}
+
+	.code-error-banner {
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		margin-bottom: var(--df-p-space-2);
+		background: rgba(220, 38, 38, 0.1);
+		border: 1px solid rgba(220, 38, 38, 0.3);
+		border-radius: var(--df-p-radius-xs);
+		font-size: var(--df-p-text-xs);
+		color: #ef4444;
+	}
+
+	.code-textarea {
+		flex: 1;
+		width: 100%;
+		resize: none;
+		padding: var(--df-p-space-3);
+		font-size: 13px;
+		line-height: 1.5;
+		background: var(--df-surface-well);
+		color: var(--df-text-main);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		font-family: monospace;
+		tab-size: 2;
+	}
+
+	.code-textarea:focus {
+		outline: none;
+		border-color: var(--df-brand);
 	}
 </style>

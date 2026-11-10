@@ -38,7 +38,14 @@ function bindingNames(file) {
       const m = /^name\s*=\s*"([^"]+)"/.exec(line);
       if (m) names.bindings.push(`${section}:${m[1]}`);
     }
-    if (section === "d1_databases" || section === "kv_namespaces") {
+    if (
+      section === "d1_databases" ||
+      section === "kv_namespaces" ||
+      section === "r2_buckets" ||
+      section === "queues.producers" ||
+      section === "workflows" ||
+      section === "ai"
+    ) {
       const m = /^binding\s*=\s*"([^"]+)"/.exec(line);
       if (m) names.bindings.push(`${section}:${m[1]}`);
     }

@@ -8,6 +8,10 @@
 		name,
 		enabled,
 		deviceId,
+		channel = 'all',
+		priority = 100,
+		cooldownS = 0,
+		maxPerHour = 0,
 		workflowId,
 		version,
 		createdAt,
@@ -22,6 +26,10 @@
 		name: string;
 		enabled: boolean;
 		deviceId: string;
+		channel?: string;
+		priority?: number;
+		cooldownS?: number;
+		maxPerHour?: number;
 		workflowId: string;
 		version: number | null;
 		createdAt: number | null;
@@ -31,7 +39,15 @@
 		hasSaved: boolean;
 		errors: Record<string, string>;
 		showErrors?: boolean;
-		onchange: (patch: { name?: string; enabled?: boolean; deviceId?: string }) => void;
+		onchange: (patch: {
+			name?: string;
+			enabled?: boolean;
+			deviceId?: string;
+			channel?: string;
+			priority?: number;
+			cooldownS?: number;
+			maxPerHour?: number;
+		}) => void;
 	} = $props();
 
 	const nameError = $derived(showErrors ? (errors.name ?? null) : null);
@@ -97,6 +113,66 @@
 						: 'Leave blank to apply to every paired device.'}
 				</p>
 			{/if}
+		</div>
+
+		<div class="field">
+			<label class="label" for="wf-channel">Messaging Channel</label>
+			<select
+				id="wf-channel"
+				class="input"
+				value={channel}
+				onchange={(event) => onchange({ channel: event.currentTarget.value })}
+			>
+				<option value="all">All Channels (Multi-Platform)</option>
+				<option value="sms">SMS / Telephony Only</option>
+				<option value="telegram">Telegram Bot</option>
+				<option value="whatsapp">WhatsApp Cloud API</option>
+			</select>
+			<p class="hint">Filter which inbound channel triggers this automation.</p>
+		</div>
+
+		<div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--df-p-space-2);">
+			<div class="field">
+				<label class="label" for="wf-priority">Priority</label>
+				<input
+					id="wf-priority"
+					type="number"
+					class="input input-mono"
+					value={priority}
+					min="0"
+					max="1000"
+					oninput={(e) => onchange({ priority: Number(e.currentTarget.value) || 0 })}
+				/>
+				<p class="hint">Higher runs first (0–1000).</p>
+			</div>
+
+			<div class="field">
+				<label class="label" for="wf-cooldown">Cooldown (s)</label>
+				<input
+					id="wf-cooldown"
+					type="number"
+					class="input input-mono"
+					value={cooldownS}
+					min="0"
+					max="86400"
+					oninput={(e) => onchange({ cooldownS: Number(e.currentTarget.value) || 0 })}
+				/>
+				<p class="hint">Min gap between replies.</p>
+			</div>
+		</div>
+
+		<div class="field">
+			<label class="label" for="wf-max-hour">Max Per Hour</label>
+			<input
+				id="wf-max-hour"
+				type="number"
+				class="input input-mono"
+				value={maxPerHour}
+				min="0"
+				max="1000"
+				oninput={(e) => onchange({ maxPerHour: Number(e.currentTarget.value) || 0 })}
+			/>
+			<p class="hint">Hourly token bucket cap (0 = unlimited).</p>
 		</div>
 
 		<label class="check">

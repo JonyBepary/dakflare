@@ -292,6 +292,10 @@ export interface Workflow {
 	name: string;
 	enabled: boolean;
 	device_id: string | null;
+	channel?: string;
+	priority?: number;
+	cooldown_s?: number;
+	max_per_hour?: number;
 	graph: WorkflowGraph;
 	version: number;
 	created_at: number;
@@ -307,6 +311,10 @@ export interface WorkflowSaveInput {
 	name: string;
 	enabled?: boolean;
 	device_id?: string | null;
+	channel?: string;
+	priority?: number;
+	cooldown_s?: number;
+	max_per_hour?: number;
 	graph: WorkflowGraph;
 }
 

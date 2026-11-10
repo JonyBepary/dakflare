@@ -36,6 +36,7 @@ import {
 } from "../lib/rule-graph";
 import { RE_WORKFLOW_ID } from "../lib/workflow";
 import { parseAcks } from "../lib/acks";
+import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 import {
   MAX_BODY_CHARS,
   MAX_FCM_TOKEN_CHARS,
@@ -554,9 +555,28 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
       LIMIT ?`
   )
     .bind(deviceId, before, limit)
-    .all();
+    .all<Record<string, unknown>>();
 
-  return Response.json({ messages: rows.results ?? [], limit });
+  const messages = (rows.results ?? []).map((m) => {
+    if (m.direction === "out") {
+      return {
+        ...m,
+        channel: (m.channel as string) || "sms",
+        lifecycle: computeCommandLifecycle({
+          channel: (m.channel as string) || "sms",
+          state: (m.reply_state as string) || "PENDING",
+          created_at: Number(m.received_at) || Date.now(),
+          error_code: m.reply_error as string | null,
+        }),
+      };
+    }
+    return {
+      ...m,
+      channel: (m.channel as string) || "sms",
+    };
+  });
+
+  return Response.json({ messages, limit });
 }
 
 /**

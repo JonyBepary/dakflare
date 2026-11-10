@@ -34,7 +34,9 @@
 		| 'history'
 		| 'mail'
 		| 'archive'
-		| 'unarchive';
+		| 'unarchive'
+		| 'undo'
+		| 'redo';
 </script>
 
 <script lang="ts">
@@ -173,5 +175,11 @@
 		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />
 		<path d="M12 16v-4.5" />
 		<path d="m9.75 13.75 2.25-2.25 2.25 2.25" />
+	{:else if name === 'undo'}
+		<path d="M3 7v6h6" />
+		<path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+	{:else if name === 'redo'}
+		<path d="M21 7v6h-6" />
+		<path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
 	{/if}
 </svg>

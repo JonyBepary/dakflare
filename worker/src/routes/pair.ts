@@ -52,6 +52,7 @@
 
 import type { Env } from "../index";
 import { requestMeta, writeAudit } from "../audit";
+import { computeDeviceLifecycle } from "../lib/canonical-lifecycle";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { readJsonBoundedResult } from "../lib/body";
@@ -405,7 +406,27 @@ export async function handleDevicesList(env: Env, requestUrl: URL): Promise<Resp
        ${archivedFilter}
       ORDER BY last_seen DESC`
   ).all();
-  return Response.json({ devices: rows.results ?? [] });
+
+  const rawDevices = (rows.results ?? []) as Array<{
+    device_id: string;
+    fcm_token: string | null;
+    label: string | null;
+    sim_slot: number | null;
+    paired_at: number;
+    last_seen: number | null;
+    archived_at: number | null;
+  }>;
+
+  const devices = rawDevices.map((d) => ({
+    ...d,
+    lifecycle: computeDeviceLifecycle({
+      archived_at: d.archived_at,
+      ws_connected: false,
+      last_seen_at: d.last_seen,
+    }),
+  }));
+
+  return Response.json({ devices });
 }
 
 /** What `inheritWorkflows` did, for the response count and the audit detail. */

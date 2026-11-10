@@ -38,6 +38,10 @@ interface WorkflowRow {
   name: string;
   enabled: number;
   device_id: string | null;
+  channel?: string;
+  priority?: number;
+  cooldown_s?: number;
+  max_per_hour?: number;
   graph: string;
   version: number;
   created_at: number;
@@ -50,6 +54,10 @@ interface WorkflowPayload {
   name: string;
   enabled: boolean;
   device_id: string | null;
+  channel: string;
+  priority: number;
+  cooldown_s: number;
+  max_per_hour: number;
   graph: unknown;
   version: number;
   created_at: number;
@@ -96,6 +104,10 @@ function toPayload(row: WorkflowRow): WorkflowPayload {
     name: row.name,
     enabled: Number(row.enabled) === 1,
     device_id: row.device_id,
+    channel: row.channel ?? "all",
+    priority: Number(row.priority ?? 100),
+    cooldown_s: Number(row.cooldown_s ?? 0),
+    max_per_hour: Number(row.max_per_hour ?? 0),
     graph: parseGraph(row.graph),
     version: Number(row.version),
     created_at: Number(row.created_at),
@@ -110,7 +122,7 @@ function workflowInvalid(issues: WorkflowIssue[]): Response {
 /** `SELECT` for one workflow, or `null` when the id is absent. */
 async function selectWorkflow(env: Env, id: string): Promise<WorkflowRow | null> {
   const row = await env.DB.prepare(
-    `SELECT id, name, enabled, device_id, graph, version, created_at, updated_at
+    `SELECT id, name, enabled, device_id, channel, priority, cooldown_s, max_per_hour, graph, version, created_at, updated_at
        FROM workflows
       WHERE id = ?`
   )
@@ -278,6 +290,26 @@ export async function handleWorkflowPut(
     expected = input.expected_previous_version;
   }
 
+  let channel = "all";
+  if (typeof input.channel === "string" && input.channel.trim().length > 0) {
+    channel = input.channel.trim();
+  }
+
+  let priority = 100;
+  if (typeof input.priority === "number" && Number.isInteger(input.priority)) {
+    priority = input.priority;
+  }
+
+  let cooldownS = 0;
+  if (typeof input.cooldown_s === "number" && input.cooldown_s >= 0) {
+    cooldownS = Math.floor(input.cooldown_s);
+  }
+
+  let maxPerHour = 0;
+  if (typeof input.max_per_hour === "number" && input.max_per_hour >= 0) {
+    maxPerHour = Math.floor(input.max_per_hour);
+  }
+
   const validation = validateWorkflowGraph(input.graph);
   if (!validation.ok) return workflowInvalid(validation.issues);
 
@@ -288,10 +320,10 @@ export async function handleWorkflowPut(
   if (expected !== null) {
     const updated = await env.DB.prepare(
       `UPDATE workflows
-          SET name = ?, enabled = ?, device_id = ?, graph = ?, version = version + 1, updated_at = ?
+          SET name = ?, enabled = ?, device_id = ?, channel = ?, priority = ?, cooldown_s = ?, max_per_hour = ?, graph = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND version = ?`
     )
-      .bind(name, enabled, deviceId, serialized, now, id, expected)
+      .bind(name, enabled, deviceId, channel, priority, cooldownS, maxPerHour, serialized, now, id, expected)
       .run();
 
     if (Number(updated.meta?.changes ?? 0) === 0) {
@@ -313,17 +345,21 @@ export async function handleWorkflowPut(
     }
   } else {
     await env.DB.prepare(
-      `INSERT INTO workflows (id, name, enabled, device_id, graph, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      `INSERT INTO workflows (id, name, enabled, device_id, channel, priority, cooldown_s, max_per_hour, graph, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          enabled = excluded.enabled,
          device_id = excluded.device_id,
+         channel = excluded.channel,
+         priority = excluded.priority,
+         cooldown_s = excluded.cooldown_s,
+         max_per_hour = excluded.max_per_hour,
          graph = excluded.graph,
          version = workflows.version + 1,
          updated_at = excluded.updated_at`
     )
-      .bind(id, name, enabled, deviceId, serialized, now, now)
+      .bind(id, name, enabled, deviceId, channel, priority, cooldownS, maxPerHour, serialized, now, now)
       .run();
   }
 
@@ -332,6 +368,19 @@ export async function handleWorkflowPut(
     // The write succeeded but the read did not see it: a storage failure, not a
     // client error, and one the operator should retry.
     return err("storage_unavailable", 503);
+  }
+
+  // Snapshot into workflow_versions for one-click history and rollback
+  try {
+    const vId = `wv_${id}_${row.version}`;
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO workflow_versions (id, workflow_id, version, name, graph_json, author, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(vId, id, row.version, row.name, row.graph, actor?.role ?? "operator", now)
+      .run();
+  } catch {
+    // Version snapshot is best-effort and does not block the save
   }
 
   return Response.json({ workflow: toPayload(row) });
