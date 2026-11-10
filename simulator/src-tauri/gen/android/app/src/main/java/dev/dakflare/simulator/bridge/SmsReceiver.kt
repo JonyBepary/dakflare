@@ -168,9 +168,14 @@ class SmsReceiver : BroadcastReceiver() {
             return
         }
 
-        // Hard-block OTP / PIN messages from triggering auto-replies
-        val otpPattern = Regex("(?i)\\b(otp|pin|verification\\s+code|security\\s+code)\\b|গোলাপী\\s*পিন|ওটিপি")
-        if (otpPattern.containsMatchIn(inboundBody)) {
+        // Hard-block OTP / PIN messages from triggering auto-replies (INFO-PBE-02)
+        val normalizedBody = java.text.Normalizer.normalize(inboundBody, java.text.Normalizer.Form.NFKC)
+            .replace(Regex("[\\u09E6-\\u09EF]")) { (it.value[0].code - 0x09E6.toInt() + '0'.code).toChar().toString() }
+        val otpPattern = Regex(
+            "(?i)\\b(otp|pin|passcode|secret\\s+code|auth(entication)?\\s+code|verification\\s+code|security\\s+code|one[\\s-]time\\s+password)\\b|" +
+            "ওটিপি|গোলাপী\\s*পিন|গোপন\\s*(নম্বর|পিন)|ভেরিফিকেশন\\s*(কোড)?|সিকিউরিটি\\s*কোড|\\bপিন\\b"
+        )
+        if (otpPattern.containsMatchIn(normalizedBody)) {
             Log.w(TAG, "sender=${mask(sender)} reply suppressed (OTP/PIN security protection)")
             decline(appDir, deviceId, actions, "otp_pin_security_block")
             return

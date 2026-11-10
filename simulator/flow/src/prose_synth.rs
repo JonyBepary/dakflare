@@ -529,38 +529,74 @@ fn occurrences(haystack: &str, needle: &str) -> Vec<usize> {
 
 /* ------------------------------------------------------------------ pre-normalizer & bangla */
 
-/// Convert Bangla digits U+09E6..U+09EF (০..৯) to ASCII digits '0'..'9'.
+/// Convert fullwidth Latin/digits and Bangla digits U+09E6..U+09EF (০..৯) to ASCII digits/letters.
 pub fn normalize_bangla_digits(input: &str) -> String {
     input
         .chars()
         .map(|ch| match ch {
-            '\u{09E6}' => '0',
-            '\u{09E7}' => '1',
-            '\u{09E8}' => '2',
-            '\u{09E9}' => '3',
-            '\u{09EA}' => '4',
-            '\u{09EB}' => '5',
-            '\u{09EC}' => '6',
-            '\u{09ED}' => '7',
-            '\u{09EE}' => '8',
-            '\u{09EF}' => '9',
+            '\u{09E6}'..='\u{09EF}' => ((ch as u32 - 0x09E6) as u8 + b'0') as char,
+            // Fullwidth digits ０-９ (U+FF10..U+FF19)
+            '\u{FF10}'..='\u{FF19}' => ((ch as u32 - 0xFF10) as u8 + b'0') as char,
+            // Fullwidth Latin uppercase Ａ-Ｚ (U+FF21..U+FF3A)
+            '\u{FF21}'..='\u{FF3A}' => ((ch as u32 - 0xFF21) as u8 + b'A') as char,
+            // Fullwidth Latin lowercase ａ-ｚ (U+FF41..U+FF5A)
+            '\u{FF41}'..='\u{FF5A}' => ((ch as u32 - 0xFF41) as u8 + b'a') as char,
             _ => ch,
         })
         .collect()
 }
 
 /// Detect if text contains OTP, PIN, or verification code keywords in English or Bangla.
+/// Hardened per INFO-PBE-02: normalizes fullwidth characters and Bangla digits before matching,
+/// recognizes extended Bengali keywords, and uses word-boundary token checks to prevent false positives.
 pub fn is_otp_or_pin(input: &str) -> bool {
-    let lower = input.to_lowercase();
-    if lower.contains("ওটিপি") || lower.contains("গোলাপী পিন") || lower.contains("পিন") {
+    let normalized = normalize_bangla_digits(input).to_lowercase();
+
+    // Bangla sensitive keywords
+    if normalized.contains("ওটিপি")
+        || normalized.contains("ভেরিফিকেশন কোড")
+        || normalized.contains("ভেরিফিকেশন")
+        || normalized.contains("গোপন নম্বর")
+        || normalized.contains("গোপন পিন")
+        || normalized.contains("সিকিউরিটি কোড")
+        || normalized.contains("গোলাপী পিন")
+    {
         return true;
     }
-    let otp_words = ["otp", "pin", "verification code", "security code", "secret code"];
-    for word in &otp_words {
-        if lower.contains(word) {
+
+    // Check single Bangla word 'পিন' on word boundary / whitespace
+    for token in normalized.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+        if token == "পিন" {
             return true;
         }
     }
+
+    // English compound phrases
+    let compound_phrases = [
+        "verification code",
+        "security code",
+        "secret code",
+        "one time password",
+        "one-time password",
+        "auth code",
+        "authentication code",
+    ];
+    for phrase in &compound_phrases {
+        if normalized.contains(phrase) {
+            return true;
+        }
+    }
+
+    // English single words (word-boundary checked to prevent false positives on 'opinion', 'spin', etc.)
+    let single_words = ["otp", "pin", "passcode"];
+    for token in normalized.split(|c: char| !c.is_alphanumeric()) {
+        for word in &single_words {
+            if token == *word {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -1015,6 +1051,10 @@ mod tests {
         let input = "টাকা ৮০০.০০ from ০১৯৯৯৯৯৯৯৯৯";
         let out = normalize_bangla_digits(input);
         assert_eq!(out, "টাকা 800.00 from 01999999999");
+
+        // Fullwidth Latin & digits conversion
+        let fullwidth = "Your ＯＴＰ code is ５４３２";
+        assert_eq!(normalize_bangla_digits(fullwidth), "Your OTP code is 5432");
     }
 
     #[test]
@@ -1022,7 +1062,15 @@ mod tests {
         assert!(is_otp_or_pin("Your OTP is 483920. Do not share."));
         assert!(is_otp_or_pin("আপনার ওটিপি কোড হলো ১২৩৪৫৬"));
         assert!(is_otp_or_pin("Security code for login: 998811"));
+        assert!(is_otp_or_pin("Your ＯＴＰ code is 88219"));
+        assert!(is_otp_or_pin("আপনার গোপন নম্বর হলো ৫৪২১"));
+        assert!(is_otp_or_pin("গোপন পিন কাউকে বলবেন না"));
+        assert!(is_otp_or_pin("Your one-time password is 102938"));
+
+        // Negative tests: words containing 'pin' or 'otp' as substrings should NOT trigger
         assert!(!is_otp_or_pin("You have received Tk 800.00 from 01999999999. TrxID 8G56H7J8K9"));
+        assert!(!is_otp_or_pin("In my opinion, we should proceed with shipping"));
+        assert!(!is_otp_or_pin("Shopping at Pinpoint store"));
     }
 
     #[test]

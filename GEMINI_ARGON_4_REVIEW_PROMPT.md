@@ -1,6 +1,8 @@
 # Instructions for Gemini Argon 4: Independent Security & Architecture Audit
 
-You are acting as an elite **Principal Systems & Security Conformance Auditor**. Your task is to perform an exhaustive, independent review of the **DakFlare AI-First Messaging Hub & Gateway (v7.0.0)** repository package enclosed in this archive, evaluating the resolution of the prior CONDITIONAL PASS findings (F-V7-01 through F-V7-06) for unconditional PASS ratification.
+You are acting as an elite **Principal Systems & Security Conformance Auditor**. Your task is to perform an exhaustive, independent review of the **DakFlare AI-First Messaging Hub & Gateway (v7.0.0)** repository package enclosed in this archive, evaluating:
+1. The resolution of the prior CONDITIONAL PASS findings (F-V7-01 through F-V7-06) for unconditional PASS ratification.
+2. The architectural conformance, security guarantees, and execution of **Phase 1: "Highlight-to-Template" (PBE) Workbench, Bangladesh Pre-Normalizer, and 3GPP SMS Segment Meter**.
 
 ---
 
@@ -20,10 +22,18 @@ The engineering team has executed:
    - `F-V7-04 (Medium)`: Declared `[[queues.consumers]]` in wrangler configs; added SSRF + 10s AbortSignal in queue processor; enabled post-delay Workflow continuation for `send_sms` and authorized webhooks.
    - `F-V7-05 (Low)`: Exposed canonical lifecycle tuple on `POST /v1/sms/send` and included `error_code` + `updated_at` in `GET /v1/sms/status/:id`.
    - `F-V7-06 (Low)`: Added `wasm.dealloc(inPtr)` in `wasm-engine.ts`; protected text inputs from `Ctrl+Z` undo hijack, seeded initial undo history, and auto-connected edges in Simple mode.
-3. **Live Production Deployment**:
-   - Worker Version `2af8447a-34f2-4045-910e-796cf9331b53` (`Producer + Consumer for dakflare-webhook-queue`, `workflow: flow-execution-workflow`).
+3. **Phase 1: "Highlight-to-Template" (PBE) Workbench & Pre-Normalizer Engine**:
+   - `prose_synth.rs`: 8 typed slots (`money_bdt`, `phone_bd`, `bank_account`, `trx_id`, `datetime_bd`, `number`, `free_text`, `enum`), `normalize_bangla_digits` (Unicode `০-৯` to `0-9`), comma stripping, and hardcoded `is_otp_or_pin` sensitive message security guard.
+   - `flow-wasm/src/lib.rs` & `build.sh`: WASM C-ABI JSON wrappers `synthesize_template_json` and `suggest_spans_json` running in `flow.wasm` (1.23 MB) client-side in `< 0.3ms` with $0 AI cost.
+   - `dashboard/src/lib/workflow/sms-encoding.ts`: 3GPP TS 23.038 GSM-7 (160/153) vs. UCS-2 (70/67) segment counter, BDT cost estimator, and downgrade trap detector (`৳` -> `Tk `).
+   - `dashboard/src/lib/components/workflow/TemplateWorkbench.svelte`: Interactive token canvas, multi-sample match table, preset loading, and 1-click apply.
+   - `dashboard/src/lib/components/workflow/NodeInspector.svelte`: Mounted `TemplateWorkbench` for `extract` nodes with manual regex toggle, and live 3GPP segment meter for `send_sms`.
+   - `worker/src/routes/incoming.ts` & `SmsReceiver.kt`: Hardcoded OTP/PIN guard blocking sensitive verification codes from triggering external automations or webhook relays.
+4. **Live Production Deployment**:
+   - Worker Version `9c59d725-7a21-49f0-bb45-85010489af7c` (Deployment `83b0c31b-b7e7-4d71-8db8-aded62a854fe`).
    - Remote D1 migration `0007_multi_platform_and_conversations.sql` applied (`18/7 applied`).
    - `dakflare doctor` status: **9 pass, 0 fail, 3 skip**.
+   - Test suites: Flow tests `26/26 passed`, Core tests `92/92 passed`, Canonical checks `52/52 passed`.
 
 ---
 
@@ -51,6 +61,12 @@ Please evaluate the codebase against the following critical criteria:
 4. **F-V7-04 Queue Consumer & Workflow Continuation**: Verify `[[queues.consumers]]` in wrangler configs and uninterrupted action execution after `step.sleep()` in `FlowExecutionWorkflow`.
 5. **F-V7-05 Canonical Lifecycle Tuple Parity**: Verify `(state, substate, is_terminal, settled, remediation)` format on send and status endpoints.
 6. **F-V7-06 WASM Simulator & Super Editor Polish**: Verify deallocation of `inPtr` in `wasm-engine.ts`, simple-mode auto-edge creation, and input field shortcut isolation.
+7. **Phase 1 Highlight-to-Template Workbench & Normalizer**:
+   - Verify `prose_synth.rs` 8 typed slot extractors and RE2 named-group regex generation.
+   - Verify `normalize_bangla_digits` (Bengali `০-৯` to `0-9`) and comma stripping.
+   - Verify `is_otp_or_pin` guard preventing credential exfiltration.
+   - Verify memory safety in `wasm-engine.ts` (`synthesizeTemplate` and `suggestSpans` deallocation).
+   - Verify 3GPP TS 23.038 GSM-7 (160/153) vs. UCS-2 (70/67) character segment counting and BDT cost logic.
 
 ---
 
@@ -59,8 +75,9 @@ Please evaluate the codebase against the following critical criteria:
 Deliver your findings using this structure:
 1. **Executive Quality Gate Verdict**: [**PASS** | **CONDITIONAL PASS** | **FAIL**]
 2. **Verification Scorecard**:
-   - Status of the Four Previous Regressions
+   - Status of the Four Previous Regressions (REG-01 to REG-04)
    - Status of Gemini Argon 4 Audit Findings (F-V7-01 through F-V7-06)
+   - Phase 1 Highlight-to-Template (PBE) Workbench & Bangladesh Pre-Normalizer
    - Multi-Platform Channel Connectors & Ingress Webhooks
    - Cloudflare Workflows & Queues Durability
    - Tri-Modal Super Editor & WASM Simulator Engine

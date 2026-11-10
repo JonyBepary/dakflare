@@ -463,11 +463,17 @@ export async function handleIncomingBatch(
     // §11.11: rules run BEFORE flows, for rows the device did not already answer.
     // A message is answered at most once by automation, so the local ids a rule
     // replied to are removed from the flow fallback below.
-    // Hard-block OTP / PIN messages from triggering automations or external flows.
-    const RE_OTP_PIN = /(?:\b(?:otp|pin|verification\s+code|security\s+code)\b|গোলাপী\s*পিন|ওটিপি)/i;
-    let flowMessages = acceptedMessages.filter((msg) => !RE_OTP_PIN.test(msg.body));
+    // Hard-block OTP / PIN messages from triggering automations or external flows (INFO-PBE-02).
+    const isOtpOrPinMessage = (rawBody: string): boolean => {
+      const normalized = (rawBody || "")
+        .normalize("NFKC")
+        .replace(/[\u09E6-\u09EF]/g, (ch) => String(ch.charCodeAt(0) - 0x09e6));
+      const RE_OTP_PIN = /(?:\b(?:otp|pin|passcode|secret\s+code|auth(?:entication)?\s+code|verification\s+code|security\s+code|one[\s-]time\s+password)\b|ওটিপি|গোলাপী\s*পিন|গোপন\s*(?:নম্বর|পিন)|ভেরিফিকেশন\s*(?:কোড)?|সিকিউরিটি\s*কোড|\bপিন\b)/iu;
+      return RE_OTP_PIN.test(normalized);
+    };
+    let flowMessages = acceptedMessages.filter((msg) => !isOtpOrPinMessage(msg.body));
     const ruleCandidates = acceptedInbound.filter(
-      (message) => message.autoReply === 0 && !RE_OTP_PIN.test(message.body)
+      (message) => message.autoReply === 0 && !isOtpOrPinMessage(message.body)
     );
     if (ruleCandidates.length > 0) {
       try {
