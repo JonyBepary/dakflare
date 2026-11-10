@@ -117,6 +117,75 @@ fn synthesize_payload(input: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Synthesize a template pattern from highlighted spans.
+///
+/// Input is `{ sample_body: string, spans: [...], additional_samples?: string[] }`.
+/// Returns `{"ok":true,"result":{pattern, trigger_phrases, variables, test_results}}`.
+///
+/// # Safety
+/// `ptr`/`len` must describe a buffer allocated with `alloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn synthesize_template_json(ptr: *const u8, len: usize) -> *mut u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    frame(synthesize_template_payload(input))
+}
+
+fn synthesize_template_payload(input: &[u8]) -> Vec<u8> {
+    let request: dakflare_flow::TemplateRequest = match serde_json::from_slice(input) {
+        Ok(request) => request,
+        Err(error) => {
+            return serde_json::to_vec(&json!({
+                "ok": false,
+                "reason": "bad_request",
+                "message": format!("invalid template request: {error}"),
+            }))
+            .unwrap_or_else(|_| b"{\"ok\":false}".to_vec());
+        }
+    };
+
+    match dakflare_flow::synthesize_template(&request) {
+        Ok(result) => serde_json::to_vec(&json!({ "ok": true, "result": result }))
+            .unwrap_or_else(|e| issues_json(&e.to_string())),
+        Err(failure) => serde_json::to_vec(&json!({
+            "ok": false,
+            "reason": failure.reason,
+            "message": failure.message,
+        }))
+        .unwrap_or_else(|_| b"{\"ok\":false}".to_vec()),
+    }
+}
+
+/// Auto-suggest variable spans across a message body.
+///
+/// Input is `{ body: string }`.
+/// Returns `{"ok":true,"spans":[...]}`.
+///
+/// # Safety
+/// `ptr`/`len` must describe a buffer allocated with `alloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn suggest_spans_json(ptr: *const u8, len: usize) -> *mut u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    frame(suggest_spans_payload(input))
+}
+
+fn suggest_spans_payload(input: &[u8]) -> Vec<u8> {
+    let parsed: Value = match serde_json::from_slice(input) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return serde_json::to_vec(&json!({
+                "ok": false,
+                "message": format!("invalid input: {error}"),
+            }))
+            .unwrap_or_else(|_| b"{\"ok\":false}".to_vec());
+        }
+    };
+
+    let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let spans = dakflare_flow::auto_suggest_spans(body);
+    serde_json::to_vec(&json!({ "ok": true, "spans": spans }))
+        .unwrap_or_else(|e| issues_json(&e.to_string()))
+}
+
 /// Validate, then place every node. Returns `{"ok":true,"algorithm":...,"positions":{...}}`.
 ///
 /// # Safety

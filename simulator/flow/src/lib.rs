@@ -21,7 +21,11 @@
 pub mod ir;
 pub mod prose_synth;
 
-pub use prose_synth::{synthesize, Sample, SynthFailure, SynthOutcome, SynthRequest, SynthResult};
+pub use prose_synth::{
+    auto_suggest_spans, is_otp_or_pin, normalize_bangla_digits, normalize_sms_body, synthesize,
+    synthesize_template, Sample, SynthFailure, SynthOutcome, SynthRequest, SynthResult,
+    TemplateRequest, TemplateResult, TemplateSpan, TemplateTestMatch,
+};
 
 use std::collections::BTreeMap;
 
@@ -236,9 +240,21 @@ pub fn run(input: &RunInput) -> RunResult {
                     Ok(data) => data,
                     Err(e) => return fail(result, format!("extract data: {e}")),
                 };
-                let subject = match data.source.as_str() {
+
+                // Hard-block OTP / PIN messages from extract extraction to protect merchant security
+                if data.source == "body" && prose_synth::is_otp_or_pin(&input.message.body) {
+                    result.outcome = "halted".into();
+                    result.steps.push(step(current, "blocked: message contains sensitive OTP or PIN"));
+                    return result;
+                }
+
+                let normalized_body;
+                let subject: &str = match data.source.as_str() {
                     "sender" => &input.message.sender,
-                    _ => &input.message.body,
+                    _ => {
+                        normalized_body = prose_synth::normalize_bangla_digits(&input.message.body);
+                        &normalized_body
+                    }
                 };
                 let regex = match regex::RegexBuilder::new(&data.pattern)
                     .case_insensitive(data.flags.as_deref() == Some("i"))
@@ -257,8 +273,11 @@ pub fn run(input: &RunInput) -> RunResult {
 
                 let mut captured = Vec::new();
                 for name in regex.capture_names().flatten() {
-                    let value = captures.name(name).map(|m| m.as_str()).unwrap_or("");
-                    result.variables.insert(name.to_string(), value.to_string());
+                    let mut value = captures.name(name).map(|m| m.as_str()).unwrap_or("").to_string();
+                    if name == "amount" || name.ends_with("_amount") {
+                        value = value.replace(',', "").trim().to_string();
+                    }
+                    result.variables.insert(name.to_string(), value.clone());
                     captured.push(format!("{name}={value}"));
                 }
                 result

@@ -463,8 +463,12 @@ export async function handleIncomingBatch(
     // §11.11: rules run BEFORE flows, for rows the device did not already answer.
     // A message is answered at most once by automation, so the local ids a rule
     // replied to are removed from the flow fallback below.
-    let flowMessages = acceptedMessages;
-    const ruleCandidates = acceptedInbound.filter((message) => message.autoReply === 0);
+    // Hard-block OTP / PIN messages from triggering automations or external flows.
+    const RE_OTP_PIN = /(?:\b(?:otp|pin|verification\s+code|security\s+code)\b|গোলাপী\s*পিন|ওটিপি)/i;
+    let flowMessages = acceptedMessages.filter((msg) => !RE_OTP_PIN.test(msg.body));
+    const ruleCandidates = acceptedInbound.filter(
+      (message) => message.autoReply === 0 && !RE_OTP_PIN.test(message.body)
+    );
     if (ruleCandidates.length > 0) {
       try {
         const outcome = await applyRules(env, deviceId, ruleCandidates, now);

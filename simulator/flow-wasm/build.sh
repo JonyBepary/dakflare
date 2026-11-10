@@ -8,4 +8,6 @@ cd "$(dirname "$0")"
 cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/dakflare_flow_wasm.wasm \
    ../../worker/src/wasm/flow.wasm
-echo "wrote worker/src/wasm/flow.wasm ($(wc -c < ../../worker/src/wasm/flow.wasm) bytes)"
+cp target/wasm32-unknown-unknown/release/dakflare_flow_wasm.wasm \
+   ../../dashboard/static/flow.wasm
+echo "wrote worker/src/wasm/flow.wasm and dashboard/static/flow.wasm ($(wc -c < ../../worker/src/wasm/flow.wasm) bytes)"

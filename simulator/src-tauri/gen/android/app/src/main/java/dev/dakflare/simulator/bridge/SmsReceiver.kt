@@ -168,6 +168,14 @@ class SmsReceiver : BroadcastReceiver() {
             return
         }
 
+        // Hard-block OTP / PIN messages from triggering auto-replies
+        val otpPattern = Regex("(?i)\\b(otp|pin|verification\\s+code|security\\s+code)\\b|গোলাপী\\s*পিন|ওটিপি")
+        if (otpPattern.containsMatchIn(inboundBody)) {
+            Log.w(TAG, "sender=${mask(sender)} reply suppressed (OTP/PIN security protection)")
+            decline(appDir, deviceId, actions, "otp_pin_security_block")
+            return
+        }
+
         // Guard against a loopback / self-sent SMS. When no source yields a
         // number there is nothing to compare against, so the guard is logged as
         // unknown and only a number known from another source would match.

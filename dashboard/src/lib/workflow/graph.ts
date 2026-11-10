@@ -1365,3 +1365,5 @@ export function nodeLabel(node: FlowNode | null): string {
 	if (node.type === 'condition') return 'Condition';
 	return title;
 }
+
+export { measureSmsSegments, sanitizeGsm7Text, type SmsEncodingMetrics } from './sms-encoding';

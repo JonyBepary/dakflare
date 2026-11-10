@@ -38,6 +38,39 @@ export interface WasmSynthResult {
 	message?: string;
 }
 
+export interface TemplateSpan {
+	role: 'trigger' | 'extract' | 'ignore';
+	name: string;
+	slot_type?: string;
+	start: number;
+	end: number;
+	optional?: boolean;
+}
+
+export interface TemplateTestMatch {
+	body: string;
+	matched: boolean;
+	extracted: Record<string, string>;
+}
+
+export interface TemplateSynthResult {
+	ok: boolean;
+	result?: {
+		pattern: string;
+		trigger_phrases: string[];
+		variables: string[];
+		test_results: TemplateTestMatch[];
+	};
+	reason?: string;
+	message?: string;
+}
+
+export interface SuggestedSpansResult {
+	ok: boolean;
+	spans?: TemplateSpan[];
+	message?: string;
+}
+
 interface WasmExports {
 	memory: WebAssembly.Memory;
 	alloc(len: number): number;
@@ -45,6 +78,8 @@ interface WasmExports {
 	run_json(ptr: number, len: number): number;
 	validate_json(ptr: number, len: number): number;
 	synthesize_json(ptr: number, len: number): number;
+	synthesize_template_json(ptr: number, len: number): number;
+	suggest_spans_json(ptr: number, len: number): number;
 }
 
 let wasmPromise: Promise<WasmExports> | null = null;
@@ -131,4 +166,30 @@ export async function synthesizePattern(
 		samples,
 		group: groupName
 	}) as WasmSynthResult;
+}
+
+/**
+ * Synthesize an RE2 pattern from highlighted spans on a sample message.
+ */
+export async function synthesizeTemplate(
+	sampleBody: string,
+	spans: TemplateSpan[],
+	additionalSamples: string[] = []
+): Promise<TemplateSynthResult> {
+	const wasm = await loadWasm();
+	return callWasmJson(wasm, wasm.synthesize_template_json.bind(wasm), {
+		sample_body: sampleBody,
+		spans,
+		additional_samples: additionalSamples
+	}) as TemplateSynthResult;
+}
+
+/**
+ * Auto-suggest template spans on a raw SMS message body in < 5ms.
+ */
+export async function suggestSpans(body: string): Promise<SuggestedSpansResult> {
+	const wasm = await loadWasm();
+	return callWasmJson(wasm, wasm.suggest_spans_json.bind(wasm), {
+		body
+	}) as SuggestedSpansResult;
 }

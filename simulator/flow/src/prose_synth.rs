@@ -527,6 +527,369 @@ fn occurrences(haystack: &str, needle: &str) -> Vec<usize> {
 
 /* ------------------------------------------------------------------ tests */
 
+/* ------------------------------------------------------------------ pre-normalizer & bangla */
+
+/// Convert Bangla digits U+09E6..U+09EF (০..৯) to ASCII digits '0'..'9'.
+pub fn normalize_bangla_digits(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| match ch {
+            '\u{09E6}' => '0',
+            '\u{09E7}' => '1',
+            '\u{09E8}' => '2',
+            '\u{09E9}' => '3',
+            '\u{09EA}' => '4',
+            '\u{09EB}' => '5',
+            '\u{09EC}' => '6',
+            '\u{09ED}' => '7',
+            '\u{09EE}' => '8',
+            '\u{09EF}' => '9',
+            _ => ch,
+        })
+        .collect()
+}
+
+/// Detect if text contains OTP, PIN, or verification code keywords in English or Bangla.
+pub fn is_otp_or_pin(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    if lower.contains("ওটিপি") || lower.contains("গোলাপী পিন") || lower.contains("পিন") {
+        return true;
+    }
+    let otp_words = ["otp", "pin", "verification code", "security code", "secret code"];
+    for word in &otp_words {
+        if lower.contains(word) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Normalize SMS text: converts Bangla digits to ASCII and collapses whitespace runs.
+pub fn normalize_sms_body(input: &str) -> String {
+    let converted = normalize_bangla_digits(input);
+    let mut out = String::with_capacity(converted.len());
+    let mut on_whitespace = false;
+    for ch in converted.chars() {
+        if ch.is_whitespace() {
+            if !on_whitespace {
+                out.push(' ');
+                on_whitespace = true;
+            }
+        } else {
+            out.push(ch);
+            on_whitespace = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/* ------------------------------------------------------------------ template workbench types */
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateSpan {
+    pub role: String, // "trigger", "extract", "ignore"
+    pub name: String,
+    #[serde(default)]
+    pub slot_type: Option<String>,
+    pub start: usize,
+    pub end: usize,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateRequest {
+    pub sample_body: String,
+    pub spans: Vec<TemplateSpan>,
+    #[serde(default)]
+    pub additional_samples: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateTestMatch {
+    pub body: String,
+    pub matched: bool,
+    pub extracted: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateResult {
+    pub pattern: String,
+    pub trigger_phrases: Vec<String>,
+    pub variables: Vec<String>,
+    pub test_results: Vec<TemplateTestMatch>,
+}
+
+fn slot_regex_for(slot_type: &str) -> &'static str {
+    match slot_type {
+        "money_bdt" => r"[0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?",
+        "phone_bd" => r"(?:\+?88)?01[3-9][0-9]{8}(?:[0-9])?",
+        "bank_account" => r"(?:\*+[0-9]{3,6}|[0-9]{10,17})",
+        "trx_id" => r"[A-Z0-9]{6,16}",
+        "datetime_bd" => r"[0-9]{1,2}[/-](?:[0-9]{1,2}|[A-Za-z]{3})[/-][0-9]{2,4}\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?(?:\s*[apAP][mM])?",
+        "number" => r"[0-9]+(?:\.[0-9]+)?",
+        "free_text" => r"[^\.\r\n]{1,64}?",
+        _ => r"[^\.\r\n]{1,64}?",
+    }
+}
+
+/// Synthesize a template from highlighted spans.
+pub fn synthesize_template(request: &TemplateRequest) -> Result<TemplateResult, SynthFailure> {
+    let raw_sample = &request.sample_body;
+    let sample = normalize_sms_body(raw_sample);
+    let chars: Vec<char> = sample.chars().collect();
+
+    if chars.is_empty() {
+        return Err(SynthFailure {
+            reason: "empty_sample".to_string(),
+            message: "sample body cannot be empty".to_string(),
+        });
+    }
+
+    let mut spans = request.spans.clone();
+    spans.sort_by_key(|s| s.start);
+
+    let mut pattern = String::new();
+    let mut trigger_phrases = Vec::new();
+    let mut variables = Vec::new();
+    let mut last_end = 0;
+
+    for span in &spans {
+        let s_start = span.start.min(chars.len());
+        let s_end = span.end.min(chars.len());
+        if s_start > s_end || s_start < last_end {
+            continue; // Skip invalid or overlapping
+        }
+
+        // Anchor before this span
+        if s_start > last_end {
+            let anchor_text: String = chars[last_end..s_start].iter().collect();
+            let rendered = render_anchor(&anchor_text);
+            if span.optional {
+                // If optional, include anchor inside the optional group
+                let slot_type = span.slot_type.as_deref().unwrap_or("free_text");
+                let sub_pat = slot_regex_for(slot_type);
+                pattern.push_str(&format!("(?:{rendered}(?<{}>{}))?", span.name, sub_pat));
+                if !variables.contains(&span.name) {
+                    variables.push(span.name.clone());
+                }
+                last_end = s_end;
+                continue;
+            } else {
+                pattern.push_str(&rendered);
+            }
+        }
+
+        let span_text: String = chars[s_start..s_end].iter().collect();
+        match span.role.as_str() {
+            "trigger" => {
+                let rendered = render_anchor(&span_text);
+                pattern.push_str(&rendered);
+                if !trigger_phrases.contains(&span_text) {
+                    trigger_phrases.push(span_text);
+                }
+            }
+            "ignore" => {
+                pattern.push_str(r"(?:[^\.\r\n]*?)");
+            }
+            "extract" => {
+                let slot_type = span.slot_type.as_deref().unwrap_or("free_text");
+                let sub_pat = slot_regex_for(slot_type);
+                if span.optional {
+                    pattern.push_str(&format!("(?:(?<{}>{}))?", span.name, sub_pat));
+                } else {
+                    pattern.push_str(&format!("(?<{}>{})", span.name, sub_pat));
+                }
+                if !variables.contains(&span.name) {
+                    variables.push(span.name.clone());
+                }
+            }
+            _ => {
+                pattern.push_str(&escape(&span_text));
+            }
+        }
+        last_end = s_end;
+    }
+
+    if last_end < chars.len() {
+        let trailing: String = chars[last_end..].iter().collect();
+        pattern.push_str(&render_anchor(&trailing));
+    }
+
+    if pattern.is_empty() {
+        pattern = escape(&sample);
+    }
+
+    // Validate regex compilation
+    let regex = match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .size_limit(1 << 20)
+        .build()
+    {
+        Ok(re) => re,
+        Err(e) => {
+            return Err(SynthFailure {
+                reason: "invalid_pattern".to_string(),
+                message: format!("synthesized pattern failed compilation: {e}"),
+            });
+        }
+    };
+
+    // Run tests against sample and additional samples
+    let mut test_corpus = vec![sample.clone()];
+    for extra in &request.additional_samples {
+        let norm = normalize_sms_body(extra);
+        if !test_corpus.contains(&norm) {
+            test_corpus.push(norm);
+        }
+    }
+
+    let mut test_results = Vec::new();
+    for body in test_corpus {
+        if let Some(captures) = regex.captures(&body) {
+            let mut extracted = std::collections::BTreeMap::new();
+            for name in regex.capture_names().flatten() {
+                if let Some(m) = captures.name(name) {
+                    let mut val = m.as_str().to_string();
+                    if name == "amount" || name.ends_with("_amount") {
+                        val = val.replace(',', "").trim().to_string();
+                    }
+                    extracted.insert(name.to_string(), val);
+                }
+            }
+            test_results.push(TemplateTestMatch {
+                body,
+                matched: true,
+                extracted,
+            });
+        } else {
+            test_results.push(TemplateTestMatch {
+                body,
+                matched: false,
+                extracted: std::collections::BTreeMap::new(),
+            });
+        }
+    }
+
+    Ok(TemplateResult {
+        pattern,
+        trigger_phrases,
+        variables,
+        test_results,
+    })
+}
+
+/// Auto-suggest variable spans across a raw message body for sub-2-minute onboarding.
+pub fn auto_suggest_spans(body: &str) -> Vec<TemplateSpan> {
+    let mut spans = Vec::new();
+    let norm = normalize_bangla_digits(body);
+
+    // 1. Trigger phrases
+    let triggers = [
+        "You have received",
+        "Cash In",
+        "Payment to",
+        "Money Received",
+        "Deposit of",
+    ];
+    for trig in &triggers {
+        if let Some(pos) = norm.find(trig) {
+            spans.push(TemplateSpan {
+                role: "trigger".to_string(),
+                name: "trigger".to_string(),
+                slot_type: None,
+                start: pos,
+                end: pos + trig.len(),
+                optional: false,
+            });
+            break;
+        }
+    }
+
+    // 2. Phone numbers (013..019)
+    if let Ok(re_phone) = regex::Regex::new(r"01[3-9][0-9]{8}") {
+        for mat in re_phone.find_iter(&norm) {
+            spans.push(TemplateSpan {
+                role: "extract".to_string(),
+                name: "sender_account".to_string(),
+                slot_type: Some("phone_bd".to_string()),
+                start: mat.start(),
+                end: mat.end(),
+                optional: false,
+            });
+        }
+    }
+
+    // 3. Amount after Tk / BDT / ৳
+    if let Ok(re_amount) = regex::Regex::new(r"(?:Tk\.?|BDT|৳)\s*([0-9,]+(?:\.[0-9]{1,2})?)") {
+        for cap in re_amount.captures_iter(&norm) {
+            if let Some(m) = cap.get(1) {
+                // Avoid matching Balance amounts
+                let before = &norm[..cap.get(0).unwrap().start()];
+                if !before.ends_with("Balance ") && !before.ends_with("Fee ") {
+                    spans.push(TemplateSpan {
+                        role: "extract".to_string(),
+                        name: "amount".to_string(),
+                        slot_type: Some("money_bdt".to_string()),
+                        start: m.start(),
+                        end: m.end(),
+                        optional: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. TrxID / TxnID
+    if let Ok(re_trx) = regex::Regex::new(r"(?:TrxID|TxnID|Txn ID|Trx ID)[:\s]+([A-Z0-9]{6,16})") {
+        for cap in re_trx.captures_iter(&norm) {
+            if let Some(m) = cap.get(1) {
+                spans.push(TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "trx_id".to_string(),
+                    slot_type: Some("trx_id".to_string()),
+                    start: m.start(),
+                    end: m.end(),
+                    optional: false,
+                });
+            }
+        }
+    }
+
+    // 5. Ref
+    if let Ok(re_ref) = regex::Regex::new(r"Ref\s+([A-Za-z0-9_-]+)") {
+        for cap in re_ref.captures_iter(&norm) {
+            if let Some(m) = cap.get(1) {
+                spans.push(TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "reference".to_string(),
+                    slot_type: Some("free_text".to_string()),
+                    start: m.start(),
+                    end: m.end(),
+                    optional: true,
+                });
+            }
+        }
+    }
+
+    // 6. DateTime
+    if let Ok(re_dt) = regex::Regex::new(r"([0-9]{2}/[0-9]{2}/[0-9]{4}\s+[0-9]{2}:[0-9]{2})") {
+        for m in re_dt.find_iter(&norm) {
+            spans.push(TemplateSpan {
+                role: "extract".to_string(),
+                name: "timestamp".to_string(),
+                slot_type: Some("datetime_bd".to_string()),
+                start: m.start(),
+                end: m.end(),
+                optional: false,
+            });
+        }
+    }
+
+    spans.sort_by_key(|s| s.start);
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +1008,54 @@ mod tests {
         );
         let result = synthesize(&request).expect("should synthesize");
         assert!(result.value_shape.contains("[0-9]"), "got {}", result.value_shape);
+    }
+
+    #[test]
+    fn bangla_digits_normalizer_converts_correctly() {
+        let input = "টাকা ৮০০.০০ from ০১৯৯৯৯৯৯৯৯৯";
+        let out = normalize_bangla_digits(input);
+        assert_eq!(out, "টাকা 800.00 from 01999999999");
+    }
+
+    #[test]
+    fn otp_pin_guard_detects_sensitive_messages() {
+        assert!(is_otp_or_pin("Your OTP is 483920. Do not share."));
+        assert!(is_otp_or_pin("আপনার ওটিপি কোড হলো ১২৩৪৫৬"));
+        assert!(is_otp_or_pin("Security code for login: 998811"));
+        assert!(!is_otp_or_pin("You have received Tk 800.00 from 01999999999. TrxID 8G56H7J8K9"));
+    }
+
+    #[test]
+    fn auto_suggest_detects_bkash_spans() {
+        let msg = "You have received Tk 800.00 from 01999999999. Ref INV102. Fee Tk 0.00. Balance Tk 1,200.00. TrxID 8G56H7J8K9 at 15/07/2026 11:24";
+        let spans = auto_suggest_spans(msg);
+        assert!(!spans.is_empty());
+        let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"amount"));
+        assert!(names.contains(&"sender_account"));
+        assert!(names.contains(&"trx_id"));
+    }
+
+    #[test]
+    fn synthesize_template_builds_matching_re2_pattern() {
+        let msg = "You have received Tk 800.00 from 01999999999. TrxID 8G56H7J8K9 at 15/07/2026 11:24";
+        let spans = auto_suggest_spans(msg);
+        let req = TemplateRequest {
+            sample_body: msg.to_string(),
+            spans,
+            additional_samples: vec![
+                "You have received Tk 1,250.50 from 01812345678. TrxID 9K12L3M4N5 at 16/07/2026 12:00".to_string(),
+            ],
+        };
+        let res = synthesize_template(&req).expect("template synthesis should succeed");
+        assert!(!res.pattern.is_empty());
+        assert!(res.variables.contains(&"amount".to_string()));
+        assert!(res.variables.contains(&"sender_account".to_string()));
+        assert!(res.variables.contains(&"trx_id".to_string()));
+        assert_eq!(res.test_results.len(), 2);
+        assert!(res.test_results[0].matched);
+        assert!(res.test_results[1].matched);
+        assert_eq!(res.test_results[0].extracted.get("amount").map(String::as_str), Some("800.00"));
+        assert_eq!(res.test_results[1].extracted.get("amount").map(String::as_str), Some("1250.50"));
     }
 }

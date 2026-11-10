@@ -2,6 +2,8 @@
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import VariableHints from './VariableHints.svelte';
+	import TemplateWorkbench from './TemplateWorkbench.svelte';
+	import { measureSmsSegments, sanitizeGsm7Text } from '$lib/workflow/sms-encoding';
 	import type {
 		BodyMode,
 		ConditionData,
@@ -59,6 +61,8 @@
 		ondelete: () => void;
 		onselect: (id: string) => void;
 	} = $props();
+
+	let showWorkbench = $state(false);
 
 	const HELP: Record<string, string> = {
 		trigger: 'Starts the flow when a matching message arrives.',
@@ -229,6 +233,38 @@
 				</p>
 			</div>
 		{:else if node.type === 'extract'}
+			<div class="field">
+				<div class="field-split-header">
+					<span class="label">Extraction Mode</span>
+					<button
+						type="button"
+						class="btn-workbench-toggle"
+						onclick={() => (showWorkbench = !showWorkbench)}
+					>
+						{showWorkbench ? '⌨️ Manual Regex Mode' : '✨ Highlight-to-Template'}
+					</button>
+				</div>
+
+				{#if showWorkbench}
+					<TemplateWorkbench
+						initialPattern={extract.pattern ?? ''}
+						initialSample={extract.template_spec?.sample_body ?? ''}
+						initialSpans={extract.template_spec?.spans ?? []}
+						onapply={(res) => {
+							onupdate({
+								pattern: res.pattern,
+								template_spec: {
+									sample_body: res.sampleBody,
+									spans: res.spans
+								},
+								test_samples: res.testSamples
+							});
+							showWorkbench = false;
+						}}
+					/>
+				{/if}
+			</div>
+
 			<div class="field">
 				<label class="label" for={`extract-source-${node.id}`}>Read from</label>
 				<select
@@ -678,6 +714,43 @@
 				{#if error('body')}
 					<p class="field-error" id={`err-${node.id}-body`}>{error('body')}</p>
 				{/if}
+
+				{#if sms.body}
+					{@const metrics = measureSmsSegments(sms.body)}
+					<div class="sms-meter-card {metrics.encoding === 'UCS-2' ? 'is-ucs2' : 'is-gsm7'}">
+						<div class="meter-row">
+							<span class="meter-badge {metrics.encoding === 'UCS-2' ? 'badge-ucs2' : 'badge-gsm7'}">
+								{metrics.encoding} {metrics.hasBangla ? '(Bangla)' : ''}
+							</span>
+							<span class="meter-stat">
+								{metrics.unitsUsed} / {metrics.unitsLimit} chars
+							</span>
+							<span class="meter-stat">
+								<strong>{metrics.segments}</strong> SMS segment{metrics.segments > 1 ? 's' : ''}
+							</span>
+							<span class="meter-cost">
+								~৳{metrics.estimatedCostBdt.toFixed(2)}
+							</span>
+						</div>
+
+						{#if metrics.nonGsmChars.length > 0 && !metrics.hasBangla}
+							<div class="trap-warning">
+								<span>
+									⚠️ Downgraded to 70-char UCS-2 by character:
+									<strong>'{metrics.nonGsmChars[0].char}'</strong>
+								</span>
+								<button
+									type="button"
+									class="btn-sanitize"
+									onclick={() => onupdate({ body: sanitizeGsm7Text(sms.body ?? '') })}
+								>
+									Sanitize to GSM-7 (Save 1 Segment)
+								</button>
+							</div>
+						{/if}
+					</div>
+				{/if}
+
 				<div class="field-foot">
 					<span class="hint">{(sms.body ?? '').length} characters</span>
 					<span class="hint">Max {SMS_BODY_LIMIT}</span>
@@ -1080,5 +1153,113 @@
 	textarea.input {
 		min-height: 92px;
 		font-size: 11.5px;
+	}
+
+	.field-split-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: var(--df-p-space-2);
+	}
+
+	.btn-workbench-toggle {
+		background: #1e2433;
+		border: 1px solid #3b82f6;
+		color: #93c5fd;
+		font-size: 0.72rem;
+		font-weight: 500;
+		padding: 0.2rem 0.5rem;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-workbench-toggle:hover {
+		background: #2563eb;
+		color: #fff;
+	}
+
+	.sms-meter-card {
+		margin-top: 0.4rem;
+		padding: 0.45rem 0.6rem;
+		background: #0f1219;
+		border: 1px solid #1e2433;
+		border-radius: 6px;
+		font-size: 0.72rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.sms-meter-card.is-ucs2 {
+		border-color: #854d0e;
+		background: #1a1508;
+	}
+
+	.meter-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.meter-badge {
+		font-size: 0.65rem;
+		padding: 0.1rem 0.35rem;
+		border-radius: 3px;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+	}
+
+	.meter-badge.badge-gsm7 {
+		background: #064e3b;
+		color: #6ee7b7;
+	}
+
+	.meter-badge.badge-ucs2 {
+		background: #713f12;
+		color: #fde047;
+	}
+
+	.meter-stat {
+		color: #94a3b8;
+	}
+
+	.meter-stat strong {
+		color: #e2e8f0;
+	}
+
+	.meter-cost {
+		margin-left: auto;
+		color: #38bdf8;
+		font-weight: 600;
+	}
+
+	.trap-warning {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem;
+		padding-top: 0.35rem;
+		border-top: 1px solid #2d2613;
+		color: #fde047;
+		font-size: 0.7rem;
+	}
+
+	.btn-sanitize {
+		background: #854d0e;
+		border: 1px solid #ca8a04;
+		color: #fef08a;
+		font-size: 0.68rem;
+		padding: 0.15rem 0.45rem;
+		border-radius: 4px;
+		cursor: pointer;
+		font-weight: 600;
+	}
+
+	.btn-sanitize:hover {
+		background: #a16207;
+		color: #fff;
 	}
 </style>

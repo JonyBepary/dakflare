@@ -336,10 +336,30 @@ export interface TriggerData {
 	body?: ModeSpec<BodyMode>;
 }
 
+export interface TemplateSpecSpan {
+	role: 'trigger' | 'extract' | 'ignore';
+	name: string;
+	slot_type?: string;
+	start: number;
+	end: number;
+	optional?: boolean;
+}
+
+export interface TemplateTestSample {
+	body: string;
+	expect_match?: boolean;
+	expected_vars?: Record<string, string>;
+}
+
 export interface ExtractData {
 	source: 'body' | 'sender';
 	pattern: string;
 	flags?: '' | 'i';
+	template_spec?: {
+		sample_body?: string;
+		spans?: TemplateSpecSpan[];
+	};
+	test_samples?: TemplateTestSample[];
 }
 
 export interface ConditionData {
