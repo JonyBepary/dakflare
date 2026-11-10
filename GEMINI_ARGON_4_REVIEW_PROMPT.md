@@ -28,9 +28,12 @@ The engineering team has executed:
    - `dashboard/src/lib/workflow/sms-encoding.ts`: 3GPP TS 23.038 GSM-7 (160/153) vs. UCS-2 (70/67) segment counter, BDT cost estimator, and downgrade trap detector (`৳` -> `Tk `).
    - `dashboard/src/lib/components/workflow/TemplateWorkbench.svelte`: Interactive token canvas, multi-sample match table, preset loading, and 1-click apply.
    - `dashboard/src/lib/components/workflow/NodeInspector.svelte`: Mounted `TemplateWorkbench` for `extract` nodes with manual regex toggle, and live 3GPP segment meter for `send_sms`.
-   - `worker/src/routes/incoming.ts` & `SmsReceiver.kt`: Hardcoded OTP/PIN guard blocking sensitive verification codes from triggering external automations or webhook relays.
-4. **Live Production Deployment**:
-   - Worker Version `9c59d725-7a21-49f0-bb45-85010489af7c` (Deployment `83b0c31b-b7e7-4d71-8db8-aded62a854fe`).
+   - `worker/src/routes/incoming.ts`, `prose_synth.rs`, and `SmsReceiver.kt`: Hardcoded OTP/PIN guard blocking sensitive verification codes from triggering external automations or webhook relays, hardened with Unicode NFKC, fullwidth mapping, and token-level word boundaries (`INFO-PBE-02`).
+4. **Resolution of Informational Recommendations (`INFO-PBE-01` & `INFO-PBE-02`)**:
+   - `INFO-PBE-01`: Full Phase 1 file coverage in bundle manifest and dual-snapshot archiving (`dakflare-v7.0.0-multi-platform-hub-review-bundle.zip` and `dakflare-v7.0.0-pbe-05583be0-review-bundle.zip`).
+   - `INFO-PBE-02`: Unicode NFKC, fullwidth Latin/digit normalizer, and expanded Bengali sensitive keywords (`ওটিপি`, `পিন`, `ভেরিফিকেশন কোড`, `গোপন নম্বর`, `সিকিউরিটি কোড`, `গোপন পিন`).
+5. **Live Production Deployment**:
+   - Worker Version `05583be0-9a98-4220-917f-54e465dd780d` (Deployment `fd1a0439-40f7-4589-9c95-cb6c70a39bd2`).
    - Remote D1 migration `0007_multi_platform_and_conversations.sql` applied (`18/7 applied`).
    - `dakflare doctor` status: **9 pass, 0 fail, 3 skip**.
    - Test suites: Flow tests `26/26 passed`, Core tests `92/92 passed`, Canonical checks `52/52 passed`.
