@@ -21,9 +21,20 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 
   async verifyWebhook(req: Request, _rawBody: string, env: Env): Promise<boolean> {
     const secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
-    const expected = (env as unknown as Record<string, string | undefined>).TELEGRAM_WEBHOOK_SECRET;
-    if (!expected) return true; // Unset secret permits initial webhook registration
-    return secret === expected;
+    const vars = env as unknown as Record<string, string | undefined>;
+    const expected = vars.TELEGRAM_WEBHOOK_SECRET ?? vars.TELEGRAM_SECRET_TOKEN;
+    if (!expected || !secret) return false;
+
+    const enc = new TextEncoder();
+    const [a, b] = await Promise.all([
+      crypto.subtle.digest("SHA-256", enc.encode(secret)),
+      crypto.subtle.digest("SHA-256", enc.encode(expected)),
+    ]);
+    const viewA = new Uint8Array(a);
+    const viewB = new Uint8Array(b);
+    let diff = 0;
+    for (let i = 0; i < viewA.length; i++) diff |= viewA[i] ^ viewB[i];
+    return diff === 0;
   }
 
   async parseInbound(_req: Request, rawBody: string, _env: Env): Promise<InboundMessagePayload[]> {

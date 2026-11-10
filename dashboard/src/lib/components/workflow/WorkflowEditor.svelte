@@ -180,6 +180,13 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
+		const target = e.target as HTMLElement | null;
+		if (
+			target &&
+			(target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+		) {
+			return;
+		}
 		if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
 			if (e.shiftKey) {
 				e.preventDefault();
@@ -346,6 +353,9 @@
 			touched = false;
 			hasSaved = false;
 			baseline = signature();
+			history = [];
+			historyIndex = -1;
+			pushHistory();
 		} else {
 			void load(id);
 		}
@@ -378,6 +388,9 @@
 			serverDetails = [];
 			saveError = null;
 			baseline = signature();
+			history = [];
+			historyIndex = -1;
+			pushHistory();
 		} catch (failure) {
 			if (failure instanceof ApiError && failure.status === 404) {
 				notFound = true;
@@ -493,9 +506,18 @@
 			announce = 'A flow can only have one trigger.';
 			return;
 		}
+		const prevNode = viewMode === 'simple' && nodes.length > 0 ? nodes[nodes.length - 1] : null;
 		const node = createNode(type, canvasCentre(), nodes);
 		node.selected = true;
 		nodes = [...nodes.map((item) => ({ ...item, selected: false })), node];
+		if (prevNode && prevNode.type !== 'stop' && sourceHandles(prevNode).includes('')) {
+			const hasOut = edges.some((e) => e.source === prevNode.id && !e.sourceHandle);
+			if (!hasOut) {
+				const edge = createEdge(prevNode.id, node.id, undefined, edges);
+				edge.type = 'smoothstep';
+				edges = [...edges, edge];
+			}
+		}
 		simResult = null;
 		simNodeIds = new Set();
 		simEdgeIds = new Set();

@@ -30,6 +30,7 @@ import {
 import { internalError } from "./pair";
 import { enqueueOutboundCommand } from "../lib/commands";
 import { enforceAgentSend, rollbackAgentSend } from "../lib/agent-send";
+import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 
 interface CommandPayload {
   command_id: string;
@@ -126,7 +127,11 @@ export async function handleSend(
   // A replay created nothing: the command and its message row already exist, and
   // an audit row here would claim this call sent something.
   if (queued.replayed) {
-    return Response.json({ command_id: queued.commandId, replayed: true });
+    return Response.json({
+      command_id: queued.commandId,
+      replayed: true,
+      lifecycle: computeCommandLifecycle({ channel: "sms", state: "PENDING", created_at: Date.now() }),
+    });
   }
 
   // Metadata only: the recipient and the message body stay out of audit_log.
@@ -143,7 +148,11 @@ export async function handleSend(
     },
   });
 
-  return Response.json({ command_id: queued.commandId, replayed: false });
+  return Response.json({
+    command_id: queued.commandId,
+    replayed: false,
+    lifecycle: computeCommandLifecycle({ channel: "sms", state: "PENDING", created_at: Date.now() }),
+  });
 }
 
 /** `POST /v1/sms/send/batch` (admin) — enqueue many outbound SMS in one DO call. */

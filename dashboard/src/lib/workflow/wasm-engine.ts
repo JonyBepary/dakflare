@@ -52,7 +52,7 @@ let wasmPromise: Promise<WasmExports> | null = null;
 async function loadWasm(): Promise<WasmExports> {
 	if (wasmPromise) return wasmPromise;
 
-	wasmPromise = (async () => {
+	const promise = (async () => {
 		const wasmUrl = `${BASE}/flow.wasm`;
 		const res = await fetch(wasmUrl);
 		if (!res.ok) {
@@ -62,6 +62,11 @@ async function loadWasm(): Promise<WasmExports> {
 		const instantiated = await WebAssembly.instantiate(buffer, {});
 		return instantiated.instance.exports as unknown as WasmExports;
 	})();
+
+	wasmPromise = promise.catch((err) => {
+		wasmPromise = null;
+		throw err;
+	});
 
 	return wasmPromise;
 }
@@ -83,10 +88,11 @@ function callWasmJson(
 	const view = new DataView(wasm.memory.buffer, outPtr, 4);
 	const outLen = view.getUint32(0, true);
 
-	const outBytes = new Uint8Array(wasm.memory.buffer, outPtr + 4, outLen);
-	const text = new TextDecoder().decode(outBytes);
-
+	const outBytes = new Uint8Array(wasm.memory.buffer, outPtr + 4, outLen).slice();
 	wasm.dealloc(outPtr, 4 + outLen);
+	wasm.dealloc(inPtr, inputBytes.byteLength);
+
+	const text = new TextDecoder().decode(outBytes);
 
 	try {
 		return JSON.parse(text);

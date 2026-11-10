@@ -146,7 +146,8 @@ export async function handleCommandStatus(
   const lifecycle = computeCommandLifecycle({
     channel: (rawCommand.channel as string) || "sms",
     state: (rawCommand.state as string) || "PENDING",
-    created_at: Number(rawCommand.created_at) || Date.now(),
+    created_at: Number(rawCommand.updated_at ?? rawCommand.created_at) || Date.now(),
+    error_code: (rawCommand.error_code as string) ?? null,
   });
 
   return Response.json({

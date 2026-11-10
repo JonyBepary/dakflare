@@ -137,7 +137,7 @@ class SmsReceiver : BroadcastReceiver() {
                 )
             }
 
-            reply(context, appDir, outcome.deviceId, sender, subscriptionId, outcome.actions)
+            reply(context, appDir, outcome.deviceId, sender, body, subscriptionId, outcome.actions)
         }
     }
 
@@ -147,6 +147,7 @@ class SmsReceiver : BroadcastReceiver() {
         appDir: String,
         deviceId: String,
         sender: String,
+        inboundBody: String,
         subscriptionId: Int,
         actions: List<Reply>,
     ) {
@@ -175,7 +176,7 @@ class SmsReceiver : BroadcastReceiver() {
             // Guard when SIM reports no number: an auto-reply loopback occurs when
             // an action sends identical text back to the sender (echo reflection),
             // which would loop indefinitely if the handset sent to itself.
-            if (actions.any { normalize(it.to) == normalize(sender) && it.body.trim().equals(body.trim(), ignoreCase = true) }) {
+            if (actions.any { normalize(it.to) == normalize(sender) && it.body.trim().equals(inboundBody.trim(), ignoreCase = true) }) {
                 Log.w(TAG, "sender=${mask(sender)} echo-loop reply suppressed (blank SIM reflection protection)")
                 decline(appDir, deviceId, actions, "self_target_loop")
                 return

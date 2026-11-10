@@ -25,10 +25,11 @@ export class WhatsAppCloudChannelPlugin implements ChannelPlugin {
   async verifyWebhook(req: Request, rawBody: string, env: Env): Promise<boolean> {
     const signature = req.headers.get("X-Hub-Signature-256");
     const secret = (env as unknown as Record<string, string | undefined>).WHATSAPP_APP_SECRET;
-    if (!secret) return true; // Allows unverified dev when secret is not provisioned
-    if (!signature || !signature.startsWith("sha256=")) return false;
+    if (!secret || !signature || !signature.startsWith("sha256=")) return false;
 
     const expectedHex = signature.slice(7);
+    if (expectedHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(expectedHex)) return false;
+
     const enc = new TextEncoder();
     const key = await crypto.subtle.importKey(
       "raw",
@@ -45,7 +46,7 @@ export class WhatsAppCloudChannelPlugin implements ChannelPlugin {
     return crypto.subtle.verify("HMAC", key, sigBytes, enc.encode(rawBody));
   }
 
-  async parseInbound(_req: Request, rawBody: string, env: Env): Promise<InboundMessagePayload[]> {
+  async parseInbound(_req: Request, rawBody: string, _env: Env): Promise<InboundMessagePayload[]> {
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(rawBody || "{}");
@@ -71,26 +72,6 @@ export class WhatsAppCloudChannelPlugin implements ChannelPlugin {
           const ts = typeof msg.timestamp === "string" ? Number(msg.timestamp) * 1000 : Date.now();
 
           if (!from) continue;
-
-          // Record conversation session state in D1
-          const convId = `conv_wa_${from}`;
-          const expiresAt = ts + WINDOW_DURATION_MS;
-
-          try {
-            await env.DB.prepare(
-              `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, window_expires_at, last_inbound_at, created_at, updated_at)
-               VALUES (?1, 'whatsapp', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?4, ?4)
-               ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
-                 session_state = 'WINDOW_OPEN',
-                 window_expires_at = ?3,
-                 last_inbound_at = ?4,
-                 updated_at = ?4`
-            )
-              .bind(convId, from, expiresAt, ts)
-              .run();
-          } catch (e) {
-            console.warn(`[whatsapp] failed to update conversation session: ${String(e)}`);
-          }
 
           results.push({
             channel: "whatsapp",

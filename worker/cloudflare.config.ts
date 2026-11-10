@@ -64,6 +64,12 @@ export default defineConfig({
 			triggers.scheduled({
 				schedule: "17 3 * * *",
 			}),
+			triggers.queue({
+				name: "dakflare-webhook-queue",
+				maxBatchSize: 10,
+				maxBatchTimeout: 5,
+				maxRetries: 3,
+			}),
 		],
 
 		env: {

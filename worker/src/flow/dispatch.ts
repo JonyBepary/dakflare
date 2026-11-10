@@ -275,18 +275,21 @@ const COMMAND_TTL_MS = 86_400_000;
 export async function dispatchFlows(
   env: Env,
   deviceId: string,
-  messages: AcceptedMessage[]
+  messages: AcceptedMessage[],
+  channel: string = "sms"
 ): Promise<number> {
   if (messages.length === 0) return 0;
 
   const rows = await env.DB.prepare(
     `SELECT id, graph, version
        FROM workflows
-      WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)
-      ORDER BY updated_at DESC
+      WHERE enabled = 1
+        AND (device_id IS NULL OR device_id = ?)
+        AND (channel = 'all' OR channel = ?)
+      ORDER BY priority DESC, updated_at DESC
       LIMIT ${MAX_FLOWS_PER_DEVICE}`
   )
-    .bind(deviceId)
+    .bind(deviceId, channel)
     .all<{ id: string; graph: string; version: number }>();
 
   const workflows = rows.results ?? [];
@@ -358,7 +361,8 @@ export async function dispatchFlows(
       if (!result.matched || (result.outcome !== "delivered" && result.outcome !== "partial")) continue;
 
       let executedWebhookOrDelay = false;
-      for (const action of result.actions) {
+      for (let actionIndex = 0; actionIndex < result.actions.length; actionIndex++) {
+        const action = result.actions[actionIndex];
         if (action.type === "send_sms") {
           // If the handset already executed partially, it sent the SMS locally.
           // Never send a duplicate SMS.
@@ -439,24 +443,27 @@ export async function dispatchFlows(
             executedWebhookOrDelay = true;
           } else if (env.FLOW_WORKFLOW && action.seconds > 5) {
             try {
+              const remainingActions = result.actions.slice(actionIndex);
+              const pendingSteps = remainingActions.map((act, idx) => ({
+                nodeId: `step_${idx}`,
+                type: act.type,
+                data: act as unknown as Record<string, unknown>,
+              }));
+
               await env.FLOW_WORKFLOW.create({
-                id: `wf_${workflow.id}_${message.localId}`,
+                id: `wf_${workflow.id}_${message.localId}_${Date.now()}`,
                 params: {
+                  deviceId,
                   flowId: workflow.id,
                   flowVersion: workflow.version,
                   localId: message.localId,
                   sender: message.sender,
                   body: message.body,
-                  pendingSteps: [
-                    {
-                      nodeId: "delay_node",
-                      type: "delay",
-                      data: { seconds: action.seconds },
-                    },
-                  ],
+                  pendingSteps,
                 },
               });
               executedWebhookOrDelay = true;
+              break;
             } catch (err) {
               console.warn(`[flow] ${workflow.id}: workflow step creation failed: ${String(err)}`);
             }

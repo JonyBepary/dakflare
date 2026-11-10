@@ -60,6 +60,8 @@ import { handleMcpRequest } from "./mcp/server";
 import { AuthorityGuard } from "./authority-guard";
 import { FlowExecutionWorkflow, type FlowWorkflowParams } from "./workflows/flow-execution";
 import { getChannelPlugin } from "./channels";
+import { dispatchFlows } from "./flow/dispatch";
+import { isBlockedWebhookHost } from "./lib/flow-ir";
 export { FlowExecutionWorkflow };
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
 import { scopeForAction } from "./lib/agent-scopes";
@@ -659,10 +661,15 @@ export default {
       try {
         const payload = msg.body as { url?: string; headers?: Record<string, string>; body?: unknown } | null;
         if (payload?.url) {
+          if (isBlockedWebhookHost(payload.url)) {
+            msg.ack();
+            continue;
+          }
           const res = await fetch(payload.url, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(payload.headers ?? {}) },
             body: typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {}),
+            signal: AbortSignal.timeout(10_000),
           });
           if (!res.ok) {
             msg.retry();
@@ -714,28 +721,50 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         const convId = `conv_tg_${msg.sender}`;
         const now = Date.now();
         ctx.waitUntil(
-          env.DB.batch([
-            env.DB.prepare(
-              `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
-               VALUES (?1, 'channel:telegram', ?2, 'in', ?3, ?4, ?5, 'telegram', ?6)
-               ON CONFLICT(device_id, local_id) DO NOTHING`
-            ).bind(
-              crypto.randomUUID(),
-              `tg_${msg.channelMessageId}`,
-              msg.sender,
-              msg.body,
-              msg.timestamp,
-              convId
-            ),
-            env.DB.prepare(
-              `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, last_inbound_at, created_at, updated_at)
-               VALUES (?1, 'telegram', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?4)
-               ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
-                 session_state = 'WINDOW_OPEN',
-                 last_inbound_at = excluded.last_inbound_at,
-                 updated_at = excluded.updated_at`
-            ).bind(convId, msg.sender, msg.timestamp, now),
-          ]).catch((err) => console.warn(`[telegram] failed to store message/conversation: ${String(err)}`))
+          (async () => {
+            try {
+              const batchRes = await env.DB.batch([
+                env.DB.prepare(
+                  `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
+                   VALUES (?1, 'channel:telegram', ?2, 'in', ?3, ?4, ?5, 'telegram', ?6)
+                   ON CONFLICT(device_id, local_id) DO NOTHING`
+                ).bind(
+                  crypto.randomUUID(),
+                  `tg_${msg.channelMessageId}`,
+                  msg.sender,
+                  msg.body,
+                  msg.timestamp,
+                  convId
+                ),
+                env.DB.prepare(
+                  `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, last_inbound_at, created_at, updated_at)
+                   VALUES (?1, 'telegram', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?4)
+                   ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
+                     session_state = 'WINDOW_OPEN',
+                     last_inbound_at = excluded.last_inbound_at,
+                     updated_at = excluded.updated_at`
+                ).bind(convId, msg.sender, msg.timestamp, now),
+              ]);
+
+              if (batchRes && Number(batchRes[0]?.meta?.changes ?? 0) > 0) {
+                await dispatchFlows(
+                  env,
+                  "channel:telegram",
+                  [
+                    {
+                      localId: `tg_${msg.channelMessageId}`,
+                      sender: msg.sender,
+                      body: msg.body,
+                      receivedAt: msg.timestamp,
+                    },
+                  ],
+                  "telegram"
+                );
+              }
+            } catch (err) {
+              console.warn(`[telegram] failed to store message/conversation: ${String(err)}`);
+            }
+          })()
         );
       }
       return Response.json({ ok: true, count: messages.length });
@@ -747,7 +776,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         const token = url.searchParams.get("hub.verify_token");
         const challenge = url.searchParams.get("hub.challenge");
         const expectedToken = (env as unknown as Record<string, string | undefined>).WHATSAPP_VERIFY_TOKEN;
-        if (mode === "subscribe" && (!expectedToken || token === expectedToken)) {
+        if (mode === "subscribe" && expectedToken && token === expectedToken) {
           return new Response(challenge ?? "", { status: 200 });
         }
         return new Response("Forbidden", { status: 403 });
@@ -765,29 +794,51 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
           const now = Date.now();
           const expiresAt = msg.timestamp + 24 * 3600 * 1000;
           ctx.waitUntil(
-            env.DB.batch([
-              env.DB.prepare(
-                `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
-                 VALUES (?1, 'channel:whatsapp', ?2, 'in', ?3, ?4, ?5, 'whatsapp', ?6)
-                 ON CONFLICT(device_id, local_id) DO NOTHING`
-              ).bind(
-                crypto.randomUUID(),
-                `wa_${msg.channelMessageId}`,
-                msg.sender,
-                msg.body,
-                msg.timestamp,
-                convId
-              ),
-              env.DB.prepare(
-                `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, window_expires_at, last_inbound_at, created_at, updated_at)
-                 VALUES (?1, 'whatsapp', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?5, ?5)
-                 ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
-                   session_state = 'WINDOW_OPEN',
-                   window_expires_at = excluded.window_expires_at,
-                   last_inbound_at = excluded.last_inbound_at,
-                   updated_at = excluded.updated_at`
-              ).bind(convId, msg.sender, expiresAt, msg.timestamp, now),
-            ]).catch((err) => console.warn(`[whatsapp] failed to store message/conversation: ${String(err)}`))
+            (async () => {
+              try {
+                const batchRes = await env.DB.batch([
+                  env.DB.prepare(
+                    `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
+                     VALUES (?1, 'channel:whatsapp', ?2, 'in', ?3, ?4, ?5, 'whatsapp', ?6)
+                     ON CONFLICT(device_id, local_id) DO NOTHING`
+                  ).bind(
+                    crypto.randomUUID(),
+                    `wa_${msg.channelMessageId}`,
+                    msg.sender,
+                    msg.body,
+                    msg.timestamp,
+                    convId
+                  ),
+                  env.DB.prepare(
+                    `INSERT INTO conversations (id, channel, account_id, peer_id, session_state, window_expires_at, last_inbound_at, created_at, updated_at)
+                     VALUES (?1, 'whatsapp', 'default', ?2, 'WINDOW_OPEN', ?3, ?4, ?5, ?5)
+                     ON CONFLICT(channel, account_id, peer_id) DO UPDATE SET
+                       session_state = 'WINDOW_OPEN',
+                       window_expires_at = excluded.window_expires_at,
+                       last_inbound_at = excluded.last_inbound_at,
+                       updated_at = excluded.updated_at`
+                  ).bind(convId, msg.sender, expiresAt, msg.timestamp, now),
+                ]);
+
+                if (batchRes && Number(batchRes[0]?.meta?.changes ?? 0) > 0) {
+                  await dispatchFlows(
+                    env,
+                    "channel:whatsapp",
+                    [
+                      {
+                        localId: `wa_${msg.channelMessageId}`,
+                        sender: msg.sender,
+                        body: msg.body,
+                        receivedAt: msg.timestamp,
+                      },
+                    ],
+                    "whatsapp"
+                  );
+                }
+              } catch (err) {
+                console.warn(`[whatsapp] failed to store message/conversation: ${String(err)}`);
+              }
+            })()
           );
         }
         return Response.json({ ok: true, count: messages.length });
