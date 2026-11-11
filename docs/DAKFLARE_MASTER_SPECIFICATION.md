@@ -1140,36 +1140,48 @@ The project maintains two configuration files that **must never drift**:
 
 | Configuration File | Consumed By | Purpose |
 |---|---|---|
-| `worker/cloudflare.config.ts` | `cf` CLI | **Canonical Worker definition:** bindings, DO exports, triggers, and deployment config. Used in CI deploy. |
+| `worker/cloudflare.config.ts` | `cf` CLI | **Canonical Worker definition:** bindings, DO exports, triggers, and deployment config. Used by every deploy. |
 | `worker/wrangler.toml` | `wrangler` CLI | **Developer tooling:** local dev (`wrangler dev --local`), log streaming (`wrangler tail`), secrets (`wrangler secret put`), D1 exports. |
 
 - **Drift Enforcement:** `npm run check:config` ([`worker/scripts/check-config.mjs`](file:///home/jony/Projects/dakflare/worker/scripts/check-config.mjs)) is executed in CI on every pull request and every push to `main`. It verifies that binding names, rate limiters, and environment variables match exactly across `cloudflare.config.ts`, `wrangler.toml`, and `wrangler.account.toml`.
 
 ### 5.2 CI/CD Pipeline (`.github/workflows/pipeline.yml`)
 
-Runs on every pull request and on pushes to `main`. Consists of six jobs. Four run in parallel; `suite` waits for `worker`, and `deploy` waits for all five:
+Runs on every pull request and on pushes to `main`. Consists of six jobs and **no deploy
+job**: a push verifies, it does not publish. Production moves when a person runs
+`cd worker && npm run deploy`.
 
 ```mermaid
 flowchart LR
-    A["worker (typecheck & check:config)"] --> B["suite (conformance suite against local dev stack)"]
-    C["dashboard (svelte-check & vite build)"] --> E["deploy (push to main only: cf build & cf deploy)"]
-    D["simulator (svelte-check)"] --> E
-    F["rust (cargo test in core & flow)"] --> E
-    B --> E
-    E --> G["smoke.sh (asserts /, /admin/, /source)"]
-    G --> H["dakflare doctor (full authenticated probe)"]
+    A["worker (typecheck & check:config)"]
+    C["dashboard (svelte-check & vite build)"]
+    D["simulator (svelte-check)"]
+    F["rust (cargo test in core & flow)"]
+    S["skills (capabilities gate)"]
+    A --> B["suite (conformance suite against local dev stack)"]
 ```
 
 1. **`worker`:** `tsc --noEmit` and `npm run check:config`.
-2. **`dashboard`:** `svelte-check` and SvelteKit static asset build.
-3. **`simulator`:** `svelte-check` for mobile UI.
-4. **`rust`:** `cargo test --locked` across `simulator/core` (89 tests) and `simulator/flow` (8 tests).
-5. **`suite`:** Starts local development stack (`wrangler dev --local`) and runs `dakflare_test_harness.mjs pair && suite`. The stack shortens the timing knobs through `--var` (`LEASE_MS=1500`, `ACK_TIMEOUT_MS=1500`, `OFFLINE_ALERT_MS=5000`), so the run does not wait a real minute for a lease to expire.
-6. **`deploy`:** Only runs on pushes to `main` or manual dispatch. Builds console, runs `cf build` and `cf deploy --prebuilt`, executes `smoke.sh`, and verifies edge health via `dakflare doctor`.
+2. **`skills`:** `test-support/skills-gate.mjs` reads `capabilities --agent` and fails on any
+   invocation in `skills/*/SKILL.md` that the CLI does not have.
+3. **`dashboard`:** `svelte-check` and SvelteKit static asset build.
+4. **`simulator`:** `svelte-check` for mobile UI.
+5. **`rust`:** `cargo test --locked` across `simulator/core` (92 tests) and `simulator/flow` (27 tests).
+6. **`suite`:** Starts the local development stack (`wrangler dev --local`) and runs
+   `dakflare_test_harness.mjs pair && suite`. CI runs it with `LEASE_MS=15000` and
+   `STALE_SOCKET_MS=120000`: the lease-recovery section holds a socket deliberately quiet for
+   the whole lease window, and at the 2 s default the push path ages it out and the command
+   looks lost.
+
+The deploy path is local, and `worker/scripts/smoke.sh` plus `dakflare doctor` are what you run
+after it. No repository secret is needed by this pipeline; `migrations.yml` is the one workflow
+that holds Cloudflare credentials.
 
 ### 5.3 Manual Migrations Workflow (`.github/workflows/migrations.yml`)
 
-- Migrations are **never** applied automatically by the deploy pipeline.
+- Migrations are **never** applied automatically. `migrations.yml` is manual, holds
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, and its `database` input takes the D1
+  **ID**: `cf d1 migrations` rejects the name outright.
 - Applied manually via GitHub Actions workflow dispatch with explicit confirmation input `confirm: "apply"`.
 - Production schema verification: [`worker/scripts/verify-baseline.sh`](file:///home/jony/Projects/dakflare/worker/scripts/verify-baseline.sh) diffs `sqlite_master` against `0001_baseline.sql`. Note: requires live Cloudflare credentials and cannot run offline in CI.
 

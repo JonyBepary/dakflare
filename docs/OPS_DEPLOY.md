@@ -42,8 +42,12 @@ binding that is `undefined` in one tool and present in the other.
 | `rust` | `cargo test --locked` in `simulator/core` (92 tests) and `simulator/flow` (22) |
 | `suite` | the conformance suite against a local stack: `pair` then `suite` |
 
-**Zero repository secrets:** The pipeline does not hold `CLOUDFLARE_API_TOKEN` or `ADMIN_TOKEN`.
-Forks and pull requests run the complete suite hermetically.
+**The check pipeline holds no secrets.** `pipeline.yml` does not read `CLOUDFLARE_API_TOKEN` or
+`ADMIN_TOKEN`, so forks and pull requests run the complete suite hermetically.
+
+One workflow is the exception: `migrations.yml` holds `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` because it calls `cf d1 migrations` against the real database. It is
+manual, runs in the `production` environment, and refuses without the confirmation word.
 
 ## First-time setup
 
@@ -64,14 +68,42 @@ Forks and pull requests run the complete suite hermetically.
 `npx wrangler secret put <NAME> --name dakflare-worker` (or uploaded from `worker/.dev.vars` by
 `dakflare up`) and survive a deploy. `cf deploy --secrets-file` is driven locally by `dakflare up`.
 
+## Deploying
+
+There is no deploy job. A push to `main` runs the six check jobs and stops; production moves
+only when you run it:
+
+```bash
+cd worker && npm run deploy        # builds the console, then `cf deploy`
+```
+
+`dakflare up` does the same for a fresh deployment, plus provisioning. This is deliberate: the
+account credential never lives in the repository, and a deploy is a decision rather than a
+consequence of merging.
+
 ## Order of operations for a schema change
 
 1. Back up: a Time Travel bookmark, or an export. `docs/OPS_BACKUP.md`.
 2. Run **Actions, D1 migrations, Run workflow**, type `apply` in the confirmation field.
-3. Merge the code that expects the new schema. The push to `main` deploys it.
+3. Merge the code that expects the new schema, then deploy it by hand (`cd worker && npm run
+   deploy`). Merging alone no longer moves production.
 
 Migrations are never part of the deploy pipeline: a migration is a one-way door, and a
 pipeline that applies one on every push will eventually apply one nobody read.
+
+## Traps when scripting `cf`
+
+Three that have each cost this repository something:
+
+- **An aborted destructive command exits `0`.** In a non-interactive session a delete without
+  `--force` prints `Aborted.` to stderr and returns success. A script that trusts the exit status
+  will report a deletion that did not happen; check for the resource, not the exit code.
+- **D1 migrations need the database ID, never the name.** `cf d1 migrations list sms_gateway`
+  answers `Expected a D1 database ID, but received <database>="sms_gateway". Database names and
+  binding names are not accepted.` The ID is `8d88069e-71cf-49a2-ba33-c150b02246b7`.
+- **`tail` and `secret put` are still Wrangler.** `cf` cannot stream logs or set one secret yet.
+  Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
+  `npx wrangler secret put ADMIN_TOKEN --name dakflare-worker`.
 
 ## Rolling back
 
@@ -82,9 +114,9 @@ cd worker
 npx cf workers versions list          # what is deployed, newest first
 ```
 
-To go back to an earlier commit, run the pipeline on it: tag the good commit and start a
-manual run on that tag, or revert and push. A revert is preferred, because `main` stays the
-thing that is running.
+To go back to an earlier commit, revert it on `main` and deploy by hand. A revert is preferred
+over a rollback: `main` stays the thing that is running, and the next deploy does not silently
+re-introduce the bad commit.
 
 Data is a different job: `npx wrangler d1 time-travel restore sms_gateway --remote
 --timestamp=...` rolls the database back in place for up to 30 days. Both are in
