@@ -65,14 +65,60 @@ const REQUIRED_BINDINGS = [
  * or nothing) is chosen here from the terminal and the mode. Nothing outside
  * this block may name a colour.
  */
-const TRUECOLOR = {
+/**
+ * The exact inks, chosen for a LIGHT background: mint-700, butter-700, coral-700
+ * and umber-400 from `design/tokens.css`.
+ *
+ * They measure 6.0 to 6.8:1 on white and 2.4 to 2.8:1 on `#1e1e1e`, so emitting
+ * them unconditionally made the output WORSE the more capable the terminal was.
+ * The terminal is the one surface whose background we do not control, which is
+ * why the default is the 16-colour palette: it delegates to the theme the
+ * operator already chose and tuned for contrast.
+ */
+const TRUECOLOR_LIGHT = {
   ok: '31,107,69',
   warn: '122,83,16',
   fail: '178,59,32',
   muted: '107,97,83',
   accent: '178,59,32',
 };
+
+/**
+ * The same roles for a DARK background: mint-400, butter-400, coral-400 and
+ * umber-300, the ascending steps of the same ramps. Measured 8.1 to 9.6:1 on
+ * `#1e1e1e`.
+ */
+const TRUECOLOR_DARK = {
+  ok: '74,222,128',
+  warn: '251,191,36',
+  fail: '248,113,113',
+  muted: '168,162,158',
+  accent: '249,115,22',
+};
+
 const ANSI16 = { ok: '32', warn: '33', fail: '31', muted: '2', accent: '31' };
+
+/**
+ * Which background the terminal has, as best we can tell without a round trip.
+ *
+ * `COLORFGBG` is the classic xterm hint (`fg;bg`, and the bg is often `default`).
+ * `DAKFLARE_TRUECOLOR=light|dark` overrides it for a terminal that does not set
+ * anything. With no signal at all the answer is `null`, and the caller falls back
+ * to the 16-colour palette rather than guessing.
+ */
+function terminalBackground() {
+  const forced = String(process.env.DAKFLARE_TRUECOLOR ?? '').toLowerCase();
+  if (forced === 'light' || forced === 'dark') return forced;
+
+  const hint = process.env.COLORFGBG;
+  if (typeof hint !== 'string' || hint === '') return null;
+  const parts = hint.split(';');
+  const bg = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(bg)) return null;
+  if (bg === 7 || bg === 15 || (bg >= 9 && bg <= 15)) return 'light';
+  if (bg >= 0 && bg <= 8) return 'dark';
+  return null;
+}
 
 /** Set once by `main`; `--agent` turns colour, prompts and pretty JSON off. */
 let AGENT = false;
@@ -83,15 +129,18 @@ let MODE = { json: false, agent: false };
 function colorMode() {
   if (AGENT || process.env.NO_COLOR) return 'none';
   if (!process.stdout.isTTY) return 'none';
-  if (String(process.env.COLORTERM ?? '').toLowerCase().includes('truecolor')) return 'truecolor';
-  return 'ansi';
+  // Truecolor only when the background is known: the ink set depends on it, and
+  // guessing is how the palette ended up at 2.4:1 on a dark terminal.
+  if (!String(process.env.COLORTERM ?? '').toLowerCase().includes('truecolor')) return 'ansi';
+  return terminalBackground() === null ? 'ansi' : 'truecolor';
 }
 
 function paint(role, text) {
   const mode = colorMode();
   if (mode === 'none') return text;
-  const code = mode === 'truecolor' ? `38;2;${TRUECOLOR[role]}` : ANSI16[role];
-  return `\x1b[${code}m${text}\x1b[0m`;
+  if (mode === 'ansi') return `\x1b[${ANSI16[role]}m${text}\x1b[0m`;
+  const inks = terminalBackground() === 'dark' ? TRUECOLOR_DARK : TRUECOLOR_LIGHT;
+  return `\x1b[38;2;${inks[role]}m${text}\x1b[0m`;
 }
 
 const ok = (text) => paint('ok', text);

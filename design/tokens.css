@@ -46,10 +46,16 @@
 	--df-p-butter-300: #f0c67c;
 	--df-p-butter-700: #7a5310;
 	--df-p-butter-900: #352d1f;
-	--df-p-peach-100: #fbe0d3;
-	--df-p-peach-300: #f5a98f;
-	--df-p-peach-700: #a33218;
-	--df-p-peach-900: #382720;
+	/* Crimson, not orange. The peach ramp was OKLCH hue 34.1, identical to
+	   coral-700, so `danger` and `accent` differed by 1.17:1 and an error message
+	   rendered in the same ink as a link. Retuned to hue 17.9 (16.2 degrees away)
+	   at the same lightness steps, so only the hue channel moved. Every pair below
+	   was remeasured: ink on cream 7.74, ink on its own wash 6.49, fill on white
+	   7.43, dark ink on the dark wash 6.80. */
+	--df-p-peach-100: #fbe1e6;
+	--df-p-peach-300: #ef96a8;
+	--df-p-peach-700: #9e1c33;
+	--df-p-peach-900: #341a22;
 	--df-p-lilac-100: #e9e3fb;
 	--df-p-lilac-300: #c2b6f2;
 	--df-p-lilac-700: #4a3a8c;
