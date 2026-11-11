@@ -923,6 +923,20 @@ pub fn auto_suggest_spans(body: &str) -> Vec<TemplateSpan> {
     }
 
     spans.sort_by_key(|s| s.start);
+
+    // Two suggestions can name the same field: a bKash message has an amount and a
+    // fee, and both look like money. `synthesize` refuses duplicate capture-group
+    // names, correctly, so a caller that fed these straight in got
+    // "duplicate capture group name" instead of a pattern. Suffixing here keeps
+    // the suggestion useful and the contract honest.
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for span in &mut spans {
+        let count = seen.entry(span.name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            span.name = format!("{}_{}", span.name, *count);
+        }
+    }
     spans
 }
 
@@ -972,6 +986,21 @@ mod tests {
         assert_eq!(result.precision, 1.0);
         assert_eq!(result.recall, 1.0);
         assert_eq!(result.negatives, 1);
+    }
+
+    #[test]
+    fn suggestions_never_share_a_name() {
+        // A bKash message has an amount and a fee; both are money, so the
+        // detector proposes "amount" twice and `synthesize` then refuses the whole
+        // set for a duplicate capture group. The suffix is what makes the
+        // suggestion usable as-is.
+        let msg = "You have received Tk 800.00 from 01999999999. Ref INV102. Fee Tk 0.00. Balance Tk 1,200.00. TrxID 8G56H7J8K9 at 15/07/2026 11:24";
+        let spans = auto_suggest_spans(msg);
+        let mut names: Vec<&str> = spans.iter().map(|span| span.name.as_str()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two suggestions share a name");
     }
 
     #[test]
