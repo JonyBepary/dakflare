@@ -45,9 +45,13 @@ binding that is `undefined` in one tool and present in the other.
 **The check pipeline holds no secrets.** `pipeline.yml` does not read `CLOUDFLARE_API_TOKEN` or
 `ADMIN_TOKEN`, so forks and pull requests run the complete suite hermetically.
 
-One workflow is the exception: `migrations.yml` holds `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID` because it calls `cf d1 migrations` against the real database. It is
-manual, runs in the `production` environment, and refuses without the confirmation word.
+There is no Cloudflare credential in this repository at all. Migrations are applied from a
+machine with a signed-in `cf`, which is a local credential that never leaves your laptop and
+needs no secret store to hold it.
+
+That also removes the only reason a workflow needed a Cloudflare API token: a GitHub runner has
+no browser and no OAuth session, so a workflow that talked to the API had to carry a long-lived
+account credential. Nothing here does any more.
 
 ## First-time setup
 
@@ -84,7 +88,14 @@ consequence of merging.
 ## Order of operations for a schema change
 
 1. Back up: a Time Travel bookmark, or an export. `docs/OPS_BACKUP.md`.
-2. Run **Actions, D1 migrations, Run workflow**, type `apply` in the confirmation field.
+2. Apply it from a machine signed in to `cf`, passing the database **ID**:
+
+   ```bash
+   cd worker
+   npx cf d1 migrations list  8d88069e-71cf-49a2-ba33-c150b02246b7
+   npx cf d1 migrations apply 8d88069e-71cf-49a2-ba33-c150b02246b7
+   ```
+
 3. Merge the code that expects the new schema, then deploy it by hand (`cd worker && npm run
    deploy`). Merging alone no longer moves production.
 

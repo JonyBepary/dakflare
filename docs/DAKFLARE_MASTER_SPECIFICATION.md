@@ -528,7 +528,7 @@ the app, which is why it is a column and not a build-time constant.
 
 **Production state:** `0002` is applied locally and exercised by the suite, but not
 yet applied to the production database. `dakflare doctor` reports it as the one
-failing check until the manual migrations workflow runs, after a backup.
+failing check until a migration is applied locally, after a backup.
 
 ### 4.2 Durable Object SQLite Schemas
 
@@ -1174,14 +1174,17 @@ flowchart LR
    looks lost.
 
 The deploy path is local, and `worker/scripts/smoke.sh` plus `dakflare doctor` are what you run
-after it. No repository secret is needed by this pipeline; `migrations.yml` is the one workflow
-that holds Cloudflare credentials.
+after it. No workflow in this repository holds a Cloudflare credential.
 
-### 5.3 Manual Migrations Workflow (`.github/workflows/migrations.yml`)
+### 5.3 Migrations are local
 
-- Migrations are **never** applied automatically. `migrations.yml` is manual, holds
-  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, and its `database` input takes the D1
-  **ID**: `cf d1 migrations` rejects the name outright.
+- Migrations are **never** applied automatically, and no workflow applies them. The workflow
+  that used to do this was deleted with its Cloudflare credential: a runner has no browser and
+  no OAuth session, so it had to hold a long-lived account token, and nothing else in the
+  repository does.
+- Apply one from a machine signed in to `cf`, after a backup, passing the D1 **ID**:
+  `npx cf d1 migrations apply 8d88069e-71cf-49a2-ba33-c150b02246b7`. `cf d1 migrations` rejects
+  the database name outright.
 - Applied manually via GitHub Actions workflow dispatch with explicit confirmation input `confirm: "apply"`.
 - Production schema verification: [`worker/scripts/verify-baseline.sh`](file:///home/jony/Projects/dakflare/worker/scripts/verify-baseline.sh) diffs `sqlite_master` against `0001_baseline.sql`. Note: requires live Cloudflare credentials and cannot run offline in CI.
 
