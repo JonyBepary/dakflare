@@ -67,6 +67,58 @@ function bindingNames(file) {
   return names;
 }
 
+/**
+ * The `exports` table, which the name comparison above cannot judge.
+ *
+ * `wrangler.toml` declaring `[exports.FlowExecutionWorkflow]` without a `name`
+ * passed this check and failed only when wrangler started, which in CI reads as
+ * "the local stack did not come up" rather than as a config error. The schema is
+ * small enough to check here: every export has a `type`, and a workflow export
+ * also carries the Workflow's `name`, which must match its `[[workflows]]` entry.
+ */
+function exportProblems(file) {
+  const text = fs.readFileSync(file, "utf8");
+  const problems = [];
+  const exports = new Map();
+  let current = null;
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+
+    // ANY table header ends the block being read. Resetting only on the next
+    // `[exports.*]` let a later `[[workflows]] name = "…"` be attributed to the
+    // export above it, which is how a missing name passed this check.
+    const header = /^\[\[?([^\]]+)\]\]?$/.exec(line);
+    if (header) {
+      current = header[1].startsWith("exports.") ? header[1].slice("exports.".length) : null;
+      if (current !== null) exports.set(current, {});
+      continue;
+    }
+    if (current === null) continue;
+    const pair = /^(type|name|storage|class_name)\s*=\s*"([^"]*)"/.exec(line);
+    if (pair) exports.get(current)[pair[1]] = pair[2];
+  }
+
+  const workflowNames = new Set(
+    [...text.matchAll(/^\[\[workflows\]\][\s\S]*?^name\s*=\s*"([^"]+)"/gm)].map((m) => m[1])
+  );
+
+  for (const [name, fields] of exports) {
+    if (fields.type === undefined) {
+      problems.push(`[exports.${name}] has no type`);
+      continue;
+    }
+    if (fields.type !== "workflow") continue;
+    if (fields.name === undefined) {
+      problems.push(`[exports.${name}] is a workflow export and needs name = "<the workflow name>"`);
+    } else if (workflowNames.size > 0 && !workflowNames.has(fields.name)) {
+      problems.push(`[exports.${name}] names "${fields.name}", which has no [[workflows]] entry`);
+    }
+  }
+  return problems;
+}
+
 const ROOT = path.join(HERE, "..");
 const local = bindingNames(path.join(ROOT, "wrangler.toml"));
 const account = bindingNames(path.join(ROOT, "wrangler.account.toml"));
@@ -131,8 +183,16 @@ for (const key of ["crons", "observability"]) {
   if (local[key] !== account[key]) diffs.push(`${key}: local=${local[key]} account=${account[key]}`);
 }
 
-if (diffs.length || cfDrift.length || templateDrift.length) {
+// Checked unconditionally: a shape error is not drift, and the earlier placement
+// inside this branch meant it was never evaluated on a clean run, which is exactly
+// when it is needed.
+const exportIssues = exportProblems(path.join(ROOT, "wrangler.toml"));
+
+if (diffs.length || cfDrift.length || templateDrift.length || exportIssues.length) {
   console.error("config drift detected:");
+  for (const problem of exportIssues) {
+    console.error(`  - ${problem}`);
+  }
   for (const d of diffs) console.error(`  - wrangler.toml vs wrangler.account.toml — ${d}`);
   for (const d of cfDrift) console.error(`  - wrangler.toml vs cloudflare.config.ts — ${d}`);
   for (const d of templateDrift) console.error(`  - template config drift — ${d}`);

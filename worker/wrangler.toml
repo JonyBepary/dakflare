@@ -71,8 +71,13 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+# A workflow export also needs the Workflow's own `name`, which must match the
+# `[[workflows]]` entry below. Without it wrangler refuses the whole file, and in CI
+# that reads as "the local stack did not come up" rather than as a config error,
+# because dev.sh starts wrangler in the background and only prints its log.
 [exports.FlowExecutionWorkflow]
 type = "workflow"
+name = "flow-execution-workflow"
 
 # ---------------------------------------------------------------------------
 # D1 — pairing codes, device registry, message log, rules.
