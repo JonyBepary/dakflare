@@ -119,6 +119,41 @@ function exportProblems(file) {
   return problems;
 }
 
+/**
+ * Workflow names, across all three configs.
+ *
+ * A workflow is declared in two places per file (a `[[workflows]]` binding and an
+ * export, or a `bindings.workflow()` and an `exports.workflow()`), and nothing above
+ * compared them. That is how `wrangler.toml` lost the `name` that `cloudflare.config.ts`
+ * still had: production deployed fine, and the conformance suite could not start.
+ */
+function workflowNames(file) {
+  const text = fs.readFileSync(file, "utf8");
+  const names = new Set();
+
+  // Line-based, and it stops at the next table header. A lazy `[\s\S]*?` between
+  // `[[workflows]]` and the next `name =` ran past the block and picked up a
+  // rate-limiter's name, which read as a phantom workflow in two configs.
+  let inWorkflows = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const header = /^\[\[?([^\]]+)\]\]?$/.exec(line);
+    if (header) {
+      inWorkflows = header[1] === "workflows";
+      continue;
+    }
+    if (inWorkflows) {
+      const pair = /^name\s*=\s*"([^"]+)"/.exec(line);
+      if (pair) names.add(pair[1]);
+    }
+  }
+
+  for (const m of text.matchAll(/exports\.workflow\(\s*\{\s*name:\s*"([^"]+)"/g)) names.add(m[1]);
+  for (const m of text.matchAll(/bindings\.workflow\(\s*\{\s*name:\s*"([^"]+)"/g)) names.add(m[1]);
+  return names;
+}
+
 const ROOT = path.join(HERE, "..");
 const local = bindingNames(path.join(ROOT, "wrangler.toml"));
 const account = bindingNames(path.join(ROOT, "wrangler.account.toml"));
@@ -187,6 +222,25 @@ for (const key of ["crons", "observability"]) {
 // inside this branch meant it was never evaluated on a clean run, which is exactly
 // when it is needed.
 const exportIssues = exportProblems(path.join(ROOT, "wrangler.toml"));
+
+// Workflows must be the same set in every config, or one deployment path silently
+// lacks a binding the code uses.
+const localWorkflows = workflowNames(path.join(ROOT, "wrangler.toml"));
+const accountWorkflows = workflowNames(path.join(ROOT, "wrangler.account.toml"));
+const cfWorkflows = workflowNames(path.join(ROOT, "cloudflare.config.ts"));
+if (cfWorkflows.size > 0) {
+  for (const name of localWorkflows) {
+    if (!cfWorkflows.has(name)) exportIssues.push(`workflow "${name}" is in wrangler.toml but not cloudflare.config.ts`);
+  }
+  for (const name of cfWorkflows) {
+    if (localWorkflows.size > 0 && !localWorkflows.has(name)) exportIssues.push(`workflow "${name}" is in cloudflare.config.ts but not wrangler.toml`);
+  }
+}
+if (accountWorkflows.size > 0) {
+  for (const name of localWorkflows) {
+    if (!accountWorkflows.has(name)) exportIssues.push(`workflow "${name}" is in wrangler.toml but not wrangler.account.toml`);
+  }
+}
 
 if (diffs.length || cfDrift.length || templateDrift.length || exportIssues.length) {
   console.error("config drift detected:");
