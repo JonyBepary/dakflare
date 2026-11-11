@@ -18,5 +18,11 @@ export interface WorkflowCanvasUi {
 	unsupportedKind(id: string): string;
 	/** Screen → canvas coordinates, supplied by the component rendered inside SvelteFlow. */
 	screenToFlowPosition(point: { x: number; y: number }): { x: number; y: number };
-	revealNode(id: string): void;
+	/**
+	 * Centres a step. `rightInset` is the width of anything covering the right edge,
+	 * so a step revealed under a drawer still lands where it can be seen.
+	 */
+	revealNode(id: string, options?: { rightInset?: number }): void;
+	/** Frames the whole graph, without going below the readable zoom floor. */
+	fitAll(): void;
 }

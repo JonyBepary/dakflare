@@ -1,4 +1,11 @@
 <script lang="ts">
+	/**
+	 * The step catalogue, as a popover: nine kinds, one click each.
+	 *
+	 * It used to be a permanent 186px column beside the canvas, which cost the
+	 * graph a quarter of its width. The palette is a door, not a room, so it opens
+	 * from the "Add step" button and closes as soon as something is picked.
+	 */
 	import Icon from '$lib/components/Icon.svelte';
 	import { NODE_LIMIT, NODE_META, NODE_TYPES } from '$lib/workflow/graph';
 	import type { WorkflowNodeType } from '$lib/types';
@@ -6,12 +13,16 @@
 	let {
 		nodeCount,
 		hasTrigger,
-		onadd
+		onadd,
+		onclose
 	}: {
 		nodeCount: number;
 		hasTrigger: boolean;
 		onadd: (type: WorkflowNodeType) => void;
+		onclose: () => void;
 	} = $props();
+
+	let listEl = $state<HTMLDivElement | null>(null);
 
 	const atLimit = $derived(nodeCount >= NODE_LIMIT);
 
@@ -19,14 +30,57 @@
 		if (atLimit) return true;
 		return type === 'trigger' && hasTrigger;
 	}
+
+	function firstEnabled(): HTMLButtonElement | null {
+		const buttons = [...(listEl?.querySelectorAll<HTMLButtonElement>('button.palette-item') ?? [])];
+		return buttons.find((button) => !button.disabled) ?? buttons[0] ?? null;
+	}
+
+	$effect(() => {
+		const button = firstEnabled();
+		button?.focus();
+	});
+
+	function onkeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.stopPropagation();
+			onclose();
+			return;
+		}
+		if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Tab') return;
+		const buttons = [...(listEl?.querySelectorAll<HTMLButtonElement>('button.palette-item') ?? [])];
+		const usable = buttons.filter((button) => !button.disabled);
+		if (usable.length === 0) return;
+		const at = usable.indexOf(document.activeElement as HTMLButtonElement);
+		if (event.key === 'Tab' && !event.shiftKey && at === usable.length - 1) return;
+		event.preventDefault();
+		const next =
+			event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey)
+				? usable[(at <= 0 ? usable.length : at) - 1]
+				: usable[(at + 1) % usable.length];
+		next?.focus();
+	}
 </script>
 
-<aside class="palette panel" aria-labelledby="palette-title">
-	<div class="palette-head">
-		<p class="eyebrow" id="palette-title">Add a step</p>
-		<p class="palette-copy">Click to drop it in the middle of the canvas.</p>
-	</div>
+<svelte:window
+	onpointerdown={(event) => {
+		const target = event.target as Node | null;
+		const inside =
+			Boolean(target && listEl?.contains(target)) ||
+			(target instanceof Element && Boolean(target.closest('.add-anchor')));
+		if (!inside) onclose();
+	}}
+/>
 
+<div
+	class="palette-pop"
+	bind:this={listEl}
+	role="dialog"
+	tabindex="-1"
+	aria-label="Add a step"
+	onkeydown={onkeydown}
+>
+	<p class="palette-title">Add a step</p>
 	<div class="palette-list">
 		{#each NODE_TYPES as type (type)}
 			{@const meta = NODE_META[type]}
@@ -36,8 +90,10 @@
 				class="palette-item"
 				class:is-disabled={isDisabled}
 				disabled={isDisabled}
-				onclick={() => onadd(type)}
-				aria-describedby={type === 'trigger' && hasTrigger ? 'palette-trigger-note' : undefined}
+				onclick={() => {
+					onadd(type);
+					onclose();
+				}}
 				title={isDisabled
 					? type === 'trigger' && hasTrigger
 						? 'A flow can only have one trigger'
@@ -49,55 +105,51 @@
 					<span class="palette-name">{meta.title}</span>
 					<span class="palette-blurb">{meta.blurb}</span>
 				</span>
-				<span class="palette-mark" aria-hidden="true">
-					{#if type === 'trigger' && hasTrigger}
-						<Icon name="check" size={16} />
-					{:else}
-						<Icon name="plus" size={16} />
-					{/if}
-				</span>
+				{#if type === 'trigger' && hasTrigger}
+					<span class="palette-mark" aria-hidden="true"><Icon name="check" size={16} /></span>
+				{/if}
 			</button>
 		{/each}
 	</div>
-
-	<p class="palette-note" id="palette-trigger-note">
+	<p class="palette-note">
 		{#if atLimit}
 			This flow is at the {NODE_LIMIT}-step limit.
 		{:else if hasTrigger}
-			One trigger per flow. Connect steps by dragging from a handle.
+			Drag from a handle to connect the new step.
 		{:else}
 			Every flow starts with one trigger.
 		{/if}
 	</p>
-</aside>
+</div>
 
 <style>
-	.palette {
-		display: flex;
-		flex-direction: column;
-		min-width: 0;
-		border-radius: var(--df-p-radius-lg);
-		overflow: hidden;
+	.palette-pop {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		z-index: 60;
+		width: 288px;
+		max-width: calc(100vw - 32px);
+		padding: var(--df-p-space-1);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-surface-card);
+		box-shadow: var(--df-shadow-dialog);
 	}
 
-	.palette-head {
-		padding: var(--df-p-space-3) var(--df-p-space-3) var(--df-p-space-2);
-		border-bottom: 1px solid var(--df-border-hairline);
-		background: var(--df-surface-well);
-	}
-
-	.palette-copy {
-		margin-top: 4px;
-		font-size: var(--df-p-text-xs);
-		line-height: 1.4;
+	.palette-title {
+		padding: 5px var(--df-p-space-2) 4px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
 		color: var(--df-text-meta);
 	}
 
 	.palette-list {
 		display: flex;
 		flex-direction: column;
-		padding: var(--df-p-space-1);
-		gap: 2px;
+		gap: 1px;
 	}
 
 	.palette-item {
@@ -106,8 +158,7 @@
 		gap: var(--df-p-space-2);
 		width: 100%;
 		min-width: 0;
-		min-height: 48px;
-		padding: 7px var(--df-p-space-2);
+		padding: 6px var(--df-p-space-2);
 		border: 1px solid transparent;
 		border-radius: var(--df-p-radius-sm);
 		background: transparent;
@@ -115,22 +166,19 @@
 		text-align: left;
 		transition:
 			background-color 130ms ease,
-			border-color 130ms ease,
-			transform var(--df-p-dur-press) ease-out;
+			border-color 130ms ease;
 	}
 
-	.palette-item:hover:not(:disabled) {
+	.palette-item:hover:not(:disabled),
+	.palette-item:focus-visible {
 		background: var(--df-surface-well);
 		border-color: var(--df-border-hairline);
-	}
-
-	.palette-item:active:not(:disabled) {
-		transform: scale(0.97);
+		outline: none;
 	}
 
 	.palette-item:focus-visible {
 		outline: 2px solid var(--df-accent-text);
-		outline-offset: 2px;
+		outline-offset: -2px;
 	}
 
 	.palette-item.is-disabled {
@@ -141,8 +189,8 @@
 	.palette-icon {
 		display: grid;
 		place-items: center;
-		width: 26px;
-		height: 26px;
+		width: 24px;
+		height: 24px;
 		flex: none;
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-surface-well);
@@ -169,13 +217,8 @@
 
 	.palette-blurb {
 		font-size: var(--df-p-text-xs);
-		line-height: 1.35;
+		line-height: 1.3;
 		color: var(--df-text-meta);
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
 	}
 
 	.palette-mark {
@@ -185,42 +228,21 @@
 		width: 18px;
 		height: 18px;
 		flex: none;
-		border-radius: var(--df-p-radius-xs);
 		color: var(--df-text-meta);
-	}
-
-	.palette-item:hover:not(:disabled) .palette-mark {
-		color: var(--df-accent-text);
 	}
 
 	.palette-note {
-		margin-top: auto;
-		padding: var(--df-p-space-2) var(--df-p-space-3);
+		margin-top: 3px;
+		padding: 5px var(--df-p-space-2) 3px;
 		border-top: 1px solid var(--df-border-hairline);
-		background: var(--df-surface-well);
 		font-size: var(--df-p-text-2xs);
-		line-height: 1.45;
+		line-height: 1.4;
 		color: var(--df-text-meta);
-	}
-
-	@media (max-width: 760px) {
-		.palette-list {
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.palette-note {
-			grid-column: 1 / -1;
-		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.palette-item {
 			transition: none;
-		}
-
-		.palette-item:active:not(:disabled) {
-			transform: none;
 		}
 	}
 </style>

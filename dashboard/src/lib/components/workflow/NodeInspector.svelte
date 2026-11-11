@@ -2,7 +2,7 @@
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import VariableHints from './VariableHints.svelte';
-	import TemplateWorkbench from './TemplateWorkbench.svelte';
+	import PatternSheet from './PatternSheet.svelte';
 	import { measureSmsSegments, sanitizeGsm7Text } from '$lib/workflow/sms-encoding';
 	import type {
 		BodyMode,
@@ -47,20 +47,28 @@
 		nodes,
 		edges,
 		issues,
+		layout = 'rail',
 		onupdate,
 		oncases,
 		ondelete,
-		onselect
+		onselect,
+		onclose = null
 	}: {
 		node: FlowNode;
 		nodes: FlowNode[];
 		edges: FlowEdge[];
 		issues: EditorIssue[];
+		/** `wide` is the inline editor in Steps: the same fields, two columns. */
+		layout?: 'rail' | 'wide';
 		onupdate: (patch: Record<string, unknown>) => void;
 		oncases: (op: SwitchCaseOp) => void;
 		ondelete: () => void;
 		onselect: (id: string) => void;
+		onclose?: (() => void) | null;
 	} = $props();
+
+	const uid = $props.id();
+	const titleId = `inspector-title-${uid}`;
 
 	let showWorkbench = $state(false);
 
@@ -137,20 +145,31 @@
 	}
 </script>
 
-<section class="panel inspector" aria-labelledby="inspector-title">
+<section class="panel inspector" class:is-wide={layout === 'wide'} aria-labelledby={titleId}>
 	<div class="inspector-head">
 		<span class="inspector-icon"><Icon name={meta.icon} size={16} /></span>
 		<div class="inspector-title">
 			<p class="eyebrow">Selected step</p>
-			<h2 id="inspector-title">{meta.title}</h2>
+			<h2 id={titleId}>{meta.title}</h2>
 		</div>
 		<span class="copy-slot"><CopyButton value={node.id} label="Copy node id" iconOnly /></span>
+		{#if onclose}
+			<button
+				type="button"
+				class="btn btn-ghost btn-icon btn-sm"
+				onclick={onclose}
+				aria-label="Close the step editor"
+				title="Close the step editor"
+			>
+				<Icon name="x" size={16} />
+			</button>
+		{/if}
 	</div>
 
 	<p class="inspector-help">{HELP[node.type]}</p>
 	<p class="inspector-summary mono">{nodeSummary(node)}</p>
 
-	<div class="inspector-body">
+	<div class="inspector-body" data-inspector-body>
 		{#if node.type === 'trigger'}
 			<div class="field">
 				<label class="label" for={`sender-mode-${node.id}`}>Sender filter</label>
@@ -242,16 +261,17 @@
 						onclick={() => (showWorkbench = !showWorkbench)}
 					>
 						<Icon name={showWorkbench ? 'keyboard' : 'sparkles'} size={16} />
-						{showWorkbench ? 'Manual Regex Mode' : 'Highlight-to-Template'}
+						{showWorkbench ? 'Write the pattern myself' : 'Build the pattern from a sample'}
 					</button>
 				</div>
 
 				{#if showWorkbench}
-					<!-- Keyed on the node: the workbench captures its initial sample, spans
-					     and pattern as state, so without a remount, opening it on a second
-					     extract node shows the FIRST node's sample. -->
-					{#key node.id}
-						<TemplateWorkbench
+					<!-- The sheet is top-layer and reseeds on `nodeId` + `open`, so one
+					     instance serves every node: no key, no remount, no chance of
+					     showing the previous node's sample. -->
+					<PatternSheet
+						nodeId={node.id}
+						bind:open={showWorkbench}
 						initialPattern={extract.pattern ?? ''}
 						initialSample={extract.template_spec?.sample_body ?? ''}
 						initialSpans={extract.template_spec?.spans ?? []}
@@ -266,8 +286,8 @@
 							});
 							showWorkbench = false;
 						}}
-						/>
-					{/key}
+						onmanual={() => (showWorkbench = false)}
+					/>
 				{/if}
 			</div>
 
@@ -826,6 +846,31 @@
 		min-width: 0;
 		border-radius: var(--df-p-radius-lg);
 		overflow: hidden;
+	}
+
+	/* Wide: the row editor in Steps. The same fields, in two columns, so a 700px
+	   editor does not become a single tall ribbon of inputs. */
+	.inspector.is-wide .inspector-body {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--df-p-space-3) var(--df-p-space-5);
+		align-items: start;
+	}
+
+	.inspector.is-wide .inspector-body > .branches,
+	.inspector.is-wide .inspector-body > .captures,
+	.inspector.is-wide .inspector-body > .node-issues {
+		grid-column: 1 / -1;
+	}
+
+	.inspector.is-wide .inspector-help,
+	.inspector.is-wide .inspector-summary {
+		max-width: 78ch;
+	}
+
+	.inspector.is-wide {
+		box-shadow: none;
+		border-color: var(--df-border-control);
 	}
 
 	.inspector-head {

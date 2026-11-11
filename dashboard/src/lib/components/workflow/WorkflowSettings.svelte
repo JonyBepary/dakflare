@@ -21,7 +21,8 @@
 		hasSaved,
 		errors,
 		showErrors = false,
-		onchange
+		onchange,
+		onclose = null
 	}: {
 		name: string;
 		enabled: boolean;
@@ -48,6 +49,7 @@
 			cooldownS?: number;
 			maxPerHour?: number;
 		}) => void;
+		onclose?: (() => void) | null;
 	} = $props();
 
 	const nameError = $derived(showErrors ? (errors.name ?? null) : null);
@@ -58,13 +60,24 @@
 	<div class="settings-head">
 		<span class="settings-icon"><Icon name="workflow" size={16} /></span>
 		<div>
-			<p class="eyebrow">Canvas</p>
+			<p class="eyebrow">Flow</p>
 			<h2 id="settings-title">Flow settings</h2>
 		</div>
+		{#if onclose}
+			<button
+				type="button"
+				class="btn btn-ghost btn-icon btn-sm close"
+				onclick={onclose}
+				aria-label="Close flow settings"
+				title="Close flow settings"
+			>
+				<Icon name="x" size={16} />
+			</button>
+		{/if}
 	</div>
 
 	<p class="settings-help">
-		Select a step to edit it, or change how this whole flow is stored and scoped.
+		How this whole flow is stored, scoped and paused.
 	</p>
 
 	<div class="settings-body">
@@ -258,6 +271,11 @@
 	.settings-head h2 {
 		margin-top: 1px;
 		font-size: var(--df-p-text-md);
+	}
+
+	.settings-head .close {
+		margin-left: auto;
+		flex: none;
 	}
 
 	.settings-help {

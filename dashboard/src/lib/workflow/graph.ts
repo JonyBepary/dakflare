@@ -1346,6 +1346,462 @@ export function applySwitchCase(
 	return { nodes: nextNodes, edges: [...nextEdges], dropped };
 }
 
+/* ------------------------------------------------------------ arrangement */
+
+/**
+ * The Worker's layout, ported: `layoutIr` in `worker/src/lib/flow-ir.ts`.
+ *
+ * Rank by longest path from the trigger, then place rank-major columns. The gaps
+ * are the same numbers (`COL_GAP` 280, `ROW_GAP` 160) so a map tidied here does
+ * not jump when the handset lays it out again, and the same document always
+ * produces the same positions: arranging twice is a no-op the second time.
+ */
+export const LAYOUT_ALGORITHM = 'rank-v1';
+export const COL_GAP = 280;
+export const ROW_GAP = 160;
+
+export function computeLayout(
+	nodes: readonly FlowNode[],
+	edges: readonly FlowEdge[]
+): Record<string, { x: number; y: number }> {
+	const trigger = nodes.find((node) => node.type === 'trigger');
+	if (!trigger) return {};
+
+	const outgoing = new Map<string, FlowEdge[]>();
+	for (const edge of edges) {
+		if (edge.source === edge.target) continue;
+		const list = outgoing.get(edge.source);
+		if (list) list.push(edge);
+		else outgoing.set(edge.source, [edge]);
+	}
+
+	const rank = new Map<string, number>([[trigger.id, 0]]);
+	const indegree = new Map<string, number>();
+	for (const node of nodes) {
+		indegree.set(
+			node.id,
+			edges.filter((edge) => edge.target === node.id && edge.source !== edge.target).length
+		);
+	}
+
+	const queue: string[] = [trigger.id];
+	for (let head = 0; head < queue.length; head += 1) {
+		const id = queue[head];
+		const current = rank.get(id) ?? 0;
+		for (const edge of outgoing.get(id) ?? []) {
+			rank.set(edge.target, Math.max(rank.get(edge.target) ?? 0, current + 1));
+			const count = indegree.get(edge.target) ?? 0;
+			indegree.set(edge.target, Math.max(0, count - 1));
+			if (count - 1 === 0) queue.push(edge.target);
+		}
+	}
+
+	const buckets = new Map<number, FlowNode[]>();
+	for (const node of nodes) {
+		const value = rank.get(node.id) ?? 0;
+		const bucket = buckets.get(value);
+		if (bucket) bucket.push(node);
+		else buckets.set(value, [node]);
+	}
+
+	const positions: Record<string, { x: number; y: number }> = {};
+	const previousOrder = new Map<string, number>();
+	const ranks = [...buckets.keys()].sort((left, right) => left - right);
+
+	ranks.forEach((rankIndex, column) => {
+		const bucket = buckets.get(rankIndex) ?? [];
+		const seedOf = (node: FlowNode): number => {
+			const seeds = edges
+				.filter((edge) => edge.target === node.id)
+				.map((edge) => previousOrder.get(edge.source))
+				.filter((value): value is number => value !== undefined);
+			return seeds.length === 0 ? Number.MAX_SAFE_INTEGER : Math.min(...seeds);
+		};
+		bucket.sort((left, right) => {
+			const delta = seedOf(left) - seedOf(right);
+			if (delta !== 0) return delta;
+			return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+		});
+		bucket.forEach((node, row) => {
+			previousOrder.set(node.id, row);
+			positions[node.id] = { x: column * COL_GAP, y: row * ROW_GAP };
+		});
+	});
+
+	return positions;
+}
+
+/* ---------------------------------------------------------------- outline */
+
+export type BranchTone = 'true' | 'false' | 'case' | 'default';
+
+export interface OutlineBranchHead {
+	handle: string;
+	/** Short word for the branch: `true`, `false`, `case 2`, `default`. */
+	label: string;
+	/** The case value a switch compares, when the branch is a case. */
+	detail: string;
+	tone: BranchTone;
+	targetId: string | null;
+}
+
+export interface OutlineStepItem {
+	kind: 'step';
+	key: string;
+	node: FlowNode;
+	depth: number;
+	/** 1-based position in the walk, or null for a step already shown above. */
+	number: number | null;
+	/** More than one connection arrives here. */
+	shared: boolean;
+	/** Already listed higher up, so this row does not repeat its chain. */
+	repeated: boolean;
+	/** Reached from nowhere: the trigger cannot get here. */
+	orphan: boolean;
+}
+
+export interface OutlineBranchItem {
+	kind: 'branch';
+	key: string;
+	depth: number;
+	label: string;
+	detail: string;
+	tone: BranchTone;
+	targetId: string | null;
+	targetTitle: string | null;
+}
+
+export type OutlineItem = OutlineStepItem | OutlineBranchItem;
+
+/**
+ * The branch-aware outline the Steps surface draws.
+ *
+ * Array order is meaningless in a graph, so this walks the connections instead:
+ * from the trigger, along each branch handle in the order the node offers them,
+ * with a branch heading wherever a condition or a switch splits the path. A step
+ * that more than one connection reaches is marked and not walked twice, so the
+ * outline never pretends a shared step is two steps.
+ */
+export function outlineItems(
+	nodes: readonly FlowNode[],
+	edges: readonly FlowEdge[]
+): OutlineItem[] {
+	const byId = new Map(nodes.map((node) => [node.id, node]));
+	const outgoing = new Map<string, FlowEdge[]>();
+	const incomingCount = new Map<string, number>();
+	for (const edge of edges) {
+		if (!byId.has(edge.source) || !byId.has(edge.target)) continue;
+		const list = outgoing.get(edge.source);
+		if (list) list.push(edge);
+		else outgoing.set(edge.source, [edge]);
+		incomingCount.set(edge.target, (incomingCount.get(edge.target) ?? 0) + 1);
+	}
+
+	const items: OutlineItem[] = [];
+	const shown = new Set<string>();
+	let counter = 0;
+
+	const walk = (id: string, depth: number): void => {
+		const node = byId.get(id);
+		if (!node) return;
+		const repeated = shown.has(id);
+		counter += 1;
+		items.push({
+			kind: 'step',
+			key: `${depth}:${id}:${counter}`,
+			node,
+			depth,
+			number: repeated ? null : counter,
+			shared: (incomingCount.get(id) ?? 0) > 1,
+			repeated,
+			orphan: false
+		});
+		if (repeated) return;
+		shown.add(id);
+
+		const outs = outgoing.get(id) ?? [];
+		if (node.type === 'stop') return;
+
+		const branches = sourceHandles(node).map((handle) => ({
+			handle,
+			edge: outs.find((edge) => (edge.sourceHandle ?? '') === handle)
+		}));
+
+		if (branches.length > 1) {
+			for (const branch of branches) {
+				const target = branch.edge ? byId.get(branch.edge.target) : undefined;
+				items.push({
+					kind: 'branch',
+					key: `${id}:${branch.handle}:head`,
+					depth: depth + 1,
+					label: branchLabel(node, branch.handle).label,
+					detail: branchLabel(node, branch.handle).detail,
+					tone: branchLabel(node, branch.handle).tone,
+					targetId: target?.id ?? null,
+					targetTitle: target ? metaFor(target.type).title : null
+				});
+				if (target) walk(target.id, depth + 2);
+			}
+			return;
+		}
+
+		const next = outs.find((edge) => (edge.sourceHandle ?? '') === '');
+		if (next && byId.has(next.target)) walk(next.target, depth);
+	};
+
+	const trigger = nodes.find((node) => node.type === 'trigger');
+	if (trigger) walk(trigger.id, 0);
+
+	// Anything the trigger cannot reach still has to be visible, or a broken flow
+	// would look complete.
+	for (const node of nodes) {
+		if (shown.has(node.id)) continue;
+		items.push({
+			kind: 'step',
+			key: `orphan:${node.id}`,
+			node,
+			depth: 0,
+			number: null,
+			shared: (incomingCount.get(node.id) ?? 0) > 1,
+			repeated: false,
+			orphan: true
+		});
+		shown.add(node.id);
+	}
+
+	return items;
+}
+
+function branchLabel(node: FlowNode, handle: string): { label: string; detail: string; tone: BranchTone } {
+	if (handle === 'true') return { label: 'true', detail: '', tone: 'true' };
+	if (handle === 'false') return { label: 'false', detail: '', tone: 'false' };
+	if (handle === DEFAULT_HANDLE) return { label: 'default', detail: '', tone: 'default' };
+	const match = /^case:(\d+)$/.exec(handle);
+	if (match && node.type === 'switch') {
+		const index = Number(match[1]);
+		const value = switchCases(node)[index] ?? '';
+		return { label: `case ${index + 1}`, detail: value.trim(), tone: 'case' };
+	}
+	return { label: handle, detail: '', tone: 'default' };
+}
+
+/* ------------------------------------------------------------ preview seed */
+
+export interface PreviewSeed {
+	sender: string;
+	body: string;
+	/** True when both values come from the trigger rather than from a default. */
+	fromTrigger: boolean;
+}
+
+/**
+ * A first preview should reach the flow, not stop at its own trigger. The sample
+ * is built from the trigger's own filters: a keyword is the message, an exact
+ * sender is the sender, and a regex gets the shortest string that matches it.
+ */
+export function previewSeed(nodes: readonly FlowNode[]): PreviewSeed {
+	const trigger = nodes.find((node) => node.type === 'trigger');
+	if (!trigger) return { sender: '+15551234567', body: 'ORDER A-1042', fromTrigger: false };
+	const data = nodeData<TriggerData>(trigger);
+	const senderSpec = data.sender ?? { mode: 'any' as const };
+	const bodySpec = data.body ?? { mode: 'any' as const };
+
+	const sender =
+		senderSpec.mode === 'any'
+			? '+15551234567'
+			: senderSpec.mode === 'regex'
+				? (sampleForPattern(senderSpec.value ?? '') ?? '+15551234567')
+				: (senderSpec.value ?? '').trim() || '+15551234567';
+
+	const body =
+		bodySpec.mode === 'any'
+			? 'ORDER A-1042'
+			: bodySpec.mode === 'keyword'
+				? (bodySpec.value ?? '').trim() || 'ORDER A-1042'
+				: (sampleForPattern(bodySpec.value ?? '') ?? bodySpec.value ?? 'ORDER A-1042');
+
+	/*
+	 * A message that gets past the trigger and then dies on the first extract is a
+	 * preview of our own sample, not of the flow. The first extract says what the
+	 * message is supposed to look like, so use its sample when it also satisfies
+	 * the trigger.
+	 */
+	let shaped = body;
+	const extract = nodes.find((node) => node.type === 'extract');
+	if (extract) {
+		const sample = sampleForPattern(nodeData<ExtractData>(extract).pattern ?? '');
+		if (sample && sample.trim()) {
+			const keyword = (bodySpec.value ?? '').trim();
+			const passesKeyword = bodySpec.mode !== 'keyword' || sample.includes(keyword);
+			const passesRegex =
+				bodySpec.mode !== 'regex' || regexAccepts(bodySpec.value ?? '', sample);
+			if (passesKeyword && passesRegex) shaped = sample;
+		}
+	}
+
+	return { sender, body: shaped, fromTrigger: senderSpec.mode !== 'any' || bodySpec.mode !== 'any' };
+}
+
+function regexAccepts(pattern: string, value: string): boolean {
+	try {
+		return new RegExp(pattern).test(value);
+	} catch {
+		return false;
+	}
+}
+
+/** The shortest string a regular expression accepts, for the forms people write. */
+export function sampleForPattern(pattern: string): string | null {
+	if (!pattern.trim()) return null;
+	const build = (source: string): string => {
+		let out = '';
+		let index = 0;
+		while (index < source.length) {
+			const char = source[index];
+			if (char === '\\') {
+				const next = source[index + 1] ?? '';
+				out +=
+					next === 'd'
+						? '4'
+						: next === 'w'
+							? 'a'
+							: next === 's'
+								? ' '
+								: next === 'D' || next === 'W' || next === 'S'
+									? 'a'
+									: next;
+				index += 2;
+				continue;
+			}
+			if (char === '^' || char === '$') {
+				index += 1;
+				continue;
+			}
+			if (char === '[') {
+				let end = index + 1;
+				let first = '';
+				let negated = false;
+				if (source[end] === '^') {
+					negated = true;
+					end += 1;
+				}
+				const body = source.slice(end);
+				const close = body.indexOf(']');
+				const content = close === -1 ? body : body.slice(0, close);
+				if (!negated && content.length > 0) {
+					if (content[0] === '\\' && content.length > 1) {
+						first = content[1] === 'd' ? '4' : content[1] === 'w' ? 'a' : content[1];
+					} else if (content[1] === '-' && content.length > 2) {
+						first = content[0];
+					} else {
+						first = content[0];
+					}
+				} else if (negated) {
+					first = 'a';
+				}
+				out += first;
+				index = close === -1 ? source.length : index + 1 + close + 1;
+				continue;
+			}
+			if (char === '(') {
+				// Skip a non-capturing or named prefix, then take the first alternative.
+				let inner = index + 1;
+				if (source[inner] === '?') {
+					if (source[inner + 1] === ':') inner += 2;
+					else if (source[inner + 1] === '<' && source[inner + 2] !== '=' && source[inner + 2] !== '!') {
+						const close = source.indexOf('>', inner);
+						inner = close === -1 ? inner + 2 : close + 1;
+					} else if (source[inner + 1] === '=' || source[inner + 1] === '!') {
+						// A lookaround adds no characters of its own.
+						const close = matchingParen(source, index);
+						index = close === -1 ? source.length : close + 1;
+						continue;
+					} else {
+						inner += 1;
+					}
+				}
+				const close = matchingParen(source, index);
+				const groupSource = source.slice(inner, close === -1 ? source.length : close);
+				out += build(firstAlternative(groupSource));
+				index = close === -1 ? source.length : close + 1;
+				continue;
+			}
+			if (char === '.') {
+				out += 'a';
+				index += 1;
+				continue;
+			}
+			if (char === '*' || char === '+' || char === '?' || char === '{') {
+				// A quantifier applies to what was just written. One repetition is
+				// enough for `+` and `{n,}`; `*`, `?` and `{0,n}` may write nothing.
+				if (char !== '+' && char !== '{') out = out.slice(0, -1);
+				if (char === '{') {
+					const close = source.indexOf('}', index);
+					index = close === -1 ? source.length : close + 1;
+					continue;
+				}
+				index += 1;
+				continue;
+			}
+			if (char === '|') {
+				index = source.length;
+				continue;
+			}
+			out += char;
+			index += 1;
+		}
+		return out;
+	};
+
+	const candidate = build(pattern).trim();
+	if (!candidate) return null;
+	try {
+		return new RegExp(pattern).test(candidate) ? candidate : null;
+	} catch {
+		return null;
+	}
+}
+
+function firstAlternative(source: string): string {
+	let depth = 0;
+	let index = 0;
+	let escaped = false;
+	while (index < source.length) {
+		const char = source[index];
+		if (escaped) {
+			escaped = false;
+		} else if (char === '\\') {
+			escaped = true;
+		} else if (char === '(' || char === '[') {
+			depth += 1;
+		} else if (char === ')' || char === ']') {
+			depth -= 1;
+		} else if (char === '|' && depth === 0) {
+			return source.slice(0, index);
+		}
+		index += 1;
+	}
+	return source;
+}
+
+function matchingParen(source: string, start: number): number {
+	let depth = 0;
+	let escaped = false;
+	let index = start;
+	while (index < source.length) {
+		const char = source[index];
+		if (escaped) escaped = false;
+		else if (char === '\\') escaped = true;
+		else if (char === '(') depth += 1;
+		else if (char === ')') {
+			depth -= 1;
+			if (depth === 0) return index;
+		}
+		index += 1;
+	}
+	return -1;
+}
+
 /** Resolve the target at the end of any branch handle. */
 export function handleTarget(
 	node: FlowNode,

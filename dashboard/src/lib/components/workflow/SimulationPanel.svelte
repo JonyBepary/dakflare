@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import { NODE_META, type FlowNode } from '$lib/workflow/graph';
 	import type { SimulationInput, SimulationResult } from '$lib/workflow/simulate';
@@ -6,19 +7,27 @@
 	let {
 		result,
 		nodes,
+		seedSender = '+15551234567',
+		seedBody = 'ORDER A-1042',
+		layout = 'panel',
 		onrun,
 		onclose,
 		onclear
 	}: {
 		result: SimulationResult | null;
 		nodes: FlowNode[];
+		/** A sample built from the flow's own trigger, so the first run enters the flow. */
+		seedSender?: string;
+		seedBody?: string;
+		/** `drawer` lays the form and the trace out side by side. */
+		layout?: 'panel' | 'drawer';
 		onrun: (input: SimulationInput) => void;
 		onclose: () => void;
 		onclear: () => void;
 	} = $props();
 
-	let sender = $state('+15551234567');
-	let body = $state('ORDER A-1042');
+	let sender = $state(untrack(() => seedSender));
+	let body = $state(untrack(() => seedBody));
 	let running = $state(false);
 
 	const nodeMap = $derived(new Map(nodes.map((node) => [node.id, node])));
@@ -55,7 +64,7 @@
 	}
 </script>
 
-<section class="panel simulation" aria-labelledby="simulation-title">
+<section class="panel simulation" class:is-drawer={layout === 'drawer'} aria-labelledby="simulation-title">
 	<div class="sim-head">
 		<div class="sim-title">
 			<Icon name="activity" size={16} />
@@ -67,6 +76,7 @@
 		</button>
 	</div>
 
+	<div class="sim-body">
 	<p class="sim-help">
 		Run the flow in your browser with a sample message. The canvas highlights the path; no SMS
 		leaves the gateway.
@@ -92,7 +102,12 @@
 			/>
 		</div>
 		<div class="field">
-			<label class="label" for="sim-body">Sample message</label>
+			<label class="label" for="sim-body">
+				Sample message
+				{#if seedBody !== 'ORDER A-1042' || seedSender !== '+15551234567'}
+					<span class="optional">from the trigger</span>
+				{/if}
+			</label>
 			<textarea
 				id="sim-body"
 				class="input"
@@ -111,7 +126,6 @@
 			{#if result}
 				<button type="button" class="btn btn-ghost btn-sm" onclick={onclear}>Clear result</button>
 			{/if}
-			<span class="spacer"></span>
 			<span class="hint">Runs against the draft, not the saved copy.</span>
 		</div>
 	</form>
@@ -197,13 +211,62 @@
 			</div>
 		{/if}
 	</div>
+	</div>
 </section>
 
 <style>
 	.simulation {
 		min-width: 0;
+		max-height: 100%;
 		border-radius: var(--df-p-radius-lg);
 		overflow: hidden;
+	}
+
+	.sim-body {
+		min-height: 0;
+	}
+
+	/* In a drawer the form and the trace sit side by side: the sample on the left,
+	   what the flow did with it on the right. */
+	.simulation.is-drawer {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.is-drawer .sim-body {
+		display: grid;
+		grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+		grid-template-rows: auto minmax(0, 1fr);
+		column-gap: var(--df-p-space-4);
+		align-items: stretch;
+		overflow-y: auto;
+	}
+
+	.is-drawer .sim-help {
+		grid-column: 1 / -1;
+	}
+
+	.is-drawer .sim-form {
+		grid-template-columns: minmax(0, 1fr);
+		align-content: start;
+	}
+
+	.is-drawer .sim-output {
+		border-top: 0;
+		border-left: 1px solid var(--df-border-hairline);
+		min-height: 0;
+		overflow-y: auto;
+	}
+
+	@media (max-width: 900px) {
+		.is-drawer .sim-body {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.is-drawer .sim-output {
+			border-left: 0;
+			border-top: 1px solid var(--df-border-hairline);
+		}
 	}
 
 	.sim-head {
