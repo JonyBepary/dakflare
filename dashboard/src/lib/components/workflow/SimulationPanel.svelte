@@ -58,12 +58,12 @@
 <section class="panel simulation" aria-labelledby="simulation-title">
 	<div class="sim-head">
 		<div class="sim-title">
-			<Icon name="activity" size={14} />
+			<Icon name="activity" size={16} />
 			<h2 id="simulation-title">Preview run</h2>
 			<span class="chip" data-tone="info">Nothing is sent</span>
 		</div>
 		<button type="button" class="btn btn-ghost btn-icon btn-sm" onclick={onclose} aria-label="Close preview">
-			<Icon name="x" size={14} />
+			<Icon name="x" size={16} />
 		</button>
 	</div>
 
@@ -105,7 +105,7 @@
 		</div>
 		<div class="sim-actions">
 			<button type="submit" class="btn btn-primary btn-sm" disabled={running} aria-busy={running}>
-				<Icon name="activity" size={12} />
+				<Icon name="activity" size={16} />
 				Run preview
 			</button>
 			{#if result}
@@ -119,7 +119,7 @@
 	<div class="sim-output" aria-live="polite" aria-atomic="false">
 		{#if !result}
 			<p class="sim-idle">
-				<Icon name="info" size={13} />
+				<Icon name="info" size={16} />
 				No preview yet. Enter a message and run it to see where the flow goes.
 			</p>
 		{:else}

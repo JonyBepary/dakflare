@@ -139,7 +139,7 @@
 
 <section class="panel inspector" aria-labelledby="inspector-title">
 	<div class="inspector-head">
-		<span class="inspector-icon"><Icon name={meta.icon} size={15} /></span>
+		<span class="inspector-icon"><Icon name={meta.icon} size={16} /></span>
 		<div class="inspector-title">
 			<p class="eyebrow">Selected step</p>
 			<h2 id="inspector-title">{meta.title}</h2>
@@ -241,12 +241,17 @@
 						class="btn-workbench-toggle"
 						onclick={() => (showWorkbench = !showWorkbench)}
 					>
-						{showWorkbench ? '⌨️ Manual Regex Mode' : '✨ Highlight-to-Template'}
+						<Icon name={showWorkbench ? 'keyboard' : 'sparkles'} size={16} />
+						{showWorkbench ? 'Manual Regex Mode' : 'Highlight-to-Template'}
 					</button>
 				</div>
 
 				{#if showWorkbench}
-					<TemplateWorkbench
+					<!-- Keyed on the node: the workbench captures its initial sample, spans
+					     and pattern as state, so without a remount, opening it on a second
+					     extract node shows the FIRST node's sample. -->
+					{#key node.id}
+						<TemplateWorkbench
 						initialPattern={extract.pattern ?? ''}
 						initialSample={extract.template_spec?.sample_body ?? ''}
 						initialSpans={extract.template_spec?.spans ?? []}
@@ -261,7 +266,8 @@
 							});
 							showWorkbench = false;
 						}}
-					/>
+						/>
+					{/key}
 				{/if}
 			</div>
 
@@ -301,7 +307,7 @@
 						Valid. Captures {extractCheck.groups.map((group) => `{{${group}}}`).join(', ')}.
 					</p>
 				{:else if extract.pattern}
-					<p class="hint invalid">No named group yet — add one like (?&lt;name&gt;...).</p>
+					<p class="hint invalid">No named group yet. Add one like (?&lt;name&gt;...).</p>
 				{/if}
 				<p class="hint" id={`pattern-hint-${node.id}`}>
 					Use a named group so later steps can reference the value. If the pattern does not
@@ -451,7 +457,7 @@
 				{#each [{ key: 'true', target: trueTarget }, { key: 'false', target: falseTarget }] as branch (branch.key)}
 					<div class="branch-row">
 						<span class="branch-key {branch.key}">{branch.key}</span>
-						<span class="branch-arrow" aria-hidden="true"><Icon name="arrow-up-right" size={11} /></span>
+						<span class="branch-arrow" aria-hidden="true"><Icon name="arrow-up-right" size={16} /></span>
 						{#if branch.target}
 							<button
 								type="button"
@@ -529,12 +535,12 @@
 									? 'A switch needs at least one case'
 									: `Remove case ${caseIndex + 1} and its connection`}
 							>
-								<Icon name="x" size={12} />
+								<Icon name="x" size={16} />
 							</button>
 						</li>
 						{#if error(`cases[${caseIndex}]`)}
 							<li class="case-error" id={`err-${node.id}-case-${caseIndex}`}>
-								<Icon name="alert" size={11} />
+								<Icon name="alert" size={16} />
 								<span>{error(`cases[${caseIndex}]`)}</span>
 							</li>
 						{/if}
@@ -550,7 +556,7 @@
 							? `A switch holds at most ${MAX_CASES} cases`
 							: 'Add a case with an empty value'}
 					>
-						<Icon name="plus" size={12} /> Add case
+						<Icon name="plus" size={16} /> Add case
 					</button>
 					{#if error('cases')}
 						<p class="field-error">{error('cases')}</p>
@@ -566,7 +572,7 @@
 						<span class="branch-key case-key {branch.index === null ? 'default' : ''}">
 							{branch.index === null ? 'default' : branch.label.trim() || `case ${branch.index + 1}`}
 						</span>
-						<span class="branch-arrow" aria-hidden="true"><Icon name="arrow-up-right" size={11} /></span>
+						<span class="branch-arrow" aria-hidden="true"><Icon name="arrow-up-right" size={16} /></span>
 						{#if target}
 							<button
 								type="button"
@@ -703,7 +709,7 @@
 					id={`sms-body-${node.id}`}
 					class="input"
 					rows="4"
-					placeholder={'Thanks — order {{order_id}} is confirmed.'}
+					placeholder={'Thanks, order {{order_id}} is confirmed.'}
 					value={sms.body ?? ''}
 					oninput={(event) => onupdate({ body: event.currentTarget.value })}
 					aria-label="Message body"
@@ -736,7 +742,7 @@
 						{#if metrics.nonGsmChars.length > 0 && !metrics.hasBangla}
 							<div class="trap-warning">
 								<span>
-									⚠️ Downgraded to 70-char UCS-2 by character:
+									<Icon name="alert" size={16} /> Downgraded to 70-char UCS-2 by character:
 									<strong>'{metrics.nonGsmChars[0].char}'</strong>
 								</span>
 								<button
@@ -801,7 +807,7 @@
 		{#if nodeIssues.length > 0}
 			<ul class="node-issues" aria-label="Problems with this node">
 				{#each nodeIssues as issue (issue.path + issue.message)}
-					<li><Icon name="alert" size={12} /><span>{issue.message}</span></li>
+					<li><Icon name="alert" size={16} /><span>{issue.message}</span></li>
 				{/each}
 			</ul>
 		{/if}
@@ -810,7 +816,7 @@
 	<div class="inspector-foot">
 		<span class="mono node-id" title={node.id}>{node.id}</span>
 		<button type="button" class="btn btn-danger btn-sm" onclick={ondelete}>
-			<Icon name="trash" size={12} /> Delete step
+			<Icon name="trash" size={16} /> Delete step
 		</button>
 	</div>
 </section>
@@ -1163,75 +1169,81 @@
 	}
 
 	.btn-workbench-toggle {
-		background: #1e2433;
-		border: 1px solid #3b82f6;
-		color: #93c5fd;
-		font-size: 0.72rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-accent-text);
+		color: var(--df-accent-text);
+		font-size: var(--df-p-text-xs);
 		font-weight: 500;
-		padding: 0.2rem 0.5rem;
-		border-radius: 4px;
+		padding: 3px 8px;
+		border-radius: var(--df-p-radius-xs);
 		cursor: pointer;
-		transition: all 0.15s ease;
+		transition:
+			background-color 140ms ease-out,
+			border-color 140ms ease-out,
+			color 140ms ease-out;
 	}
 
 	.btn-workbench-toggle:hover {
-		background: #2563eb;
-		color: #fff;
+		background: var(--df-accent-fill);
+		color: var(--df-text-on-accent);
 	}
 
 	.sms-meter-card {
-		margin-top: 0.4rem;
-		padding: 0.45rem 0.6rem;
-		background: #0f1219;
-		border: 1px solid #1e2433;
-		border-radius: 6px;
-		font-size: 0.72rem;
+		margin-top: var(--df-p-space-1);
+		padding: 6px 10px;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		font-size: var(--df-p-text-xs);
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 5px;
 	}
 
 	.sms-meter-card.is-ucs2 {
-		border-color: #854d0e;
-		background: #1a1508;
+		border-color: var(--df-state-warn-ink);
+		background: var(--df-state-warn-bg);
 	}
 
 	.meter-row {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 0.5rem;
+		gap: var(--df-p-space-2);
 	}
 
 	.meter-badge {
-		font-size: 0.65rem;
-		padding: 0.1rem 0.35rem;
-		border-radius: 3px;
+		font-size: var(--df-p-text-2xs);
+		padding: 2px 6px;
+		border-radius: var(--df-p-radius-xs);
 		font-weight: 700;
 		letter-spacing: 0.02em;
 	}
 
 	.meter-badge.badge-gsm7 {
-		background: #064e3b;
-		color: #6ee7b7;
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
 	}
 
 	.meter-badge.badge-ucs2 {
-		background: #713f12;
-		color: #fde047;
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
 	}
 
 	.meter-stat {
-		color: #94a3b8;
+		color: var(--df-text-meta);
 	}
 
 	.meter-stat strong {
-		color: #e2e8f0;
+		color: var(--df-text-primary);
 	}
 
 	.meter-cost {
 		margin-left: auto;
-		color: #38bdf8;
+		color: var(--df-state-info-ink);
 		font-weight: 600;
 	}
 
@@ -1240,26 +1252,34 @@
 		flex-wrap: wrap;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.4rem;
-		padding-top: 0.35rem;
-		border-top: 1px solid #2d2613;
-		color: #fde047;
-		font-size: 0.7rem;
+		gap: var(--df-p-space-1);
+		padding-top: 5px;
+		border-top: 1px solid
+			color-mix(in srgb, var(--df-state-warn-ink) 32%, var(--df-border-hairline));
+		color: var(--df-state-warn-ink);
+		font-size: var(--df-p-text-xs);
+	}
+
+	.trap-warning > span {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-wrap: wrap;
 	}
 
 	.btn-sanitize {
-		background: #854d0e;
-		border: 1px solid #ca8a04;
-		color: #fef08a;
-		font-size: 0.68rem;
-		padding: 0.15rem 0.45rem;
-		border-radius: 4px;
+		background: var(--df-state-warn-bg);
+		border: 1px solid var(--df-state-warn-ink);
+		color: var(--df-state-warn-ink);
+		font-size: var(--df-p-text-2xs);
+		padding: 2px 7px;
+		border-radius: var(--df-p-radius-xs);
 		cursor: pointer;
 		font-weight: 600;
 	}
 
 	.btn-sanitize:hover {
-		background: #a16207;
-		color: #fff;
+		background: color-mix(in srgb, var(--df-state-warn-bg) 80%, var(--df-state-warn-ink));
+		color: var(--df-state-warn-ink);
 	}
 </style>

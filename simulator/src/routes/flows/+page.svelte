@@ -188,8 +188,8 @@
 				<span class="label" id="offline-mode-label">Offline mode</span>
 				<p class="switch-copy" id="offline-mode-copy">
 					{app.offline
-						? 'Offline — injects are stored locally only.'
-						: 'Online — injects upload over the signed endpoint.'}
+						? 'Offline: injects are stored locally only.'
+						: 'Online: injects upload over the signed endpoint.'}
 				</p>
 			</div>
 			<Switch.Root

@@ -56,7 +56,7 @@
 
 <section class="panel settings" aria-labelledby="settings-title">
 	<div class="settings-head">
-		<span class="settings-icon"><Icon name="workflow" size={15} /></span>
+		<span class="settings-icon"><Icon name="workflow" size={16} /></span>
 		<div>
 			<p class="eyebrow">Canvas</p>
 			<h2 id="settings-title">Flow settings</h2>

@@ -19,7 +19,9 @@
    ========================================================================== */
 
 :root {
-	color-scheme: light;
+	/* `light dark` defers to the OS; the data-theme rules below narrow it when
+	   the operator has stored a choice. */
+	color-scheme: light dark;
 
 	--font-sans: var(--df-p-font-sans);
 	--font-mono: var(--df-p-font-mono);
@@ -114,7 +116,9 @@
 
 	--rail: var(--df-p-layout-rail);
 	--df-c-shell-header: 64px;
-	--df-c-shell-tabs: 48px;
+	/* The section tabs only exist below 900px; above it they take no space and
+	   must not inflate scroll padding or the sticky table head. */
+	--df-c-shell-tabs: 0px;
 	/* Outer margin is twice the smallest internal gap (04 §4.2). */
 	--df-c-shell-gutter: var(--df-p-space-6);
 
@@ -130,125 +134,105 @@
    mist ink, and 100% opaque state containers with light ink. A 12% pastel keeps
    the old ink at 1.4–2:1, so the containers are solid, not translucent.
    Four values are hand-picked, because no primitive sits between night-500 and
-   the mist inks: --df-border-hairline (#3d352c), --df-border-control (#6f6455),
+   the mist inks: --df-border-hairline (#3d352c), --df-border-control (#786b5c),
    --df-surface-press (#463d33) and --df-surface-selected (#53483b). Their
    measured pairs, and the reason each step exists, are in the console-dark
    review; they are the candidates for a night-550 / night-650 pair.
-   The `prefers-color-scheme` copy and the `data-theme` copy are identical; edit
-   both, or add the next dark-only value as a `light-dark()` component token
-   (app.css already does that for hover, tint edges and the nav pill). */
+   Light and dark are one `light-dark()` pair per token, so the palette has a
+   single value list; `color-scheme` is the switch and the two attribute rules
+   below are the only other thing that decides. A media-query copy of the block
+   would need a second list, and merging it into a selector list would stop an
+   explicit `data-theme="dark"` from working on a light OS. */
+:root {
+	--df-surface-page: light-dark(var(--df-p-cream-100), var(--df-p-night-800));
+	--df-surface-card: light-dark(var(--df-p-cream-50), var(--df-p-night-700));
+	--df-surface-well: light-dark(var(--df-p-cream-200), var(--df-p-night-600));
+	--df-surface-press: light-dark(var(--df-p-cream-300), #463d33);
+	--df-surface-field: light-dark(var(--df-p-cream-50), var(--df-p-night-900));
+	--df-surface-selected: light-dark(var(--df-p-cream-50), #53483b);
+
+	--df-text-primary: light-dark(var(--df-p-umber-900), var(--df-p-mist-50));
+	--df-text-secondary: light-dark(var(--df-p-umber-500), var(--df-p-mist-300));
+	--df-text-meta: light-dark(var(--df-p-umber-400), var(--df-p-mist-500));
+
+	--df-border-hairline: light-dark(var(--df-p-cream-400), #3d352c);
+	/* The input's fill equals the card, so this edge is its only boundary. At
+	   the old #d3c4ac it measured 1.68:1 and the field read as borderless. The
+	   phone's pair is #94897a at 3.38:1 on #fffdf8 and #786b5c at 3.37:1 on
+	   #161a22 (3.11:1 on the #262019 card, 3.63:1 on the #14110e field). */
+	--df-border-control: light-dark(#94897a, #786b5c);
+	/* A hover edge one step past control. This name was referenced by the
+	   workflow editor before it existed, so those declarations silently fell
+	   back to `currentColor`. */
+	--df-border-strong: light-dark(var(--df-p-umber-300), var(--df-p-mist-500));
+	--df-border-focus: light-dark(var(--df-p-coral-700), var(--df-p-coral-300));
+
+	--df-accent-text: light-dark(var(--df-p-coral-700), var(--df-p-coral-300));
+	--df-accent-text-hover: light-dark(var(--df-p-coral-800), var(--df-p-coral-100));
+	/* The fill inverts in dark: a lighter coral carries near-black ink, and
+	   hover lightens rather than darkens, so every state clears 4.5:1. */
+	--df-text-on-accent: light-dark(var(--df-p-cream-50), var(--df-p-umber-1000));
+	--df-accent-fill: light-dark(var(--df-p-coral-600), var(--df-p-coral-400));
+	--df-accent-fill-hover: light-dark(var(--df-p-coral-700), var(--df-p-coral-300));
+	--df-accent-fill-press: light-dark(var(--df-p-coral-800), var(--df-p-coral-500));
+	--df-accent-soft: light-dark(
+		var(--df-p-coral-100),
+		color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700))
+	);
+	--df-accent-decor: light-dark(var(--df-p-coral-500), var(--df-p-coral-400));
+
+	--df-state-ok-bg: light-dark(var(--df-p-mint-100), var(--df-p-mint-900));
+	--df-state-ok-ink: light-dark(var(--df-p-mint-700), var(--df-p-mint-300));
+	--df-state-info-bg: light-dark(var(--df-p-sky-100), var(--df-p-sky-900));
+	--df-state-info-ink: light-dark(var(--df-p-sky-700), var(--df-p-sky-300));
+	--df-state-warn-bg: light-dark(var(--df-p-butter-100), var(--df-p-butter-900));
+	--df-state-warn-ink: light-dark(var(--df-p-butter-700), var(--df-p-butter-300));
+	--df-state-danger-bg: light-dark(var(--df-p-peach-100), var(--df-p-peach-900));
+	--df-state-danger-ink: light-dark(var(--df-p-peach-700), var(--df-p-peach-300));
+	--df-state-danger-fill: var(--df-p-peach-700);
+	--df-state-neutral-bg: light-dark(var(--df-p-stone-100), var(--df-p-stone-900));
+	--df-state-neutral-ink: light-dark(var(--df-p-stone-700), var(--df-p-stone-300));
+	--df-state-filter-bg: light-dark(var(--df-p-lilac-100), var(--df-p-lilac-900));
+	--df-state-filter-ink: light-dark(var(--df-p-lilac-700), var(--df-p-lilac-300));
+	--df-text-on-danger: var(--df-p-cream-50);
+
+	/* Dark needs a real drop shadow, not a 3% white line: the page is nearly
+	   black, so black at 45-95% is what separates a card from it. The night
+	   values stay named because light-dark() accepts colours only, and a shadow
+	   is geometry plus a comma-separated colour list. */
+	--df-shadow-card-night:
+		0 1px 0 rgba(255, 253, 248, 0.035),
+		0 1px 2px rgba(0, 0, 0, 0.5);
+	--df-shadow-raised-night:
+		0 2px 6px rgba(0, 0, 0, 0.45),
+		0 18px 44px -22px rgba(0, 0, 0, 0.85);
+	--df-shadow-dialog-night: 0 40px 100px -32px rgba(0, 0, 0, 0.95);
+	--df-c-dialog-scrim: light-dark(rgba(36, 31, 26, 0.45), rgba(0, 0, 0, 0.65));
+}
+
+/* Shadows need their own small switch: light-dark() takes colours, so the trio
+   cannot ride the palette pairs above. The values themselves live once. */
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme='light']) {
-		color-scheme: dark;
-
-		--df-surface-page: var(--df-p-night-800);
-		--df-surface-card: var(--df-p-night-700);
-		--df-surface-well: var(--df-p-night-600);
-		--df-surface-press: #463d33;
-		--df-surface-field: var(--df-p-night-900);
-		--df-surface-selected: #53483b;
-
-		--df-text-primary: var(--df-p-mist-50);
-		--df-text-secondary: var(--df-p-mist-300);
-		--df-text-meta: var(--df-p-mist-500);
-
-		--df-border-hairline: #3d352c;
-		--df-border-control: #6f6455;
-		--df-border-focus: var(--df-p-coral-300);
-
-		--df-accent-text: var(--df-p-coral-300);
-		--df-accent-text-hover: var(--df-p-coral-100);
-		/* The fill inverts in dark: a lighter coral carries near-black ink, and
-		   hover lightens rather than darkens, so every state clears 4.5:1. */
-		--df-text-on-accent: var(--df-p-umber-1000);
-		--df-accent-fill: var(--df-p-coral-400);
-		--df-accent-fill-hover: var(--df-p-coral-300);
-		--df-accent-fill-press: var(--df-p-coral-500);
-		--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700));
-		--df-accent-decor: var(--df-p-coral-400);
-
-		--df-state-ok-bg: var(--df-p-mint-900);
-		--df-state-ok-ink: var(--df-p-mint-300);
-		--df-state-info-bg: var(--df-p-sky-900);
-		--df-state-info-ink: var(--df-p-sky-300);
-		--df-state-warn-bg: var(--df-p-butter-900);
-		--df-state-warn-ink: var(--df-p-butter-300);
-		--df-state-danger-bg: var(--df-p-peach-900);
-		--df-state-danger-ink: var(--df-p-peach-300);
-		--df-state-danger-fill: var(--df-p-peach-700);
-		--df-state-neutral-bg: var(--df-p-stone-900);
-		--df-state-neutral-ink: var(--df-p-stone-300);
-		--df-state-filter-bg: var(--df-p-lilac-900);
-		--df-state-filter-ink: var(--df-p-lilac-300);
-		--df-text-on-danger: var(--df-p-cream-50);
-
-		/* Dark needs a real drop shadow, not a 3% white line: the page is nearly
-		   black, so black at 45-95% is what separates a card from it. */
-		--df-shadow-card:
-			0 1px 0 rgba(255, 253, 248, 0.035),
-			0 1px 2px rgba(0, 0, 0, 0.5);
-		--df-shadow-raised:
-			0 2px 6px rgba(0, 0, 0, 0.45),
-			0 18px 44px -22px rgba(0, 0, 0, 0.85);
-		--df-shadow-dialog: 0 40px 100px -32px rgba(0, 0, 0, 0.95);
-		--df-c-dialog-scrim: rgba(0, 0, 0, 0.65);
+		--df-shadow-card: var(--df-shadow-card-night);
+		--df-shadow-raised: var(--df-shadow-raised-night);
+		--df-shadow-dialog: var(--df-shadow-dialog-night);
 	}
+}
+
+/* light-dark() follows the used color-scheme; these rules are the whole switch.
+   `light dark` lets the OS decide, and a stored choice overrides it in either
+   direction — including dark on a light OS, which a media query cannot express. */
+:root[data-theme='light'] {
+	color-scheme: light;
 }
 
 :root[data-theme='dark'] {
 	color-scheme: dark;
 
-	--df-surface-page: var(--df-p-night-800);
-	--df-surface-card: var(--df-p-night-700);
-	--df-surface-well: var(--df-p-night-600);
-	--df-surface-press: #463d33;
-	--df-surface-field: var(--df-p-night-900);
-	--df-surface-selected: #53483b;
-
-	--df-text-primary: var(--df-p-mist-50);
-	--df-text-secondary: var(--df-p-mist-300);
-	--df-text-meta: var(--df-p-mist-500);
-
-	--df-border-hairline: #3d352c;
-	--df-border-control: #6f6455;
-	--df-border-focus: var(--df-p-coral-300);
-
-	--df-accent-text: var(--df-p-coral-300);
-	--df-accent-text-hover: var(--df-p-coral-100);
-	/* The fill inverts in dark: a lighter coral carries near-black ink, and
-	   hover lightens rather than darkens, so every state clears 4.5:1. */
-	--df-text-on-accent: var(--df-p-umber-1000);
-	--df-accent-fill: var(--df-p-coral-400);
-	--df-accent-fill-hover: var(--df-p-coral-300);
-	--df-accent-fill-press: var(--df-p-coral-500);
-	--df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700));
-	--df-accent-decor: var(--df-p-coral-400);
-
-	--df-state-ok-bg: var(--df-p-mint-900);
-	--df-state-ok-ink: var(--df-p-mint-300);
-	--df-state-info-bg: var(--df-p-sky-900);
-	--df-state-info-ink: var(--df-p-sky-300);
-	--df-state-warn-bg: var(--df-p-butter-900);
-	--df-state-warn-ink: var(--df-p-butter-300);
-	--df-state-danger-bg: var(--df-p-peach-900);
-	--df-state-danger-ink: var(--df-p-peach-300);
-	--df-state-danger-fill: var(--df-p-peach-700);
-	--df-state-neutral-bg: var(--df-p-stone-900);
-	--df-state-neutral-ink: var(--df-p-stone-300);
-	--df-state-filter-bg: var(--df-p-lilac-900);
-	--df-state-filter-ink: var(--df-p-lilac-300);
-	--df-text-on-danger: var(--df-p-cream-50);
-
-	/* Dark needs a real drop shadow, not a 3% white line: the page is nearly
-	   black, so black at 45-95% is what separates a card from it. */
-	--df-shadow-card:
-		0 1px 0 rgba(255, 253, 248, 0.035),
-		0 1px 2px rgba(0, 0, 0, 0.5);
-	--df-shadow-raised:
-		0 2px 6px rgba(0, 0, 0, 0.45),
-		0 18px 44px -22px rgba(0, 0, 0, 0.85);
-	--df-shadow-dialog: 0 40px 100px -32px rgba(0, 0, 0, 0.95);
-	--df-c-dialog-scrim: rgba(0, 0, 0, 0.65);
+	--df-shadow-card: var(--df-shadow-card-night);
+	--df-shadow-raised: var(--df-shadow-raised-night);
+	--df-shadow-dialog: var(--df-shadow-dialog-night);
 }
 
 /* --------------------------------------------------------------------------
@@ -263,6 +247,12 @@
 
 html {
 	-webkit-text-size-adjust: 100%;
+	/* Anything scrolled to — the skip link's #main, a route's in-page anchor —
+	   must clear the sticky header plus the phone's tab strip. Without this the
+	   skip link lands 64px under the header and its focus ring is invisible. */
+	scroll-padding-block-start: calc(
+		var(--df-c-shell-header) + var(--df-c-shell-tabs, 0px)
+	);
 }
 
 body {
@@ -301,10 +291,6 @@ a {
 	color: var(--df-accent-text);
 	text-decoration: none;
 	text-underline-offset: 3px;
-}
-
-a:hover {
-	text-decoration: underline;
 }
 
 button,
@@ -423,10 +409,6 @@ time {
 	text-decoration: none;
 }
 
-.brand:hover {
-	text-decoration: none;
-}
-
 .brand-mark {
 	display: grid;
 	place-items: center;
@@ -485,12 +467,6 @@ time {
 	transition:
 		background-color 140ms ease,
 		color 140ms ease;
-}
-
-.nav-link:hover {
-	background: var(--df-surface-press);
-	color: var(--df-text-primary);
-	text-decoration: none;
 }
 
 .nav-link[aria-current='page'] {
@@ -643,10 +619,6 @@ time {
 	background: var(--df-surface-card);
 }
 
-.topbar-actions .btn.btn-icon:hover {
-	background: var(--df-surface-well);
-}
-
 .main-wrap {
 	min-width: 0;
 }
@@ -692,12 +664,21 @@ time {
 	margin-bottom: var(--df-p-space-5);
 }
 
+/* The copy column is the one that has to shrink: without min-width it keeps its
+   min-content width (the longest word) and a 120-character workflow name pushes
+   the page sideways at 320px. */
+.page-head > div {
+	min-width: 0;
+}
+
 .page-head h1 {
 	margin-top: 4px;
 	font-family: var(--df-font-display);
 	font-size: var(--df-p-text-2xl);
 	font-weight: 700;
 	letter-spacing: -0.02em;
+	/* Names and subjects are operator data, so they can break mid-word. */
+	overflow-wrap: anywhere;
 }
 
 .page-sub {
@@ -759,11 +740,6 @@ time {
 	transition:
 		transform var(--df-p-dur-lift) var(--df-p-ease-standard),
 		box-shadow var(--df-p-dur-lift) var(--df-p-ease-standard);
-}
-
-.card.lift:hover {
-	transform: translateY(-2px);
-	box-shadow: var(--df-c-card-shadow-hover);
 }
 
 .card.tint-mint {
@@ -833,7 +809,9 @@ time {
 	align-items: center;
 	gap: var(--df-p-space-3);
 	justify-content: space-between;
-	padding: 11px var(--df-p-space-4);
+	/* One rhythm for every card header, so a panel, an inspector and a list
+	   toolbar share the same leading edges as the card body. */
+	padding: 16px 24px;
 	border-bottom: 1px solid var(--df-border-hairline);
 	background: var(--df-surface-well);
 	border-radius: var(--df-p-radius-md) var(--df-p-radius-md) 0 0;
@@ -891,20 +869,20 @@ time {
 		transform var(--df-p-dur-press) ease-out;
 }
 
-.btn:hover {
-	background: var(--df-surface-well);
-	border-color: var(--df-text-meta);
-	text-decoration: none;
-}
-
 .btn:active {
 	transform: scale(0.97);
 }
 
+/* Opacity 0.5 measured 3.20:1 light and 4.48:1 dark. A solid muted pair keeps
+   the label readable and the edge present: meta ink on the well is 5.31:1
+   light and 4.83:1 dark. */
 .btn:disabled {
-	opacity: 0.5;
+	opacity: 1;
 	cursor: not-allowed;
 	transform: none;
+	color: var(--df-text-meta);
+	background: var(--df-surface-well);
+	border-color: var(--df-border-hairline);
 }
 
 .btn svg {
@@ -914,12 +892,6 @@ time {
 
 .btn-primary {
 	background: var(--df-accent-fill);
-	border-color: transparent;
-	color: var(--df-text-on-accent);
-}
-
-.btn-primary:hover {
-	background: var(--df-accent-fill-hover);
 	border-color: transparent;
 	color: var(--df-text-on-accent);
 }
@@ -942,32 +914,16 @@ time {
 	background: transparent;
 }
 
-.btn-danger:hover {
-	background: var(--df-state-danger-bg);
-	border-color: var(--df-state-danger-ink);
-}
-
 .btn-danger-solid {
 	background: var(--df-state-danger-fill);
 	border-color: transparent;
 	color: var(--df-text-on-danger);
 }
 
-.btn-danger-solid:hover {
-	background: color-mix(in srgb, var(--df-state-danger-fill) 86%, black);
-	border-color: transparent;
-}
-
 .btn-ghost {
 	background: transparent;
 	border-color: transparent;
 	color: var(--df-text-secondary);
-}
-
-.btn-ghost:hover {
-	background: var(--df-surface-well);
-	border-color: transparent;
-	color: var(--df-text-primary);
 }
 
 .btn-sm {
@@ -1003,10 +959,6 @@ time {
 	text-decoration: underline;
 	text-underline-offset: 3px;
 	border-radius: 2px;
-}
-
-.link-btn:hover {
-	color: var(--df-accent-text-hover);
 }
 
 /* --------------------------------------------------------------------------
@@ -1211,10 +1163,6 @@ time {
 	opacity: 0.85;
 }
 
-.input:hover {
-	border-color: var(--df-text-meta);
-}
-
 .input:focus-visible {
 	outline: 2px solid var(--df-accent-text);
 	outline-offset: 2px;
@@ -1330,10 +1278,6 @@ select.input {
 		color 140ms ease;
 }
 
-.seg-item:hover span {
-	color: var(--df-text-primary);
-}
-
 .seg-item:has(input:checked) span {
 	background: var(--df-surface-selected);
 	color: var(--df-text-primary);
@@ -1409,10 +1353,6 @@ select.input {
 
 .table tbody tr {
 	transition: background-color 120ms ease;
-}
-
-.table tbody tr:hover {
-	background: var(--df-surface-hover);
 }
 
 .table th:first-child,
@@ -1647,6 +1587,12 @@ select.input {
 }
 
 @media (max-width: 900px) {
+	:root {
+		/* The tab strip appears with this breakpoint, so the scroll padding and
+		   the sticky table head grow by its height from here down. */
+		--df-c-shell-tabs: 48px;
+	}
+
 	.shell {
 		grid-template-columns: minmax(0, 1fr);
 	}
@@ -1770,6 +1716,12 @@ select.input {
 		justify-content: flex-end;
 	}
 
+	/* Card headers keep their block rhythm, but a 24px inline inset is too wide
+	   once the card itself is 16px from the page edge. */
+	.panel-head {
+		padding-inline: var(--df-p-space-4);
+	}
+
 	/* Primary actions meet the 44px touch target; compact row actions stay
 	   compact but still clear of the 36px minimum. */
 	.btn {
@@ -1812,40 +1764,6 @@ select.input {
 	}
 }
 
-@media (prefers-reduced-motion: reduce) {
-	.settle {
-		animation: none;
-		opacity: 1;
-		transform: none;
-	}
-
-	.card,
-	.card.lift:hover,
-	.btn,
-	.nav-link,
-	.chip,
-	.devrow,
-	.table tbody tr {
-		transition: none;
-	}
-
-	.card.lift:hover,
-	.btn:active {
-		transform: none;
-	}
-
-	.beacon {
-		animation: none !important;
-		opacity: 1;
-	}
-
-	/* A loading indicator still reads as loading without rotating. */
-	.spinner {
-		animation: none;
-		opacity: 0.6;
-	}
-}
-
 /* A destructive action that stays quiet until it is hovered — used in dense rows. */
 .btn-danger-ghost {
 	background: transparent;
@@ -1853,8 +1771,97 @@ select.input {
 	color: var(--df-state-danger-ink);
 }
 
-.btn-danger-ghost:hover {
-	background: color-mix(in srgb, var(--df-state-danger-ink) 10%, var(--df-surface-card));
-	border-color: transparent;
-	color: var(--df-state-danger-ink);
+@media (prefers-reduced-motion: reduce) {
+	/* Blanket, not an allowlist: a selector list silently exempts every new
+	   transition someone adds later. Durations go to near-zero so animations
+	   still commit their final frame (including `both` fill), and one iteration
+	   stops looping spinners. */
+	*,
+	::before,
+	::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* Hover only where a pointer can actually hover. A tap on a touch screen leaves
+   `:hover` latched until the next tap, which reads as a stuck selected row, and
+   the console ships a phone layout. Kept in one block so the media query is not
+   repeated at each rule. */
+@media (hover: hover) and (pointer: fine) {
+	a:hover {
+		text-decoration: underline;
+	}
+
+	.brand:hover {
+		text-decoration: none;
+	}
+
+	.nav-link:hover {
+		background: var(--df-surface-press);
+		color: var(--df-text-primary);
+		text-decoration: none;
+	}
+
+	.topbar-actions .btn.btn-icon:hover {
+		background: var(--df-surface-well);
+	}
+
+	.card.lift:hover {
+		transform: translateY(-2px);
+		box-shadow: var(--df-c-card-shadow-hover);
+	}
+
+	.btn:hover:not(:disabled) {
+		background: var(--df-surface-well);
+		border-color: var(--df-border-strong);
+		text-decoration: none;
+	}
+
+	.btn-primary:hover:not(:disabled) {
+		background: var(--df-accent-fill-hover);
+		border-color: transparent;
+		color: var(--df-text-on-accent);
+	}
+
+	.btn-danger:hover:not(:disabled) {
+		background: var(--df-state-danger-bg);
+		border-color: var(--df-state-danger-ink);
+	}
+
+	.btn-danger-solid:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--df-state-danger-fill) 86%, black);
+		border-color: transparent;
+	}
+
+	.btn-ghost:hover:not(:disabled) {
+		background: var(--df-surface-well);
+		border-color: transparent;
+		color: var(--df-text-primary);
+	}
+
+	.link-btn:hover {
+		color: var(--df-accent-text-hover);
+	}
+
+	/* States win over hover: an invalid or focused field keeps its own edge. */
+	.input:hover:not(:focus-visible):not([aria-invalid='true']) {
+		border-color: var(--df-border-strong);
+	}
+
+	.seg-item:hover span {
+		color: var(--df-text-primary);
+	}
+
+	.table tbody tr:hover {
+		background: var(--df-surface-hover);
+	}
+
+	.btn-danger-ghost:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--df-state-danger-ink) 10%, var(--df-surface-card));
+		border-color: transparent;
+		color: var(--df-state-danger-ink);
+	}
 }

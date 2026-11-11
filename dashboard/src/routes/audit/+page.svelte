@@ -427,7 +427,7 @@
 		padding: var(--df-p-space-3) var(--df-p-space-4);
 		border-bottom: 1px solid var(--df-border-hairline);
 		background: var(--df-surface-well);
-		border-radius: var(--df-c-card-radius) var(--df-c-card-radius) 0 0;
+		border-radius: calc(var(--df-c-card-radius) - 1px) calc(var(--df-c-card-radius) - 1px) 0 0;
 	}
 
 	.filters {
@@ -491,7 +491,8 @@
 	}
 
 	.table-wrap {
-		overflow-x: auto;
+		overflow: auto;
+		max-height: min(70dvh, 760px);
 		position: relative;
 	}
 
@@ -562,9 +563,11 @@
 		color: var(--df-text-meta);
 	}
 
-	.detail-toggle:hover {
-		background: var(--df-surface-well);
-		color: var(--df-text-primary);
+	@media (hover: hover) and (pointer: fine) {
+		.detail-toggle:hover {
+			background: var(--df-surface-well);
+			color: var(--df-text-primary);
+		}
 	}
 
 	.detail-row td {

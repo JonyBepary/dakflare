@@ -68,7 +68,7 @@
 		{
 			value: 'regex',
 			label: 'Regex',
-			hint: 'RE2 subset only — no lookarounds or backreferences.',
+			hint: 'RE2 subset only: no lookarounds or backreferences.',
 			placeholder: '^\\+1555[0-9]{7}$'
 		}
 	];
@@ -83,7 +83,7 @@
 		{
 			value: 'regex',
 			label: 'Regex',
-			hint: 'RE2 subset only — the gateway rejects a pattern it cannot compile.',
+			hint: 'RE2 subset only: the gateway rejects a pattern it cannot compile.',
 			placeholder: '^(STOP|UNSUBSCRIBE)$'
 		}
 	];
@@ -505,7 +505,7 @@
 											bind:value={form.device_id}
 											aria-describedby="rule-scope-hint"
 										>
-											<option value="">Global — every device</option>
+											<option value="">Global, every device</option>
 											{#each devices as device (device.device_id)}
 												<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 											{/each}
@@ -823,7 +823,7 @@
 
 			</div>
 
-			<div class="bento settle" style="--i: 1">
+			<div class="bento settle" style="--i: 0">
 				<div class="span-12 test-col">
 					<RuleTestPanel rules={rules} devices={devices} scope={form.device_id} draftNotice />
 				</div>
@@ -842,7 +842,7 @@
 				</section>
 			</div>
 		{:else if loading}
-			<div class="bento settle" style="--i: 1">
+			<div class="bento settle" style="--i: 2">
 				<section class="card span-12" aria-busy="true" aria-live="polite">
 					<span class="sr-only">Loading rules</span>
 					<div class="skeleton" style="height: 16px; width: 90px"></div>
@@ -854,7 +854,7 @@
 				</section>
 			</div>
 		{:else if rules.length === 0}
-			<div class="bento settle" style="--i: 1">
+			<div class="bento settle" style="--i: 3">
 				<section class="card span-12">
 					<EmptyState
 						icon="filter"
@@ -868,7 +868,7 @@
 				</section>
 			</div>
 		{:else}
-			<div class="bento settle" style="--i: 1">
+			<div class="bento settle" style="--i: 4">
 				<section
 					class="card list-card {listTestOpen ? 'span-8' : 'span-12'}"
 					aria-labelledby="rules-heading"
@@ -983,7 +983,6 @@
 
 <style>
 	.editor {
-		scroll-margin-top: 80px;
 		padding: 0;
 		overflow: hidden;
 	}
@@ -1273,8 +1272,10 @@
 		transition: background-color 140ms ease;
 	}
 
-	.limits-toggle:hover {
-		background: var(--df-surface-press);
+	@media (hover: hover) and (pointer: fine) {
+		.limits-toggle:hover {
+			background: var(--df-surface-press);
+		}
 	}
 
 	.limits-toggle:focus-visible {
@@ -1312,7 +1313,6 @@
 
 	.test-col {
 		min-width: 0;
-		scroll-margin-top: 80px;
 	}
 
 	.loading-rows {

@@ -476,8 +476,14 @@
 		transition: background-color 120ms ease-out;
 	}
 
-	.hit:hover {
-		background: var(--df-surface-well);
+	.hit:active {
+		background: var(--df-surface-press);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.hit:hover {
+			background: var(--df-surface-well);
+		}
 	}
 
 	.hit-top {

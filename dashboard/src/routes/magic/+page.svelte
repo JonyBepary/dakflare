@@ -183,7 +183,7 @@
 			<Icon name="mail" size={15} /> Ask for a new link
 		</a>
 		<p class="note">
-			If you did not use it, someone else did — a new link is safe, and the old one stays dead.
+			If you did not use it, someone else did. A new link is safe, and the old one stays dead.
 		</p>
 	{:else if view === 'unusable'}
 		<p class="eyebrow">Sign-in link</p>

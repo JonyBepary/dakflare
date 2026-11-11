@@ -59,8 +59,8 @@
 	<div class="reveal-head">
 		<h3 id="recovery-codes-title">{heading}</h3>
 		<p class="reveal-lede">
-			Ten single-use codes. Each one signs you in once when the authenticator is not available —
-			they are the only way back into this account if the passkey device is lost. They are shown
+			Ten single-use codes. Each one signs you in once when the authenticator is not available.
+			They are the only way back into this account if the passkey device is lost. They are shown
 			now and never again; the gateway keeps only a scrambled copy.
 		</p>
 	</div>
@@ -94,7 +94,7 @@
 			disabled={!acknowledged}
 			onclick={ondone}
 		>
-			Done — hide the codes
+			Done, hide the codes
 		</button>
 	</div>
 	<p class="hint">
@@ -145,6 +145,7 @@
 		border: 1px solid var(--line);
 		border-radius: var(--r-sm);
 		background: var(--line);
+		overflow: hidden;
 	}
 
 	.code {

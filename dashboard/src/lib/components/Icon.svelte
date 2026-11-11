@@ -36,7 +36,9 @@
 		| 'archive'
 		| 'unarchive'
 		| 'undo'
-		| 'redo';
+		| 'redo'
+		| 'keyboard'
+		| 'sparkles';
 </script>
 
 <script lang="ts">
@@ -150,7 +152,15 @@
 		<rect x="4.5" y="4.5" width="15" height="15" rx="4" />
 		<rect x="9" y="9" width="6" height="6" rx="1" />
 	{:else if name === 'grip'}
-		<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="2.4" />
+		<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" />
+	{:else if name === 'keyboard'}
+		<rect x="2.5" y="6" width="19" height="12" rx="2" />
+		<path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M20 10h.01" />
+		<path d="M6 13.5h.01M9.5 13.5h.01M13 13.5h.01M16.5 13.5h.01M20 13.5h.01" />
+		<path d="M8 16.5h8" />
+	{:else if name === 'sparkles'}
+		<path d="M12 3l1.7 4.6L18.5 9.3l-4.8 1.7L12 15.6l-1.7-4.6L5.5 9.3l4.8-1.7L12 3Z" />
+		<path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" />
 	{:else if name === 'fingerprint'}
 		<path d="M12 4.5a7.5 7.5 0 0 1 7.5 7.5" />
 		<path d="M4.5 12A7.5 7.5 0 0 1 12 4.5" />
@@ -183,3 +193,11 @@
 		<path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
 	{/if}
 </svg>
+
+<style>
+	/* Keep the documented 1.5px stroke at any rendered size, rather than
+	   scaling it down with the 24-unit grid. */
+	svg :where(path, rect, circle) {
+		vector-effect: non-scaling-stroke;
+	}
+</style>

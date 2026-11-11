@@ -81,7 +81,7 @@
 	border-radius: var(--df-p-radius-md);
 	background: var(--df-surface-card);
 	color: var(--df-text-primary);
-	box-shadow: var(--df-shadow-raised);
+	box-shadow: var(--df-shadow-card);
 	transition:
 		border-color 140ms ease,
 		box-shadow 140ms ease,
@@ -186,7 +186,7 @@
 	border-color: var(--df-accent-text);
 	box-shadow:
 		0 0 0 3px color-mix(in srgb, var(--df-accent-text) 16%, transparent),
-		var(--df-shadow-card);
+		var(--df-shadow-raised);
 	transform: none;
 }
 
@@ -194,7 +194,7 @@
 	border-color: var(--df-state-ok-ink);
 	box-shadow:
 		0 0 0 3px color-mix(in srgb, var(--df-state-ok-ink) 14%, transparent),
-		var(--df-shadow-card);
+		var(--df-shadow-raised);
 }
 
 .wf-node.is-selected.is-active {
@@ -202,7 +202,7 @@
 	box-shadow:
 		0 0 0 3px color-mix(in srgb, var(--df-accent-text) 16%, transparent),
 		0 0 0 6px color-mix(in srgb, var(--df-state-ok-ink) 12%, transparent),
-		var(--df-shadow-card);
+		var(--df-shadow-raised);
 }
 
 .svelte-flow .svelte-flow__node:focus-visible {

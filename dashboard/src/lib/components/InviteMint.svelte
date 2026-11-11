@@ -261,7 +261,7 @@
 
 		<div class="result-actions">
 			<button type="button" class="btn btn-primary" onclick={close}>
-				<Icon name="check" size={14} /> Done — hide the link
+				<Icon name="check" size={14} /> Done, hide the link
 			</button>
 			<button type="button" class="btn btn-ghost" onclick={mintAnother}>Mint another</button>
 		</div>
@@ -358,13 +358,6 @@
 {/if}
 
 <style>
-	/* Scrolling a form or a reveal into view must clear the sticky shell header,
-	   and the tab strip the phone adds under it. */
-	.mint-form,
-	.mint-result {
-		scroll-margin-top: calc(var(--df-c-shell-header) + 12px);
-	}
-
 	.mint-form {
 		margin-top: var(--s-3);
 		padding: var(--s-3);
@@ -507,11 +500,6 @@
 	}
 
 	@media (max-width: 900px) {
-		.mint-form,
-		.mint-result {
-			scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-c-shell-tabs) + 12px);
-		}
-
 		.mint-grid {
 			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		}

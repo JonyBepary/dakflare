@@ -967,7 +967,7 @@
 					</div>
 					<p class="hint">
 						The secret is made by the gateway, shown once, and kept encrypted with the Worker's auth
-						secret. Setting it up asks for your passkey first — a factor change is confirmed by the
+						secret. Setting it up asks for your passkey first, a factor change is confirmed by the
 						factor that is already on this account, never by a password.
 					</p>
 				</div>
@@ -1630,18 +1630,6 @@
 		margin-top: var(--s-4);
 	}
 
-	/* Scrolling a card to the top of the viewport must not tuck it under the
-	   sticky header, or under the tabs the phone adds below it. */
-	.factor-card {
-		scroll-margin-top: calc(var(--df-c-shell-header) + 12px);
-	}
-
-	@media (max-width: 900px) {
-		.factor-card {
-			scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-c-shell-tabs) + 12px);
-		}
-	}
-
 	.factor-head {
 		display: flex;
 		align-items: flex-start;
@@ -2201,8 +2189,10 @@
 			border-radius: var(--r-sm);
 		}
 
-		.invite-table tbody tr:hover {
-			background: transparent;
+		@media (hover: hover) and (pointer: fine) {
+			.invite-table tbody tr:hover {
+				background: transparent;
+			}
 		}
 
 		.invite-table td {

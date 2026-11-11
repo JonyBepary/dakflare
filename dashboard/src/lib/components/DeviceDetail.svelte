@@ -877,26 +877,27 @@
 		color: var(--df-text-primary);
 		box-shadow: var(--df-shadow-dialog);
 		overflow: hidden;
+		opacity: 0;
+		translate: 0 6px;
+		transition:
+			opacity var(--df-p-dur-settle) var(--df-p-ease-standard),
+			translate var(--df-p-dur-settle) var(--df-p-ease-standard),
+			overlay var(--df-p-dur-settle) allow-discrete,
+			display var(--df-p-dur-settle) allow-discrete;
 	}
 
-	/* `settle` is the only entrance in the system: 220ms, 6px, no slide. */
 	.drawer[open] {
-		animation: settle var(--df-p-dur-settle) var(--df-p-ease-standard) both;
+		opacity: 1;
+		translate: 0 0;
+
+		@starting-style {
+			opacity: 0;
+			translate: 0 6px;
+		}
 	}
 
 	.drawer::backdrop {
 		background: var(--df-c-dialog-scrim);
-	}
-
-	@keyframes settle {
-		from {
-			opacity: 0;
-			transform: translateY(6px);
-		}
-		to {
-			opacity: 1;
-			transform: none;
-		}
 	}
 
 	.drawer-shell {
@@ -1014,22 +1015,22 @@
 
 	/* Same five shapes as PresenceChip, so the drawer and the row agree. */
 	.state-glyph {
-		width: 9px;
-		height: 9px;
+		width: var(--df-c-chip-dot-size);
+		height: var(--df-c-chip-dot-size);
 		flex: none;
 		border-radius: 50%;
-		background: var(--df-text-primary);
+		background: currentColor;
 	}
 
 	.state-glyph[data-presence='synced'] {
 		background: transparent;
-		box-shadow: inset 0 0 0 1.5px var(--df-text-primary);
+		box-shadow: inset 0 0 0 1.5px currentColor;
 	}
 
 	.state-glyph[data-presence='stale'] {
 		background: transparent;
 		border-radius: 1px;
-		box-shadow: inset 0 0 0 1.5px var(--df-text-primary);
+		box-shadow: inset 0 0 0 1.5px currentColor;
 	}
 
 	.state-glyph[data-presence='offline'] {
@@ -1037,7 +1038,7 @@
 	}
 
 	.state-glyph[data-presence='unknown'] {
-		width: 10px;
+		width: calc(var(--df-c-chip-dot-size) + 1px);
 		height: 2px;
 		border-radius: 1px;
 	}
@@ -1264,7 +1265,6 @@
 		gap: var(--df-p-space-2);
 		padding: var(--df-p-space-2) var(--df-p-space-3);
 		border-bottom: 1px solid var(--df-border-hairline);
-		scroll-margin-top: var(--df-p-space-6);
 		transition: background-color var(--df-p-dur-lift) ease;
 	}
 
@@ -1383,8 +1383,8 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.drawer[open] {
-			animation: none;
+		.drawer {
+			transition: none;
 		}
 
 		.dlog-row {

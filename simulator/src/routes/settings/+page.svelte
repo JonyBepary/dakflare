@@ -247,7 +247,7 @@
 			</div>
 		{:else}
 			<p class="note">
-				The operator mints a one-time code in the dashboard. Paste the code — or the whole
+				The operator mints a one-time code in the dashboard. Paste the code, or the whole
 				<code>dakflare://pair?u=…&amp;c=…</code> link, whose worker URL is saved as the target first.
 				No admin token is needed.
 			</p>
@@ -407,7 +407,7 @@
 					ANDROID_ID <span class="muted">(hint, optional)</span>
 				</label>
 				<input id="platform-id" bind:value={platformId} placeholder="a1b2c3d4e5f6" autocomplete="off" />
-				<small>Never used to authenticate — only for duplicate detection and support.</small>
+				<small>Never used to authenticate, only for duplicate detection and support.</small>
 			</div>
 			<div class="field">
 				<label for="carrier">Carrier <span class="muted">(optional)</span></label>
@@ -416,9 +416,9 @@
 			<div class="field">
 				<label for="sim-slot">SIM slot</label>
 				<select id="sim-slot" bind:value={simSlot}>
-					<option value={0}>0 — default</option>
-					<option value={1}>1 — SIM 1</option>
-					<option value={2}>2 — SIM 2</option>
+					<option value={0}>0 (default)</option>
+					<option value={1}>1 (SIM 1)</option>
+					<option value={2}>2 (SIM 2)</option>
 				</select>
 			</div>
 			<div class="form-actions">

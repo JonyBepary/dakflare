@@ -844,7 +844,7 @@
 					aria-pressed={selectedNode === null}
 					title="Show the settings for this flow"
 				>
-					<Icon name="workflow" size={12} /> Flow settings
+					<Icon name="workflow" size={16} /> Flow settings
 				</button>
 			</span>
 		{/if}
@@ -879,7 +879,7 @@
 				<Notice tone="danger" title="Could not load this workflow">{loadError}</Notice>
 				<div class="row">
 					<button type="button" class="btn btn-primary" onclick={() => void load(id)}>
-						<Icon name="refresh" size={14} /> Try again
+						<Icon name="refresh" size={16} /> Try again
 					</button>
 					<a class="btn" href={ROUTES.workflows}>Back to workflows</a>
 				</div>
@@ -914,7 +914,7 @@
 				</div>
 				<div class="row">
 					<a class="btn" href={ROUTES.workflows}>
-						<Icon name="arrow-down-left" size={13} /> Back to workflows
+						<Icon name="arrow-down-left" size={16} /> Back to workflows
 					</a>
 					{#if !id}<span class="hint">This draft is not saved yet.</span>{/if}
 				</div>
@@ -981,7 +981,7 @@
 											title="Back to workflows"
 											aria-label="Back to workflows"
 										>
-											<Icon name="arrow-down-left" size={14} />
+											<Icon name="arrow-down-left" size={16} />
 										</a>
 										<span class="toolbar-sep" aria-hidden="true"></span>
 										<button
@@ -992,7 +992,7 @@
 											title="Undo (Ctrl+Z)"
 											aria-label="Undo"
 										>
-											<Icon name="undo" size={13} />
+											<Icon name="undo" size={16} />
 										</button>
 										<button
 											type="button"
@@ -1002,7 +1002,7 @@
 											title="Redo (Ctrl+Y)"
 											aria-label="Redo"
 										>
-											<Icon name="redo" size={13} />
+											<Icon name="redo" size={16} />
 										</button>
 										<span class="toolbar-sep" aria-hidden="true"></span>
 										<button
@@ -1013,7 +1013,7 @@
 											aria-busy={saving}
 											title={blockedReason}
 										>
-											{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+											{#if saving}<Spinner />{:else}<Icon name="check" size={16} />{/if}
 											Save
 										</button>
 										<button
@@ -1022,7 +1022,7 @@
 											onclick={validateNow}
 											title="Run the structural checks"
 										>
-											<Icon name="shield" size={12} /> Validate
+											<Icon name="shield" size={16} /> Validate
 										</button>
 										<button
 											type="button"
@@ -1032,7 +1032,7 @@
 											aria-expanded={simulateOpen}
 											title="Preview the flow with a sample message"
 										>
-											<Icon name="activity" size={12} /> Simulate
+											<Icon name="activity" size={16} /> Simulate
 										</button>
 									</div>
 									<div class="toolbar-state">
@@ -1076,7 +1076,7 @@
 									class="btn btn-primary btn-sm"
 									onclick={() => addNode('trigger')}
 								>
-									<Icon name="zap" size={12} /> Add trigger
+									<Icon name="zap" size={16} /> Add trigger
 								</button>
 							</div>
 						{/if}
@@ -1091,7 +1091,7 @@
 									title="Back to workflows"
 									aria-label="Back to workflows"
 								>
-									<Icon name="arrow-down-left" size={14} />
+									<Icon name="arrow-down-left" size={16} />
 								</a>
 								<span class="toolbar-sep" aria-hidden="true"></span>
 								<button
@@ -1102,7 +1102,7 @@
 									title="Undo (Ctrl+Z)"
 									aria-label="Undo"
 								>
-									<Icon name="undo" size={13} />
+									<Icon name="undo" size={16} />
 								</button>
 								<button
 									type="button"
@@ -1112,7 +1112,7 @@
 									title="Redo (Ctrl+Y)"
 									aria-label="Redo"
 								>
-									<Icon name="redo" size={13} />
+									<Icon name="redo" size={16} />
 								</button>
 								<span class="toolbar-sep" aria-hidden="true"></span>
 								<button
@@ -1123,7 +1123,7 @@
 									aria-busy={saving}
 									title={blockedReason}
 								>
-									{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+									{#if saving}<Spinner />{:else}<Icon name="check" size={16} />{/if}
 									Save
 								</button>
 								<button
@@ -1132,7 +1132,7 @@
 									onclick={validateNow}
 									title="Run the structural checks"
 								>
-									<Icon name="shield" size={12} /> Validate
+									<Icon name="shield" size={16} /> Validate
 								</button>
 								<button
 									type="button"
@@ -1142,7 +1142,7 @@
 									aria-expanded={simulateOpen}
 									title="Preview the flow with a sample message"
 								>
-									<Icon name="activity" size={12} /> Simulate
+									<Icon name="activity" size={16} /> Simulate
 								</button>
 							</div>
 							<div class="toolbar-state">
@@ -1185,7 +1185,7 @@
 										class="btn btn-primary btn-sm"
 										onclick={() => addNode('trigger')}
 									>
-										<Icon name="zap" size={12} /> Add trigger
+										<Icon name="zap" size={16} /> Add trigger
 									</button>
 								</div>
 							{:else}
@@ -1220,13 +1220,13 @@
 													title="Delete step"
 													aria-label="Delete step"
 												>
-													<Icon name="trash" size={13} />
+													<Icon name="trash" size={16} />
 												</button>
 											</div>
 										</div>
 										{#if index < nodes.length - 1}
 											<div class="simple-step-connector" aria-hidden="true">
-												<Icon name="chevron-down" size={14} />
+												<Icon name="chevron-down" size={16} />
 											</div>
 										{/if}
 									{/each}
@@ -1244,7 +1244,7 @@
 									title="Back to workflows"
 									aria-label="Back to workflows"
 								>
-									<Icon name="arrow-down-left" size={14} />
+									<Icon name="arrow-down-left" size={16} />
 								</a>
 								<span class="toolbar-sep" aria-hidden="true"></span>
 								<button
@@ -1255,7 +1255,7 @@
 									title="Undo (Ctrl+Z)"
 									aria-label="Undo"
 								>
-									<Icon name="undo" size={13} />
+									<Icon name="undo" size={16} />
 								</button>
 								<button
 									type="button"
@@ -1265,7 +1265,7 @@
 									title="Redo (Ctrl+Y)"
 									aria-label="Redo"
 								>
-									<Icon name="redo" size={13} />
+									<Icon name="redo" size={16} />
 								</button>
 								<span class="toolbar-sep" aria-hidden="true"></span>
 								<button
@@ -1276,7 +1276,7 @@
 									aria-busy={saving}
 									title={blockedReason}
 								>
-									{#if saving}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+									{#if saving}<Spinner />{:else}<Icon name="check" size={16} />{/if}
 									Save
 								</button>
 								<button
@@ -1285,7 +1285,7 @@
 									onclick={validateNow}
 									title="Run the structural checks"
 								>
-									<Icon name="shield" size={12} /> Validate
+									<Icon name="shield" size={16} /> Validate
 								</button>
 								<button
 									type="button"
@@ -1295,7 +1295,7 @@
 									aria-expanded={simulateOpen}
 									title="Preview the flow with a sample message"
 								>
-									<Icon name="activity" size={12} /> Simulate
+									<Icon name="activity" size={16} /> Simulate
 								</button>
 							</div>
 							<div class="toolbar-state">
@@ -1555,8 +1555,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		width: 380px;
-		max-width: calc(100vw - 56px);
+		width: auto;
+		max-width: 100%;
 		padding: var(--df-p-space-1);
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-md);
@@ -1630,10 +1630,13 @@
 		height: 1px;
 	}
 
+	/* One switch, one geometry. The routes use 34x20 with a 14px thumb and the
+	   accent fill; this was 30x18 with a mint "on", so the same control read as two
+	   different controls depending on the page. */
 	.switch-track {
 		position: relative;
-		width: 30px;
-		height: 18px;
+		width: 34px;
+		height: 20px;
 		flex: none;
 		border: 1px solid var(--df-border-control);
 		border-radius: var(--df-p-radius-pill);
@@ -1647,8 +1650,8 @@
 		position: absolute;
 		top: 2px;
 		left: 2px;
-		width: 12px;
-		height: 12px;
+		width: 14px;
+		height: 14px;
 		border-radius: 50%;
 		background: var(--df-text-meta);
 		transition:
@@ -1657,13 +1660,13 @@
 	}
 
 	.switch input:checked + .switch-track {
-		background: var(--df-state-ok-bg);
-		border-color: var(--df-state-ok-ink);
+		background: var(--df-accent-fill);
+		border-color: var(--df-accent-fill);
 	}
 
 	.switch input:checked + .switch-track > span {
-		transform: translateX(12px);
-		background: var(--df-state-ok-ink);
+		transform: translateX(14px);
+		background: var(--df-text-on-accent, #fff);
 	}
 
 	.switch input:focus-visible + .switch-track {
@@ -1819,9 +1822,9 @@
 
 	.view-btn.is-active {
 		background: var(--df-surface-card);
-		color: var(--df-text-main);
+		color: var(--df-text-primary);
 		font-weight: 500;
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+		box-shadow: var(--df-shadow-card);
 	}
 
 	.simple-shell,
@@ -1879,7 +1882,7 @@
 	}
 
 	.simple-step-card.is-selected {
-		border-color: var(--df-brand);
+		border-color: var(--df-accent-text);
 		background: var(--df-surface-card);
 	}
 
@@ -1945,11 +1948,11 @@
 	.code-error-banner {
 		padding: var(--df-p-space-2) var(--df-p-space-3);
 		margin-bottom: var(--df-p-space-2);
-		background: rgba(220, 38, 38, 0.1);
-		border: 1px solid rgba(220, 38, 38, 0.3);
+		background: var(--df-state-danger-bg);
+		border: 1px solid var(--df-state-danger-ink);
 		border-radius: var(--df-p-radius-xs);
 		font-size: var(--df-p-text-xs);
-		color: #ef4444;
+		color: var(--df-state-danger-ink);
 	}
 
 	.code-textarea {
@@ -1960,7 +1963,7 @@
 		font-size: 13px;
 		line-height: 1.5;
 		background: var(--df-surface-well);
-		color: var(--df-text-main);
+		color: var(--df-text-primary);
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-sm);
 		font-family: monospace;
@@ -1969,6 +1972,6 @@
 
 	.code-textarea:focus {
 		outline: none;
-		border-color: var(--df-brand);
+		border-color: var(--df-accent-text);
 	}
 </style>

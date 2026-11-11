@@ -102,3 +102,17 @@
 		</button>
 	</div>
 </dialog>
+
+<style>
+	/* The dialog surface's radius comes from the component token, not the generic
+	   radius scale. The footer is flush with the 1px border, so it repeats the
+	   outer radius minus that border and its square top stays hidden. */
+	:global(.dialog) {
+		border-radius: var(--df-c-dialog-radius);
+	}
+
+	:global(.dialog .dialog-foot) {
+		border-radius: 0 0 calc(var(--df-c-dialog-radius) - 1px)
+			calc(var(--df-c-dialog-radius) - 1px);
+	}
+</style>

@@ -880,9 +880,11 @@
 		border-top: 0;
 	}
 
-	.devrow:hover {
-		background: var(--df-surface-well);
-		text-decoration: none;
+	@media (hover: hover) and (pointer: fine) {
+		.devrow:hover {
+			background: var(--df-surface-well);
+			text-decoration: none;
+		}
 	}
 
 	.dev-glyph {

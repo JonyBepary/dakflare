@@ -894,11 +894,18 @@
 			transform var(--df-p-dur-press) ease-out;
 	}
 
-	.rung:hover:not([aria-disabled='true']):not(:disabled),
 	.rung:focus-visible:not([aria-disabled='true']):not(:disabled) {
 		background: var(--df-accent-fill);
 		border-color: transparent;
 		color: var(--df-text-on-accent);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.rung:hover:not([aria-disabled='true']):not(:disabled) {
+			background: var(--df-accent-fill);
+			border-color: transparent;
+			color: var(--df-text-on-accent);
+		}
 	}
 
 	.rung:active:not([aria-disabled='true']):not(:disabled) {

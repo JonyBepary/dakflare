@@ -43,8 +43,8 @@
 	/* Five shapes, one per state: filled circle, ring, hollow square, filled
 	   square, dash. Never colour alone. */
 	.glyph {
-		width: 7px;
-		height: 7px;
+		width: var(--df-c-chip-dot-size);
+		height: var(--df-c-chip-dot-size);
 		flex: none;
 		border-radius: 50%;
 		background: currentColor;
@@ -66,7 +66,7 @@
 	}
 
 	.glyph[data-presence='unknown'] {
-		width: 8px;
+		width: calc(var(--df-c-chip-dot-size) + 1px);
 		height: 2px;
 		border-radius: 1px;
 	}

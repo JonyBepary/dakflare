@@ -55,13 +55,13 @@
 	let editOptional = $state(false);
 
 	const SLOT_TYPES = [
-		{ id: 'money_bdt', label: '💰 Money (Tk / BDT)', defaultName: 'amount' },
-		{ id: 'phone_bd', label: '📱 Phone Number (BD)', defaultName: 'sender_account' },
-		{ id: 'trx_id', label: '🔑 Transaction ID', defaultName: 'trx_id' },
-		{ id: 'datetime_bd', label: '🕒 Date & Time', defaultName: 'timestamp' },
-		{ id: 'bank_account', label: '🏦 Bank Account (*1234)', defaultName: 'account_no' },
-		{ id: 'number', label: '🔢 Plain Number', defaultName: 'num' },
-		{ id: 'free_text', label: '🏷️ Free Text / Reference', defaultName: 'reference' }
+		{ id: 'money_bdt', label: 'Money (Tk / BDT)', defaultName: 'amount' },
+		{ id: 'phone_bd', label: 'Phone Number (BD)', defaultName: 'sender_account' },
+		{ id: 'trx_id', label: 'Transaction ID', defaultName: 'trx_id' },
+		{ id: 'datetime_bd', label: 'Date & Time', defaultName: 'timestamp' },
+		{ id: 'bank_account', label: 'Bank Account (*1234)', defaultName: 'account_no' },
+		{ id: 'number', label: 'Plain Number', defaultName: 'num' },
+		{ id: 'free_text', label: 'Free Text / Reference', defaultName: 'reference' }
 	];
 
 	// Tokenize sample text for token-chip click-to-select
@@ -274,7 +274,7 @@
 				</button>
 			{/each}
 			<button type="button" class="btn-pill btn-suggest" onclick={runAutoSuggest}>
-				⚡ Auto-Detect Fields
+				<Icon name="zap" size={16} /> Auto-Detect Fields
 			</button>
 		</div>
 	</div>
@@ -297,7 +297,7 @@
 					>
 						<span class="token-text">{token.text}</span>
 						<span class="span-tag">
-							{#if token.span.role === 'trigger'}⚡{:else if token.span.role === 'ignore'}🚫{:else}🎯 {token.span.name}{/if}
+							{#if token.span.role === 'trigger'}<Icon name="zap" size={16} />{:else if token.span.role === 'ignore'}<Icon name="x" size={16} />{:else}<Icon name="filter" size={16} /> {token.span.name}{/if}
 						</span>
 					</button>
 				{:else}
@@ -326,21 +326,21 @@
 						class={`role-btn ${editRole === 'trigger' ? 'active trigger' : ''}`}
 						onclick={() => (editRole = 'trigger')}
 					>
-						⚡ Trigger
+						<Icon name="zap" size={16} /> Trigger
 					</button>
 					<button
 						type="button"
 						class={`role-btn ${editRole === 'extract' ? 'active extract' : ''}`}
 						onclick={() => (editRole = 'extract')}
 					>
-						🎯 Extract
+						<Icon name="filter" size={16} /> Extract
 					</button>
 					<button
 						type="button"
 						class={`role-btn ${editRole === 'ignore' ? 'active ignore' : ''}`}
 						onclick={() => (editRole = 'ignore')}
 					>
-						🚫 Ignore
+						<Icon name="x" size={16} /> Ignore
 					</button>
 				</div>
 			</div>
@@ -374,7 +374,7 @@
 
 			<div class="popover-actions">
 				<button type="button" class="btn-primary" onclick={applySelection}>
-					✓ Apply Span
+					<Icon name="check" size={16} /> Apply Span
 				</button>
 				{#if selectedSpanIndex !== null}
 					<button
@@ -411,7 +411,7 @@
 
 		{#if synthError}
 			<div class="error-banner">
-				⚠️ {synthError}
+				<Icon name="alert" size={16} /> {synthError}
 			</div>
 		{/if}
 
@@ -420,9 +420,9 @@
 				<div class={`match-row ${match.matched ? 'matched' : 'unmatched'}`}>
 					<div class="row-status">
 						{#if match.matched}
-							<span class="badge-ok">✅ Matched</span>
+							<span class="badge-ok"><Icon name="check" size={16} /> Matched</span>
 						{:else}
-							<span class="badge-fail">⚠️ Unmatched</span>
+							<span class="badge-fail"><Icon name="alert" size={16} /> Unmatched</span>
 						{/if}
 						<span class="sample-num">Sample #{i + 1}</span>
 					</div>
@@ -453,22 +453,23 @@
 			disabled={!compiledPattern || capturedVariables.length === 0}
 			onclick={commitTemplate}
 		>
-			✓ Use Template in Step ({capturedVariables.length} Variables)
+			<Icon name="check" size={16} /> Use Template in Step ({capturedVariables.length} Variables)
 		</button>
 	</div>
 </div>
 
 <style>
 	.workbench {
+		container-type: inline-size;
 		display: flex;
 		flex-direction: column;
-		gap: 0.85rem;
-		background: #14171f;
-		border: 1px solid #2d3343;
-		border-radius: 8px;
-		padding: 0.85rem;
-		color: #e5e7eb;
-		font-size: 0.82rem;
+		gap: var(--df-p-space-3);
+		background: var(--df-surface-card);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-md);
+		padding: var(--df-p-space-4);
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-base);
 	}
 
 	.wb-header {
@@ -476,63 +477,69 @@
 		flex-wrap: wrap;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.5rem;
-		padding-bottom: 0.5rem;
-		border-bottom: 1px solid #222734;
+		gap: var(--df-p-space-2);
+		padding-bottom: var(--df-p-space-2);
+		border-bottom: 1px solid var(--df-border-hairline);
 	}
 
 	.wb-title {
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: var(--df-p-space-1);
 		font-weight: 600;
-		color: #60a5fa;
+		color: var(--df-accent-text);
 	}
 
 	.preset-pills {
 		display: flex;
 		align-items: center;
-		gap: 0.35rem;
+		gap: var(--df-p-space-1);
 		flex-wrap: wrap;
 	}
 
 	.preset-label {
-		font-size: 0.72rem;
-		color: #94a3b8;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.btn-pill {
-		background: #1e2433;
-		border: 1px solid #334155;
-		color: #cbd5e1;
-		font-size: 0.72rem;
-		padding: 0.15rem 0.5rem;
-		border-radius: 9999px;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-control);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		padding: 2px 8px;
+		border-radius: var(--df-p-radius-pill);
 		cursor: pointer;
-		transition: all 0.15s ease;
+		transition:
+			background-color 140ms ease-out,
+			border-color 140ms ease-out,
+			color 140ms ease-out;
 	}
 
 	.btn-pill:hover {
-		background: #2e384d;
-		color: #fff;
+		background: var(--df-surface-press);
+		color: var(--df-text-primary);
 	}
 
 	.btn-suggest {
-		background: #064e3b;
-		border-color: #059669;
-		color: #6ee7b7;
+		background: var(--df-state-ok-bg);
+		border-color: var(--df-state-ok-ink);
+		color: var(--df-state-ok-ink);
 		font-weight: 600;
 	}
 
 	.token-surface-container {
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 5px;
 	}
 
 	.surface-label {
-		font-size: 0.75rem;
-		color: #94a3b8;
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 		font-weight: 500;
 	}
 
@@ -540,11 +547,11 @@
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 0.2rem;
-		padding: 0.75rem;
-		background: #0f1219;
-		border: 1px solid #1f2430;
-		border-radius: 6px;
+		gap: 3px;
+		padding: var(--df-p-space-3);
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
 		line-height: 1.8;
 		user-select: none;
 	}
@@ -555,226 +562,246 @@
 
 	.token-chip {
 		font-family: inherit;
-		font-size: 0.8rem;
-		padding: 0.1rem 0.35rem;
-		border-radius: 4px;
+		font-size: var(--df-p-text-base);
+		padding: 2px 6px;
+		border-radius: var(--df-p-radius-xs);
 		cursor: pointer;
 		border: 1px solid transparent;
 		background: transparent;
-		color: #cbd5e1;
+		color: var(--df-text-secondary);
 		display: inline-flex;
 		align-items: center;
-		gap: 0.25rem;
-		transition: all 0.15s ease;
+		gap: var(--df-p-space-1);
+		transition:
+			background-color 140ms ease-out,
+			border-color 140ms ease-out,
+			color 140ms ease-out;
 	}
 
 	.token-chip.unassigned:hover {
-		background: #1e293b;
-		border-color: #3b82f6;
+		background: var(--df-surface-card);
+		border-color: var(--df-accent-text);
 	}
 
 	.token-chip.is-selecting {
-		background: #1e3a5f;
-		border-color: #60a5fa;
-		color: #fff;
+		background: var(--df-accent-soft);
+		border-color: var(--df-accent-text);
+		color: var(--df-text-primary);
 	}
 
 	.token-chip.span-trigger {
-		background: #1e2238;
-		border-color: #6366f1;
-		color: #c7d2fe;
+		background: var(--df-accent-soft);
+		border-color: var(--df-accent-text);
+		color: var(--df-accent-text);
 	}
 
 	.token-chip.span-extract {
-		background: #064e3b;
-		border-color: #10b981;
-		color: #a7f3d0;
+		background: var(--df-state-info-bg);
+		border-color: var(--df-state-info-ink);
+		color: var(--df-state-info-ink);
 	}
 
 	.token-chip.span-ignore {
-		background: #27272a;
-		border-color: #52525b;
-		color: #a1a1aa;
+		background: var(--df-state-neutral-bg);
+		border-color: var(--df-state-neutral-ink);
+		color: var(--df-state-neutral-ink);
 		text-decoration: line-through;
 	}
 
 	.token-chip.is-selected {
-		box-shadow: 0 0 0 2px #f59e0b;
+		box-shadow: 0 0 0 2px var(--df-accent-text);
 	}
 
 	.span-tag {
-		font-size: 0.65rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		font-size: var(--df-p-text-2xs);
 		opacity: 0.9;
 		font-weight: 600;
 	}
 
 	.span-editor-popover {
-		background: #1e2433;
-		border: 1px solid #3b82f6;
-		border-radius: 6px;
-		padding: 0.6rem 0.75rem;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-accent-text);
+		border-radius: var(--df-p-radius-md);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: var(--df-p-space-2);
 	}
 
 	.popover-row {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.5rem;
+		gap: var(--df-p-space-2);
 	}
 
 	.popover-title {
 		font-weight: 600;
-		color: #93c5fd;
-		font-size: 0.75rem;
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
 	}
 
 	.role-selector {
 		display: flex;
-		gap: 0.25rem;
+		gap: var(--df-p-space-1);
 	}
 
 	.role-btn {
-		font-size: 0.7rem;
-		padding: 0.15rem 0.45rem;
-		border-radius: 4px;
-		border: 1px solid #475569;
-		background: #0f172a;
-		color: #94a3b8;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: var(--df-p-text-xs);
+		padding: 2px 7px;
+		border-radius: var(--df-p-radius-xs);
+		border: 1px solid var(--df-border-control);
+		background: var(--df-surface-card);
+		color: var(--df-text-meta);
 		cursor: pointer;
 	}
 
 	.role-btn.active.trigger {
-		background: #4f46e5;
-		color: #fff;
-		border-color: #6366f1;
+		background: var(--df-accent-fill);
+		color: var(--df-text-on-accent);
+		border-color: var(--df-accent-fill);
 	}
 
 	.role-btn.active.extract {
-		background: #059669;
-		color: #fff;
-		border-color: #10b981;
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+		border-color: var(--df-state-ok-ink);
 	}
 
 	.role-btn.active.ignore {
-		background: #475569;
-		color: #fff;
-		border-color: #64748b;
+		background: var(--df-state-neutral-bg);
+		color: var(--df-state-neutral-ink);
+		border-color: var(--df-state-neutral-ink);
 	}
 
 	.popover-fields {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 0.6rem;
+		gap: var(--df-p-space-2);
 	}
 
 	.popover-field {
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
+		gap: 3px;
 	}
 
 	.popover-field label {
-		font-size: 0.68rem;
-		color: #94a3b8;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 	}
 
 	.wb-input,
 	.wb-select {
-		background: #0f1219;
-		border: 1px solid #334155;
-		border-radius: 4px;
-		color: #f1f5f9;
-		font-size: 0.75rem;
-		padding: 0.2rem 0.4rem;
+		background: var(--df-surface-well);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-xs);
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
+		padding: 3px 7px;
 	}
 
 	.optional-check {
 		display: flex;
 		align-items: center;
-		gap: 0.3rem;
-		font-size: 0.72rem;
-		color: #cbd5e1;
+		gap: 5px;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
 		cursor: pointer;
-		margin-top: 1rem;
+		margin-top: var(--df-p-space-3);
 	}
 
 	.popover-actions {
 		display: flex;
-		gap: 0.35rem;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1);
 	}
 
 	.btn-primary {
-		background: #2563eb;
-		color: #fff;
-		border: none;
-		border-radius: 4px;
-		padding: 0.25rem 0.6rem;
-		font-size: 0.75rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: var(--df-accent-fill);
+		color: var(--df-text-on-accent);
+		border: 1px solid var(--df-accent-fill);
+		border-radius: var(--df-p-radius-sm);
+		padding: 4px 10px;
+		font-size: var(--df-p-text-sm);
 		font-weight: 500;
 		cursor: pointer;
 	}
 
 	.btn-danger {
-		background: #dc2626;
-		color: #fff;
-		border: none;
-		border-radius: 4px;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.75rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: var(--df-state-danger-fill);
+		color: var(--df-text-on-danger);
+		border: 1px solid var(--df-state-danger-fill);
+		border-radius: var(--df-p-radius-sm);
+		padding: 4px 8px;
+		font-size: var(--df-p-text-sm);
 		cursor: pointer;
 	}
 
 	.btn-secondary {
-		background: #334155;
-		color: #e2e8f0;
-		border: none;
-		border-radius: 4px;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.75rem;
+		background: var(--df-surface-press);
+		color: var(--df-text-primary);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-sm);
+		padding: 4px 8px;
+		font-size: var(--df-p-text-sm);
 		cursor: pointer;
 	}
 
 	.preview-section {
 		display: flex;
 		flex-direction: column;
-		gap: 0.4rem;
+		gap: var(--df-p-space-1);
 	}
 
 	.section-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: var(--df-p-space-2);
 	}
 
 	.section-title {
-		font-size: 0.75rem;
+		font-size: var(--df-p-text-sm);
 		font-weight: 600;
-		color: #94a3b8;
+		color: var(--df-text-meta);
 	}
 
 	.synthesizing-pill {
-		font-size: 0.68rem;
-		color: #60a5fa;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-accent-text);
 		font-style: italic;
 	}
 
 	.error-banner {
-		background: #451a1a;
-		border: 1px solid #991b1b;
-		color: #fca5a5;
-		padding: 0.4rem 0.6rem;
-		border-radius: 4px;
-		font-size: 0.75rem;
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-1);
+		background: var(--df-state-danger-bg);
+		border: 1px solid var(--df-state-danger-ink);
+		color: var(--df-state-danger-ink);
+		padding: var(--df-p-space-2);
+		border-radius: var(--df-p-radius-sm);
+		font-size: var(--df-p-text-sm);
 	}
 
 	.match-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 5px;
 		max-height: 220px;
 		overflow-y: auto;
 	}
@@ -782,127 +809,170 @@
 	.match-row {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		padding: 0.45rem 0.6rem;
-		border-radius: 4px;
-		background: #0f1219;
+		gap: 3px;
+		padding: 6px 10px;
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
 		border-left: 3px solid transparent;
 	}
 
 	.match-row.matched {
-		border-left-color: #10b981;
+		border-left-color: var(--df-state-ok-ink);
 	}
 
 	.match-row.unmatched {
-		border-left-color: #f59e0b;
+		border-left-color: var(--df-state-warn-ink);
 	}
 
 	.row-status {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: var(--df-p-space-2);
 	}
 
 	.badge-ok {
-		background: #064e3b;
-		color: #6ee7b7;
-		padding: 0.1rem 0.35rem;
-		border-radius: 3px;
-		font-size: 0.68rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+		padding: 2px 6px;
+		border-radius: var(--df-p-radius-xs);
+		font-size: var(--df-p-text-2xs);
 		font-weight: 600;
 	}
 
 	.badge-fail {
-		background: #451a03;
-		color: #fcd34d;
-		padding: 0.1rem 0.35rem;
-		border-radius: 3px;
-		font-size: 0.68rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
+		padding: 2px 6px;
+		border-radius: var(--df-p-radius-xs);
+		font-size: var(--df-p-text-2xs);
 		font-weight: 600;
 	}
 
 	.sample-num {
-		font-size: 0.68rem;
-		color: #64748b;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
 	}
 
 	.row-body {
-		font-size: 0.73rem;
-		color: #94a3b8;
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-meta);
 		word-break: break-word;
 	}
 
 	.row-vars {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.25rem;
+		gap: var(--df-p-space-1);
 	}
 
 	.var-pill {
-		background: #1e293b;
-		border: 1px solid #334155;
-		border-radius: 3px;
-		padding: 0.1rem 0.35rem;
-		font-size: 0.68rem;
-		color: #e2e8f0;
+		background: var(--df-surface-card);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+		padding: 2px 6px;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-primary);
 	}
 
 	.var-pill code {
-		color: #38bdf8;
+		color: var(--df-state-info-ink);
 	}
 
 	.var-pill strong {
-		color: #34d399;
+		color: var(--df-state-ok-ink);
 	}
 
 	.wb-footer {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		padding-top: 0.5rem;
-		border-top: 1px solid #222734;
+		gap: var(--df-p-space-2);
+		padding-top: var(--df-p-space-2);
+		border-top: 1px solid var(--df-border-hairline);
 	}
 
 	.pattern-preview {
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
+		gap: 3px;
 	}
 
 	.pattern-label {
-		font-size: 0.7rem;
-		color: #94a3b8;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.pattern-code {
-		font-family: monospace;
-		font-size: 0.72rem;
-		background: #0b0e14;
-		padding: 0.35rem 0.5rem;
-		border-radius: 4px;
-		color: #fbbf24;
-		border: 1px solid #1e2433;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		background: var(--df-surface-well);
+		padding: 5px 8px;
+		border-radius: var(--df-p-radius-xs);
+		color: var(--df-accent-text);
+		border: 1px solid var(--df-border-hairline);
 		word-break: break-all;
 	}
 
 	.btn-apply-step {
-		background: #059669;
-		color: #fff;
-		border: none;
-		border-radius: 6px;
-		padding: 0.45rem 0.85rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+		border: 1px solid var(--df-state-ok-ink);
+		border-radius: var(--df-p-radius-sm);
+		padding: 7px 12px;
 		font-weight: 600;
-		font-size: 0.8rem;
+		font-size: var(--df-p-text-base);
 		cursor: pointer;
-		transition: background 0.15s ease;
+		transition:
+			background-color 140ms ease-out,
+			border-color 140ms ease-out,
+			color 140ms ease-out;
 	}
 
 	.btn-apply-step:hover:not(:disabled) {
-		background: #10b981;
+		background: var(--df-state-ok-ink);
+		color: var(--df-state-ok-bg);
 	}
 
 	.btn-apply-step:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	@container (width < 420px) {
+		.wb-header {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.preset-pills {
+			width: 100%;
+		}
+
+		.popover-row {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.popover-fields {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.popover-field {
+			width: 100%;
+		}
+
+		.optional-check {
+			margin-top: 0;
+		}
 	}
 </style>

@@ -44,16 +44,16 @@
 						: `A flow can hold at most ${NODE_LIMIT} steps`
 					: `Add ${meta.title}`}
 			>
-				<span class="palette-icon"><Icon name={meta.icon} size={15} /></span>
+				<span class="palette-icon"><Icon name={meta.icon} size={16} /></span>
 				<span class="palette-text">
 					<span class="palette-name">{meta.title}</span>
 					<span class="palette-blurb">{meta.blurb}</span>
 				</span>
 				<span class="palette-mark" aria-hidden="true">
 					{#if type === 'trigger' && hasTrigger}
-						<Icon name="check" size={12} />
+						<Icon name="check" size={16} />
 					{:else}
-						<Icon name="plus" size={12} />
+						<Icon name="plus" size={16} />
 					{/if}
 				</span>
 			</button>

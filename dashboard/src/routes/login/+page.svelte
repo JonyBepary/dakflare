@@ -966,7 +966,7 @@
 							</p>
 							<p class="hint sent-hint">
 								It works once and expires in {magicLinkMinutes} minutes. Opening it does not
-								sign you in — the button in the email does, so a link checker cannot spend it.
+								sign you in; the button in the email does, so a link checker cannot spend it.
 							</p>
 
 							{#if mlError}
@@ -1608,13 +1608,15 @@
 			transform var(--df-p-dur-press) ease-out;
 	}
 
-	.door:hover {
-		background: var(--surface-2);
-		border-color: var(--line-strong);
+	@media (hover: hover) and (pointer: fine) {
+		.door:hover {
+			background: var(--surface-2);
+			border-color: var(--line-strong);
+		}
 	}
 
 	.door:active {
-		transform: scale(0.985);
+		transform: scale(0.97);
 	}
 
 	.door:disabled {
@@ -1680,7 +1682,13 @@
 			transform 140ms ease;
 	}
 
-	.door:hover .door-go,
+	@media (hover: hover) and (pointer: fine) {
+		.door:hover .door-go {
+			opacity: 1;
+			transform: translateX(0);
+		}
+	}
+
 	.door:focus-visible .door-go {
 		opacity: 1;
 		transform: translateX(0);
@@ -1796,8 +1804,10 @@
 		transform: translateY(1px) rotate(225deg);
 	}
 
-	.login-more summary:hover {
-		color: var(--ink);
+	@media (hover: hover) and (pointer: fine) {
+		.login-more summary:hover {
+			color: var(--ink);
+		}
 	}
 
 	.login-more-body {

@@ -182,7 +182,7 @@
 
 					<!--
 						The list endpoint returns id, name, enabled, device_id, updated_at and
-						node_count — no version, no cache flag and no last run. Those facts live on
+						node_count: no version, no cache flag and no last run. Those facts live on
 						the detail read, so the row says nothing about them rather than inventing
 						a zero.
 					-->
@@ -340,10 +340,12 @@
 		overflow-wrap: anywhere;
 	}
 
-	.flow-name:hover {
-		color: var(--df-accent-text);
-		text-decoration: underline;
-		text-underline-offset: 3px;
+	@media (hover: hover) and (pointer: fine) {
+		.flow-name:hover {
+			color: var(--df-accent-text);
+			text-decoration: underline;
+			text-underline-offset: 3px;
+		}
 	}
 
 	.flow-name:focus-visible {

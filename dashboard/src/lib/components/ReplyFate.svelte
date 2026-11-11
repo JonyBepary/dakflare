@@ -52,7 +52,7 @@
 {#if variant === 'out' || failed}
 	<span class="fate" data-state={state} title={note}>
 		<span class="fate-word">{word}</span>
-		{#if reason}<span class="fate-reason">— {reason}</span>{/if}
+		{#if reason}<span class="fate-reason">: {reason}</span>{/if}
 		<span class="fate-glyph" aria-hidden="true"><Icon name={glyphs[state]} size={11} /></span>
 		{#if href}
 			<a class="fate-link" {href} onclick={follow}>Show the reply</a>
@@ -115,7 +115,9 @@
 		white-space: nowrap;
 	}
 
-	.fate-link:hover {
-		color: var(--df-accent-text);
+	@media (hover: hover) and (pointer: fine) {
+		.fate-link:hover {
+			color: var(--df-accent-text);
+		}
 	}
 </style>

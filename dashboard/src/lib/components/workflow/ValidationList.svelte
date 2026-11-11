@@ -21,7 +21,7 @@
 <section class="panel checks" aria-labelledby="checks-title">
 	<div class="checks-head">
 		<h2 class="panel-title" id="checks-title">
-			<Icon name={issues.length > 0 ? 'alert' : 'shield'} size={14} />
+			<Icon name={issues.length > 0 ? 'alert' : 'shield'} size={16} />
 			Checks
 		</h2>
 		<span
@@ -37,7 +37,7 @@
 
 	{#if issues.length === 0}
 		<div class="checks-empty">
-			<span class="ok-mark" aria-hidden="true"><Icon name="check" size={13} /></span>
+			<span class="ok-mark" aria-hidden="true"><Icon name="check" size={16} /></span>
 			<div>
 				<p class="checks-ok">This flow is ready to save.</p>
 				<p class="hint">The gateway runs the same checks again when you save.</p>
@@ -73,7 +73,7 @@
 								{issue.message}
 								<span class="issue-path mono">{issue.path}</span>
 							</span>
-							<Icon name="arrow-up-right" size={11} />
+							<Icon name="arrow-up-right" size={16} />
 						</button>
 					{:else}
 						<div class="issue is-static">

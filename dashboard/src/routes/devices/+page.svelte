@@ -829,7 +829,7 @@
 								<span class="pair-state-mark"><Icon name="clock" size={16} /></span>
 								<div class="pair-state-body">
 									<p class="eyebrow">Pairing code</p>
-									<h3>Code expired — mint a new one</h3>
+									<h3>Code expired, mint a new one</h3>
 									<p class="hint">
 										This code can no longer register a phone. A fresh code replaces it; the old
 										one is not left looking valid.
@@ -1018,7 +1018,7 @@
 				{#if devices.length === 0}
 					<p class="fleet-none">
 						No active devices. <span class="mono">{archivedTotal}</span>
-						{archivedTotal === 1 ? 'archived device is' : 'archived devices are'} hidden — turn on
+						{archivedTotal === 1 ? 'archived device is' : 'archived devices are'} hidden. Turn on
 						<strong>Show archived</strong> to see {archivedTotal === 1 ? 'it' : 'them'}.
 					</p>
 				{:else}
@@ -1159,9 +1159,9 @@
 					</div>
 
 					<p class="fleet-note">
-						<strong>live</strong> — connected now · <strong>synced</strong> — in contact within 15
-						minutes · <strong>stale</strong> — within 24 hours · <strong>offline</strong> — over 24
-						hours · <strong>unknown</strong> — no contact recorded. Wake is
+						<strong>live</strong>: connected now · <strong>synced</strong>: in contact within 15
+						minutes · <strong>stale</strong>: within 24 hours · <strong>offline</strong>: over 24
+						hours · <strong>unknown</strong>: no contact recorded. Wake is
 						<span class="mono">push</span> when the phone holds a push token, otherwise
 						<span class="mono">poll-only</span>.
 					</p>
@@ -1250,7 +1250,6 @@
 
 	.mint-panel {
 		border-color: color-mix(in srgb, var(--df-accent-text) 26%, var(--df-border-hairline));
-		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-4));
 	}
 
 	.mint-panel .card-head {
@@ -1519,8 +1518,10 @@
 			background-color var(--df-p-dur-lift) ease;
 	}
 
-	.archived-toggle:hover .toggle-track {
-		border-color: var(--df-text-meta);
+	@media (hover: hover) and (pointer: fine) {
+		.archived-toggle:hover .toggle-track {
+			border-color: var(--df-text-meta);
+		}
 	}
 
 	.archived-toggle input:checked + .toggle-track {
@@ -1615,8 +1616,10 @@
 		border-bottom: 0;
 	}
 
-	.fleet-row:hover {
-		background: var(--df-surface-hover);
+	@media (hover: hover) and (pointer: fine) {
+		.fleet-row:hover {
+			background: var(--df-surface-hover);
+		}
 	}
 
 	/* Quieter, not disabled: the row still opens, still rotates, still revokes.
@@ -1664,14 +1667,16 @@
 		transition: transform var(--df-p-dur-lift) ease;
 	}
 
-	.device-open:hover .device-go {
-		transform: translateX(1px);
-	}
+	@media (hover: hover) and (pointer: fine) {
+		.device-open:hover .device-go {
+			transform: translateX(1px);
+		}
 
-	.device-open:hover .device-id {
-		color: var(--df-accent-text);
-		text-decoration: underline;
-		text-underline-offset: 3px;
+		.device-open:hover .device-id {
+			color: var(--df-accent-text);
+			text-decoration: underline;
+			text-underline-offset: 3px;
+		}
 	}
 
 	.device-label {
@@ -1919,8 +1924,10 @@
 			transition: none;
 		}
 
-		.device-open:hover .device-go {
-			transform: none;
+		@media (hover: hover) and (pointer: fine) {
+			.device-open:hover .device-go {
+				transform: none;
+			}
 		}
 
 		.toggle-track,

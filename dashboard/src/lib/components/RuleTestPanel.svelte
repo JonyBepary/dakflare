@@ -178,7 +178,7 @@
 		<div class="test-body">
 			{#if draftNotice}
 				<p class="draft-note">
-					Tests the saved rules only — save this rule to include it. The unsaved values above are
+					Tests the saved rules only. Save this rule to include it. The unsaved values above are
 					not used.
 				</p>
 			{/if}
@@ -312,7 +312,7 @@
 		padding: var(--df-p-space-3) var(--df-p-space-4);
 		border-bottom: 1px solid var(--df-border-hairline);
 		background: var(--df-surface-well);
-		border-radius: var(--df-p-radius-lg) var(--df-p-radius-lg) 0 0;
+		border-radius: calc(var(--df-p-radius-lg) - 1px) calc(var(--df-p-radius-lg) - 1px) 0 0;
 	}
 
 	.test-heading {
@@ -440,13 +440,17 @@
 	}
 
 	.verdict {
-		padding: 1px 7px;
-		border-radius: var(--df-p-radius-pill);
+		display: inline-flex;
+		align-items: center;
+		height: var(--df-c-chip-height);
+		padding: 0 var(--df-c-chip-padding-inline);
+		border-radius: var(--df-c-chip-radius);
 		background: var(--df-state-ok-bg);
 		color: var(--df-state-ok-ink);
-		font-size: var(--df-p-text-2xs);
-		font-weight: 700;
-		line-height: 1.6;
+		font-size: var(--df-c-chip-font-size);
+		font-weight: var(--df-c-chip-font-weight);
+		letter-spacing: var(--df-c-chip-tracking);
+		line-height: 1;
 		white-space: nowrap;
 	}
 

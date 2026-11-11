@@ -731,7 +731,6 @@
 	.compose-panel {
 		margin-bottom: var(--df-p-space-4);
 		border-color: color-mix(in srgb, var(--df-accent-text) 24%, var(--df-border-hairline));
-		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-4));
 	}
 
 	.compose-meta {
@@ -755,7 +754,7 @@
 		padding: var(--df-p-space-3) var(--df-p-space-4);
 		border-bottom: 1px solid var(--df-border-hairline);
 		background: var(--df-surface-well);
-		border-radius: var(--df-c-card-radius) var(--df-c-card-radius) 0 0;
+		border-radius: calc(var(--df-c-card-radius) - 1px) calc(var(--df-c-card-radius) - 1px) 0 0;
 	}
 
 	.device-picker {
@@ -841,7 +840,6 @@
 		gap: var(--df-p-space-3);
 		padding: var(--df-p-space-3) var(--df-p-space-4);
 		border-bottom: 1px solid var(--df-border-hairline);
-		scroll-margin-top: calc(var(--df-c-shell-header) + var(--df-p-space-6));
 		transition: background-color var(--df-p-dur-lift) ease;
 	}
 
@@ -849,8 +847,10 @@
 		border-bottom: 0;
 	}
 
-	.log-row:hover {
-		background: var(--df-surface-hover);
+	@media (hover: hover) and (pointer: fine) {
+		.log-row:hover {
+			background: var(--df-surface-hover);
+		}
 	}
 
 	.log-row:focus-visible {

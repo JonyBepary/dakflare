@@ -62,7 +62,7 @@
 		<span class="qr-fallback-icon"><Icon name="alert" size={15} /></span>
 		<div>
 			<strong>QR code unavailable</strong>
-			<p>{qr.error} Use the deep link instead — it pairs the same way.</p>
+			<p>{qr.error} Use the deep link instead; it pairs the same way.</p>
 		</div>
 	</div>
 {:else}

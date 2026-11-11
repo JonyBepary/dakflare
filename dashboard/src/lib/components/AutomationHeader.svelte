@@ -83,13 +83,15 @@
 			color 140ms ease;
 	}
 
-	.tab:hover {
-		background: light-dark(
-			color-mix(in srgb, var(--df-surface-card) 60%, transparent),
-			var(--df-surface-press)
-		);
-		color: var(--df-text-primary);
-		text-decoration: none;
+	@media (hover: hover) and (pointer: fine) {
+		.tab:hover {
+			background: light-dark(
+				color-mix(in srgb, var(--df-surface-card) 60%, transparent),
+				var(--df-surface-press)
+			);
+			color: var(--df-text-primary);
+			text-decoration: none;
+		}
 	}
 
 	.tab:focus-visible {

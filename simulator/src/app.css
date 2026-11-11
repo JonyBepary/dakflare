@@ -10,6 +10,11 @@
 
 /* Pre-migration names, kept alive on top of the shared tokens. */
 :root {
+	/* The UA paints native widgets (select popups, carets, scrollbars,
+	   autofill) from this, and the dark block below only repoints tokens. */
+	color-scheme: light dark;
+	/* One state word on both surfaces: the console's `.chip` tracking. */
+	--df-c-chip-tracking: 0.01em;
 	--bg: var(--df-surface-page);
 	--surface: var(--df-surface-card);
 	--surface-2: var(--df-surface-well);
@@ -42,6 +47,8 @@
 /* Phone dark: layer 2 only, so every component token above keeps working. */
 @media (prefers-color-scheme: dark) {
 	:root {
+		color-scheme: dark;
+
 		--df-surface-page: var(--df-p-night-900);
 		--df-surface-card: var(--df-p-night-800);
 		--df-surface-well: var(--df-p-night-700);
@@ -372,13 +379,17 @@ p {
 	line-height: 1.2;
 	cursor: pointer;
 	transition:
-		transform 90ms ease-out,
+		transform var(--df-p-dur-press) ease-out,
 		background-color 120ms ease-out,
 		border-color 120ms ease-out;
 }
 
-.btn:hover:not(:disabled) {
-	background: var(--df-surface-well);
+/* A phone is the target: hover is a fine-pointer affordance only. Touch gets
+   the press state below. */
+@media (hover: hover) and (pointer: fine) {
+	.btn:hover:not(:disabled) {
+		background: var(--df-surface-well);
+	}
 }
 
 .btn:active:not(:disabled) {
@@ -391,9 +402,11 @@ p {
 	color: var(--df-text-on-accent);
 }
 
-.btn.primary:hover:not(:disabled) {
-	background: var(--df-accent-fill-hover);
-	border-color: var(--df-accent-fill-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn.primary:hover:not(:disabled) {
+		background: var(--df-accent-fill-hover);
+		border-color: var(--df-accent-fill-hover);
+	}
 }
 
 .btn.wide {
@@ -412,9 +425,11 @@ p {
 	color: var(--ink-3);
 }
 
-.btn.quiet:hover:not(:disabled) {
-	background: var(--df-surface-well);
-	color: var(--ink);
+@media (hover: hover) and (pointer: fine) {
+	.btn.quiet:hover:not(:disabled) {
+		background: var(--df-surface-well);
+		color: var(--ink);
+	}
 }
 
 .btn.danger-ghost {
@@ -457,11 +472,21 @@ button:disabled {
 	background: var(--surface);
 	color: var(--ink-2);
 	cursor: pointer;
+	transition:
+		transform var(--df-p-dur-press) ease-out,
+		background-color 120ms ease-out,
+		color 120ms ease-out;
 }
 
-.icon-btn:hover:not(:disabled) {
-	color: var(--ink);
-	background: var(--df-surface-well);
+@media (hover: hover) and (pointer: fine) {
+	.icon-btn:hover:not(:disabled) {
+		color: var(--ink);
+		background: var(--df-surface-well);
+	}
+}
+
+.icon-btn:active:not(:disabled) {
+	transform: scale(0.97);
 }
 
 :where(a, button, input, select, textarea, summary, [role='switch']):focus-visible {
@@ -542,21 +567,33 @@ input::placeholder {
 	margin-bottom: 7px;
 }
 
-.pill {
+/* One geometry for a state word on the phone: 22px tall, 9px inline padding,
+   0.6875rem/700 at the console's 0.01em tracking. `.pill`, `.state-pill` and
+   `.state-chip` only differ in the tone pair they paint. */
+.pill,
+.state-pill,
+.state-chip {
 	display: inline-block;
 	flex: none;
+	height: var(--df-c-chip-height);
+	padding: 0 var(--df-c-chip-padding-inline);
+	border: 1px solid transparent;
+	border-radius: var(--df-c-chip-radius);
+	font-size: var(--df-c-chip-font-size);
+	font-weight: var(--df-c-chip-font-weight);
+	letter-spacing: var(--df-c-chip-tracking);
+	/* The 22px box minus its 1px boundary, so the word sits centred. */
+	line-height: calc(var(--df-c-chip-height) - 2px);
+	white-space: nowrap;
+	vertical-align: middle;
+}
+
+.pill {
 	max-width: 58%;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	white-space: nowrap;
-	padding: 3px 8px;
-	border: 1px solid var(--line);
-	border-radius: 999px;
+	border-color: var(--line);
 	color: var(--ink-3);
-	font-size: 10px;
-	font-weight: 700;
-	letter-spacing: 0.04em;
-	vertical-align: middle;
 }
 
 .pill[data-state='live'] {
@@ -578,14 +615,7 @@ input::placeholder {
 }
 
 .state-pill {
-	display: inline-block;
-	flex: none;
 	margin-top: 4px;
-	padding: 4px 10px;
-	border-radius: 999px;
-	font-size: 11px;
-	font-weight: 700;
-	letter-spacing: 0.03em;
 	background: var(--df-state-neutral-bg);
 	color: var(--df-state-neutral-ink);
 }
@@ -730,9 +760,11 @@ input::placeholder {
 	text-decoration: none;
 }
 
-.text-link:hover {
-	text-decoration: underline;
-	text-underline-offset: 3px;
+@media (hover: hover) and (pointer: fine) {
+	.text-link:hover {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
 }
 
 .inline-link {
@@ -774,8 +806,15 @@ input::placeholder {
 	transition: background-color 120ms ease-out;
 }
 
-.thread-row:hover {
-	background: var(--df-surface-well);
+@media (hover: hover) and (pointer: fine) {
+	.thread-row:hover {
+		background: var(--df-surface-well);
+	}
+}
+
+/* Touch keeps a press state, so a tap does not leave the row washed. */
+.thread-row:active {
+	background: var(--df-surface-press);
 }
 
 .thread-mark {
@@ -847,13 +886,8 @@ input::placeholder {
 }
 
 .state-chip {
-	padding: 1px 6px;
-	border-radius: 999px;
 	background: var(--df-state-neutral-bg);
 	color: var(--df-state-neutral-ink);
-	font-size: 10px;
-	font-weight: 700;
-	letter-spacing: 0.03em;
 	text-transform: none;
 }
 
@@ -1024,8 +1058,10 @@ input::placeholder {
 		background-color 120ms ease-out;
 }
 
-.composer-send:hover:not(:disabled) {
-	background: var(--df-c-composer-send-hover-bg);
+@media (hover: hover) and (pointer: fine) {
+	.composer-send:hover:not(:disabled) {
+		background: var(--df-c-composer-send-hover-bg);
+	}
 }
 
 .composer-send:active:not(:disabled) {
@@ -1268,13 +1304,15 @@ input::placeholder {
 		background-color 120ms ease-out;
 }
 
-.icon-btn.compose-open:hover {
-	background: var(--df-accent-fill-hover);
-	color: var(--df-text-on-accent);
+@media (hover: hover) and (pointer: fine) {
+	.icon-btn.compose-open:hover {
+		background: var(--df-accent-fill-hover);
+		color: var(--df-text-on-accent);
+	}
 }
 
 .icon-btn.compose-open:active {
-	transform: scale(0.94);
+	transform: scale(0.97);
 }
 
 .compose-screen {
@@ -1624,9 +1662,11 @@ input::placeholder {
 	font-variant-numeric: tabular-nums;
 }
 
-.btn.ladder-rung:hover:not(:disabled) {
-	background: var(--accent-soft);
-	border-color: var(--df-accent-fill);
+@media (hover: hover) and (pointer: fine) {
+	.btn.ladder-rung:hover:not(:disabled) {
+		background: var(--accent-soft);
+		border-color: var(--df-accent-fill);
+	}
 }
 
 .approval-actions {

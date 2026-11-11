@@ -43,7 +43,7 @@
 	{/if}
 
 	<div class="wf-node-head">
-		<span class="wf-node-icon"><Icon name={icon} size={13} strokeWidth={1.7} /></span>
+		<span class="wf-node-icon"><Icon name={icon} size={16} /></span>
 		<span class="wf-node-type">{title}</span>
 		{#if active}
 			<span class="wf-node-ran" title="Visited in the last preview">ran</span>
@@ -63,7 +63,7 @@
 				title="Duplicate node"
 				aria-label={`Duplicate ${title} node`}
 			>
-				<Icon name="copy" size={12} />
+				<Icon name="copy" size={16} />
 			</button>
 			<span class="wf-tool-sep" aria-hidden="true"></span>
 		{/if}
@@ -74,7 +74,7 @@
 			title="Delete node"
 			aria-label={`Delete ${title} node`}
 		>
-			<Icon name="trash" size={12} />
+			<Icon name="trash" size={16} />
 		</button>
 	</NodeToolbar>
 </div>

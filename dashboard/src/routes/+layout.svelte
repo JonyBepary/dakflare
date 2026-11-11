@@ -393,6 +393,19 @@
 {/if}
 
 <style>
+	/* The tab strip scrolls sideways on a phone and hides its scrollbar; without
+	   a mask a partly cut-off tab looks like the end of the list. The fade says
+	   there is more in that direction. */
+	:global(.shell-tabs) {
+		mask-image: linear-gradient(
+			to right,
+			transparent 0,
+			#000 12px,
+			#000 calc(100% - 12px),
+			transparent 100%
+		);
+	}
+
 	/* The console's first focusable control: hidden above the viewport until
 	   focused, then a real target at the top-left. */
 	.skip {

@@ -226,8 +226,10 @@
 		text-underline-offset: 2px;
 	}
 
-	.alert-device-link:hover {
-		color: var(--df-accent-text);
+	@media (hover: hover) and (pointer: fine) {
+		.alert-device-link:hover {
+			color: var(--df-accent-text);
+		}
 	}
 
 	.alert-list {
