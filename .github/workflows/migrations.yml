@@ -11,9 +11,14 @@ on:
   workflow_dispatch:
     inputs:
       database:
-        description: D1 database name or id
+        # The ID, not the name. `cf d1 migrations list` answers "Expected a D1
+        # database ID, but received <database>=\"sms_gateway\". Database names and
+        # binding names are not accepted." The default used to be the name, so this
+        # workflow failed on its own defaults, which is the one time it matters:
+        # applying a migration by hand, after a backup.
+        description: D1 database ID (names are not accepted)
         required: true
-        default: sms_gateway
+        default: 8d88069e-71cf-49a2-ba33-c150b02246b7
       confirm:
         description: Type apply to run the migrations
         required: true
