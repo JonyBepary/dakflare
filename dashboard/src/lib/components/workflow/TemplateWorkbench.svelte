@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import {
 		suggestSpans,
@@ -26,18 +27,26 @@
 		}) => void;
 	} = $props();
 
-	// State
+	// State, seeded from the props ONCE.
+	//
+	// `untrack` is the documented way to say that: the parent keys this component
+	// on the node id, so it remounts per node and these props never change under
+	// it. Writing `$state(initialSample)` read as "capture the first value and
+	// ignore the rest", which is what the compiler warned about, and which was a
+	// real bug before the key existed.
 	let sampleBody = $state(
-		initialSample ||
+		untrack(() => initialSample) ||
 			'You have received Tk 800.00 from 01999999999. Ref INV102. Fee Tk 0.00. Balance Tk 1,200.00. TrxID 8G56H7J8K9 at 15/07/2026 11:24'
 	);
-	let spans = $state<TemplateSpan[]>(initialSpans.length > 0 ? [...initialSpans] : []);
+	let spans = $state<TemplateSpan[]>(
+		untrack(() => (initialSpans.length > 0 ? [...initialSpans] : []))
+	);
 	let additionalSamples = $state<string[]>([
 		'You have received Tk 1,250.50 from 01812345678. Ref ORDER88. Fee Tk 0.00. Balance Tk 2,500.00. TrxID 9K12L3M4N5 at 16/07/2026 12:00',
 		'Cash In Tk 540.00 from 01961116866 successful. Fee Tk 0.00. Balance Tk 1,090.78. TrxID 3277235345 at 14/09/2026 12:38'
 	]);
 
-	let compiledPattern = $state(initialPattern);
+	let compiledPattern = $state(untrack(() => initialPattern));
 	let capturedVariables = $state<string[]>([]);
 	let testMatches = $state<TemplateTestMatch[]>([]);
 	let synthError = $state<string | null>(null);
