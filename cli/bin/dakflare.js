@@ -885,11 +885,11 @@ function requireConfig() {
       reason === 'invalid'
         ? `the config at ${CONFIG_FILE} is not valid JSON`
         : `no deployment is configured (${CONFIG_FILE} is missing)`;
-    throw new CliError(`${why} — run \`dakflare init\` first.`, 2, { error: 'no_config' });
+    throw new CliError(`${why}: run \`dakflare init\` first.`, 2, { error: 'no_config' });
   }
   if (typeof cfg.url !== 'string' || cfg.url === '' || typeof cfg.token !== 'string' || cfg.token === '') {
     throw new CliError(
-      `the config at ${CONFIG_FILE} needs both "url" and "token" — run \`dakflare init\` again.`,
+      `the config at ${CONFIG_FILE} needs both "url" and "token": run \`dakflare init\` again.`,
       2,
       { error: 'no_config' }
     );
@@ -927,7 +927,7 @@ async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS }
         ? `request timed out after ${Math.round(timeout / 1000)}s`
         : String(error?.message ?? error);
     throw new CliError(
-      `cannot reach ${base} — ${reason}. Check the Worker URL and your connection.`,
+      `cannot reach ${base}: ${reason}. Check the Worker URL and your connection.`,
       1,
       { error: 'network', url: base }
     );
@@ -1300,7 +1300,7 @@ async function commandInit(argv) {
     return healthy ? 0 : 1;
   }
 
-  out(`DakFlare init — ${url}`);
+  out(`DakFlare init: ${url}`);
   printFindings(findings);
   out(`  config        ${CONFIG_FILE} (mode ${modeString(configMode())})`);
   out('  token         stored; never printed');
@@ -1516,20 +1516,20 @@ async function commandDoctor(argv) {
       'config',
       'fail',
       reason === 'invalid'
-        ? `${CONFIG_FILE} is not valid JSON — run \`dakflare init\``
-        : `${CONFIG_FILE} is missing — run \`dakflare init\``
+        ? `${CONFIG_FILE} is not valid JSON: run \`dakflare init\``
+        : `${CONFIG_FILE} is missing: run \`dakflare init\``
     );
     return finishDoctor(checks, json, null);
   }
 
   if (typeof cfg.url !== 'string' || cfg.url === '' || typeof cfg.token !== 'string' || cfg.token === '') {
-    add('config', 'fail', `${CONFIG_FILE} needs both "url" and "token" — run \`dakflare init\``);
+    add('config', 'fail', `${CONFIG_FILE} needs both "url" and "token": run \`dakflare init\``);
     return finishDoctor(checks, json, null);
   }
 
   const url = cfg.url.replace(/\/+$/, '');
   if (process.platform !== 'win32' && mode !== null && (mode & 0o077) !== 0) {
-    add('config', 'fail', `${CONFIG_FILE} mode ${modeString(mode)}; expected 600 — run \`chmod 600 ${CONFIG_FILE}\``);
+    add('config', 'fail', `${CONFIG_FILE} mode ${modeString(mode)}; expected 600: run \`chmod 600 ${CONFIG_FILE}\``);
   } else {
     add('config', 'pass', `${url} (${CONFIG_FILE}, mode ${modeString(mode)})`);
   }
@@ -1545,7 +1545,7 @@ async function commandDoctor(argv) {
   }
 
   if (health.status === 401 || health.status === 403) {
-    add('health', 'fail', `HTTP ${health.status} — admin token rejected`);
+    add('health', 'fail', `HTTP ${health.status}: admin token rejected`);
     add('admin-token', 'fail', 'rejected by /v1/admin/health (HTTP 401/403)');
     addSkippedDependents(add, 'the admin token was rejected');
     return finishDoctor(checks, json, url);
@@ -1577,7 +1577,7 @@ async function commandDoctor(argv) {
   add(
     'schema',
     data.schema_ready === true ? 'pass' : 'fail',
-    data.schema_ready === true ? 'ready (d1_migrations present and counts readable)' : 'not ready — apply D1 migrations'
+    data.schema_ready === true ? 'ready (d1_migrations present and counts readable)' : 'not ready: apply D1 migrations'
   );
 
   const expected = expectedMigrations();
@@ -1633,7 +1633,7 @@ async function commandDoctor(argv) {
     'd1',
     data.db_error === null && data.counts ? 'pass' : 'fail',
     data.db_error === null && data.counts
-      ? `reachable — devices ${data.counts.devices ?? '?'} · messages ${data.counts.messages ?? '?'} · rules ${data.counts.rules ?? '?'}`
+      ? `reachable: devices ${data.counts.devices ?? '?'} · messages ${data.counts.messages ?? '?'} · rules ${data.counts.rules ?? '?'}`
       : `unreachable${data.db_error ? `: ${String(data.db_error).slice(0, 180)}` : ''}`
   );
 
@@ -1647,7 +1647,7 @@ async function commandDoctor(argv) {
 
   if (devices) {
     if (devices.length === 0) {
-      add('phone', 'skip', 'no paired devices — run `dakflare pair`');
+      add('phone', 'skip', 'no paired devices: run `dakflare pair`');
     } else {
       const freshest = devices
         .map((device) => ({ device, seconds: ageSeconds(device.last_seen) }))
@@ -1660,7 +1660,7 @@ async function commandDoctor(argv) {
         const label = freshest.device.label ? ` (${freshest.device.label})` : '';
         const detail = `${freshest.device.device_id}${label}: last contact ${humanAge(freshest.seconds)}`;
         if (freshest.seconds <= maxAgeMinutes * 60) add('phone', 'pass', detail);
-        else add('phone', 'fail', `${detail}; older than ${maxAgeMinutes}m — is the gateway running?`);
+        else add('phone', 'fail', `${detail}; older than ${maxAgeMinutes}m: is the gateway running?`);
       }
     }
   }
@@ -1705,7 +1705,7 @@ function finishDoctor(checks, json, url, version) {
     return;
   }
 
-  out(`DakFlare doctor${url ? ` — ${url}` : ''}`);
+  out(`DakFlare doctor${url ? `: ${url}` : ''}`);
   for (const check of checks) {
     const tag =
       check.status === 'pass'
@@ -1718,7 +1718,7 @@ function finishDoctor(checks, json, url, version) {
   out('');
   out(
     `doctor: ${counts.pass} pass, ${counts.fail} fail, ${counts.skip} skip` +
-      (healthy ? '' : ` — ${fail('not healthy')}`)
+      (healthy ? '' : `: ${fail('not healthy')}`)
   );
   if (!healthy) process.exitCode = 1;
 }
@@ -1815,7 +1815,7 @@ async function commandDevices(argv) {
 
   out(`Devices (${devices.length})`);
   if (devices.length === 0) {
-    out('  no paired devices — run `dakflare pair`');
+    out('  no paired devices: run `dakflare pair`');
     return;
   }
 
@@ -1853,7 +1853,7 @@ async function commandRevoke(argv) {
   const target = devices.find((device) => device.device_id === deviceId);
   if (!target) {
     throw new CliError(
-      `no paired device with id "${deviceId}" — run \`dakflare devices\` to list them.`,
+      `no paired device with id "${deviceId}": run \`dakflare devices\` to list them.`,
       1,
       { error: 'device_unknown' }
     );
@@ -2038,7 +2038,7 @@ async function resolveDevice(cfg, explicitId) {
 
   const devices = (await listDevices(cfg)).map(publicDevice);
   if (devices.length === 0) {
-    throw new CliError('no paired device yet — run `dakflare pair` first.', 1, {
+    throw new CliError('no paired device yet: run `dakflare pair` first.', 1, {
       error: 'no_device',
     });
   }
@@ -2252,7 +2252,7 @@ async function commandSend(argv) {
   });
   if (result.status === 404 && result.data?.error === 'device_unknown') {
     throw new CliError(
-      `device_unknown — "${deviceId}" is not in the D1 registry. Run \`dakflare devices\`.`,
+      `device_unknown: "${deviceId}" is not in the D1 registry. Run \`dakflare devices\`.`,
       1,
       { error: 'device_unknown' }
     );
@@ -2484,7 +2484,7 @@ async function commandUp(argv) {
   out(`Deployed ${url}`);
   out(`  database      ${databaseId}`);
   out(`  kv namespace  ${namespaceId}`);
-  out(`  health        ${health ? 'ok' : 'not healthy — run `dakflare doctor`'}`);
+  out(`  health        ${health ? 'ok' : 'not healthy: run `dakflare doctor`'}`);
   if (owner.state === 'created') {
     out('');
     out('Owner invite (shown once):');
@@ -2952,7 +2952,7 @@ async function commandStatus(argv) {
 
 /* ───────────────────────────── audit ───────────────────────────── */
 
-/** The console's own invite URL — clickable in any browser, unlike the app scheme. */
+/** The console's own invite URL: clickable in any browser, unlike the app scheme. */
 function webInvite(base, token) {
   return `${base.replace(/\/+$/, '')}/admin/invite?code=${encodeURIComponent(token)}`;
 }
@@ -3525,7 +3525,7 @@ async function commandMcpServe(argv) {
 
 /* ─────────────────────── provenance (v6.1 P3) ─────────────────────── */
 
-/** `trace <id>` — one id, the whole story, and one word for it. */
+/** `trace <id>`: one id, the whole story, and one word for it. */
 async function commandTrace(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('trace');
@@ -3605,7 +3605,7 @@ async function commandTrace(argv) {
   return 0;
 }
 
-/** `alerts` — the open ones by default, the history on request. */
+/** `alerts`: the open ones by default, the history on request. */
 async function commandAlerts(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('alerts');
@@ -3637,7 +3637,7 @@ async function commandAlerts(argv) {
   return 0;
 }
 
-/** `dlq` — the alarms that gave up. */
+/** `dlq`: the alarms that gave up. */
 async function commandDlq(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('dlq');
@@ -3677,7 +3677,7 @@ async function commandDlq(argv) {
   return 0;
 }
 
-/** `ws inspect` — what the object thinks its sockets are, and how quiet. */
+/** `ws inspect`: what the object thinks its sockets are, and how quiet. */
 async function commandWs(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('ws');
@@ -4176,7 +4176,7 @@ async function commandRules(argv) {
   return 2;
 }
 
-/** `rules apply <file>` — one rule, or `{ rules: [...] }`. */
+/** `rules apply <file>`: one rule, or `{ rules: [...] }`. */
 async function commandRulesApply(argv) {
   const { flags, rest } = parseArgv(argv);
   if (flags.help) return printHelp('rules');
@@ -4297,7 +4297,7 @@ async function commandRulesApply(argv) {
   return 0;
 }
 
-/** `rules test --peer <e164> --body <text>` — why would this message reply. */
+/** `rules test --peer <e164> --body <text>`: why would this message reply. */
 async function commandRulesTest(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('rules');
@@ -4894,7 +4894,7 @@ async function commandKey(argv) {
 /* ───────────────────────────── help ───────────────────────────── */
 
 const HELP = {
-  root: `dakflare — operate a self-hosted DakFlare deployment
+  root: `dakflare: operate a self-hosted DakFlare deployment
 
 Usage: dakflare <command> [options]
 
