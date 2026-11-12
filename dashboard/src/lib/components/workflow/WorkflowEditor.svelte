@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, setContext, tick } from 'svelte';
+	import { onDestroy, onMount, setContext, tick } from 'svelte';
 	import { beforeNavigate, goto, replaceState } from '$app/navigation';
 	import {
 		Background,
@@ -497,6 +497,18 @@
 
 	let leavePrompt = $state<null | { href: string; kind: 'link' | 'back' }>(null);
 	let allowLeave = false;
+	/**
+	 * A popstate navigation has already moved the history entry before the guard
+	 * runs, so `history.back()` returns at once and the popstate that actually
+	 * carries the navigation arrives later. Keep the guard open across that gap;
+	 * a successful leave unmounts this component, and the timer only matters if
+	 * the back navigation never arrives.
+	 */
+	let allowLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+	onDestroy(() => {
+		if (allowLeaveTimer) clearTimeout(allowLeaveTimer);
+	});
 
 	beforeNavigate(({ cancel, to, type }) => {
 		if (!dirty || allowLeave) return;
@@ -516,11 +528,16 @@
 		leavePrompt = null;
 		if (!target) return;
 		allowLeave = true;
+		if (target.kind === 'back') {
+			window.history.back();
+			if (allowLeaveTimer) clearTimeout(allowLeaveTimer);
+			allowLeaveTimer = setTimeout(() => {
+				allowLeaveTimer = null;
+				allowLeave = false;
+			}, 1000);
+			return;
+		}
 		try {
-			if (target.kind === 'back') {
-				window.history.back();
-				return;
-			}
 			await goto(target.href, { invalidateAll: false });
 		} finally {
 			allowLeave = false;
