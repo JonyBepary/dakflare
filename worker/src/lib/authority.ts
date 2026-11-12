@@ -684,13 +684,27 @@ async function lostRace(env: Env, id: string): Promise<DecisionResult> {
   return {
     ok: false,
     error: "not_pending",
-    message: `request is already ${current.state.toLowerCase()}`,
+    message:
+      current.decided_by === null || current.decided_by === undefined
+        ? `request is already ${current.state.toLowerCase()}`
+        : `request is already ${current.state.toLowerCase()} by ${current.decided_by}`,
+    // Who answered first, so the console can say it rather than "someone else".
+    // The loser of a race is the one who most needs to know who won.
+    decided_by: current.decided_by,
+    decided_at: current.decided_at,
   };
 }
 
 export type DecisionResult =
   | { ok: true; approval: ApprovalRecord; grant: GrantRecord | null; clamped: ClampedDuration | null }
-  | { ok: false; error: "not_found" | "not_pending" | "expired" | "bad_target" | "not_grantable"; message: string };
+  | {
+      ok: false;
+      error: "not_found" | "not_pending" | "expired" | "bad_target" | "not_grantable";
+      message: string;
+      /** Set on a lost race: who decided it, and when. */
+      decided_by?: string | null;
+      decided_at?: number | null;
+    };
 
 /**
  * Answer a request: approve it (which mints a grant) or reject it.
