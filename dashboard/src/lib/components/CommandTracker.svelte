@@ -281,7 +281,9 @@
 
 		{#if error && command !== undefined}
 			<p class="field-error">
-				Last check failed: {error}.{finished ? ' Checks stopped.' : ' Retrying…'}
+				<!-- The error already ends in a full stop when it comes from the gateway,
+				     so appending one rendered "try again.. Retrying…". -->
+				Last check failed: {error.replace(/\.$/, '')}.{finished ? ' Checks stopped.' : ' Retrying…'}
 			</p>
 		{/if}
 
