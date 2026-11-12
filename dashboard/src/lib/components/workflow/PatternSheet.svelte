@@ -194,6 +194,42 @@
 	const finalName = $derived.by(() => uniqueName(sanitizeName(editName), selectedSpanIndex));
 	const firstMatch = $derived(testMatches[0] ?? null);
 
+	// The engine can hand names back in capture order. An operator reads the
+	// message and the field list side by side, so rank each name by its span.
+	const orderedVariables = $derived.by(() => {
+		const starts = new Map<string, number>();
+		for (const span of spans) {
+			if (!starts.has(span.name)) starts.set(span.name, span.start);
+		}
+		return capturedVariables
+			.map((name, index) => ({ name, index, start: starts.get(name) }))
+			.sort((a, b) => {
+				if (a.start === undefined && b.start === undefined) return a.index - b.index;
+				if (a.start === undefined) return 1;
+				if (b.start === undefined) return -1;
+				return a.start - b.start;
+			})
+			.map((item) => item.name);
+	});
+
+	const assignedFieldNames = $derived.by(() => {
+		const names = new Set<string>();
+		for (const span of spans) {
+			if (span.role === 'extract') names.add(span.name);
+		}
+		return names;
+	});
+
+	const synthErrorFirstLine = $derived.by(() => {
+		const text = synthError?.trim();
+		if (!text) return '';
+		return text.split(/\r?\n/)[0] ?? text;
+	});
+
+	const hasStoredPattern = $derived(
+		Boolean(compiledPattern) && !sampleBody && spans.length === 0
+	);
+
 	const canApply = $derived(
 		spans.length > 0 &&
 			capturedVariables.length > 0 &&
@@ -982,16 +1018,21 @@
 			</div>
 			<div class="head-actions">
 				<button type="button" class="btn" onclick={requestClose}>Cancel</button>
-				<button
-					type="button"
-					class="btn btn-primary"
-					disabled={!canApply}
-					title={applyHint}
-					onclick={applyPattern}
-				>
-					<Icon name="check" size={15} />
-					Use this pattern
-				</button>
+				<div class="apply">
+					<button
+						type="button"
+						class="btn btn-primary"
+						disabled={!canApply}
+						title={applyHint}
+						onclick={applyPattern}
+					>
+						<Icon name="check" size={15} />
+						Use this pattern
+					</button>
+					{#if !canApply}
+						<p class="apply-hint">{applyHint}</p>
+					{/if}
+				</div>
 			</div>
 		</header>
 
@@ -1099,10 +1140,10 @@
 								data-autofocus
 								bind:value={sampleDraft}
 							></textarea>
-							{#if spans.length > 0}
+							{#if assignedFieldNames.size > 0}
 								<p class="hint">
-									A different message clears the {spans.length}
-									{spans.length === 1 ? 'field' : 'fields'} you already assigned.
+									A different message clears the {assignedFieldNames.size}
+									{assignedFieldNames.size === 1 ? 'field' : 'fields'} you already assigned.
 								</p>
 							{/if}
 							<div class="row-actions">
@@ -1226,7 +1267,12 @@
 								{#if editRole === 'extract'}
 									<div class="field">
 										<label class="label" for={typeId}>Kind of value</label>
-										<select id={typeId} class="input" bind:value={editType}>
+										<select
+											id={typeId}
+											class="input type-select"
+											bind:value={editType}
+											title={SLOT_TYPES.find((type) => type.id === editType)?.label ?? ''}
+										>
 											{#each SLOT_TYPES as type (type.id)}
 												<option value={type.id}>{type.label}</option>
 											{/each}
@@ -1276,11 +1322,25 @@
 						{/if}
 					</div>
 
+					{#if hasStoredPattern}
+						<p class="pattern-note">
+							This step already has a pattern. Paste a message to rebuild it from an example.
+						</p>
+					{/if}
+
 					{#if synthError}
 						<div class="notice notice-danger">
 							<Icon name="alert" size={15} />
-							<div>{synthError}</div>
+							<div class="notice-copy" title={synthError}>{synthErrorFirstLine}</div>
 						</div>
+						{#if synthError.includes('\n')}
+							<details class="error-full">
+								<summary>Show the full error</summary>
+								<pre>{synthError}</pre>
+							</details>
+						{/if}
+					{:else if isSynthesizing && !compiledPattern}
+						<p class="pattern-empty">Building the pattern…</p>
 					{:else if compiledPattern}
 						<pre class="pattern-code"><code>{compiledPattern}</code></pre>
 					{:else}
@@ -1294,12 +1354,16 @@
 				<div class="pattern-fields">
 					<div class="section-head">
 						<h3 class="section-title">Fields it reads</h3>
-						<span class="pattern-count">{capturedVariables.length}</span>
+						{#if isSynthesizing}
+							<span class="pattern-count" aria-hidden="true">…</span>
+						{:else}
+							<span class="pattern-count">{capturedVariables.length}</span>
+						{/if}
 					</div>
 
-					{#if capturedVariables.length > 0}
+					{#if orderedVariables.length > 0}
 						<ul class="var-list">
-							{#each capturedVariables as name (name)}
+							{#each orderedVariables as name (name)}
 								<li class="var-row">
 									<button
 										type="button"
@@ -1333,6 +1397,8 @@
 								</li>
 							{/each}
 						</ul>
+					{:else if isSynthesizing}
+						<p class="hint">Building the fields…</p>
 					{:else}
 						<p class="hint">
 							No fields yet. Every value you name becomes a field the flow can use.
@@ -1543,6 +1609,21 @@
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 		justify-content: flex-end;
+	}
+
+	.apply {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 4px;
+	}
+
+	.apply-hint {
+		max-width: 32ch;
+		text-align: right;
+		font-size: var(--df-p-text-xs);
+		line-height: 1.35;
+		color: var(--df-text-meta);
 	}
 
 	/* --------------------------------------------------------------- body */
@@ -1792,9 +1873,14 @@
 
 	.assign-grid {
 		display: grid;
-		grid-template-columns: minmax(0, 260px) auto minmax(0, 190px);
+		grid-template-columns: minmax(0, 260px) auto minmax(190px, max-content);
 		gap: var(--df-p-space-3);
 		align-items: start;
+	}
+
+	.type-select {
+		width: max-content;
+		max-width: 100%;
 	}
 
 	.roles {
@@ -1926,6 +2012,46 @@
 		font-size: var(--df-p-text-sm);
 		line-height: 1.55;
 		max-width: 52ch;
+	}
+
+	.pattern-note {
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-meta);
+	}
+
+	.notice-copy {
+		min-width: 0;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.error-full {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.error-full summary {
+		cursor: pointer;
+		font-weight: 600;
+	}
+
+	.error-full pre {
+		margin: 6px 0 0;
+		padding: 8px 10px;
+		max-height: 140px;
+		overflow: auto;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-field);
+		color: var(--df-text-primary);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.6;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 
 	.var-list {
@@ -2230,6 +2356,16 @@
 
 		.head-actions :global(.btn) {
 			flex: 1 1 auto;
+		}
+
+		.apply {
+			flex: 1 1 auto;
+			align-items: stretch;
+		}
+
+		.apply-hint {
+			max-width: none;
+			text-align: center;
 		}
 
 		.sheet-body {

@@ -60,11 +60,12 @@ export const STARTER_TEMPLATES: StarterTemplate[] = [
 				}
 			},
 			{
-				body: 'Cash In Tk 540.00 from 01961116866 successful. Fee Tk 0.00. Balance Tk 1,090.78. TrxID 3277235345 at 14/09/2026 12:38',
+				body: 'You have received Tk 540.00 from 01961116866. Ref PAY-540. Fee Tk 0.00. Balance Tk 1,200.00. TrxID 3277235345 at 14/09/2026 12:38',
 				expect_match: true,
 				expected_vars: {
 					amount: '540.00',
 					sender_account: '01961116866',
+					reference: 'PAY-540',
 					trx_id: '3277235345',
 					timestamp: '14/09/2026 12:38'
 				}
