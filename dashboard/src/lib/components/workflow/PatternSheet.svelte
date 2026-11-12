@@ -1605,7 +1605,10 @@
 	.head-actions {
 		margin-left: auto;
 		display: flex;
-		align-items: center;
+		/* Top, not centre: the apply column grows a hint under the button, and a
+		   centred Cancel then floats 9 to 24px below the primary action it sits
+		   beside. Aligning the tops keeps the pair reading as one row. */
+		align-items: flex-start;
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 		justify-content: flex-end;
@@ -1873,7 +1876,12 @@
 
 	.assign-grid {
 		display: grid;
-		grid-template-columns: minmax(0, 260px) auto minmax(190px, max-content);
+		/* The role group is `max-content`, not `auto`: sizing the type select to its
+		   content made this column compete with it, and the third role button ended
+		   up 14 to 25px underneath the select with its label cut off. A column whose
+		   contents must stay readable gets the width it needs, and the flexible one
+		   gives way. */
+		grid-template-columns: minmax(0, 200px) max-content minmax(190px, max-content);
 		gap: var(--df-p-space-3);
 		align-items: start;
 	}
