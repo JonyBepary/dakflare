@@ -998,7 +998,7 @@
 							<span class="note-icon"><Icon name="shield" size={13} /></span>
 							<span>
 								A wrong password and an address with no account get the same answer, on purpose.
-								Only an HttpOnly, SameSite=Strict session cookie is kept.
+								Only an HttpOnly session cookie is kept.
 							</span>
 						</p>
 					{:else if step === 'magic'}

@@ -45,7 +45,9 @@ npx wrangler d1 migrations apply sms_gateway --remote
 # 2. secrets (never in the repo)
 npx wrangler secret put ADMIN_TOKEN --name dakflare-worker      # machine credential
 npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
-npx wrangler secret put AUTH_PEPPER --name dakflare-worker      # v1:<base64 32 bytes>
+npx wrangler secret put AUTH_PEPPER --name dakflare-worker      # v2:<base64 32 bytes>,v1:<base64 32 bytes>
+# optional: turns on the magic-link door
+npx wrangler secret put RESEND_API_KEY --name dakflare-worker
 
 # 3. deploy (builds the console into worker/public/admin first)
 npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
@@ -54,9 +56,9 @@ npm run deploy                                  # cf build + cf deploy; see docs
 `cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`,
 because `cf` cannot set one secret or stream logs yet.
 
-CI runs the same checks on every pull request and deploys `main` when they pass. Migrations
-are applied by hand, never by the pipeline. `docs/OPS_DEPLOY.md` has the jobs, the secrets,
-the order of operations and the rollback.
+CI runs the same checks on every pull request; it does not deploy. Deploy from a clean tree with
+`npm run deploy`, which builds the console first. Migrations are applied by hand, never by the
+pipeline. `docs/OPS_DEPLOY.md` has the jobs, the secrets, the order of operations and the rollback.
 
 Then, from anywhere:
 
@@ -88,12 +90,46 @@ never carry body text, one coral action per screen, mono for anything an operato
 |---|---|---|
 | 1 | **Passkey** | primary; nothing phishable, no shared secret |
 | 2 | **TOTP** | optional for every role; backup codes shown once |
-| 3 | **Password** | optional; the KDF runs in the browser under `AUTH_PASSWORD_MODE=client-derived`, because a server-side PBKDF2 costs ~27 ms against the free tier's 10 ms CPU budget |
+| 3 | **Password** | optional; the KDF runs in the browser under `AUTH_PASSWORD_MODE=client-derived`, because a server-side PBKDF2 costs about 27 ms against the free tier's 10 ms CPU budget |
+| 4 | **Magic link** | optional; the door appears only when `RESEND_API_KEY` is set. The token is spent by the button, never by opening the page |
 
 `AUTH_MODE` decides who guards `/v1/admin/*`: `legacy` (the `ADMIN_TOKEN`, exchanged for a session
-cookie) or `new` (Better Auth accounts, `requireRole()`). Registration is invite-only — there is no
-public sign-up. `dakflare auth invite` or the Security panel mints a single-use link; only its hash is
-stored.
+cookie) or `new` (Better Auth accounts, `requireRole()`). Registration is invite-only; there is no
+public sign-up. The CLI or the Security panel mints a single-use invite, and only its hash is stored.
+
+#### Sessions
+
+A signed-in browser holds one `__Secure-better-auth.session_token` cookie: HttpOnly, Secure,
+`SameSite=Lax`, host-only, seven days. Its value is `<token>.<HMAC-SHA256(BETTER_AUTH_SECRET, token)>`,
+URL-encoded; D1 stores the token and the session row. Better Auth also caches the session in a signed
+`session_data` cookie for five minutes, and `requireRole({ fresh: true })` reads D1 instead. The legacy
+admin-token console keeps its own `dakflare_admin` cookie, `SameSite=Strict`.
+
+Three consequences worth knowing:
+
+- **The cookie is host-only.** Open the console on the hostname that signed you in. A preview proxy on
+  `localhost`, an IDE iframe, or another hostname has its own cookie jar, so the Worker signs the
+  request in and the browser never sends the cookie back. The console then says the session could not
+  be started, which is true, and is not a second factor.
+- **A second factor is the Worker's decision.** A first factor returns `{ twoFactorRedirect: true }`
+  when it withheld the session, and `GET /v1/auth/challenge` answers whether a code challenge is live
+  for this browser. The login page renders the code step only on those answers. A `?step=code` in the
+  URL, or a session it could not read, is not evidence that an account owes a code.
+- **Turning the authenticator off cleans up after itself.** The secret and the enabled flag go, and
+  so do the sign-in challenges the account left outstanding, so a tab parked on the code step cannot
+  keep asking for a code that no longer exists.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/auth/mode` | pre-auth configuration: which doors this deployment can finish |
+| `GET /v1/auth/challenge` | is a sign-in challenge live for this browser (`{ pending }`) |
+| `POST /v1/auth/redeem` | spend an invite and mint the first session |
+| `POST /v1/auth/salt` | per-address salt and iteration count for client-side derivation |
+| `POST /v1/auth/sign-in/password` | password first factor; `{ material }` in client-derived mode |
+| `POST /v1/auth/magic-link` | request a link (the same 202 for known and unknown addresses) |
+| `POST /v1/auth/magic-link/consume` | spend the link; answers `twoFactorRedirect`, or sets the session |
+| `GET /v1/auth/me` | the account behind the session, or 401 |
+| `/api/auth/*` | Better Auth itself: passkey and TOTP verification, sign-out |
 
 ## The phone
 
@@ -136,11 +172,16 @@ so passkey assertions are real cryptography rather than a mock.
 ## Known gaps
 
 - **MMS** is not supported; a push produces a notification saying so rather than vanishing.
-- **Magic link** is planned and unimplemented — it needs a sender, and this deployment has no domain.
+- **Magic link** needs a sender. `RESEND_API_KEY` turns the door on; without it `/v1/auth/mode` does
+  not advertise the factor, because a door that cannot deliver a link would strand the login page.
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
-- The console's pre-auth state cannot read `auth_mode` (health is behind the admin gate), so the login
-  offers the token form first and the passkey door behind a live `/api/auth` probe.
+- **A proxy in front of the console breaks the cookie**, not the sign-in. The session cookie is
+  host-only, so an http preview or a second hostname signs in on the Worker and keeps nothing; open
+  the deployment's own HTTPS URL. `/admin/login` is honest about this: it reports that the session
+  could not be started rather than asking for a code.
+- **An older Worker without `/v1/auth/challenge`** makes the console drop the code step and show the
+  doors. That is the safe direction: a challenge is never inferred.
 
 ## License
 
