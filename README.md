@@ -84,6 +84,20 @@ never carry body text, one coral action per screen, mono for anything an operato
 - **Automation** — rules as one sentence each, workflows on a canvas.
 - **Security** — sign-in factors (passkey, authenticator, password), invites, and the audit log.
 
+### Layout
+
+The console measures its content column, not the window. The rail takes 249 px, so a 914 px window
+leaves the page about 616 px, and a table that assumes the window will collapse there even though the
+browser reports a wide viewport.
+
+- Tables switch to stacked rows on a **container query** over their card, never on `@media`.
+- The fleet table needs a 966 px card (about a 1282 px window) for its six columns. Below that the fleet
+  is a stacked card, not a squeezed table.
+- Wide grids give the name column a floor and let the device id ellipsize on one line. The open arrow
+  rides the id line, outside the ellipsis, so it stays visible wherever the id clips.
+- The login page and every console page were measured at 390, 768, 914, 1024 and 1440: no horizontal
+  overflow, and the action buttons stay inside their card at every width.
+
 ### Sign-in
 
 | # | Factor | Notes |
