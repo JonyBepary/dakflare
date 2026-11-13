@@ -45,3 +45,6 @@ design/landing/hero.html
 # Review archives
 *.zip
 
+
+# Local review prompts and archives, deliberately not in git
+docs/archive/

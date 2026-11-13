@@ -1,7 +1,7 @@
 # DakFlare console — UX decisions
 
-Status: adopted 2026-10-22. Supersedes the implicit model in the dashboard as built.
-Wire behaviour this implies is normative in `PROTOCOL_CONTRACT_V5.md` §11.11–§11.12.
+Status: adopted 2026-10-22, layout updated 2026-11-14. Supersedes the implicit model in the dashboard as built.
+Wire behaviour this implies is normative in `history/PROTOCOL_CONTRACT_V5.md` §11.11–§11.12.
 
 ---
 
@@ -19,7 +19,7 @@ is not a prettier Rules page.
 | Runs | In the Worker, as the batch syncs | On the phone first (§11.9), Worker fallback |
 | Latency | One sync interval | Immediate on the device |
 | Offline | Needs the gateway | Works with the gateway unreachable |
-| Authoring | Form | Canvas |
+| Authoring | Form | Steps or Map |
 
 **Pipeline, enforced in the Worker:** for each newly accepted inbound message where the
 device did not already reply (`auto_reply_sent` false), evaluate Rules by `priority DESC`.
@@ -82,7 +82,8 @@ describes the deployment only and is never allowed to imply the fleet is reachab
 
 ## 4. Information architecture
 
-Nav: Overview · Devices · Messages · **Automation**.
+Nav: Overview · Devices · Messages · **Automation**, then the owner/admin group: **Approvals**,
+**Audit log**, **Security**. A member sees the first four; the rest are hidden by role, not disabled.
 
 Automation contains two tabs, `Rules` and `Workflows`, and a permanent one-paragraph
 statement of the pipeline above. Neither tab is presented as the default: the difference is
@@ -93,6 +94,20 @@ Devices are named. `label` is captured from the device at pairing (never invente
 the console) and shown wherever a device id appears; a device that has never reported one
 keeps its id as the primary text. A re-pair that reports no label preserves the existing
 one. An operator-facing rename is not exposed yet.
+
+### 4.1 Responsive: the card is the constraint
+
+The rail takes 248 px (249 with its hairline), so a 914 px window leaves the content 616 px. A table
+that switches on `@media` collapses there while the browser still reports a wide window.
+
+- Tables switch to stacked rows on a **container query** over their card, never on the viewport.
+- The fleet table needs a 966 px card (about a 1282 px window) for six columns; below that the fleet is
+  a stacked card, not a squeezed table.
+- The device name has a 180 px column floor, the id ellipsizes on one line, and the open arrow rides
+  the id line outside the ellipsis so it survives the clip.
+- The editor is readable at 390: `Steps` is the narrow surface and `Map` is the desktop one.
+- The login page and every console page were measured at 390, 768, 914, 1024 and 1440: no horizontal
+  overflow, and action buttons stay inside their card.
 
 ---
 
@@ -128,6 +143,7 @@ receipts (Wave 2) and must not be shown until then.
 
 ## 7. Out of scope here
 
-Roles/RBAC (single-operator deployment), multi-tenant isolation, RCS. Mobile console is
-triaged, not redesigned: readable, no horizontal scroll, canvas editing explicitly deferred
-to desktop.
+Multi-tenant isolation and RCS. Roles exist (owner, admin, member) and the nav hides the
+owner/admin group; the console is still designed for one deployment, not a tenant fleet.
+Narrow screens get the full read path and the `Steps` editor; free canvas editing stays a
+desktop surface.

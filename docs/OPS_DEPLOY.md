@@ -1,6 +1,6 @@
 # Deploying
 
-One sovereign deploy path, two configuration files, and an air-gapped CI pipeline
+One sovereign deploy path, three configuration files, and an air-gapped CI pipeline
 that verifies every check without holding any production credentials.
 
 ```bash
@@ -13,12 +13,13 @@ Deployment is **decoupled from GitHub Actions**: CI runs with zero repository se
 guaranteeing complete supply-chain immunity for edge credentials while keeping production
 deployments coordinated with the physical Android handset.
 
-## The two configs
+## The three configs
 
 | File | Read by | Why it exists |
 |---|---|---|
 | `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical Worker definition: bindings, exports, triggers |
 | `worker/wrangler.toml` | `wrangler` (local dev, `tail`, `secret put`, `d1 export`) | `cf` cannot set one secret or stream logs yet, and the conformance suite needs `wrangler dev --local` with Durable Object SQLite and alarms |
+| `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1` test lane) | the preview D1 and KV are `remote = true`; the Worker and Durable Object still run locally |
 
 `cf build` delegates to Wrangler, which is also why `wrangler.toml`'s `[assets] directory`
 still decides what is uploaded as static assets.
@@ -37,9 +38,10 @@ binding that is `undefined` in one tool and present in the other.
 | Job | What it proves |
 |---|---|
 | `worker` | `tsc --noEmit`, and the three configs agree |
+| `skills` | the four `SKILL.md` packages pass the skills gate |
 | `dashboard` | the console type-checks and builds |
 | `simulator` | the phone's Svelte UI type-checks |
-| `rust` | `cargo test --locked` in `simulator/core` (92 tests) and `simulator/flow` (22) |
+| `rust` | `cargo test --locked` in `simulator/core` and `simulator/flow` |
 | `suite` | the conformance suite against a local stack: `pair` then `suite` |
 
 **The check pipeline holds no secrets.** `pipeline.yml` does not read `CLOUDFLARE_API_TOKEN` or

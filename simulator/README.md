@@ -1,188 +1,90 @@
-# DakFlare device simulator
+# DakFlare device app
 
-A real device-shaped app, not a test harness: it holds a P-256 identity, a local
-libSQL database, and (next) speaks the full signed protocol. The carrier is the
-only simulated part; everything above it is intended to survive the move to a
-real Android build.
+One Android handset as the SMS radio for a DakFlare deployment: device identity,
+SMS receive and send, local flows, and reports to the Worker. Package
+`dev.dakflare.simulator`.
 
-## Layout
+## Shape
 
-```
-core/        Rust library — identity, local libSQL store. No Tauri, no UI.
-src-tauri/   Tauri v2 shell — app lifecycle + commands over `core`.
-src/         SvelteKit 2 + Svelte 5 + Bits UI, served as an SPA in the webview.
-```
+| Path | What it is |
+|---|---|
+| `src-tauri/` | Tauri v2 shell: lifecycle, commands and the webview host |
+| `core/` | Rust core: P-256 identity, signed protocol client, local libSQL store, flow runs |
+| `src/` | Svelte 5 UI, served as an SPA in the webview |
+| `flow/` | pure Rust flow interpreter: graph and message in, actions out |
+| `flow-wasm/` | the same interpreter compiled for the Worker's fallback |
+| `src-tauri/gen/android/.../bridge/` | Kotlin telephony, provider and gateway service |
+| `scripts/` | toolchain setup, device checks and release build |
 
-`core` is deliberately Tauri-free so it compiles and tests on any machine, and so
-the Android build can use it without dragging in the desktop shell.
+The Kotlin bridge is the platform surface: `SmsReceiver` takes `SMS_DELIVER`,
+`SmsSender` and `SendStatusReceiver` handle the radio, `SmsProvider` publishes to
+`content://sms`, and `GatewayService` stays in the foreground with a Reply action
+on the notification. `BootReceiver` restores the service after a reboot. The Rust
+core stays free of Tauri, so it builds and tests outside the desktop shell.
 
-## Run
+## Default SMS app
+
+The manifest declares the default-SMS-app entry points, including `SMS_DELIVER`
+and the compose intents. The role is held at runtime by `android.app.role.SMS`;
+the device check reports the holder and never changes it. The app handles SMS
+only. MMS is not supported.
+
+## Local store and flow engine
+
+Identity and messages live in a local libSQL database managed by `core/`. The
+signing key is wrapped by Android Keystore in `KeyVault` and stored as a
+`keystore:v1:` blob, not plaintext PKCS#8. The store also caches flows, queues
+outbound messages and records `flow_runs`.
+
+The on-device engine parses each cached flow and runs it for an incoming message
+without a network round trip. Replies are queued locally and sent through the
+radio; the run is reported per message and flow version. The Worker keeps a WASM
+fallback for messages the device did not run.
+
+## Build
 
 ```bash
-# Core: schema, identity, signing (no system dependencies)
-cd core && cargo test
-
-# Frontend type check + build
+simulator/scripts/android-setup.sh          # JDK, SDK, NDK and Rust targets
+source ~/.config/dakflare/android-env.sh
+cd simulator
 npm install
 npm run check
 npm run build
-
-# Desktop app (needs the system libraries below)
-npm run tauri dev
+npx tauri android build --apk --target aarch64
 ```
 
-### Desktop prerequisites (Debian/Ubuntu)
+`android-setup.sh` installs under `$HOME`, needs about 8 GB free, and the release
+target is `aarch64`. Tests run without the Android toolchain:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-                 librsvg2-dev patchelf build-essential
+cd simulator/core && cargo test
+cd simulator/flow && cargo test
+simulator/flow-wasm/build.sh   # rebuild worker/src/wasm/flow.wasm
 ```
 
-Without these, `cargo` cannot link the Tauri shell — this is the state on the CI
-box used for M0.
-
-### Android prerequisites
-
-No sudo needed; everything installs under `$HOME`:
+## Device check
 
 ```bash
-simulator/scripts/android-setup.sh     # JDK 17 + SDK 35 + build-tools + NDK 27 + rust targets
-source ~/.config/dakflare/android-env.sh
+simulator/scripts/device-check.sh
+simulator/scripts/device-check.sh --reboot
 ```
 
-It needs ~6 GB free and refuses to run below that unless given `--force`.
+The script checks the attached handset, the SMS role, the Keystore-backed key,
+one injected inbound PDU, the provider row, an outgoing send, the notification
+action and the foreground service. `--reboot` also proves the boot path. It needs
+a rooted debug handset, `adb`, `node`, `python3` and `sqlite3`; a SKIP is not a
+pass, and a failed check exits non-zero.
+
+## Release signing
 
 ```bash
-adb connect <phone-ip>:<debug-port>    # the Wireless-debugging port, not the pairing port
-cd simulator
-npm run tauri android init
-npm run tauri android dev
+simulator/scripts/release-apk.sh
 ```
 
-Target device used for the port: **Pixel 8 (`shiba`), Android 17 / SDK 37,
-`arm64-v8a` only, dual SIM, no default SMS app**. `arm64-v8a` alone means the
-`aarch64-linux-android` target is the one that matters.
-
-If the adb server restarts (or the machine reboots) the wireless connection is
-lost even though the pairing persists; re-run `adb connect`.
-
-## M4 status
-
-| Check | Result |
-|---|---|
-| Device fetches its flows (`GET /v1/flows`, signed, device-scoped) | **pass** — live |
-| Device runs the graph locally and reports `flow_runs` | **pass** — live |
-| Worker fallback skips flows the device ran | **pass** — `device_sent=1 fallback=0` |
-| Fallback still replies when the device reports no run | **pass** — `device_sent=0 fallback=1` |
-| Purge removes `flow_runs` with the message log | **pass** |
-| Device-sent SMS visible in `/admin/messages` (`direction: "out"`) | **pass** — probe asserts it |
-
-The probe now asserts the split explicitly:
-
-```
-case A:   device_sent=1 fallback=0
-          → +15551230000 · Your code is 483920
-case B:   device_sent=0 fallback=1
-          → +15551230000 · Your code is 777111
-mirror:   device-sent SMS visible to admin = true
-FLOW PROBE OK — device primary, Worker fallback
-```
-
-Locally-sent rows are uploaded with `direction: "out"`; a failed mirror keeps
-`mirrored = 0` in the local DB and is retried on the next sync.
-
-## M3 status
-
-| Check | Result |
-|---|---|
-| Flow interpreter (pure Rust): extract, condition, template, stop, budgets | **pass** — 8 tests |
-| Worker fallback via WASM (same crate, `wasm32-unknown-unknown`) | **pass** — live |
-| Injected `CODE 483920` produces `Your code is 483920` | **pass** — production probe |
-| Retried batch does not send twice | **pass** — `duplicates=1`, no extra command |
-| WeakRef/alloc boundary | hand-rolled `alloc`/`dealloc`/`run_json`, no wasm-bindgen |
-
-The reply rides back in the **same upload response**: `handleIncomingBatch`
-finishes by reading the pending queue, which marks the just-enqueued command
-`DISPATCHED`. The carrier captures commands from that response as well as from a
-later poll, because skipping the first path silently dropped replies.
-
-`workflow` execution is Worker-only today. Device-side execution (M4) is the other
-half of "device primary, Worker fallback"; the `flow_runs` dedupe key is already
-in the schema for it.
-
-Rebuild the bundled module after changing `simulator/flow`:
-
-```bash
-simulator/flow-wasm/build.sh   # writes worker/src/wasm/flow.wasm
-```
-
-## M2 status
-
-| Check | Result |
-|---|---|
-| Inject inbound: local thread + signed upload | **pass** — live probe |
-| Capture outbound: poll → record → ack | **pass** — live probe |
-| Offline switch: stores locally, skips upload/poll | **pass** — unit test + UI |
-| Message thread + clear | **pass** — unit test |
-
-The probe now covers the carrier path as well: pair, inject `CODE 483920`
-(uploaded, accepted=1), queue a real command as admin, drain it through a signed
-poll (captured with the right recipient), then purge and revoke. It also caught a
-real bug: the command wire field is `to`, not the SQL column `to_e164`, so the
-first capture produced an outbound row with an empty peer.
-
-## M1 status
-
-| Check | Result |
-|---|---|
-| Protocol client: mint code, pair, signed poll, inbound upload | **pass** — live probe against production |
-| Cleanup: purge message log, revoke device | **pass** — probe removed its own rows |
-| Canonical string + P1363 headers (contract §2/§3) | **pass** — unit tests |
-| WebSocket transport | not yet |
-
-The probe is `core/examples/probe.rs`:
-
-```bash
-cd core
-DAKFLARE_URL=https://<worker>.workers.dev DAKFLARE_ADMIN_TOKEN=... \
-  cargo run --example probe
-```
-
-It creates a temporary identity, pairs, polls, uploads one inbound message,
-purges that device's log, revokes the device and deletes the temp database —
-so it is safe to run against the live deployment.
-
-## M0 status
-
-| Check | Result |
-|---|---|
-| libSQL opens a real file, migrations idempotent | **pass** — `cargo test`, 8 tests |
-| Device identity: grammar, SPKI, P1363 sign/verify | **pass** |
-| Frontend compiles (Svelte 5 + Bits UI) | **pass** — `npm run check`, 0 errors |
-| Desktop shell builds | **blocked** — WebKitGTK/GTK/libsoup/rsvg not installed |
-| Android target builds | **blocked** — no SDK/NDK on the machine |
-
-## Decisions worth remembering
-
-- **`device_id` authenticates; `platform_id` does not.** `device_id` is generated
-  locally and bound to the keypair. `ANDROID_ID` (or iOS `IDFV`) is stored as a
-  support hint only — it is stable per signing key, survives reinstall, resets on
-  factory reset, and is spoofable on a rooted device. Using it as a credential
-  would let a rooted phone impersonate another.
-- **libSQL, not the platform SQLite.** Same file format as SQLite, but it lives in
-  the Rust core, so desktop and Android share one schema and one migration path,
-  and embedded replicas remain possible later. Room/Kotlin would split the data
-  layer in two.
-- **Private keys in the local DB are simulator-only.** PKCS#8 PEM on disk is fine
-  for test identities on a developer machine; the Android build must use the
-  Keystore.
-- **RCS is out of scope.** There is no public API for third-party apps to send or
-  receive RCS. SMS/MMS via `SmsManager` is the programmatic surface.
-
-## Next
-
-1. Protocol client in `core` (pair, signed poll, inbound batch, WebSocket).
-2. Target switcher (deployed Worker) + cleanup rails (`sim*` prefixes,
-   message purge endpoint).
-3. Device-side flow execution + `flow_runs` reporting (M4).
-4. WebSocket transport (poll covers delivery today).
+The script sources `~/.config/dakflare/android-env.sh`, requires the release
+keystore, runs the Tauri Android build and prints the APK path, size,
+`apksigner` certificate and version. Signing material stays outside the
+repository: `~/.config/dakflare/dakflare-release.jks` and the mode 600
+`release-keystore.txt`. Gradle refuses a release build without the key, so it
+cannot fall back to the debug signer. The APK lands in
+`src-tauri/gen/android/app/build/outputs/apk/universal/release/`.

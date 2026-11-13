@@ -1,7 +1,7 @@
-# DakFlare — test-support
+# DakFlare test-support
 
 The harness is `dakflare_test_harness.mjs` at the repository root: a zero-dependency Node
-"Virtual Android Device" that implements the wire protocol of `PROTOCOL_CONTRACT_V5.md` from the
+"Virtual Android Device" that implements the wire protocol of `history/PROTOCOL_CONTRACT_V5.md` from the
 contract text alone. It was deliberately **not** derived from `worker/src` — its only value is that it
 can disagree with the server.
 
@@ -26,15 +26,16 @@ three consumers disagree until they agree again.
 
 ## Prerequisites
 
-- Node 24+
+- Node 22+
 - `npm install` already run in `worker/`
 - Cloudflare credentials (`wrangler whoami`) **only** for account-backed mode
 - Nothing else. The harness has no dependencies of its own.
 
 ## Two modes, one config
 
-`worker/wrangler.toml` marks D1 and KV `remote = true`. `wrangler dev --local` disables remote
-bindings, so the same file serves both lanes:
+`worker/wrangler.toml` is the local lane and keeps its bindings local. The account-backed lane uses
+`worker/wrangler.account.toml`, which marks the preview D1 and KV `remote = true` while the Worker and
+the Durable Object still run locally:
 
 | Mode | Command | D1 / KV | Worker + Durable Object |
 |---|---|---|---|
@@ -66,7 +67,8 @@ node dakflare_test_harness.mjs pair
 node dakflare_test_harness.mjs suite
 ```
 
-Other commands: `verify-vectors`, `proxy`, `ws`, `stub`, `reset`.
+Every mode: `selftest`, `verify-vectors`, `pair`, `suite`, `hardening`, `multidevice`, `auth`,
+`password`, `lockout-global`, `password-rotate`, `magic`, `proxy`, `ws`, `stub` and `reset`.
 
 ## The two runs the plan requires
 
@@ -105,7 +107,7 @@ DER→P1363 conversion separately. Run it whenever the contract changes.
 
 ## What the suite covers
 
-83 assertions across nine sections: admin surface, auth rejection (grammar, tamper, signature length,
+The suite covers nine sections: admin surface, auth rejection (grammar, tamper, signature length,
 query-before-crypto ordering), the replay guard (including **40 consecutive in-window requests** and
 two fresh nonces in the same millisecond), the RE2 linter (15 patterns, rejects and accepts), incoming
 batch hardening, the full command state machine (including stale-ack and expired-resurrection
@@ -253,7 +255,7 @@ behaviour. Verified gaps:
   structurally valid JWT that Google rejects is only caught against the real endpoint.
 - **DO placement and TLS/CDN behaviour** in front of the Worker are untestable offline.
 
-These are Tier 2 (staged deploy) items. See §4.3 of `dakflare_v5_master_plan_rev_c.md`.
+These are Tier 2 (staged deploy) items. See §4.3 of `history/dakflare_v5_master_plan_rev_c.md`.
 
 ## Hoppscotch
 
@@ -262,7 +264,7 @@ node dakflare_test_harness.mjs pair     # once, to create the signing identity
 node dakflare_test_harness.mjs proxy    # :8788
 ```
 
-Import `hoppscotch_dakflare_collection.json` and point it at `http://localhost:8788`. The proxy
+Import `docs/hoppscotch_dakflare_collection.json` and point it at `http://localhost:8788`. The proxy
 injects the four signed headers for device routes and forwards your `Authorization` header for admin
 routes, so no request needs manual signing. Requests `2.x` and `3.x` depend on `1.1`/`1.2` having been
 run first to mint and pair a device.

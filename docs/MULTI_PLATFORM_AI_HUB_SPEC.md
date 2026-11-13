@@ -1,9 +1,29 @@
 # DakFlare Multi-Platform AI-First Agentic Hub Specification
 
-> **Specification Version**: 7.0.0-PROPOSAL  
-> **Status**: Ratified Architectural Blueprint  
-> **Applies to**: Cloudflare Workers, Durable Objects, D1, Android Simulator v6.2+, SvelteKit Dashboard  
-> **Author**: Architecture & Agent Control Plane Guild  
+> **Specification Version**: 7.0.0 proposal  
+> **Status**: partly shipped. The table below is the tree today; the rest of the document is the
+> design it was written against.
+> **Applies to**: Cloudflare Workers, Durable Objects, D1, Android app, SvelteKit console  
+
+---
+
+## 0. What is in the tree today
+
+| Area | State |
+|---|---|
+| Telegram and WhatsApp Cloud webhooks | shipped: `worker/src/channels/`, `POST /v1/channels/{telegram,whatsapp}/webhook` |
+| Conversations, `messages.channel`, `messages.conversation_id` | shipped in `0007_multi_platform_and_conversations.sql` |
+| WhatsApp 24-hour window and `template_required` | shipped in `channels/whatsapp-cloud.ts` |
+| Canonical lifecycle object | shipped: `worker/src/lib/canonical-lifecycle.ts` |
+| `FlowExecutionWorkflow` for delays and long steps | shipped; delays over five seconds |
+| `WEBHOOK_QUEUE` for outbound webhooks | shipped |
+| Workflow versions, audience lists, plugin tables | schema shipped in `0007`; no route, console or runtime reads them yet |
+| Editor | shipped as two surfaces (`Steps`, `Map`) plus a read-only `Source` sheet, not the tri-modal Simple/Canvas/Code below |
+| `MEDIA_BUCKET` (R2) and `AI` (Workers AI) | bindings only; no Worker route reads them |
+| Signal and the Android notification bridge | not implemented |
+| Plugin registry, signed catalogs and the WASM sandbox | not implemented; the tables exist |
+| `WEBHOOK_DLQ` | not implemented; device dead letters live in the Durable Object and are read by `dakflare dlq` |
+| AI Gateway, BYOK and OAuth provider phases | not implemented |
 
 ---
 
@@ -63,7 +83,7 @@ DakFlare v7.0 transitions the platform from a single-handset SMS relay into an *
 1. **Phase 1 (Native Official Cloud APIs)**:
    - **Telegram**: Telegram Bot API (`POST /v1/channels/telegram/webhook`) verifying `X-Telegram-Bot-Api-Secret-Token`. Instant setup, zero cost, built-in retry parameters.
    - **WhatsApp**: Meta WhatsApp Business Cloud API (`POST /v1/channels/whatsapp/webhook`) verifying `X-Hub-Signature-256`. Enforces the 24-hour customer service window natively.
-   - **SMS/MMS**: Android Handset Native Radio (`SmsReceiver.kt` + `SmsManager`) via the existing cryptographic WebSocket/P-256 transport (`PROTOCOL_CONTRACT_V5.md`).
+   - **SMS/MMS**: Android Handset Native Radio (`SmsReceiver.kt` + `SmsManager`) via the existing cryptographic WebSocket/P-256 transport (`history/PROTOCOL_CONTRACT_V5.md`).
 2. **Phase 2 (Android Handset Notification Bridge)**:
    - For platforms without bot APIs (Signal) or where personal numbers are automated, an Android `NotificationListenerService` and `RemoteInput` bridge runs on the handset. The phone's official apps (WhatsApp, Signal, Telegram) receive messages and send replies using OS-level intents without protocol reverse engineering or ban risk.
 3. **Phase 3 (Companion Linked-Device Protocol Wrappers)**:
@@ -170,9 +190,11 @@ Normalizes Android KeyStore P-256 handsets, WhatsApp companions, Signal sessions
 
 ---
 
-## 4. Tri-Modal Super Editor Specification (`dakflare.flow/v3`)
+## 4. Editor specification (`dakflare.flow/v3`)
 
-The artificial split between `/admin/rules` and `/admin/workflows` is replaced by the **Tri-Modal Super Editor** over a unified Intermediate Representation:
+The editor shipped as two surfaces plus a sheet: `Steps` (the form-like surface, default), `Map` (the
+SvelteFlow canvas) and `Source` (read-only JSON with apply). The tri-modal name below was the design
+target; YAML, monaco and the 50-state ring buffer did not ship. Undo is grouped by edit burst.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -213,7 +235,10 @@ Plugins are distributed via static, signed JSON registries (`index.min.json`):
 
 ## 6. Implementation Action Plan
 
-### Phase 1: Database Migration & Core Edge Bindings
+Status: phase 1 is done except the parts noted; phase 2 is done except the DLQ; phases 3 and 4 are
+partial and not started as described.
+
+### Phase 1: Database Migration & Core Edge Bindings (shipped)
 1. **D1 Migration `0007_multi_platform_and_conversations.sql`**:
    - Add `channel` and `conversation_id` to `messages`.
    - Create `conversations` table.
@@ -226,16 +251,16 @@ Plugins are distributed via static, signed JSON registries (`index.min.json`):
 3. **Canonical Lifecycle Object**:
    - Implement `worker/src/lib/canonical-lifecycle.ts` and attach to command/message APIs.
 
-### Phase 2: Official Messaging Channels & Hybrid Fast-Path
+### Phase 2: Official Messaging Channels & Hybrid Fast-Path (shipped, no `WEBHOOK_DLQ`)
 1. Implement `worker/src/channels/telegram.ts` (Bot API webhook + 429 retry backoff).
 2. Implement `worker/src/channels/whatsapp-cloud.ts` (Meta Graph API + 24h window enforcement).
 3. Wire Cloudflare Workflow `FlowExecutionWorkflow` for durable delays and webhooks.
 
-### Phase 3: Tri-Modal Super Editor & WASM Simulation
+### Phase 3: Editor surfaces and WASM simulation (partial: Steps, Map, Source; no YAML/monaco)
 1. Switch `WorkflowEditor.svelte` to `$state.raw()` with undo/redo ring buffer.
 2. Embed `flow.wasm` into the dashboard bundle for sub-16ms client-side trace evaluation.
 3. Implement `[Simple] [Canvas] [Code]` view switcher.
 
-### Phase 4: Plugin Registry & Android Notification Bridge
+### Phase 4: Plugin Registry & Android Notification Bridge (not started; tables only)
 1. Implement `@dakflare/plugin-sdk` and `index.min.json` Ed25519 verifier.
 2. Build Android `NotificationBridgeService.kt` for native notification capture and reply intents.

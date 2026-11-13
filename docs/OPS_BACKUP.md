@@ -2,7 +2,7 @@
 
 Two different jobs, two different mechanisms. Neither one restores a Durable Object.
 
-## 1. Time Travel — for mistakes, hours to a month
+## 1. Time Travel: for mistakes, hours to a month
 
 D1 keeps 30 days of point-in-time history. This is the first thing to reach for when a
 migration, a purge or a bad deploy removed rows.
@@ -24,7 +24,7 @@ reversible for 30 days. Take a bookmark *before* a risky migration:
 npx wrangler d1 time-travel info sms_gateway --remote   # copy the current bookmark
 ```
 
-## 2. SQL export — for copies that leave the account
+## 2. SQL export: for copies that leave the account
 
 Time Travel does not protect against losing the account, and it is not an archive.
 
@@ -33,8 +33,8 @@ npx wrangler d1 export sms_gateway --remote --output=backup-$(date +%F).sql
 ```
 
 The file contains every table and every row: messages, devices, rules, workflows, accounts,
-passkeys, invites, the audit log. **It contains personal data and password verifiers** —
-store it encrypted, and do not commit it. `*.sql` backups are gitignored by convention; keep
+passkeys, invites, the audit log. **It contains personal data and password verifiers.**
+Store it encrypted, and do not commit it. `*.sql` backups are gitignored by convention; keep
 them outside the repo.
 
 Schedule: before any migration, before a release deploy, and weekly otherwise. A cron on
@@ -61,26 +61,28 @@ Compare against the same query on `sms_gateway`, then delete the scratch databas
 npx wrangler d1 delete dakflare_restore_test
 ```
 
-Last rehearsed 2026-10-30: 18 tables, and identical counts on devices, messages, users,
-passkeys and audit (2 / 150 / 1 / 1 / 10).
+Last rehearsed 2026-10-30, against 33 tables. Record the counts you see; they move, and the
+comparison is the point, not the numbers.
 
 ## 4. What a restore does not bring back
 
-- **Durable Objects.** The command queue, replay-guard nonces, alarms and — once the
-  auth guard exists — the lockout counters live in per-object SQLite storage, not in D1.
-  A D1 restore leaves them as they are; a device whose queue was lost simply has nothing
-  pending, and the phone re-syncs flows on its next poll.
+- **Durable Objects.** `DeviceGateway` keeps the command queue, replay-guard nonces and
+  alarms; `AuthGuard` keeps the account and IP lockout counters; `AuthorityGuard` keeps the
+  live grant windows. All three are per-object SQLite storage, not D1. A D1 restore leaves
+  them as they are. A device whose queue was lost has nothing pending and re-syncs flows on
+  its next poll; a lockout may outlive the rows that caused it; a grant window may outlive a
+  rolled-back grant row, so revoke it explicitly if that matters.
 - **KV.** The FCM token cache. It repopulates from the phone.
 - **The phone's own database.** `simulator.db` holds the local thread and the wrapped
   identity key. Losing it means re-pairing, not data loss on the deployment.
-- **Secrets.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`, `RESEND_API_KEY` are
-  Worker secrets, not rows. A restored database with a rotated pepper means every stored
-  password fails to verify until the matching pepper is restored — keep the pepper ring
+- **Secrets.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`, `RESEND_API_KEY` and
+  optionally `FCM_SERVICE_ACCOUNT_JSON` are Worker secrets, not rows. A restored database with a rotated pepper means every stored
+  password fails to verify until the matching pepper is restored; keep the pepper ring
   backed up wherever you keep secrets.
 
 ## 5. After a restore
 
-1. `dakflare doctor` — schema, migrations, bindings, phone contact.
+1. `dakflare doctor`: schema, migrations, bindings, phone contact.
 2. Sign in with the passkey; if the account table rolled back past its creation, the passkey
    is gone too and `dakflare auth reset` is the way back in.
 3. Check one device's `last_seen` and send a test message; a restored D1 does not replay the

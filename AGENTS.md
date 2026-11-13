@@ -54,7 +54,7 @@ install them into another repository unchanged.
 | `simulator/` | the Android app (Tauri + Rust core) |
 | `design/` | the landing page sources and tokens |
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
-| `docs/` | plans and runbooks: `AUTH_PLAN.md`, `CLI_PLAN.md`, `OPS_BACKUP.md` |
+| `docs/` | the master spec, runbooks, console and workflow notes, and `history/` for point-in-time plans |
 
 ## Before you claim something works
 

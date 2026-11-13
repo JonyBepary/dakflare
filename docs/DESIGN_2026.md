@@ -47,7 +47,7 @@ chips whose text is a single word at 700 weight, where the pair above is already
 Every ratio in this document is computed with WCAG 2.1 relative luminance, not asserted.
 The first draft of this section failed its own rule in three places and was corrected:
 coral `#C9482A` as text was 4.39:1, white on `#D9502C` was 4.09:1, and `#857A6B`
-metadata was 3.68:1 on the well. `docs/design-review/03-design-system.md` carries the
+metadata was 3.68:1 on the well. `docs/history/design-review/03-design-system.md` carries the
 full measured table and the primitive/semantic/component naming that supersedes the flat
 list below.
 
@@ -118,6 +118,9 @@ are 16px within a group and 24px between groups. Cards may span 3, 4, 6, 8 or 12
   (4) → automation board (12).
 - Dense lists stay lists. A table is allowed to be a table: sticky `--surface-2` header,
   1px `--line` row rules, no per-cell cards, no zebra pastel.
+- Tables switch on the card, not the window: a container query over the table card. The fleet
+  table appears at a 966px card (about a 1282px window); below that it is a stacked card. The
+  name column keeps a floor, ids ellipsize on one line, and a row never scrolls the page.
 - Board lanes are for automation (rules and flows), not for messages.
 - One full-bleed moment per page at most, and only for the banner.
 
@@ -128,7 +131,7 @@ The phone app uses the same tokens and the same motion, in one column at 100% wi
 pocket at night: dark surfaces are `#1C1814` / `#262019`, and state chips switch to a
 light ink on an opaque dark tint of the same hue. A 12% alpha pastel keeps the pastel ink
 at 1.4–2.0:1, which is unreadable; the dark chip values come from
-`docs/design-review/03-design-system.md` and are not restated here. Pairing success is the
+`docs/history/design-review/03-design-system.md` and are not restated here. Pairing success is the
 one dopamine moment; the carrier panel keeps mono for the injected number and body.
 
 ## 6. What must not change
@@ -140,3 +143,5 @@ one dopamine moment; the carrier panel keeps mono for the injected number and bo
 - Focus rings: 2px `--accent` offset 2px on every interactive element, visible on cream,
   pastel and dark.
 - The dashboard remains a prerendered static build with no new runtime dependency.
+- Tables measure their card, not the viewport; a container query is the rule, not a higher
+  breakpoint guess.

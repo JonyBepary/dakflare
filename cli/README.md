@@ -1,110 +1,127 @@
-# `dakflare` — operator CLI
+# `dakflare` operator CLI
 
-Operate a self-hosted DakFlare deployment without `curl`, a dashboard tab, or
-`adb` archaeology. Zero dependencies, Node 22+ (`fetch` is built in).
+Zero-dependency Node 22+ CLI for one DakFlare deployment. It talks to the Worker over `fetch`, keeps
+its config in `~/.config/dakflare/config.json` (mode 600), and never needs a build step.
 
 ```bash
-node cli/bin/dakflare.js --help
-node cli/bin/dakflare.js doctor
-npm link          # optional: makes `dakflare` global (root bin -> cli/bin/dakflare.js)
+npm install -g .                       # from the repo root, or: node cli/bin/dakflare.js ...
+dakflare init --url https://example.workers.dev --token <ADMIN_TOKEN>
+dakflare doctor
 ```
 
-The CLI talks to exactly one Worker: the one in
-`~/.config/dakflare/config.json`. It never calls Cloudflare's API, never
-deploys, and never prints the admin token. `init --local` is the only command
-that writes a secret file, and it generates fresh values.
+`init --local` writes `worker/.dev.vars` with a fresh `ADMIN_TOKEN`, `AUTH_PEPPER` and
+`BETTER_AUTH_SECRET` for `wrangler dev`; it does not contact a Worker.
+
+`dakflare up --email you@example.com` provisions a deployment end to end: resources, deploy, the first
+owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questions.
 
 ## Commands
 
-| Command | Does |
+### Provision
+
+| Command | Flags | What it does |
+|---|---|---|
+| `init` | `--url --token --token-file --local --force` | verify a Worker and save the URL and token |
+| `up` | `--email --yes --dry-run` | resources, deploy, owner, pairing |
+| `doctor` | `--max-age --serial` | config, health, schema, migrations, bindings, phone |
+| `pair` | `--label --qr --ttl` | mint a pairing code; `--qr` renders it in the terminal |
+| `devices` | none | list paired devices and their last contact |
+| `revoke <id>` | `--yes` | revoke one device; the phone must pair again |
+
+### Messaging
+
+| Command | Flags | What it does |
+|---|---|---|
+| `send` | `--to --body --device --no-wait --wait --until --idempotency-key` | queue an SMS and follow it to the radio |
+| `status <id>` | `--device --wait --until` | read one command's state, or follow it |
+| `audit` | `--tail --actor --limit` | read the audit log |
+
+A send is asynchronous. `send` waits 10 s by default and exits from the outcome; `--no-wait` returns
+as soon as the deployment queues it. Exit `75` means still in flight: check `status`, never send
+again. `SENT` is not delivery; `DELIVERED` is. Pass `--idempotency-key` whenever a retry is possible.
+
+### Accounts and the agent control plane
+
+`dakflare auth <subcommand>`:
+
+| Subcommand | What it does |
 |---|---|
-| `dakflare init` | verify `/v1/admin/health`, then save the Worker URL and admin token |
-| `dakflare init --local` | write `worker/.dev.vars` with fresh `ADMIN_TOKEN`, `AUTH_PEPPER`, `BETTER_AUTH_SECRET` |
-| `dakflare doctor` | checklist of config, health, schema, migrations, bindings, D1, phone and adb |
-| `dakflare pair` | mint a pairing code and print the `dakflare://pair?u=…&c=…` link |
-| `dakflare pair --qr` | the same, plus a terminal QR (`qrencode`, or the built-in encoder) |
-| `dakflare devices` | list paired devices with label, SIM slot and last contact |
-| `dakflare revoke <id>` | revoke a device in D1 and its Durable Object; asks first |
-| `dakflare send --to <e164> --body <text>` | queue an outbound SMS and print its command id and state |
-| `dakflare audit --tail` | read the audit log; says "not available on this deployment" on 404 |
-| `dakflare key fingerprint` | print the release signing certificate's SHA-256 from the JKS |
+| `bootstrap --email` | create the first owner, with no credential; enrol a passkey next |
+| `invite --email [--role] [--ttl]` | mint a single-user invite |
+| `invites` | list invites and whether they were used |
+| `reset --email --yes` | delete an account and mint a fresh owner invite |
+| `mint-agent-token --name --scope [--device] [--max-per-hour] [--ttl]` | mint a `dkf_agt_` token; printed once |
+| `agent-tokens [--all]` | list tokens and their budgets |
+| `revoke-agent-token <id> --yes` | stop a token on its next request |
+| `approvals [--state PENDING]` | what agents wait on, with the ladder |
+| `approve <id> --for 1m\|5m\|15m\|30m\|1h\|1d\|7d\|30d` | grant it, clamped per scope |
+| `reject <id>` | refuse it; the agent may ask again |
+| `grants [--token] [--live]` | what is currently allowed, and how often it was used |
+| `grants revoke <grant-id> --yes` | close a grant window now |
 
-Every command accepts `--json` and every command has its own `--help`.
+`devices:revoke` and `auth:reset` are not scopes at all, so no token and no grant can hold them.
+Production SMS is capped at one hour and must name recipients or a device; a production flow deploy
+and a rules write are capped at one day.
 
-## Config
+### Automation
 
-`~/.config/dakflare/config.json`, written mode `600`:
+| Command | Flags | What it does |
+|---|---|---|
+| `flows apply <file>` | `--dry-run --force --samples --node --corpus-limit` | write one flow document and print the structural diff |
+| `rules apply <file>` | `--dry-run` | write auto-reply rules |
+| `rules test` | `--peer --body --device` | run the rules against one message |
+| `extract synthesize --samples <file>` | `--group --verify-d1-limit --device` | derive a regex from real messages and prove it |
 
-```json
-{
-  "url": "https://<worker>.workers.dev",
-  "token": "<ADMIN_TOKEN>",
-  "installedAt": "2026-10-30T00:00:00.000Z"
-}
-```
+### Provenance
 
-The token is stored but never printed. If the file is missing, commands say to
-run `dakflare init` and exit 2. `ADMIN_TOKEN` is unrecoverable from the Worker;
-regenerate it with `npx wrangler secret put ADMIN_TOKEN --name dakflare-worker`.
+| Command | Flags | What it does |
+|---|---|---|
+| `trace <id>` | `--device` | explain a message, command or approval request |
+| `alerts` | `--all` | open operator alerts, newest first |
+| `dlq <device>` | `--limit` | read a device object's dead letters |
+| `ws inspect <device>` | `--device` | show a device's live sockets |
 
-## What `doctor` proves
+### Contract
 
-| Check | Passes when |
+| Command | What it does |
 |---|---|
-| `config` | present, with `url` and `token`, mode `600` on POSIX |
-| `health` | `/v1/admin/health` answers 200 (or 503 with a diagnosis) |
-| `admin-token` | the Worker accepts the bearer token |
-| `schema` | `schema_ready` is true and the counts query worked |
-| `migrations` | every `worker/migrations/*.sql` in the checkout is in `migrations` |
-| `bindings` | `DB`, `KV`, `DEVICE` and all rate limiters are bound |
-| `fcm-binding` | FCM is present (optional; absent is a skip, not a failure) |
-| `auth-mode` | reported and known; absent is a skip until phase 2 |
-| `d1` | no `db_error`, counts readable |
-| `phone` | the freshest device contacted within `--max-age` (default 60 min) |
-| `phone-role` | `android.app.role.SMS` is held by the installed DakFlare package |
-| `phone-build` | the installed package is readable; reports release vs debug |
+| `capabilities` | every command, its effect and its flags |
+| `describe <command>` | purpose, usage and flags for one command |
+| `schema <command>` | the flag contract as data; `schema states` for state machines |
+| `examples <command>` | real invocations, including a failing one |
+| `mcp serve` | bridge this deployment over MCP on stdio |
+| `key fingerprint` | print the release signing certificate's SHA-256 |
 
-`phone-role` and `phone-build` are skipped when `adb` is absent or no device is
-attached. `--serial` / `ANDROID_SERIAL` select a device; `ADB` overrides the
-binary. Exit 1 if any check fails; a skip is not a failure.
+## Machine contract
+
+`--agent` prints one compact JSON document, never prompts and never uses colour. `--json` is accepted
+on every command as the same envelope. Exit codes are semantic:
+
+| Code | Meaning |
+|---|---|
+| `0` | ok |
+| `1` | failed check or request |
+| `2` | usage error |
+| `3` | not found |
+| `4` | permission denied |
+| `5` | conflict, such as a stale `expected_previous_version` |
+| `6` | precondition failed |
+| `75` | still in flight |
 
 ## Examples
 
 ```bash
-# configure against an existing deployment
-dakflare init --url https://dakflare-worker.example.workers.dev --token-file ~/.config/dakflare/admin-token
-
-# local development secrets (does not contact a Worker)
-dakflare init --local
-
-# a pairing code as text, or with a QR for the phone camera
-dakflare pair
-dakflare pair --label "Mi A3" --qr
-
-# queue one message; with several devices it uses the freshest, and says so
-dakflare send --to +8801540196080 --body "cli probe"
-dakflare send --to +8801540196080 --body "pinned phone" --device dev29b9c2248cb266c8
-
-# scripts
-dakflare doctor --json
-dakflare devices --json
+dakflare pair --qr
+dakflare send --to +8801700000000 --body "Build finished" --idempotency-key build-42
+dakflare status cmdf_01j... --wait
+dakflare auth invite --email operator@example.com --role admin --ttl 900
+dakflare auth mint-agent-token --name ci --scope sms:send,devices:read --max-per-hour 20
+dakflare auth approvals
+dakflare flows apply flow.json --dry-run
+dakflare extract synthesize --samples samples.json
+dakflare trace cmdf_01j...
+dakflare capabilities --agent
 ```
 
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | success (including `audit` when the endpoint is absent) |
-| 1 | a check failed, the Worker returned an error, or the keystore could not be read |
-| 2 | usage error, missing config, missing tool, or a destructive command without confirmation |
-
-## Deliberately deferred to phase 2
-
-- **Invites and owner bootstrap.** `dakflare init` configures an existing
-  deployment; it does not create users or invite anyone.
-- **Audit.** `dakflare audit` is wired, but the Worker has no audit endpoint
-  yet. It prints "not available on this deployment" on 404 instead of failing.
-- **Secret rotation.** No command writes Cloudflare secrets. `init --local`
-  rotates only the local `.dev.vars`.
-- **Fleet routing.** `send` picks the freshest paired device when `--device` is
-  omitted. There is no failover or per-line capacity logic yet.
+The root README has the deployment model, the grant caps and the MCP tools. `docs/OPS_DEPLOY.md` has
+the Worker-side deploy and secret order.

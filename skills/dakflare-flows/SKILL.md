@@ -1,6 +1,6 @@
 ---
 name: dakflare-flows
-description: Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, flows heal, extraction drift.
+description: Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, extraction drift.
 ---
 
 # DakFlare: flows
@@ -100,19 +100,23 @@ An `extract` whose pattern stops matching is silent: the message was accepted an
 the flow stopped at a step that said nothing. Two misses in an hour raise an
 `extraction_drift` alert naming the flow and the capture group.
 
-Heal it from new examples, and let the gate decide:
+Derive the replacement from the messages that arrived, then apply it:
 
 ```
 dakflare extract synthesize --samples new-template.json --group order
-dakflare flows heal wf_orders --samples new-template.json --dry-run
-dakflare flows heal wf_orders --samples new-template.json
+dakflare extract synthesize --samples new-template.json --group order --verify-d1-limit 500
+dakflare flows apply flow.json --dry-run
+dakflare flows apply flow.json
 ```
 
-The heal re-checks the real history: for every inbound body the OLD pattern
-matched, the NEW one must capture the same value byte for byte. One difference and
-nothing is written, the offenders are printed, and the exit code is `6`. That is
-deliberate: a pattern that fixes today's template and changes what yesterday's
-messages extract is worse than the drift.
+`synthesize` returns a pattern only after it has matched every sample exactly once,
+captured the expected value from each, and failed every negative. `--verify-d1-limit`
+runs the same pattern over recent inbound messages from the deployment and reports how
+many matched; history has no ground truth, so that number is reach, not accuracy.
+
+There is no `flows heal`: the pattern is proved offline, then written with
+`flows apply`. A dry run first shows the graph diff, so a changed capture name or a
+lost variable is visible before the write.
 
 ## Rules, which are not flows
 
