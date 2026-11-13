@@ -14,5 +14,5 @@ written, not the tree as it is.
 | `sms_gateway_v5_master_plan_and_timeline.md` | the original v5 plan and timeline |
 | `design-review/` | the seven design-audit notes |
 
-Current documents live one level up: `../README.md` for the product, `../DAKFLARE_MASTER_SPECIFICATION.md`
+Current documents live one level up: `../../README.md` for the product, `../DAKFLARE_MASTER_SPECIFICATION.md`
 for the system reference, and the runbooks in `../OPS_*.md`.
