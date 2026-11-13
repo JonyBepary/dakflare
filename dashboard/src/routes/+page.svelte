@@ -955,7 +955,14 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--df-p-space-2);
+		/* The card is four twelfths of the bento: at a 914px window it is about
+		   190px wide, and the link plus the button need about 197. They wrap
+		   into two rows instead of pushing the button out of the card. The
+		   column gap is one step tighter than the row gap so the two still sit
+		   on one line at the widths where they nearly fit. */
+		flex-wrap: wrap;
+		column-gap: var(--df-p-space-1);
+		row-gap: var(--df-p-space-2);
 		margin-top: var(--df-p-space-2);
 	}
 

@@ -1022,8 +1022,10 @@
 						<strong>Show archived</strong> to see {archivedTotal === 1 ? 'it' : 'them'}.
 					</p>
 				{:else}
-					<!-- One list, two layouts: a dense table-like grid above 860px, a stacked
-					     row below it. The fleet is never rendered twice. -->
+					<!-- One list, two layouts: a dense table-like grid while the card is
+					     wide enough for six columns, a stacked row under that. The
+					     switch follows the card's own width, not the window's. The
+					     fleet is never rendered twice. -->
 					<div class="fleet">
 						<div class="fleet-head" aria-hidden="true">
 							<span>Device</span>
@@ -1054,8 +1056,11 @@
 												{#if deviceLabel(device)}
 													<span class="device-name">{deviceLabel(device)}</span>
 												{/if}
-												<span class="mono device-id">
-													{device.device_id}<span class="device-go" aria-hidden="true">›</span>
+												<span class="device-id-row">
+													<span class="mono device-id">
+														{device.device_id}
+													</span>
+													<span class="device-go" aria-hidden="true">›</span>
 												</span>
 											</span>
 										</button>
@@ -1569,10 +1574,26 @@
 		color: var(--df-text-primary);
 	}
 
+	/* The table measures the card, not the window: the rail takes 249px, so a
+	   914px window leaves this grid 616px.
+	   --fleet-actions is a definite width on purpose. The head's last cell is
+	   empty, so an `auto` track there measured 150px while the buttons made it
+	   252px in the row: same column list, two different grids, headers drifting
+	   off their columns. One definite track keeps the two grids identical.
+	   --fleet-floor (966px) is a row with every column at its own minimum:
+	   180 + 118 + 116 + 104 + 84 + 256 + 5 gaps of 12 + 2 paddings of 24.
+	   The @container threshold is the same number, so the table only appears
+	   where it fits whole: no squeezed column, no scrollbar inside the card.
+	   Below it the stacked card takes over. Keep the two in step when a column
+	   changes. The device column keeps 180px because that is what a name like
+	   "Mi A3 Grameenphone" and a 36-character id need to stay readable. */
 	.fleet {
+		--fleet-actions: 256px;
+		--fleet-floor: 966px;
 		--fleet-cols:
-			minmax(0, 2.2fr) minmax(118px, 0.9fr) minmax(116px, 1fr) minmax(104px, 0.8fr)
-			84px minmax(150px, auto);
+			minmax(180px, 2.2fr) minmax(118px, 0.9fr) minmax(116px, 1fr) minmax(104px, 0.8fr)
+			84px var(--fleet-actions);
+		container: fleet / inline-size;
 	}
 
 	.fleet-head,
@@ -1581,6 +1602,16 @@
 		grid-template-columns: var(--fleet-cols);
 		gap: var(--df-p-space-3);
 		align-items: center;
+	}
+
+	/* The floor belongs to the wide grid alone. The stacked row is a single
+	   column and has to take whatever width the card gives it, so nothing here
+	   reaches it. */
+	@container fleet (min-width: 966px) {
+		.fleet-head,
+		.fleet-row {
+			min-width: var(--fleet-floor);
+		}
 	}
 
 	/* Sticky below the shell header: two sticky siblings at top: 0 would overlap. */
@@ -1661,7 +1692,9 @@
 	}
 
 	.device-go {
-		margin-left: 3px;
+		/* A flex sibling of the id, never shrunk: the id clips, the arrow is
+		   what tells you the row opens. */
+		flex: 0 0 auto;
 		font-family: var(--df-p-font-mono);
 		color: var(--df-text-meta);
 		transition: transform var(--df-p-dur-lift) ease;
@@ -1690,13 +1723,32 @@
 		font-size: var(--df-p-text-md);
 		font-weight: 600;
 		line-height: 1.3;
-		overflow-wrap: anywhere;
+		/* Words break at spaces. `break-word` only steps in for a single word
+		   too long for the column, and unlike `anywhere` it cannot shrink the
+		   column: that value is what turned the name into a letter tower when
+		   the track collapsed to 0px. */
+		overflow-wrap: break-word;
+	}
+
+	.device-id-row {
+		/* The arrow rides the id line, so the name keeps the label's full width
+		   and the id is the only thing that gives way. */
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
 	}
 
 	.device-id {
 		font-size: var(--df-p-text-xs);
 		color: var(--df-text-meta);
-		overflow-wrap: anywhere;
+		/* One line with the tail clipped: a hash wrapped over four lines turns
+		   one row into a paragraph, and the copy button beside it hands over
+		   the whole id. It is the flex child that shrinks inside the row. */
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.cell-state {
@@ -1733,8 +1785,8 @@
 	}
 
 	/* The column head is the label on a wide screen, but it is aria-hidden so a
-	   row still reads on its own. The same key is clipped here and shown below
-	   860px, where the head is gone. */
+	   row still reads on its own. The same key is clipped here and shown once
+	   the card is narrow enough to stack, where the head is gone. */
 	.cell-key {
 		position: absolute;
 		width: 1px;
@@ -1797,7 +1849,16 @@
 		}
 	}
 
-	@media (max-width: 860px) {
+	/* The card's width, not the window's. 966px is where six columns with a
+	   180px name and the three row actions on one line fit; under it the row
+	   stacks instead of squeezing the name to a ribbon. The rows can scroll
+	   sideways inside the card if a column is ever added without raising the
+	   floor, so the actions cannot leave it. */
+	@container fleet (max-width: 965.99px) {
+		.fleet-rows {
+			overflow-x: auto;
+		}
+
 		.fleet-head {
 			display: none;
 		}
