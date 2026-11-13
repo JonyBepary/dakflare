@@ -58,7 +58,7 @@ the editor mirrors its schema.
 | `trigger` | `{ kind: "incoming", sender?, body? }`, matchers with `any`, `exact`, `prefix`, `keyword` or `regex` | 1 |
 | `extract` | `{ source, pattern, flags? }`; at least one named group | 1 |
 | `set_var` | `{ name, value }`; the value may interpolate | 1 |
-| `condition` | `{ left, op, right? }`; `equals`, `not_equals`, `contains`, `starts_with`, `matches_regex`, `gt`, `lt` | 2 (`true`, `false`) |
+| `condition` | `{ left, op, right? }`; `equals`, `not_equals`, `contains`, `matches` (a regex) or `exists`, which takes no right value | 2 (`true`, `false`) |
 | `switch` | `{ value, cases }`; at most 8 cases plus `default` | one per case plus `default` |
 | `delay` | `{ seconds }`, 1 to 300 | 1 |
 | `webhook` | `{ url, body }`; HTTPS only, SSRF-guarded | 1 |
@@ -124,7 +124,7 @@ reports `replied`, `filtered`, `halted` or `error`, and names the step that stop
 | `GET` | `/v1/admin/workflows/:id` | the full document |
 | `PUT` | `/v1/admin/workflows/:id` | validate, rank and save; returns the layout |
 | `DELETE` | `/v1/admin/workflows/:id` | delete and cascade cleanup |
-| `GET` | `/v1/device/flows` | the handset's flow cache |
+| `GET` | `/v1/flows` | the handset's flow cache |
 
 A flow is fleet-wide (`device_id: null`) or scoped to one handset. The CLI speaks the same document:
 `dakflare flows apply <file> --dry-run` prints the structural diff before the write.
