@@ -343,6 +343,29 @@ export async function handleTotpDisable(req: Request, env: Env): Promise<Respons
     where: [{ field: "userId", value: guard.user.id }],
   });
 
+  // Burn the sign-in challenges this account already has outstanding.
+  //
+  // A challenge is minted when a first factor passes and lives for the lockout
+  // window. Disabling TOTP deletes the secret but left those behind, so a tab that
+  // was sitting on "Enter your authenticator code" kept asking for a code that
+  // could no longer exist, with five attempts and no way back. Starting the
+  // sign-in again was the only escape, and nothing on the screen said so.
+  try {
+    await env.DB.prepare(
+      `DELETE FROM verification
+        WHERE identifier IN (
+          SELECT identifier FROM verification
+           WHERE identifier LIKE '2fa-%'
+             AND identifier NOT LIKE '2fa-attempts-%'
+             AND value = ?
+        )`
+    )
+      .bind(guard.user.id)
+      .run();
+  } catch (error) {
+    console.error(`[totp] could not clear outstanding challenges: ${String(error)}`);
+  }
+
   await writeAudit(env, {
     action: "totp.disable",
     actor: { userId: guard.user.id, label: guard.user.email },
