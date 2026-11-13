@@ -1,9 +1,9 @@
 # DakFlare test-support
 
 The harness is `dakflare_test_harness.mjs` at the repository root: a zero-dependency Node
-"Virtual Android Device" that implements the wire protocol of `history/PROTOCOL_CONTRACT_V5.md` from the
-contract text alone. It was deliberately **not** derived from `worker/src` — its only value is that it
-can disagree with the server.
+"Virtual Android Device" that implements the wire protocol of
+`docs/history/PROTOCOL_CONTRACT_V5.md` from the contract text alone. It was deliberately **not**
+derived from `worker/src` — its only value is that it can disagree with the server.
 
 ## One published copy of the contract vectors
 
@@ -24,6 +24,10 @@ others are not. Deriving from the file would turn the third opinion into a secon
 Changing a vector means changing the contract first, then this file, then letting the
 three consumers disagree until they agree again.
 
+`flow-ir-vectors.json` is the same idea for the workflow IR: `worker/src/lib/flow-ir.ts`,
+`simulator/flow` and the harness's flow IR section all read it, so the Worker validator, the
+phone interpreter and the harness are tested against one file rather than three transcriptions.
+
 ## Prerequisites
 
 - Node 22+
@@ -31,10 +35,11 @@ three consumers disagree until they agree again.
 - Cloudflare credentials (`wrangler whoami`) **only** for account-backed mode
 - Nothing else. The harness has no dependencies of its own.
 
-## Two modes, one config
+## Two modes, two config files
 
 `worker/wrangler.toml` is the local lane and keeps its bindings local. The account-backed lane uses
-`worker/wrangler.account.toml`, which marks the preview D1 and KV `remote = true` while the Worker and
+`worker/wrangler.account.toml` with `--env-file .dev.vars`, against the preview database
+`sms_gateway_preview`. That config marks the preview D1 and KV `remote = true` while the Worker and
 the Durable Object still run locally:
 
 | Mode | Command | D1 / KV | Worker + Durable Object |
@@ -50,10 +55,13 @@ deploying anything.
 with the timing vars woven down so alarms fire in seconds instead of minutes:
 
 ```
-ACK_TIMEOUT_MS=1500   OFFLINE_ALERT_MS=5000   STALE_SOCKET_MS=2000
+ACK_TIMEOUT_MS=1500   LEASE_MS=6000   OFFLINE_ALERT_MS=5000   STALE_SOCKET_MS=2000
 FCM_BASE_URL=http://127.0.0.1:8790
 GOOGLE_TOKEN_URL=http://127.0.0.1:8790/token
 ```
+
+`WORKER_PORT` (8787) and `STUB_PORT` (8790) are overridable, and the FCM URLs follow `STUB_PORT`.
+The four timing values are `ACK_TIMEOUT_MS`, `LEASE_MS`, `OFFLINE_ALERT_MS` and `STALE_SOCKET_MS`.
 
 ## Running
 
@@ -98,7 +106,7 @@ would misread it identically and the suite would stay green while the wire forma
 SHA-256, a different string-building idiom, and a separate reading of the same frozen text.
 
 ```bash
-python3 test-support/independent-canonical-check.py   # 26 checks, no server, no dependencies
+python3 test-support/independent-canonical-check.py   # 52 checks, no server, no dependencies
 ```
 
 It asserts only what is deterministic — the body digest and the canonical string. ECDSA signatures are
@@ -107,12 +115,14 @@ DER→P1363 conversion separately. Run it whenever the contract changes.
 
 ## What the suite covers
 
-The suite covers nine sections: admin surface, auth rejection (grammar, tamper, signature length,
-query-before-crypto ordering), the replay guard (including **40 consecutive in-window requests** and
-two fresh nonces in the same millisecond), the RE2 linter (15 patterns, rejects and accepts), incoming
-batch hardening, the full command state machine (including stale-ack and expired-resurrection
-regressions), WebSocket (`hello`, edge auto-response `pong`, batch-send uniqueness), the ack-timeout
-alarm with a real FCM wake, and negative controls.
+The suite covers twenty sections: pairing and re-pair inheritance, the admin and console surfaces,
+reply state, auth rejection (grammar, tamper, signature length, query-before-crypto ordering), the
+replay guard (including **40 consecutive in-window requests** and two fresh nonces in the same
+millisecond), the RE2 linter (15 patterns, rejects and accepts), incoming batch hardening, the full
+command state machine (including stale-ack and expired-resurrection regressions), WebSocket (`hello`,
+edge auto-response `pong`, batch-send uniqueness), lease expiry and lease recovery with a real FCM
+wake, negative controls, flow IR, by-example synthesis, extraction drift and healing, MCP, provenance,
+and the agent control plane.
 
 Three assertions are load-bearing because they target specific defects that the original design would
 have shipped:
@@ -150,7 +160,8 @@ It asserts:
 - **Keepalive.** A socket pinged every 45 s is still *routable* after 150 s — probed with a ping, not
   merely checked for a close frame.
 - **Staleness.** A socket quiet past `STALE_SOCKET_MS` is closed `1001` by the push path, and the
-  command is not lost (it stays `PENDING` for the next poll).
+  command is not lost: it stays `PENDING` for the next poll, or is `LEASED`/`DISPATCHED` if the push
+  won the race.
 
 ### What the deployment corrected
 
@@ -255,7 +266,7 @@ behaviour. Verified gaps:
   structurally valid JWT that Google rejects is only caught against the real endpoint.
 - **DO placement and TLS/CDN behaviour** in front of the Worker are untestable offline.
 
-These are Tier 2 (staged deploy) items. See §4.3 of `history/dakflare_v5_master_plan_rev_c.md`.
+These are Tier 2 (staged deploy) items. See §4.3 of `docs/history/dakflare_v5_master_plan_rev_c.md`.
 
 ## Hoppscotch
 
