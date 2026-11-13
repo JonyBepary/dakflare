@@ -66,7 +66,7 @@ account credential. Nothing here does any more.
    dakflare up --email you@example.com
    ```
    `dakflare up` provisions D1 and KV, generates and writes configurations, applies D1 migrations,
-   uploads secrets from `worker/.dev.vars`, deploys the Worker, and prints the QR pairing code
+   uploads secrets from `worker/.dev.vars`, deploys the Worker, and prints a pairing code
    for the physical handset.
 
 **Worker secrets are not managed in CI.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`,
@@ -137,8 +137,8 @@ Data is a different job: `npx wrangler d1 time-travel restore sms_gateway --remo
 
 ## Smoke and health
 
-`worker/scripts/smoke.sh <url>` is what the pipeline runs after a deploy. It needs no
-credential and asserts the three things a deploy must keep serving:
+`worker/scripts/smoke.sh <url>` is the check to run after a manual deploy. CI never runs it.
+It needs no credential and asserts the three things a deploy must keep serving:
 
 - `/` returns 200 **and more than 1000 bytes**, because a deploy that loses its assets still
   answers 200 with the Worker's own 404 body.
@@ -147,7 +147,7 @@ credential and asserts the three things a deploy must keep serving:
 
 The authenticated check is `dakflare doctor`: config, health, admin token, schema, migrations,
 bindings, auth mode, D1 counts, phone contact, SMS role, installed build. It is the same check
-a person runs, so the pipeline cannot claim a health the CLI would not.
+a person runs; nothing in CI runs it for you.
 
 ## What is deliberately not automated
 

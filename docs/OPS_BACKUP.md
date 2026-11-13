@@ -68,10 +68,11 @@ comparison is the point, not the numbers.
 
 - **Durable Objects.** `DeviceGateway` keeps the command queue, replay-guard nonces and
   alarms; `AuthGuard` keeps the account and IP lockout counters; `AuthorityGuard` keeps the
-  live grant windows. All three are per-object SQLite storage, not D1. A D1 restore leaves
-  them as they are. A device whose queue was lost has nothing pending and re-syncs flows on
-  its next poll; a lockout may outlive the rows that caused it; a grant window may outlive a
-  rolled-back grant row, so revoke it explicitly if that matters.
+  grant expiry timers (D1 stays authoritative for what a grant may do). All three are
+  per-object SQLite storage, not D1. A D1 restore leaves them as they are. A device whose
+  queue was lost has nothing pending and re-syncs flows on its next poll; a lockout may
+  outlive the rows that caused it; a timer may outlive a rolled-back grant row, and firing
+  it only writes an `authority.expired` audit row.
 - **KV.** The FCM token cache. It repopulates from the phone.
 - **The phone's own database.** `simulator.db` holds the local thread and the wrapped
   identity key. Losing it means re-pairing, not data loss on the deployment.
