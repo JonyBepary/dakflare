@@ -272,8 +272,10 @@ Worker continues it.
 `extract_misses` records failed extractions. Two misses in an hour raise an `extraction_drift` alert
 naming the flow and the capture group. `dakflare extract synthesize --samples <file>` derives a
 replacement pattern and proves it against the samples and the negatives; `--verify-d1-limit` reports
-how many recent messages it reaches. The replacement is written with `flows apply`, not by editing
-history.
+how many recent messages it reaches. `dakflare flows heal <flow-id> --samples <file>` then re-checks
+the pattern against the real history: every inbound body the old pattern matched must capture the
+same value byte for byte, or nothing is written and the offenders are printed with exit `6`. The
+write itself is `flows apply`, never a hand edit.
 
 ## 7. Channels and conversations
 
@@ -338,7 +340,7 @@ colours. Twenty-three commands:
 
 `init`, `up`, `doctor`, `pair`, `devices`, `revoke`, `send`, `status`, `audit`, `auth` (bootstrap,
 invite, invites, reset, mint-agent-token, agent-tokens, revoke-agent-token, approvals, approve, reject,
-grants), `flows apply`, `rules apply|test`, `extract synthesize`, `trace`, `alerts`, `dlq`,
+grants), `flows apply|heal`, `rules apply|test`, `extract synthesize`, `trace`, `alerts`, `dlq`,
 `ws inspect`, `capabilities`, `describe`, `schema`, `examples`, `mcp serve`, `key fingerprint`.
 
 Exit codes: `0` ok, `1` failed, `2` usage, `3` not found, `4` permission, `5` conflict, `6`

@@ -67,7 +67,8 @@ and a rules write are capped at one day.
 
 | Command | Flags | What it does |
 |---|---|---|
-| `flows apply <file>` | `--dry-run --force --samples --node --corpus-limit` | write one flow document and print the structural diff |
+| `flows apply <file>` | `--dry-run --force` | write one flow document and print the structural diff |
+| `flows heal <id>` | `--samples --node --corpus-limit --dry-run` | re-check a new pattern against the real history; write it only if every old capture is unchanged |
 | `rules apply <file>` | `--dry-run` | write auto-reply rules |
 | `rules test` | `--peer --body --device` | run the rules against one message |
 | `extract synthesize --samples <file>` | `--group --verify-d1-limit --device` | derive a regex from real messages and prove it |
@@ -78,8 +79,8 @@ and a rules write are capped at one day.
 |---|---|---|
 | `trace <id>` | `--device` | explain a message, command or approval request |
 | `alerts` | `--all` | open operator alerts, newest first |
-| `dlq <device>` | `--limit` | read a device object's dead letters |
-| `ws inspect <device>` | `--device` | show a device's live sockets |
+| `dlq` | `--device --limit` | read a device object's dead letters |
+| `ws inspect` | `--device` | show a device's live sockets |
 
 ### Contract
 

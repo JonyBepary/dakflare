@@ -260,7 +260,7 @@ never colours. Twenty-three commands:
 - **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`.
 - **Messaging**: `send`, `status`, `audit`.
 - **Accounts and agents**: `auth bootstrap|invite|invites|reset|mint-agent-token|agent-tokens|revoke-agent-token|approvals|approve|reject|grants`.
-- **Automation**: `flows apply`, `rules apply|test`, `extract synthesize`.
+- **Automation**: `flows apply|heal`, `rules apply|test`, `extract synthesize`.
 - **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`.
 - **Contract**: `capabilities`, `describe`, `schema` (including `schema states`), `examples`,
   `mcp serve`, `key fingerprint`.
