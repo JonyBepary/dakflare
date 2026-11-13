@@ -55,8 +55,8 @@ cd dakflare
 cd worker && npm install
 cp wrangler.template.toml wrangler.toml
 cp cloudflare.config.template.ts cloudflare.config.ts
-npx wrangler d1 create sms_gateway              # paste database_id into wrangler.toml
-npx wrangler kv namespace create KV             # paste the id into wrangler.toml
+npx wrangler d1 create sms_gateway              # put database_id in cloudflare.config.ts and wrangler.toml
+npx wrangler kv namespace create KV             # put the id in both files
 npx wrangler d1 migrations apply sms_gateway --remote
 
 # 2. secrets (never in the repo)

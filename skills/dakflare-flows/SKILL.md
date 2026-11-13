@@ -1,6 +1,6 @@
 ---
 name: dakflare-flows
-description: Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, extraction drift.
+description: Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, flows heal, extraction drift.
 ---
 
 # DakFlare: flows
@@ -45,8 +45,9 @@ If you need it on both branches, extract it before the branch or set it with
 ## Write a flow
 
 The file is `{ id, name, graph, device_id?, enabled?, expected_previous_version? }`,
-or a bare `{ nodes, edges }` if you pass `--id`. No coordinates are needed: the
-Worker ranks every node by its longest distance from the trigger and lays it out.
+or a bare `{ nodes, edges }` whose id comes from the file name. No coordinates are
+needed: the Worker ranks every node by its longest distance from the trigger and lays
+it out.
 
 ```
 dakflare flows apply flow.json --dry-run
@@ -100,13 +101,13 @@ An `extract` whose pattern stops matching is silent: the message was accepted an
 the flow stopped at a step that said nothing. Two misses in an hour raise an
 `extraction_drift` alert naming the flow and the capture group.
 
-Derive the replacement from the messages that arrived, then apply it:
+Derive the replacement from the messages that arrived, then heal the flow:
 
 ```
 dakflare extract synthesize --samples new-template.json --group order
 dakflare extract synthesize --samples new-template.json --group order --verify-d1-limit 500
-dakflare flows apply flow.json --dry-run
-dakflare flows apply flow.json
+dakflare flows heal wf_orders --samples new-template.json --dry-run
+dakflare flows heal wf_orders --samples new-template.json
 ```
 
 `synthesize` returns a pattern only after it has matched every sample exactly once,
@@ -114,9 +115,20 @@ captured the expected value from each, and failed every negative. `--verify-d1-l
 runs the same pattern over recent inbound messages from the deployment and reports how
 many matched; history has no ground truth, so that number is reach, not accuracy.
 
-There is no `flows heal`: the pattern is proved offline, then written with
-`flows apply`. A dry run first shows the graph diff, so a changed capture name or a
-lost variable is visible before the write.
+Heal re-checks the real history: for every inbound body the old pattern matched, the
+new one must capture the same value byte for byte. One difference and nothing is
+written, the offenders are printed, and the exit code is 6. `--node` names the extract
+when a flow has more than one; `--corpus-limit` sets how many recent inbound messages
+to re-check (default 200, max 500). `--dry-run` runs the gate and writes nothing.
+
+To change anything beyond one extract pattern, edit the flow file and apply it:
+
+```
+dakflare flows apply flow.json --dry-run
+dakflare flows apply flow.json
+```
+
+`--force` drops `expected_previous_version`, so a stale version does not conflict.
 
 ## Rules, which are not flows
 

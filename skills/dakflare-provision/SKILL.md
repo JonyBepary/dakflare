@@ -6,8 +6,9 @@ description: Install, configure or repair a DakFlare deployment: a Worker on Clo
 # DakFlare: provisioning and repair
 
 A deployment is three things: a Worker on the operator's own Cloudflare account, a D1
-database it owns, and one Android handset that holds the SIM. The CLI never talks to
-Cloudflare — it talks to the Worker — so provisioning is `cf`/`wrangler` plus this CLI.
+database it owns, and one Android handset that holds the SIM. `dakflare up` is the one
+command that talks to Cloudflare: it drives `cf`, with no wrangler fallback. Every
+other command talks to the Worker.
 
 ## Read this first
 
@@ -23,32 +24,37 @@ phone, and each failing check names the command that fixes it in the envelope's
 ## The sequence
 
 ```bash
-# 1. the edge
-cd worker && npm install
-cp wrangler.template.toml wrangler.toml
-cp cloudflare.config.template.ts cloudflare.config.ts
-npx wrangler d1 create sms_gateway
-npx wrangler kv namespace create KV
-npx wrangler d1 migrations apply sms_gateway --remote
+# 1. sign in to Cloudflare locally
+cf auth login
 
-# 2. the three secrets
-npx wrangler secret put ADMIN_TOKEN --name dakflare-worker
-npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
-npx wrangler secret put AUTH_PEPPER --name dakflare-worker
+# 2. write the three local secrets into worker/.dev.vars
+dakflare init --local
 
-# 3. deploy, then point the CLI at it
-npm run deploy
+# 3. provision, migrate, deploy, create the owner, mint a pairing code
+dakflare up --email you@example.com
+
+# 4. point the CLI at the Worker
 dakflare init --url https://<worker>.workers.dev --token-file ~/.token
-dakflare auth bootstrap --email you@example.com
-dakflare pair --qr
+dakflare pair --qr          # another pairing code, when needed
 ```
+
+The admin token `init --local` generated is the `ADMIN_TOKEN` line in
+`worker/.dev.vars`; put that value in `~/.token` before step 4. Never commit
+`.dev.vars`.
+
+`up --dry-run` prints the plan and changes nothing. Every step converges, so running
+it again on a live deployment repairs it rather than replacing it.
 
 ## Two facts that cost time if you learn them the hard way
 
-- **The ids are pasted, not guessed.** `d1 create` and `kv namespace create` print a
-  `database_id` and an `id`; both go into `wrangler.toml` before step 2. The deploy
-  fails without them, and the error does not say so.
-- **Unified Authentication.** Operators authenticate via email/password through Better Auth in the console; automated CLI and machine workflows use an admin token or scoped agent token. `doctor` reports token and session status.
+- **The ids are written, not pasted.** `up` finds `sms_gateway` by exact name, creates
+  it only when absent, and writes the D1 and KV ids into
+  `worker/cloudflare.config.ts`, which is the file `cf deploy` reads. Ids pasted into
+  `wrangler.toml` are invisible to that deploy.
+- **Unified Authentication.** Operators authenticate with a passkey through Better Auth
+  in the console; a password factor exists where enabled. Automated CLI and machine
+  workflows use an admin token or a scoped agent token. `doctor` reports the admin
+  token and the auth mode it sees.
 
 ## Repair order
 

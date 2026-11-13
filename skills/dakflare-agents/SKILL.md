@@ -50,9 +50,9 @@ dakflare auth reject <request-id>
 ```
 
 Then the same send succeeds. The grant is capped per scope whatever was asked for:
-production SMS one hour and it must name its recipients, shortcode and DLQ 15
-minutes, a production deploy or a rule write one day, reads 30 days. A request that
-is clamped says so: `requested_s 2592000, granted_s 3600, clamped true`.
+production SMS one hour and it must name its recipients or a device, shortcode and
+DLQ 15 minutes, a production deploy or a rule write one day, reads 30 days. A request
+that is clamped says so: `requested_s 2592000, granted_s 3600, clamped true`.
 
 ```
 dakflare auth grants --live
