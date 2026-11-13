@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
 		ApiError,
@@ -21,7 +21,7 @@
 		verifyRecoveryCode
 	} from '$lib/passkey';
 	import { PasswordFailure, probePasswordSignIn, signInWithPassword } from '$lib/password';
-	import { isWellFormedCode } from '$lib/totp';
+	import { isWellFormedCode, pendingSignInChallenge } from '$lib/totp';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import Brand from '$lib/components/Brand.svelte';
@@ -416,9 +416,18 @@
 			}
 			const current = await getAuthSession();
 			if (current === null) {
-				// A TOTP account: this Worker withheld the session. An older one that
-				// did not is caught here rather than opening the console unasked.
-				await beginSecondFactorStep();
+				// The password was accepted, but this browser cannot read the session
+				// it just minted. That is not a second factor: only the Worker can say
+				// one is pending, and asking it is what stops a code form appearing
+				// for an account with no authenticator.
+				if (await pendingSignInChallenge()) {
+					await beginSecondFactorStep();
+					return;
+				}
+				pwError =
+					'The password was accepted, but the console could not start a session. Reload the page and sign in again.';
+				await tick();
+				pwPasswordField?.focus();
 				return;
 			}
 			await landAccountSession();
@@ -480,12 +489,38 @@
 		if (gate.kind !== 'new') return;
 		const wanted = page.url.searchParams.get('step') ?? page.url.searchParams.get('door');
 		if (wanted === 'code') {
-			firstFactor = 'magic-link';
-			await beginSecondFactorStep();
+			// A URL is not a challenge. `/magic` hands this step over when a first
+			// factor was accepted, but the same address is what a reload, a bookmark
+			// or a stale tab brings back, and once the authenticator is turned off
+			// there is nothing left to satisfy it. Ask the Worker whether a
+			// challenge is actually live; when it is not, drop the step and show the
+			// doors.
+			if (await pendingSignInChallenge()) {
+				firstFactor = 'magic-link';
+				await beginSecondFactorStep();
+				return;
+			}
+			await clearStepParam();
 			return;
 		}
 		if (wanted === 'magic' && doors.includes('magic')) {
 			await openMagicStep(page.url.searchParams.get('restart') === '1');
+		}
+	}
+
+	/**
+	 * Remove a hand-off step from the address bar without navigating. The page is
+	 * already on the right screen; the parameter only exists to choose it once.
+	 */
+	async function clearStepParam(): Promise<void> {
+		const url = new URL(page.url.href);
+		if (!url.searchParams.has('step') && !url.searchParams.has('door')) return;
+		url.searchParams.delete('step');
+		url.searchParams.delete('door');
+		try {
+			await replaceState(url, {});
+		} catch {
+			// The address bar is a convenience; the screen is already correct.
 		}
 	}
 
@@ -564,8 +599,15 @@
 			}
 			const current = await getAuthSession();
 			if (current === null) {
-				firstFactor = 'passkey';
-				await beginSecondFactorStep();
+				// Same rule as the password path: a missing session is not proof of a
+				// second factor.
+				if (await pendingSignInChallenge()) {
+					firstFactor = 'passkey';
+					await beginSecondFactorStep();
+					return;
+				}
+				passkeyError =
+					'The passkey was accepted, but the console could not start a session. Reload the page and sign in again.';
 				return;
 			}
 			await landAccountSession();
@@ -594,6 +636,9 @@
 		useRecovery = false;
 		challengeSpent = false;
 		passkeyError = null;
+		// Leaving the code step must also leave the address that asked for it, or a
+		// reload puts the code form straight back.
+		await clearStepParam();
 		if (firstFactor === 'magic-link') {
 			await openMagicStep(true);
 			return;
@@ -638,10 +683,12 @@
 			if (codeInput) codeInput.value = '';
 			const current = await getAuthSession();
 			if (current === null) {
-				passkeyError = useRecovery
-					? 'That recovery code was not accepted. Each one works once; check the one you typed.'
-					: 'That code was not accepted. Wait for the next one and try again.';
-				codeInput?.focus();
+				// The verify request succeeded, so the code was accepted; what is
+				// missing is the session it should have started. Saying "that code was
+				// not accepted" here sent people back to their authenticator for a
+				// code that had already worked.
+				passkeyError =
+					'That code was accepted, but the console could not read the new session. Reload the page and sign in again.';
 				return;
 			}
 			await landAccountSession();

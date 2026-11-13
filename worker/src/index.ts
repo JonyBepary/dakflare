@@ -80,7 +80,7 @@ import {
   handleTotpStatus,
 } from "./auth";
 import { requestMeta, writeAudit, type AdminActor } from "./audit";
-import { handleRedeemInvite, handleAuthMe, handleAuthMode } from "./routes/auth";
+import { handleRedeemInvite, handleAuthMe, handleAuthMode, handleAuthChallenge } from "./routes/auth";
 import { handleBootstrap } from "./routes/bootstrap";
 import { handleResetUser } from "./routes/reset-user";
 import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
@@ -873,6 +873,12 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     // login page must be able to choose a factor before it has one.
     if (method === "GET" && pathname === "/v1/auth/mode") {
       return handleAuthMode(req, env);
+    }
+    // Is a second-factor challenge live for this browser? The login page asks
+    // before it renders a code form, so a stale `?step=code` or a session it
+    // could not read cannot strand anyone on a step nothing can satisfy.
+    if (method === "GET" && pathname === "/v1/auth/challenge") {
+      return handleAuthChallenge(req, env);
     }
 
     // Magic-link factor (AUTH_PLAN §1, factor 2). The request route answers the

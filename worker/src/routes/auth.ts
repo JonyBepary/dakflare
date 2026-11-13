@@ -23,6 +23,7 @@ import {
   passwordMode,
 } from "../lib/config";
 import { magicLinkMailEnabled } from "../auth/mailer";
+import { resolveSignInChallenge } from "../auth/challenge";
 import { consumeInvite, hashInviteToken } from "../lib/invites";
 
 export async function handleRedeemInvite(req: Request, env: Env): Promise<Response> {
@@ -120,6 +121,35 @@ export async function handleAuthMe(req: Request, env: Env): Promise<Response> {
     expires_at: guard.expiresAt,
     auth_mode: "new",
   });
+}
+
+/**
+ * `GET /v1/auth/challenge` — is a second-factor challenge live for this browser?
+ *
+ * The login page used to infer "this account owes a code" from two things that
+ * are not evidence: a `?step=code` in its own URL, and a session it could not
+ * read after a first factor. Both produce a code form that nothing can satisfy,
+ * and a reload cannot escape it. This answers the question the page actually
+ * has, from the only two things that can: the signed challenge cookie and the
+ * verification row behind it.
+ *
+ * It names no account, no address and no secret. A browser without the cookie
+ * gets the same answer as one whose challenge expired, was used, or whose
+ * authenticator has since been turned off (`resolveSignInChallenge` checks the
+ * enrolled secret, so a removed factor reports nothing pending).
+ */
+export async function handleAuthChallenge(req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `auth-challenge:${ip}` });
+    if (!success) return err("rate_limited", 429);
+  }
+
+  const challenge = await resolveSignInChallenge(env, req);
+  return Response.json(
+    { pending: challenge !== null },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /**

@@ -170,14 +170,21 @@ export async function requestMagicLink(email: string, next?: string): Promise<vo
 
 /**
  * Spend the token. This is the only call in the console that does, and it runs
- * from a button press — never from a page load.
+ * from a button press, never from a page load.
+ *
+ * The response says whether the Worker withheld the session pending an
+ * authenticator code (`twoFactorRedirect`). That flag is the only honest reason
+ * to send someone to the code step: a 401 from `/v1/auth/me` afterwards means
+ * the session could not be read, which is a different problem, and treating it
+ * as "owes a code" stranded people on a form nothing could satisfy.
  */
-export async function consumeMagicLink(token: string): Promise<void> {
+export async function consumeMagicLink(token: string): Promise<{ twoFactorRedirect: boolean }> {
 	try {
-		await authJson<{ ok?: boolean }>('/v1/auth/magic-link/consume', {
-			method: 'POST',
-			body: { token }
-		});
+		const body = await authJson<{ ok?: boolean; twoFactorRedirect?: unknown }>(
+			'/v1/auth/magic-link/consume',
+			{ method: 'POST', body: { token } }
+		);
+		return { twoFactorRedirect: body?.twoFactorRedirect === true };
 	} catch (error) {
 		throw toMagicFailure(error);
 	}

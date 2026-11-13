@@ -2,7 +2,7 @@
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { ApiError, describeError, getMe } from '$lib/api';
+	import { describeError, getMe } from '$lib/api';
 	import {
 		MAGIC_LINK_MINUTES,
 		MagicFailure,
@@ -80,8 +80,10 @@
 		if (view === 'pending' || token === null) return;
 		view = 'pending';
 		error = null;
+		let needsCode: boolean;
 		try {
-			await consumeMagicLink(token);
+			const result = await consumeMagicLink(token);
+			needsCode = result.twoFactorRedirect;
 			// Spent. Drop the reference so nothing can send it twice.
 			token = null;
 		} catch (failure) {
@@ -98,7 +100,7 @@
 			if (view === 'ready') action?.focus();
 			return;
 		}
-		await land();
+		await land(needsCode);
 	}
 
 	/**
@@ -106,29 +108,26 @@
 	 * with an authenticator owes a code before the console opens, and the login
 	 * page owns that step.
 	 */
-	async function land(): Promise<void> {
+	async function land(needsCode: boolean): Promise<void> {
 		view = 'done';
+		if (needsCode) {
+			// The Worker said so on the consume response. No `getMe()` probe is
+			// needed, and none could answer this question.
+			await hold();
+			await goto(`${ROUTES.login}?step=code&next=${encodeURIComponent(nextTarget)}`, {
+				replaceState: true
+			});
+			return;
+		}
 		try {
 			const me = await getMe();
 			session.applyMe(me);
 			await hold();
-			if (me.user.twoFactorEnabled) {
-				await goto(`${ROUTES.login}?step=code&next=${encodeURIComponent(nextTarget)}`, {
-					replaceState: true
-				});
-				return;
-			}
 			await goto(nextTarget, { replaceState: true });
 		} catch (failure) {
-			if (failure instanceof ApiError && (failure.status === 401 || failure.status === 403)) {
-				// The Worker withheld the session pending an authenticator code.
-				await hold();
-				await goto(`${ROUTES.login}?step=code&next=${encodeURIComponent(nextTarget)}`, {
-					replaceState: true
-				});
-				return;
-			}
-			// The link worked, but the console could not confirm the session.
+			// The link worked, but the console could not confirm the session. That is
+			// not a second factor, so this screen says what happened instead of
+			// handing over a code step that cannot work.
 			error = describeError(failure);
 		}
 	}

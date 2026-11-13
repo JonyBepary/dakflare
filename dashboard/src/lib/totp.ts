@@ -96,6 +96,28 @@ async function accountRequest<T>(
 	return payload as T;
 }
 
+/**
+ * Is a second-factor challenge live for this browser?
+ *
+ * The login page must never infer one. A `?step=code` in the URL is not a
+ * challenge, and neither is a session it could not read: after the authenticator
+ * is turned off, a reload of that URL, or a stale tab on it, would show a code
+ * form that nothing can satisfy. Ask the Worker, which checks the signed
+ * challenge cookie and the row behind it (and reports nothing when the account
+ * no longer has an authenticator).
+ *
+ * An older Worker has no such route. `false` is the safe answer there: it shows
+ * the doors rather than a code step that cannot work.
+ */
+export async function pendingSignInChallenge(): Promise<boolean> {
+	try {
+		const body = await accountRequest<{ pending?: unknown }>('/v1/auth/challenge');
+		return body?.pending === true;
+	} catch {
+		return false;
+	}
+}
+
 /** One sentence for a refusal, without naming the wire. */
 function totpFailure(error: unknown, intent: 'enable' | 'disable' | 'regenerate'): ApiError {
 	if (error instanceof ApiError) {
