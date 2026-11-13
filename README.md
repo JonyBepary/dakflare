@@ -1,32 +1,49 @@
 # DakFlare
 
-> **Sovereign Device-to-Edge SMS Relay on Cloudflare Workers & Android.**
+> **A sovereign multi-platform messaging hub and SMS gateway on Cloudflare and Android.**
 >
 > DakFlare pairs a dedicated Android handset with your own Cloudflare account (Workers, Durable
-> Objects, D1, KV) to send, receive and answer SMS over a signed wire protocol. No third-party
-> telecom SaaS, no per-message markup, no shared secret between the phone and the edge.
+> Objects, D1, Queues, Workflows) and turns it into an SMS gateway, a conversation hub for Telegram
+> and WhatsApp, and an agent-operable control plane. No third-party telecom SaaS, no per-message
+> markup, no shared secret between the phone and the edge.
 
 The handset is the radio. The Worker is the coordinator. The console is where an operator watches
 both.
 
 ## Why "DakFlare"
 
-**DakFlare** combines *Dāk* (ডাক — the relay-runner dispatch network that carried urgent letters
-across Bengal station by station) with the **Cloudflare** edge where the coordinator lives.
+**DakFlare** combines *Dāk* (ডাক, the relay-runner dispatch network that carried urgent letters across
+Bengal station by station) with the **Cloudflare** edge where the coordinator lives.
 
 ## Shape
 
 | Layer | Role |
 |---|---|
-| **Android app** (Tauri + Rust core) | Owns the SIM, is the default SMS app, holds a P-256 identity wrapped by Android Keystore, runs flows on-device, mirrors what it did |
-| **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts |
-| **Durable Object** (one per device) | SQLite-backed command queue, replay-guard nonces, alarms for `ack_timeout` / `offline_alert` / expiry |
-| **D1** | Fleet registry, message log, rules, workflows, accounts, invites, audit |
+| **Android app** (Tauri + Rust core) | Owns the SIM, is the default SMS app, holds a P-256 identity wrapped by Android Keystore, runs the flow engine on-device, mirrors what it did |
+| **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts, channels, flows and the agent control plane |
+| **Durable Objects** | `DeviceGateway` per handset (command queue, replay nonces, ack and offline alarms), `AuthGuard` (account lockout), `AuthorityGuard` (grant windows) |
+| **D1** | Fleet, messages, conversations, rules, flows, agents, approvals, grants, audit. Seven migrations, `0001` through `0007` |
+| **Queues and Workflows** | `dakflare-webhook-queue` for outbound webhooks; `FlowExecutionWorkflow` for flow delays longer than five seconds |
+| **Channels** | SMS through the handset, Telegram and WhatsApp Cloud webhooks, all stored as conversations |
 | **KV** | FCM bearer-token cache |
 
 Device auth is not a shared secret: each phone signs `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`
-with a P-256 key whose at-rest form is `keystore:v1:<iv>:<ciphertext>` — wrapped by a non-exportable
+with a P-256 key whose at-rest form is `keystore:v1:<iv>:<ciphertext>`, wrapped by a non-exportable
 AndroidKeyStore AES-GCM key. A copied database alone cannot impersonate the phone.
+
+## Repository map
+
+| Path | What |
+|---|---|
+| `worker/` | the Worker, D1 migrations, Durable Objects, channels, flow engine and MCP server |
+| `dashboard/` | the SvelteKit console, built into `worker/public/admin` and served at `/admin` |
+| `cli/` | `dakflare`, a zero-dependency Node 22+ operator CLI |
+| `simulator/` | the Android app (Tauri + Rust core, Kotlin telephony, Svelte UI) and the on-device flow engine |
+| `design/` | design tokens and the token preview |
+| `docs/` | auth, CLI, console UX, deploy, backup, phone release, workflow editor and multi-platform specs |
+| `skills/` | four `SKILL.md` packages for agents: provision, messaging, flows, agents |
+| `contracts/` | the MCP tool contract (`mcp-tools.json`) |
+| `test-support/` | local dev stack, protocol and flow vectors, platform and skills gates |
 
 ## Quick start
 
@@ -38,8 +55,8 @@ cd dakflare
 cd worker && npm install
 cp wrangler.template.toml wrangler.toml
 cp cloudflare.config.template.ts cloudflare.config.ts
-npx wrangler d1 create sms_gateway
-npx wrangler kv namespace create KV            # paste the id into cloudflare.config.ts
+npx wrangler d1 create sms_gateway              # paste database_id into wrangler.toml
+npx wrangler kv namespace create KV             # paste the id into wrangler.toml
 npx wrangler d1 migrations apply sms_gateway --remote
 
 # 2. secrets (never in the repo)
@@ -53,8 +70,8 @@ npx wrangler secret put RESEND_API_KEY --name dakflare-worker
 npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
 ```
 
-`cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`,
-because `cf` cannot set one secret or stream logs yet.
+`cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`, because
+`cf` cannot set one secret or stream logs yet.
 
 CI runs the same checks on every pull request; it does not deploy. Deploy from a clean tree with
 `npm run deploy`, which builds the console first. Migrations are applied by hand, never by the
@@ -63,10 +80,15 @@ pipeline. `docs/OPS_DEPLOY.md` has the jobs, the secrets, the order of operation
 Then, from anywhere:
 
 ```bash
-npm install -g .            # or: node cli/bin/dakflare.js …
+npm install -g .            # or: node cli/bin/dakflare.js ...
 dakflare init               # stores the URL + token in ~/.config/dakflare/config.json (mode 600)
-dakflare doctor             # 11 checks: config, health, token, schema, migrations, bindings,
-                            # auth mode, D1, phone contact, SMS role, installed build
+dakflare up                 # provision resources, deploy, create the owner and pair a phone
+```
+
+Or step by step:
+
+```bash
+dakflare doctor                                   # config, health, schema, migrations, bindings, phone
 dakflare auth bootstrap --email you@example.com   # prints the one-time owner invite
 ```
 
@@ -74,15 +96,18 @@ Open that invite in a browser, redeem it, create a passkey. That account is the 
 
 ## The console
 
-Prerendered SvelteKit, served by the Worker at `/admin`, hand-written CSS over a token system
-(`design/tokens.css`: primitive → semantic → component). Warm cream surfaces, pastel containers that
-never carry body text, one coral action per screen, mono for anything an operator compares with a log.
+SvelteKit, prerendered to static assets and served by the Worker at `/admin`, hand-written CSS over a
+token system (`design/tokens.css`: primitive, semantic, component). Warm cream surfaces, pastel
+containers that never carry body text, one coral action per screen, mono for anything an operator
+compares with a log.
 
-- **Overview** — deployment health, fleet, the quiet panel, the rules-vs-flows pipeline.
-- **Devices / Messages** — the fleet with five states, and a message log that says who answered and
-  what happened to that answer (`Delivered · Sent · Queued · Failed — reason`).
-- **Automation** — rules as one sentence each, workflows on a canvas.
-- **Security** — sign-in factors (passkey, authenticator, password), invites, and the audit log.
+- **Overview**: deployment health, fleet, the quiet panel, the rules-vs-flows pipeline.
+- **Devices / Messages**: the fleet with five states, and a message log that says who answered and
+  what happened to that answer (`Delivered · Sent · Queued · Failed, reason`).
+- **Automation**: rules as one sentence each, workflows on a canvas.
+- **Approvals**: the queue of time-boxed authority an agent is waiting for, with the duration ladder.
+- **Audit log**: every privileged action, who took it and what it touched.
+- **Security**: sign-in factors (passkey, authenticator, password) and invites.
 
 ### Layout
 
@@ -129,9 +154,9 @@ Three consequences worth knowing:
   when it withheld the session, and `GET /v1/auth/challenge` answers whether a code challenge is live
   for this browser. The login page renders the code step only on those answers. A `?step=code` in the
   URL, or a session it could not read, is not evidence that an account owes a code.
-- **Turning the authenticator off cleans up after itself.** The secret and the enabled flag go, and
-  so do the sign-in challenges the account left outstanding, so a tab parked on the code step cannot
-  keep asking for a code that no longer exists.
+- **Turning the authenticator off cleans up after itself.** The secret and the enabled flag go, and so
+  do the sign-in challenges the account left outstanding, so a tab parked on the code step cannot keep
+  asking for a code that no longer exists.
 
 | Endpoint | Purpose |
 |---|---|
@@ -145,11 +170,69 @@ Three consequences worth knowing:
 | `GET /v1/auth/me` | the account behind the session, or 401 |
 | `/api/auth/*` | Better Auth itself: passkey and TOTP verification, sign-out |
 
+## Agent control plane
+
+An agent never holds the admin token. It holds a `dkf_agt_` token minted with a scope set, and every
+irreversible action also needs a live, time-boxed grant that a human approves in the console or with
+`dakflare auth approve`.
+
+- **Tokens**: `dakflare auth mint-agent-token --name ci --scope sms:send,devices:read`. The token is
+  printed once; D1 stores a digest. `dakflare auth agent-tokens` lists them, and
+  `dakflare auth revoke-agent-token <id>` stops one on its next request.
+- **Scopes**: reads (`messages:read`, `devices:read`, `flows:read`, `audit:read`), cheap writes
+  (`sms:send`, `rules:write`, `flows:write`, `alerts:write`, and others), and the costly four
+  (`sms:send:production`, `flow_deploy_prod`, `dlq_bulk_replay`, `enable_shortcode`). `devices:revoke`
+  and `auth:reset` are not scopes at all, so neither a token nor a grant can hold them.
+- **Grants**: a ladder of 1m, 5m, 15m, 30m, 1h, 1d, 7d and 30d, capped per scope. Production SMS is
+  capped at one hour and must name recipients or a device; a production flow deploy, a rules write and
+  a bulk DLQ replay are capped at one day or less.
+- **Approvals**: `GET /v1/admin/approvals`, the console's Approvals page, and
+  `dakflare auth approvals|approve|reject`. A request that loses the race is told who answered first.
+- **Grants on record**: `dakflare auth grants [--live]` and `dakflare auth grants revoke <id>`.
+
+### MCP
+
+`POST /v1/mcp` serves seven tools over the same token: `list_devices`, `read_messages`,
+`command_status`, `list_flows`, `get_flow`, `trace` and `send_sms`. The bearer is a static `dkf_agt_`
+token, and this is deliberately not MCP authorization: there is no OAuth 2.1 resource server here, so
+a conformant OAuth client cannot negotiate it. `dakflare mcp serve` bridges the same tools over stdio.
+
+## Flows
+
+A flow is a canonical IR document, not a canvas blob. Nine node kinds (`trigger`, `extract`,
+`set_var`, `condition`, `switch`, `delay`, `webhook`, `send_sms`, `stop`), a dry-run that prints a
+structural diff before a write, and a layout the Worker computes from the graph, so an agent can
+author a flow without knowing anything about coordinates.
+
+- `dakflare flows apply <file> [--dry-run]` writes one document and prints the diff.
+- `dakflare extract synthesize --samples <file>` derives a regex from real messages and proves it
+  against the negatives.
+- Drift alerts (`extraction_drift`) fire when a stored pattern stops matching traffic.
+- The editor has two surfaces (`Steps` and `Map`) and a read-only `Source` sheet; `PatternSheet`
+  explains a pattern with live samples.
+
+The same engine also compiles to WebAssembly (`simulator/flow-wasm`), so the handset can evaluate a
+flow locally instead of waiting for the network.
+
+## Provenance
+
+- `dakflare trace <id>` explains a message, command or approval request across D1, the Durable Object
+  and the audit log.
+- `dakflare alerts` lists open operator alerts, newest first; the console can acknowledge them.
+- `dakflare dlq <device>` reads a device object's dead letters.
+- `dakflare ws inspect <device>` shows a device's live sockets.
+
+## Channels
+
+`worker/src/channels` has three adapters. SMS goes through the paired handset; Telegram and WhatsApp
+Cloud arrive as webhooks (`/v1/channels/telegram/webhook`, `/v1/channels/whatsapp/webhook`) and are
+stored as conversations (`0007`), so the console and the flow engine see one message model.
+
 ## The phone
 
-A real SMS app, not a config page: four frames behind a dock (**Threads · Device · Flows ·
-Settings**), a conversation view with paging, a reply-only composer that counts GSM-7/UCS-2 segments,
-and inline reply from the notification.
+A real SMS app, not a config page: four frames behind a dock (**Threads · Device · Flows · Settings**),
+a conversation view with paging, a reply-only composer that counts GSM-7/UCS-2 segments, and inline
+reply from the notification.
 
 It is the **default SMS app** (role held), so it receives `SMS_DELIVER`, writes what it stores into
 `content://sms`, and posts one silent notification per thread. A `remoteMessaging` foreground service
@@ -169,6 +252,31 @@ Release signing lives outside the repo: `~/.config/dakflare/dakflare-release.jks
 means no future update can carry the same app id.** The certificate fingerprint is recorded in
 `docs/PHONE_RELEASE.md`.
 
+## CLI
+
+`dakflare` is zero-dependency, speaks one compact JSON document under `--agent`, never prompts and
+never colours. Twenty-three commands:
+
+- **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`.
+- **Messaging**: `send`, `status`, `audit`.
+- **Accounts and agents**: `auth bootstrap|invite|invites|reset|mint-agent-token|agent-tokens|revoke-agent-token|approvals|approve|reject|grants`.
+- **Automation**: `flows apply`, `rules apply|test`, `extract synthesize`.
+- **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`.
+- **Contract**: `capabilities`, `describe`, `schema` (including `schema states`), `examples`,
+  `mcp serve`, `key fingerprint`.
+
+Exit codes are semantic: `0` ok, `1` failed, `2` usage, `3` not found, `4` permission, `5` conflict,
+`6` precondition, `75` still in flight. A send is asynchronous: `send` waits 10 s and exits from the
+outcome, `--no-wait` returns as soon as the deployment queues it, and exit `75` means check `status`,
+never send again.
+
+## Skills for agents
+
+`skills/dakflare-provision`, `skills/dakflare-messaging`, `skills/dakflare-flows` and
+`skills/dakflare-agents` are `SKILL.md` packages that teach an agent the CLI contract, the async send
+rule (`SENT` is not delivery) and the authority model. Install them with `npx skills add` or point an
+agent at the folder.
+
 ## Verifying it
 
 ```bash
@@ -179,9 +287,11 @@ cd worker && node dakflare_test_harness.mjs pair && node dakflare_test_harness.m
 cd simulator/core && cargo test
 ```
 
-The harness covers pairing, admin, reply state, auth, replay, rules, console surface, the state
-machine, websockets, ack timeout and the password factor — including a software WebAuthn authenticator,
-so passkey assertions are real cryptography rather than a mock.
+Harness modes: `selftest`, `verify-vectors`, `pair`, `suite`, `hardening`, `multidevice`, `auth`,
+`password`, `lockout-global`, `password-rotate`, `magic`, `proxy`, `ws`, `stub` and `reset`. The suite
+covers pairing, admin, reply state, auth, replay, rules, console surface, websockets, ack timeout and
+the password factor, including a software WebAuthn authenticator, so passkey assertions are real
+cryptography rather than a mock. `test-support/` holds the dev stack and the shared vectors.
 
 ## Known gaps
 
@@ -190,6 +300,7 @@ so passkey assertions are real cryptography rather than a mock.
   not advertise the factor, because a door that cannot deliver a link would strand the login page.
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
+- **`MEDIA_BUCKET` and `AI` are bound but unused**; no Worker route reads media or calls a model yet.
 - **A proxy in front of the console breaks the cookie**, not the sign-in. The session cookie is
   host-only, so an http preview or a second hostname signs in on the Worker and keeps nothing; open
   the deployment's own HTTPS URL. `/admin/login` is honest about this: it reports that the session
