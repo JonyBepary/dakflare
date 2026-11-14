@@ -222,6 +222,10 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # Retention window for message bodies and phone numbers (D1 and DO `commands`).
 # A product decision, not an engineering default: see OPERATIONS.md.
 MESSAGE_RETENTION_DAYS = "90"
+# System 1 decision model: clef-flash (default) | clef | jev.
+# Read per request in src/lib/system1.ts; an unsupported value falls back to
+# clef-flash rather than failing the route.
+SYSTEM1_DEFAULT_MODEL = "clef-flash"
 # Per-device daily inbound row budget (D1 writes), enforced in the device's DO.
 # Bounds how much of the shared daily write allowance one device can consume.
 INCOMING_ROWS_PER_DAY = "10000"

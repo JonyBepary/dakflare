@@ -89,6 +89,7 @@ export default defineConfig({
 			FCM_BASE_URL: bindings.text("https://fcm.googleapis.com"),
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
+			SYSTEM1_DEFAULT_MODEL: bindings.text("clef-flash"),
 			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/JonyBepary/dakflare"),

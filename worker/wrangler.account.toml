@@ -141,6 +141,10 @@ AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGE_RETENTION_DAYS = "90"
+# System 1 decision model: clef-flash (default) | clef | jev.
+# Read per request in src/lib/system1.ts; an unsupported value falls back to
+# clef-flash rather than failing the route.
+SYSTEM1_DEFAULT_MODEL = "clef-flash"
 INCOMING_ROWS_PER_DAY = "10000"
 SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 
