@@ -7,8 +7,15 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(setVarSummary(data as unknown as SetVarData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Set variable'
+	);
 </script>
 
-<NodeCard nodeId={id} type="set_var" icon="key" title="Set variable" {summary} {selected}>
+<NodeCard nodeId={id} type="set_var" icon="key" title={cardTitle} {summary} {selected}>
 	<Handle type="source" position={Position.Right} class="wf-handle" />
 </NodeCard>

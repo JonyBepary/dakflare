@@ -7,8 +7,15 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(triggerSummary(data as unknown as TriggerData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Trigger'
+	);
 </script>
 
-<NodeCard nodeId={id} type="trigger" icon="zap" title="Trigger" {summary} {selected} hasTarget={false} canDuplicate={false}>
+<NodeCard nodeId={id} type="trigger" icon="zap" title={cardTitle} {summary} {selected} hasTarget={false} canDuplicate={false}>
 	<Handle type="source" position={Position.Right} class="wf-handle" />
 </NodeCard>

@@ -7,9 +7,16 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(conditionSummary(data as unknown as ConditionData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Condition'
+	);
 </script>
 
-<NodeCard nodeId={id} type="condition" icon="branch" title="Condition" {summary} {selected}>
+<NodeCard nodeId={id} type="condition" icon="branch" title={cardTitle} {summary} {selected}>
 	<div class="wf-branches">
 		<div class="wf-branch">
 			<span class="wf-branch-key">true</span>

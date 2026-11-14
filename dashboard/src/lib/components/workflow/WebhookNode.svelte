@@ -7,8 +7,15 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(webhookSummary(data as unknown as WebhookData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Webhook'
+	);
 </script>
 
-<NodeCard nodeId={id} type="webhook" icon="external" title="Webhook" {summary} {selected}>
+<NodeCard nodeId={id} type="webhook" icon="external" title={cardTitle} {summary} {selected}>
 	<Handle type="source" position={Position.Right} class="wf-handle" />
 </NodeCard>

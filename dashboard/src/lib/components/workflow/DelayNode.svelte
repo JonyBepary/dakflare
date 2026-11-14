@@ -7,8 +7,15 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(delaySummary(data as unknown as DelayData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Delay'
+	);
 </script>
 
-<NodeCard nodeId={id} type="delay" icon="clock" title="Delay" {summary} {selected}>
+<NodeCard nodeId={id} type="delay" icon="clock" title={cardTitle} {summary} {selected}>
 	<Handle type="source" position={Position.Right} class="wf-handle" />
 </NodeCard>

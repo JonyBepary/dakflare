@@ -7,7 +7,14 @@
 	let { id, data, selected = false }: NodeProps<FlowNode> = $props();
 
 	const summary = $derived(stopSummary(data as unknown as StopData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Stop'
+	);
 </script>
 
-<NodeCard nodeId={id} type="stop" icon="stop" title="Stop" {summary} {selected}>
+<NodeCard nodeId={id} type="stop" icon="stop" title={cardTitle} {summary} {selected}>
 </NodeCard>

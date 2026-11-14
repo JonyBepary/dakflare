@@ -20,7 +20,7 @@
 	import { tick } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
-	import { metaFor, nodeSummary, type FlowEdge, type FlowNode } from '$lib/workflow/graph';
+	import { nodeSummary, type FlowEdge, type FlowNode } from '$lib/workflow/graph';
 	import {
 		percent,
 		synthesizePatch,
@@ -30,8 +30,9 @@
 		type AgentUnavailable
 	} from './agent';
 	import {
-		composeInsert,
+		composePatch,
 		verifyPatch,
+		visibleTitle,
 		type ComposedPatch,
 		type PatchProblems
 	} from './agent-patch';
@@ -91,7 +92,7 @@
 		if (agentMode) return [] as Found[];
 		const found: Found[] = [];
 		nodes.forEach((node, index) => {
-			const title = metaFor(node.type).title;
+			const title = visibleTitle(node);
 			const summary = nodeSummary(node);
 			const haystack = `${title} ${summary} ${node.type} ${index + 1}`.toLowerCase();
 			if (needle && !haystack.includes(needle)) return;
@@ -211,7 +212,7 @@
 		// Let the first phase paint before the synchronous reading finishes.
 		await tick();
 
-		const read = composeInsert(words, nodes, edges, { selectedId });
+		const read = composePatch(words, { nodes, edges }, { selectedId });
 		if (!read.ok) {
 			phases = { understand: 'failed', propose: 'idle', verify: 'idle' };
 			failure = { kind: 'refused', reason: null, message: read.reason };
@@ -410,13 +411,13 @@
 				{...toolParam(
 					agentMode ? 'Intent' : 'Step name',
 					agentMode
-						? 'The change the operator wants, in their own words. Name the kind of step and where it goes, for example "add a delay after 2".'
+						? 'The change the operator wants, in their own words: add, move, rename or remove a step, for example "move 3 before 2".'
 						: 'A step name, a summary word, or a kind.'
 				)}
 				bind:value={query}
 				{oninput}
 				placeholder={agentMode
-					? 'Say what to change, for example: add a delay after 2'
+					? 'Say what to change: add, move, rename or remove'
 					: 'Find a step, or type > to ask the agent'}
 				aria-label={agentMode ? 'Ask the agent for a change' : 'Find a step'}
 				aria-describedby={agentMode ? 'finder-agent-state' : 'finder-results'}
@@ -509,8 +510,8 @@
 						</div>
 						{#if failure.kind === 'refused'}
 							<p class="agent-hint">
-								Try naming the kind of step and the step it goes after, for example
-								<code>add a delay after 2</code>.
+								Try one of <code>add a delay after 2</code>, <code>move 3 before 2</code>,
+								<code>rename 1 to Intake</code> or <code>remove step 4</code>.
 							</p>
 						{/if}
 					{:else if judgement && composed}
@@ -525,12 +526,19 @@
 								{:else}
 									<span class="chip" data-tone="muted">No approval needed</span>
 								{/if}
-								<span class="chip" data-tone="muted">
-									+{composed.addedIds.length} step{composed.addedIds.length === 1 ? '' : 's'}
-								</span>
+								{#if composed.addedIds.length > 0}
+									<span class="chip" data-tone="muted">
+										+{composed.addedIds.length} step{composed.addedIds.length === 1 ? '' : 's'}
+									</span>
+								{/if}
 								{#if composed.modifiedIds.length > 0}
 									<span class="chip" data-tone="muted">
-										{composed.modifiedIds.length} connection{composed.modifiedIds.length === 1 ? '' : 's'} moved
+										{composed.modifiedIds.length} step{composed.modifiedIds.length === 1 ? '' : 's'} changed
+									</span>
+								{/if}
+								{#if composed.removedIds.length > 0}
+									<span class="chip" data-tone="muted">
+										−{composed.removedIds.length} step{composed.removedIds.length === 1 ? '' : 's'} removed
 									</span>
 								{/if}
 							</div>
@@ -585,13 +593,16 @@
 						</p>
 					{:else}
 						<p class="agent-hint">
-							Name the kind of step and where it goes. The console reads the words, the gateway
-							judges the patch, and you accept or revert the result.
+							Ask for one change with <strong>add</strong>, <strong>move</strong>,
+							<strong>rename</strong> or <strong>remove</strong>. The console reads the words
+							against this flow, the gateway judges the patch, and you accept or revert the
+							result.
 						</p>
 						<ul class="agent-examples">
 							<li><code>add a delay after 2</code></li>
-							<li><code>add a send sms at the end</code></li>
-							<li><code>add a webhook before step 3</code></li>
+							<li><code>move 3 before 2</code></li>
+							<li><code>rename 1 to Intake</code></li>
+							<li><code>remove step 4</code></li>
 						</ul>
 					{/if}
 				</div>

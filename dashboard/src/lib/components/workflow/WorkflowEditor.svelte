@@ -40,7 +40,8 @@
 	import UnsupportedNode from '$lib/components/workflow/UnsupportedNode.svelte';
 	import WebhookNode from '$lib/components/workflow/WebhookNode.svelte';
 	import StepFinder, { type AgentProposal } from '$lib/components/workflow/StepFinder.svelte';
-	import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/components/workflow/agent-patch';
+	import { visibleTitle } from '$lib/components/workflow/agent-patch';
+import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/components/workflow/agent-patch';
 	import { percent, type AgentJudgement } from '$lib/components/workflow/agent';
 	import { WORKFLOW_GHOST, type GhostKind, type WorkflowGhostUi } from '$lib/components/workflow/ghost';
 	import { registerWorkflowTools } from '$lib/components/workflow/webmcp';
@@ -377,7 +378,7 @@
 				edges: JSON.parse(JSON.stringify(proposal.patch.patch.edges)) as FlowEdge[]
 			},
 			problems: proposal.problems,
-			entries: { added: proposal.patch.added, modified: proposal.patch.modified, removed: [] },
+			entries: { added: proposal.patch.added, modified: proposal.patch.modified, removed: proposal.patch.removed },
 			applyToken: proposal.judgement.apply_token,
 			approvalRequired: proposal.judgement.approval_required,
 			faithful: proposal.judgement.faithful,
@@ -443,7 +444,7 @@
 			const node = nodes.find((item) => item.id === id);
 			return {
 				id,
-				title: node ? metaFor(node.type).title : 'Step',
+				title: visibleTitle(node),
 				detail: node ? nodeSummary(node) : ''
 			};
 		});
@@ -451,7 +452,7 @@
 			const node = graph.nodes.find((item) => item.id === id);
 			return {
 				id,
-				title: node ? metaFor(node.type).title : 'Step',
+				title: visibleTitle(node),
 				detail: node ? nodeSummary(node) : ''
 			};
 		});
@@ -459,7 +460,7 @@
 			const node = graph.nodes.find((item) => item.id === id);
 			return {
 				id,
-				title: node ? metaFor(node.type).title : 'Step',
+				title: visibleTitle(node),
 				detail: node ? nodeSummary(node) : ''
 			};
 		});
@@ -2237,7 +2238,7 @@
 															<Icon name="arrow-up-right" size={13} />
 														</span>
 														<span class="step-text">
-															<strong>{metaFor(item.node.type).title}</strong>
+															<strong>{visibleTitle(item.node)}</strong>
 															<small>already shown above</small>
 														</span>
 													</button>
@@ -2257,7 +2258,7 @@
 														<Icon name={metaFor(item.node.type).icon} size={16} />
 													</span>
 													<span class="step-text">
-														<strong>{metaFor(item.node.type).title}</strong>
+														<strong>{visibleTitle(item.node)}</strong>
 														<small>{nodeSummary(item.node)}</small>
 													</span>
 													{#if item.shared}

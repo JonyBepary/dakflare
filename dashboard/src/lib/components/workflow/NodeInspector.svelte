@@ -2,6 +2,7 @@
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import VariableHints from './VariableHints.svelte';
+	import { visibleTitle } from './agent-patch';
 	import PatternSheet from './PatternSheet.svelte';
 	import { measureSmsSegments, sanitizeGsm7Text } from '$lib/workflow/sms-encoding';
 	import type {
@@ -164,7 +165,7 @@
 		<span class="inspector-icon"><Icon name={meta.icon} size={16} /></span>
 		<div class="inspector-title">
 			<p class="eyebrow">Selected step</p>
-			<h2 id={titleId}>{meta.title}</h2>
+			<h2 id={titleId}>{visibleTitle(node)}</h2>
 		</div>
 		<span class="copy-slot"><CopyButton value={node.id} label="Copy node id" iconOnly /></span>
 		{#if onclose}

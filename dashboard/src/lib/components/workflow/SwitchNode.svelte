@@ -9,9 +9,16 @@
 	const switchData = $derived(data as unknown as SwitchData);
 	const summary = $derived(switchSummary(switchData));
 	const branches = $derived(switchBranchesOf(switchData));
+
+	const cardTitle = $derived(
+		typeof (data as { title?: unknown })?.title === 'string' &&
+			((data as { title?: string }).title ?? '').trim()
+			? (data as { title: string }).title.trim()
+			: 'Switch'
+	);
 </script>
 
-<NodeCard nodeId={id} type="switch" icon="workflow" title="Switch" {summary} {selected}>
+<NodeCard nodeId={id} type="switch" icon="workflow" title={cardTitle} {summary} {selected}>
 	<div class="wf-branches">
 		{#each branches as branch (branch.handle)}
 			<div class="wf-branch">

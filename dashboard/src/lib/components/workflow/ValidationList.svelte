@@ -9,6 +9,7 @@
 	 */
 	import Icon from '$lib/components/Icon.svelte';
 	import { metaFor, type EditorIssue, type FlowNode } from '$lib/workflow/graph';
+	import { visibleTitle } from './agent-patch';
 
 	let {
 		issues,
@@ -35,7 +36,7 @@
 	function stepName(issue: EditorIssue): string {
 		if (!issue.nodeId) return 'Flow';
 		const node = byId.get(issue.nodeId);
-		return node ? metaFor(node.type).title : 'Removed step';
+		return node ? visibleTitle(node) : 'Removed step';
 	}
 
 	function onkeydown(event: KeyboardEvent) {
