@@ -33,6 +33,8 @@
 //! given, because a synthesized pattern that reports only "ok" is a claim, and
 //! the numbers are the evidence.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// How many distinct anchors before the examples stop describing one template.
@@ -172,8 +174,6 @@ impl CharClass {
         let mut digits = true;
         let mut alnum = true;
         let mut hex = true;
-        let mut mixed = true;
-
         for value in values {
             for ch in value.chars() {
                 if !ch.is_ascii_digit() {
@@ -184,9 +184,6 @@ impl CharClass {
                 }
                 if !ch.is_ascii_hexdigit() {
                     hex = false;
-                }
-                if !(ch.is_ascii_alphanumeric() || "._/- ".contains(ch)) {
-                    mixed = false;
                 }
             }
         }
@@ -199,9 +196,9 @@ impl CharClass {
             CharClass::Hex
         } else if alnum {
             CharClass::Alnum
-        } else if mixed {
-            CharClass::Mixed
         } else {
+            // The widest class the synthesizer emits: anything it could not
+            // narrow to digits, hex or alphanumerics still needs coverage.
             CharClass::Mixed
         }
     }
@@ -437,7 +434,20 @@ pub fn synthesize(request: &SynthRequest) -> SynthOutcome {
 
     /* ---- 4. the value ------------------------------------------------ */
     let values: Vec<&str> = request.samples.iter().map(|s| s.value.as_str()).collect();
-    let value_shape = shape_value(&values)?;
+    // A reference is prose, not an identifier: `Ref CUS512.` and `Ref test
+    // payment.` are the same field with a different number of words. Deriving a
+    // fixed word shape from those two examples produced `[A-Za-z0-9]{6,13}`,
+    // which then refused the second sample at verification time. When every
+    // sample agrees on a reference label and at least one value is multi-word,
+    // the bounded prose class is the honest shape.
+    let reference_shape = anchors.len() == 1
+        && is_reference_label(&anchors[0])
+        && values.iter().any(|value| value.contains(' '));
+    let value_shape = if reference_shape {
+        REFERENCE_VALUE_CLASS.to_string()
+    } else {
+        shape_value(&values)?
+    };
 
     let pattern = format!("{anchor_pattern}{separator}(?<{group}>{value_shape})");
 
@@ -523,6 +533,336 @@ fn occurrences(haystack: &str, needle: &str) -> Vec<usize> {
         }
     }
     hits
+}
+
+/* ------------------------------------------------------- reference clauses */
+
+/// The character class a reference clause is allowed to take. It is bounded on
+/// purpose: a reference is one line of a receipt (`CUS512`, `test payment`), not
+/// prose, so the pattern must not be taught to swallow a whole sentence.
+pub const REFERENCE_VALUE_CLASS: &str = "[A-Za-z0-9 _-]{1,40}";
+
+/// Labels that introduce a reference clause, longest first so `Reference` is not
+/// read as `Ref` followed by `erence`.
+pub const REFERENCE_LABELS: [&str; 2] = ["Reference", "Ref"];
+
+/// More samples than this stop describing one template.
+pub const MAX_REFERENCE_SAMPLES: usize = 5;
+
+/// A clause that some samples carry and others omit.
+///
+/// The motivating failure: three receipts arrived, two carrying `Ref CUS512.` and
+/// `Ref test payment.` and one carrying no reference at all. A shape derived from
+/// the values (`[A-Za-z0-9]{6,6}`) refuses `test payment`, and a shape derived
+/// from the anchors treats `test payment` as a second label. Neither is the
+/// field. The field is "an optional `Ref` clause whose value is a short run of
+/// word characters and spaces", so that is what `pattern` says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceClause {
+    /// The literal label, as the samples spelled it (`Ref`).
+    pub label: String,
+    /// Capture-group name inside the clause (`ref`).
+    pub group: String,
+    /// The whole clause, ready to place in a larger template.
+    pub pattern: String,
+    /// True when at least one sample omitted the clause.
+    pub optional: bool,
+    /// Samples that carried a clause.
+    pub with_clause: usize,
+    /// Samples that did not.
+    pub without_clause: usize,
+}
+
+/// True when a label introduces a reference clause (`Ref`, `Reference`).
+pub fn is_reference_label(label: &str) -> bool {
+    let trimmed = label.trim_end_matches([':', '.', ' ']);
+    REFERENCE_LABELS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(trimmed))
+}
+
+/// Locate a reference clause in one body: `(label, value, ended_with_period)`.
+fn reference_clause_in(body: &str) -> Option<(String, String, bool)> {
+    for label in REFERENCE_LABELS {
+        let mut from = 0usize;
+        while let Some(found) = body[from..].find(label) {
+            let at = from + found;
+            from = at + label.len();
+
+            // The label must stand alone: not `Refund`, not `Preference`.
+            let before_ok = body[..at]
+                .chars()
+                .next_back()
+                .map(|ch| !is_word_char(ch))
+                .unwrap_or(true);
+            let after_index = at + label.len();
+            let after = body[after_index..].chars().next();
+            if !before_ok || !matches!(after, Some(ch) if ch.is_whitespace() || ch == ':' || ch == '=') {
+                continue;
+            }
+
+            let after_label = &body[after_index..];
+            let separated = after_label.trim_start_matches([':', '=', ' ', '\t', '\n', '\r']);
+            if separated.len() == after_label.len() {
+                // Nothing separated the label from a value: not a clause.
+                continue;
+            }
+
+            let collected: String = separated
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == ' ' || *ch == '_' || *ch == '-')
+                .collect();
+            let value = collected.trim_end();
+            if value.is_empty() || value.chars().count() > 40 {
+                continue;
+            }
+            let period = separated[value.len()..].trim_start().starts_with('.');
+            return Some((label.to_string(), value.to_string(), period));
+        }
+    }
+    None
+}
+
+/// Synthesize the optional reference clause described by a set of bodies.
+///
+/// Returns `None` when the bodies do not describe one: fewer than two samples
+/// carry the clause, the labels disagree, or every clause has the same word
+/// count (in which case the ordinary value-shape path is already right, and the
+/// single-word case must stay unchanged).
+pub fn synthesize_reference_clause(
+    bodies: &[String],
+    group: Option<&str>,
+) -> Option<ReferenceClause> {
+    if bodies.len() < 2 || bodies.len() > MAX_REFERENCE_SAMPLES {
+        return None;
+    }
+    let group = group.unwrap_or("ref");
+    if !is_group_name(group) {
+        return None;
+    }
+
+    let mut label: Option<String> = None;
+    let mut texts: Vec<String> = Vec::new();
+    let mut with_clause = 0usize;
+    let mut period_count = 0usize;
+
+    for body in bodies {
+        let Some((found, text, period)) = reference_clause_in(body) else {
+            continue;
+        };
+        match &label {
+            Some(existing) if existing != &found => return None,
+            Some(_) => {}
+            None => label = Some(found),
+        }
+        with_clause += 1;
+        if period {
+            period_count += 1;
+        }
+        texts.push(text);
+    }
+
+    let label = label?;
+    if with_clause < 2 {
+        return None;
+    }
+
+    // Differing word counts are the evidence that a fixed shape is wrong. One
+    // word everywhere (`CUS512`, `CUS999`) is the ordinary case.
+    let word_counts: Vec<usize> = texts
+        .iter()
+        .map(|text| text.split_whitespace().count())
+        .collect();
+    if word_counts.iter().min() == word_counts.iter().max() {
+        return None;
+    }
+
+    let optional = with_clause < bodies.len();
+    let trailing = if period_count == with_clause { "\\." } else { "" };
+    let pattern = format!(
+        "(?: {label} (?P<{group}>{REFERENCE_VALUE_CLASS}){trailing}){}",
+        if optional { "?" } else { "" }
+    );
+
+    Some(ReferenceClause {
+        label,
+        group: group.to_string(),
+        pattern,
+        optional,
+        with_clause,
+        without_clause: bodies.len() - with_clause,
+    })
+}
+
+/* ------------------------------------------------------------ role aliases */
+
+/// Capture-group name to role name, e.g. `{"amount": "principal_amount"}`.
+///
+/// The synthesizers name what they see (`amount` for the first money span); a
+/// caller's template may name the same slot by its role. Keeping the map
+/// separate means the detector stays honest about what it looked at while the
+/// caller still gets the names its graphs use.
+pub type RoleAliases = BTreeMap<String, String>;
+
+/// The alias map a first-run console starts with.
+pub fn default_role_aliases() -> RoleAliases {
+    let mut map = RoleAliases::new();
+    map.insert("amount".to_string(), "principal_amount".to_string());
+    map.insert("reference".to_string(), "reference".to_string());
+    map.insert("sender_account".to_string(), "sender_account".to_string());
+    map.insert("timestamp".to_string(), "timestamp".to_string());
+    map.insert("trx_id".to_string(), "trx_id".to_string());
+    map
+}
+
+/// Rename the spans through a role map, keeping capture-group names unique.
+pub fn apply_role_aliases(spans: &mut [TemplateSpan], aliases: &RoleAliases) {
+    for span in spans.iter_mut() {
+        if let Some(replacement) = aliases.get(&span.name) {
+            span.name = replacement.clone();
+        }
+    }
+    dedupe_span_names(spans);
+}
+
+/// `amount`, `amount_2`, `amount_3`, ... in document order.
+fn dedupe_span_names(spans: &mut [TemplateSpan]) {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for span in spans.iter_mut() {
+        let count = seen.entry(span.name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            span.name = format!("{}_{}", span.name, *count);
+        }
+    }
+}
+
+/* --------------------------------------------------------- literal segments */
+
+/// One literal run in a pattern, and whether a value gap precedes it.
+///
+/// This is the small IR the diagnostics walk: enough to say where a message
+/// stopped agreeing with a pattern, not a regex parser. Anything the scanner does
+/// not understand becomes a gap, which is the safe direction — a gap means "the
+/// pattern does not spell out what sits here", never "this must be literal".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteralSegment {
+    pub text: String,
+    /// A class, group, quantifier or alternation sits between this segment and
+    /// the previous one, so a value of unknown length lives in the gap.
+    pub after_gap: bool,
+}
+
+fn flush_segment(out: &mut Vec<LiteralSegment>, current: &mut String, gap: bool) {
+    if !current.is_empty() {
+        out.push(LiteralSegment {
+            text: std::mem::take(current),
+            after_gap: gap,
+        });
+    }
+}
+
+/// Walk a pattern and return its literal runs in order.
+pub fn literal_segments(pattern: &str) -> Vec<LiteralSegment> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out: Vec<LiteralSegment> = Vec::new();
+    let mut current = String::new();
+    let mut gap = false;
+    let mut index = 0usize;
+
+    // A character class or an escape that stands for one.
+    fn is_class_escape(ch: char) -> bool {
+        matches!(ch, 'd' | 'D' | 's' | 'S' | 'w' | 'W' | 'b' | 'B' | 'A' | 'z' | 'Z' | 'p' | 'P' | 'k' | 'K')
+    }
+
+    while index < chars.len() {
+        let ch = chars[index];
+        match ch {
+            '\\' => {
+                let Some(next) = chars.get(index + 1).copied() else {
+                    index += 1;
+                    continue;
+                };
+                if is_class_escape(next) {
+                    flush_segment(&mut out, &mut current, gap);
+                    gap = true;
+                } else if next.is_ascii_alphanumeric() {
+                    // `\n`, `\t`, `\r` are the escapes that stand for a literal
+                    // control character; the rest were handled above.
+                    current.push(match next {
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        other => other,
+                    });
+                } else {
+                    // Escaped punctuation is exactly that punctuation.
+                    current.push(next);
+                }
+                index += 2;
+            }
+            '[' => {
+                flush_segment(&mut out, &mut current, gap);
+                gap = true;
+                index += 1;
+                if chars.get(index) == Some(&'^') {
+                    index += 1;
+                }
+                if chars.get(index) == Some(&']') {
+                    index += 1;
+                }
+                while index < chars.len() && chars[index] != ']' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            '(' => {
+                flush_segment(&mut out, &mut current, gap);
+                gap = true;
+                if chars.get(index + 1) == Some(&'?') {
+                    let mut cursor = index + 2;
+                    while cursor < chars.len() && chars[cursor] != ')' {
+                        if chars[cursor] == '>' {
+                            cursor += 1;
+                            break;
+                        }
+                        if chars[cursor] == ':' {
+                            cursor += 1;
+                            break;
+                        }
+                        cursor += 1;
+                    }
+                    index = cursor;
+                } else {
+                    index += 1;
+                }
+            }
+            ')' | '|' | '.' | '^' | '$' | '?' | '*' | '+' => {
+                flush_segment(&mut out, &mut current, gap);
+                gap = true;
+                index += 1;
+            }
+            '{' => {
+                flush_segment(&mut out, &mut current, gap);
+                gap = true;
+                index += 1;
+                while index < chars.len() && chars[index] != '}' {
+                    index += 1;
+                }
+                index += 1;
+            }
+            _ => {
+                current.push(ch);
+                index += 1;
+            }
+        }
+    }
+
+    flush_segment(&mut out, &mut current, gap);
+    out
 }
 
 /* ------------------------------------------------------------------ tests */
@@ -816,7 +1156,25 @@ pub fn synthesize_template(request: &TemplateRequest) -> Result<TemplateResult, 
 }
 
 /// Auto-suggest variable spans across a raw message body for sub-2-minute onboarding.
+///
+/// Names are what the detectors saw (`amount`, `trx_id`); a caller that wants
+/// role names applies [`default_role_aliases`] through
+/// [`auto_suggest_spans_with_aliases`] instead.
 pub fn auto_suggest_spans(body: &str) -> Vec<TemplateSpan> {
+    let mut spans = detect_spans(body);
+    dedupe_span_names(&mut spans);
+    spans
+}
+
+/// Like [`auto_suggest_spans`], with the capture groups renamed through a role
+/// map and kept unique afterwards.
+pub fn auto_suggest_spans_with_aliases(body: &str, aliases: &RoleAliases) -> Vec<TemplateSpan> {
+    let mut spans = detect_spans(body);
+    apply_role_aliases(&mut spans, aliases);
+    spans
+}
+
+fn detect_spans(body: &str) -> Vec<TemplateSpan> {
     let mut spans = Vec::new();
     let norm = normalize_bangla_digits(body);
 
@@ -927,16 +1285,9 @@ pub fn auto_suggest_spans(body: &str) -> Vec<TemplateSpan> {
     // Two suggestions can name the same field: a bKash message has an amount and a
     // fee, and both look like money. `synthesize` refuses duplicate capture-group
     // names, correctly, so a caller that fed these straight in got
-    // "duplicate capture group name" instead of a pattern. Suffixing here keeps
-    // the suggestion useful and the contract honest.
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for span in &mut spans {
-        let count = seen.entry(span.name.clone()).or_insert(0);
-        *count += 1;
-        if *count > 1 {
-            span.name = format!("{}_{}", span.name, *count);
-        }
-    }
+    // "duplicate capture group name" instead of a pattern. Suffixing in
+    // `dedupe_span_names` keeps the suggestion useful and the contract honest,
+    // and it runs after aliasing so a renamed span cannot collide either.
     spans
 }
 
@@ -1134,5 +1485,121 @@ mod tests {
         assert!(res.test_results[1].matched);
         assert_eq!(res.test_results[0].extracted.get("amount").map(String::as_str), Some("800.00"));
         assert_eq!(res.test_results[1].extracted.get("amount").map(String::as_str), Some("1250.50"));
+    }
+
+    /* ---- v7.1: the reference clause ---------------------------------- */
+
+    #[test]
+    fn three_samples_with_and_without_ref_get_one_optional_clause() {
+        let bodies = vec![
+            "Payment Tk 100.00 sent. Ref CUS512. Thank you.".to_string(),
+            "Payment Tk 100.00 sent. Ref test payment. Thank you.".to_string(),
+            "Payment Tk 100.00 sent. Thank you.".to_string(),
+        ];
+
+        let clause = synthesize_reference_clause(&bodies, Some("ref"))
+            .expect("two word counts and one omission describe a clause");
+        assert_eq!(clause.label, "Ref");
+        assert_eq!(clause.group, "ref");
+        assert!(clause.optional, "one sample omits the clause");
+        assert_eq!(clause.with_clause, 2);
+        assert_eq!(clause.without_clause, 1);
+        assert_eq!(
+            clause.pattern,
+            r"(?: Ref (?P<ref>[A-Za-z0-9 _-]{1,40})\.)?"
+        );
+
+        // The clause is a real pattern, not a description of one. It is optional,
+        // so an unanchored search also finds the empty alternative first; a
+        // caller embeds it between literals. Here, scan for the carrying match.
+        let compiled = regex::Regex::new(&clause.pattern).expect("clause compiles");
+        for body in &bodies {
+            assert!(compiled.is_match(body), "clause must accept {body:?}");
+        }
+        let captured = |body: &str| -> Option<String> {
+            compiled
+                .captures_iter(body)
+                .find_map(|captures| captures.name("ref").map(|m| m.as_str().to_string()))
+        };
+        assert_eq!(captured(&bodies[0]).as_deref(), Some("CUS512"));
+        assert_eq!(captured(&bodies[1]).as_deref(), Some("test payment"));
+        assert_eq!(captured(&bodies[2]), None, "the third sample has no reference");
+    }
+
+    #[test]
+    fn a_multi_word_reference_keeps_all_of_its_words() {
+        // The failure this exists for: `Ref CUS512.` and `Ref test payment.` used
+        // to shape as `[A-Za-z0-9]{6,13}`, which then refused the second sample.
+        let request = req(
+            &[
+                (
+                    "You have received Tk 800.00. Ref CUS512. Fee Tk 0.00.",
+                    "CUS512",
+                ),
+                (
+                    "You have received Tk 800.00. Ref test payment. Fee Tk 0.00.",
+                    "test payment",
+                ),
+            ],
+            &[],
+        );
+
+        let result = synthesize(&request).expect("both samples describe one field");
+        assert_eq!(result.anchors, vec!["Ref"]);
+        assert_eq!(result.value_shape, REFERENCE_VALUE_CLASS);
+        assert_eq!(result.precision, 1.0);
+        assert_eq!(result.recall, 1.0);
+        assert!(
+            result.pattern.contains("[A-Za-z0-9 _-]{1,40}"),
+            "got {}",
+            result.pattern
+        );
+    }
+
+    #[test]
+    fn a_single_word_reference_case_is_unchanged() {
+        // One word in every sample is the ordinary case: the value shape stays
+        // narrow instead of widening to prose, and no clause is reported.
+        let bodies = vec![
+            "Payment Tk 100.00 sent. Ref CUS512. Thank you.".to_string(),
+            "Payment Tk 100.00 sent. Ref CUS999. Thank you.".to_string(),
+            "Payment Tk 100.00 sent. Ref INV033. Thank you.".to_string(),
+        ];
+        assert!(
+            synthesize_reference_clause(&bodies, Some("ref")).is_none(),
+            "a fixed word count is not a clause"
+        );
+
+        let request = req(
+            &[
+                ("Order sent. Ref CUS512.", "CUS512"),
+                ("Order sent. Ref CUS999.", "CUS999"),
+            ],
+            &[],
+        );
+        let result = synthesize(&request).expect("single-word references still synthesize");
+        assert_eq!(result.value_shape, "CUS[0-9]{3}");
+        assert_ne!(result.value_shape, REFERENCE_VALUE_CLASS);
+    }
+
+    #[test]
+    fn role_aliases_rename_without_colliding() {
+        let message = "You have received Tk 800.00 from 01999999999. Ref INV102. Fee Tk 0.00. Balance Tk 1,200.00. TrxID 8G56H7J8K9 at 15/07/2026 11:24";
+        let aliases = default_role_aliases();
+        assert_eq!(
+            aliases.get("amount").map(String::as_str),
+            Some("principal_amount")
+        );
+
+        let spans = auto_suggest_spans_with_aliases(message, &aliases);
+        let mut names: Vec<&str> = spans.iter().map(|span| span.name.as_str()).collect();
+        assert!(
+            names.contains(&"principal_amount"),
+            "the role map must reach the span: {names:?}"
+        );
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "aliased names must stay unique");
     }
 }

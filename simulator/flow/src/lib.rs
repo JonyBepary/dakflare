@@ -18,13 +18,24 @@
 //! list in order gets the ordering the graph asked for and this crate never
 //! touches a clock.
 
+pub mod diagnostics;
 pub mod ir;
 pub mod prose_synth;
+pub mod self_heal;
 
+pub use diagnostics::{
+    DiagnosticCode, Invisible, MatchFailure, SmsEncoding, segment_count, sms_encoding,
+    trace_match_failure,
+};
 pub use prose_synth::{
-    auto_suggest_spans, is_otp_or_pin, normalize_bangla_digits, normalize_sms_body, synthesize,
-    synthesize_template, Sample, SynthFailure, SynthOutcome, SynthRequest, SynthResult,
-    TemplateRequest, TemplateResult, TemplateSpan, TemplateTestMatch,
+    auto_suggest_spans, auto_suggest_spans_with_aliases, default_role_aliases, is_otp_or_pin,
+    is_reference_label, literal_segments, normalize_bangla_digits, normalize_sms_body,
+    synthesize, synthesize_reference_clause, synthesize_template, LiteralSegment, ReferenceClause,
+    RoleAliases, Sample, SynthFailure, SynthOutcome, SynthRequest, SynthResult, TemplateRequest,
+    TemplateResult, TemplateSpan, TemplateTestMatch,
+};
+pub use self_heal::{
+    CorpusScore, evaluate_corpus_and_score, rank_candidates,
 };
 
 use std::collections::BTreeMap;
