@@ -56,7 +56,14 @@ import {
   handleDeviceApprovalReject,
   handleDeviceApprovals,
 } from "./routes/device-approvals";
-import { handleMcpRequest } from "./mcp/server";
+import { handleStreamableMcp } from "./mcp/http";
+import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
+import {
+  handleAgentDiagnose,
+  handleAgentSynthesize,
+  handleAgentTelemetry,
+  handleAgentTriage,
+} from "./routes/agent";
 import { AuthorityGuard } from "./authority-guard";
 import { FlowExecutionWorkflow, type FlowWorkflowParams } from "./workflows/flow-execution";
 import { getChannelPlugin } from "./channels";
@@ -292,10 +299,10 @@ async function withAdmin(
  */
 async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
   const bearer = readBearer(req);
-  if (bearer === null) return mcpUnauthorized("missing bearer token");
+  if (bearer === null) return mcpChallenge(req, "missing bearer token");
 
   const token = await resolveAgentToken(env, bearer);
-  if (token === null) return mcpUnauthorized("unknown or revoked token");
+  if (token === null) return mcpChallenge(req, "unknown or revoked token");
 
   if (env.ADMIN_LIMITER) {
     const { success } = await env.ADMIN_LIMITER.limit({ key: `mcp:${token.id}` });
@@ -309,7 +316,7 @@ async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
 
   await recordTokenUse(env, token.id);
 
-  return handleMcpRequest(req, env, {
+  return handleStreamableMcp(req, env, {
     userId: null,
     label: `agent:${token.name}`,
     role: "agent",
@@ -326,16 +333,6 @@ async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
  * No `resource_metadata` parameter: there is no protected-resource document to
  * point at, and inventing a URL for one would be worse than the bare challenge.
  */
-function mcpUnauthorized(reason: string): Response {
-  return Response.json(
-    { error: "unauthorized", message: reason },
-    {
-      status: 401,
-      headers: { "WWW-Authenticate": 'Bearer realm="dakflare", error="invalid_token"' },
-    }
-  );
-}
-
 /**
  * Admin gate. Three credentials:
  *
@@ -850,7 +847,22 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     // versioning: everything an MCP client expects, none of which the admin gate
     // speaks. Resolve the credential first; the tool registry is then filtered to
     // the scopes it holds, so `tools/list` is the permission surface.
-    if (method === "POST" && pathname === "/v1/mcp") {
+    /* ---- MCP OAuth discovery (RFC 9728 / RFC 8414) --------------------- */
+    // Metadata is public by definition: a client reads it to learn how to
+    // authenticate. Only the two documents exist; anything else under
+    // /.well-known/ 404s from the handler.
+    if (method === "GET" && pathname.startsWith("/.well-known/oauth-")) {
+      return handleWellKnown(req, env);
+    }
+
+    /* ---- MCP (v6.1 P4, streamable HTTP since v7.1) --------------------- */
+    // POST is the request/response leg, GET holds the SSE stream for a stateful
+    // session, DELETE ends it. `/mcp` is the spec path; `/v1/mcp` stays for the
+    // tokens already deployed against it.
+    if (
+      (method === "POST" || method === "GET" || method === "DELETE") &&
+      (pathname === "/v1/mcp" || pathname === "/mcp")
+    ) {
       return handleMcpRoute(req, env);
     }
 
@@ -960,6 +972,33 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       // A read: a member may see who did what, including their own actions.
       return withAdminAccess(req, env, "read", "read the audit log", (_actor) =>
         handleAuditList(env, url)
+      );
+    }
+
+    /* ---- Agent analysis (v7.1 WS4/WS6) --------------------------------- */
+    // Three reads and one capability mint. The read-only paths use the `read`
+    // permission (a member may ask); synthesize is a `write` because it mints
+    // the authority handle an apply spends. `withAdminAccess` is the same gate
+    // the rest of the console uses, so ADMIN_TOKEN, a session and a `dkf_agt_`
+    // token all reach it and the per-token/admin rate limiter still applies.
+    if (method === "POST" && pathname === "/v1/agent/triage") {
+      return withAdminAccess(req, env, "read", "triage inbound messages", (_actor) =>
+        handleAgentTriage(req, env)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/agent/telemetry") {
+      return withAdminAccess(req, env, "read", "read agent telemetry", (_actor) =>
+        handleAgentTelemetry(req, env)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/agent/diagnose") {
+      return withAdminAccess(req, env, "read", "diagnose agent failures", (_actor) =>
+        handleAgentDiagnose(req, env)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/agent/synthesize") {
+      return withAdminAccess(req, env, "write", "synthesize agent patches", (_actor) =>
+        handleAgentSynthesize(req, env)
       );
     }
 

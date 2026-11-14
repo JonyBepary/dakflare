@@ -156,6 +156,11 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
   "read trace": "messages:read",
   "read the dead letter queue": "devices:read",
   "inspect sockets": "devices:read",
+  // v7.1 agent analysis (routes/agent.ts). Triage/diagnose read messages;
+  // telemetry reads the fleet. All three are read-only and bounded.
+  "triage inbound messages": "messages:read",
+  "read agent telemetry": "devices:read",
+  "diagnose agent failures": "messages:read",
 
   // Writes.
   "send SMS": "sms:send",
@@ -165,6 +170,10 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
   "delete workflows": "flow_deploy_prod",
   "save rules": "rules:write",
   "delete rules": "rules:write",
+  // Minting an apply token is a write in the sense that matters: it produces the
+  // authority handle a later apply spends. The token's `max_uses` is 1 and the
+  // apply route still requires the grant.
+  "synthesize agent patches": "flows:write",
   "pair devices": "devices:write",
   "archive devices": "devices:write",
   "unarchive devices": "devices:write",
