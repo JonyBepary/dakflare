@@ -45,6 +45,11 @@ interface WebMcpTool {
 	inputSchema?: Record<string, unknown>;
 	annotations?: {
 		readOnlyHint?: boolean;
+		/**
+		 * WebMCP's name for "this changes what the operator sees". Chrome's
+		 * `getTools()` surfaces this hint; it does not surface `destructiveHint`.
+		 */
+		consequentialHint?: boolean;
 		destructiveHint?: boolean;
 		idempotentHint?: boolean;
 		openWorldHint?: boolean;
@@ -149,7 +154,12 @@ function buildTools(host: WorkflowToolHost): WebMcpTool[] {
 			name: 'dakflare_stage_flow_patch',
 			description:
 				'Stages one patch to the workflow that is open, so a person can review it as a preview on the map and in the outline. Consequential: the editor changes what it shows, but the patch is not applied, not saved, and the operator must still accept it. Replaces any patch already staged.',
-			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+			annotations: {
+				readOnlyHint: false,
+				consequentialHint: true,
+				destructiveHint: true,
+				idempotentHint: false
+			},
 			inputSchema: {
 				type: 'object',
 				properties: {
