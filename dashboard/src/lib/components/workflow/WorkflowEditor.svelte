@@ -16,6 +16,7 @@
 	import '$lib/workflow/workflow.css';
 
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
@@ -25,7 +26,6 @@
 	import NodeInspector from '$lib/components/workflow/NodeInspector.svelte';
 	import SimulationPanel from '$lib/components/workflow/SimulationPanel.svelte';
 	import SourceSheet, { type ApplyResult } from '$lib/components/workflow/SourceSheet.svelte';
-	import StepFinder from '$lib/components/workflow/StepFinder.svelte';
 	import ValidationList from '$lib/components/workflow/ValidationList.svelte';
 	import WorkflowSettings from '$lib/components/workflow/WorkflowSettings.svelte';
 	import ConditionNode from '$lib/components/workflow/ConditionNode.svelte';
@@ -39,6 +39,11 @@
 	import TriggerNode from '$lib/components/workflow/TriggerNode.svelte';
 	import UnsupportedNode from '$lib/components/workflow/UnsupportedNode.svelte';
 	import WebhookNode from '$lib/components/workflow/WebhookNode.svelte';
+	import StepFinder, { type AgentProposal } from '$lib/components/workflow/StepFinder.svelte';
+	import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/components/workflow/agent-patch';
+	import { percent, type AgentJudgement } from '$lib/components/workflow/agent';
+	import { WORKFLOW_GHOST, type GhostKind, type WorkflowGhostUi } from '$lib/components/workflow/ghost';
+	import { registerWorkflowTools } from '$lib/components/workflow/webmcp';
 
 	import { ApiError, describeError, getWorkflow, readWorkflowIssues, saveWorkflow } from '$lib/api';
 	import { ROUTES } from '$lib/paths';
@@ -62,6 +67,7 @@
 		outlineItems,
 		previewSeed,
 		sourceHandles,
+		templateVariables,
 		toGraph,
 		validateWorkflow,
 		type EditorIssue,
@@ -129,6 +135,8 @@
 	let simulateOpen = $state(false);
 	let sourceOpen = $state(false);
 	let finderOpen = $state(false);
+	/** Ctrl+K opens the step list; Ctrl+J opens the same palette in agent mode. */
+	let finderMode = $state<'steps' | 'agent'>('steps');
 	let addOpen = $state(false);
 	let checksOpen = $state(false);
 	let menuOpen = $state(false);
@@ -164,6 +172,34 @@
 		enabled: boolean;
 		sig: string;
 	}
+
+	/**
+	 * A patch the agent proposed, waiting on a person.
+	 *
+	 * `snapshotBefore` is the document as it was before staging, so a revert is a
+	 * plain assignment and an accept is one undo entry away. While this is set the
+	 * editor draws the patched graph as a ghost: the real document is still the
+	 * snapshot, which is why every edit path is closed until the operator decides.
+	 */
+	interface StagedPatch {
+		summary: string;
+		snapshotBefore: HistorySnapshot;
+		patchedFlow: { nodes: FlowNode[]; edges: FlowEdge[] };
+		problems: PatchProblems;
+		entries: { added: PatchEntry[]; modified: PatchEntry[]; removed: PatchEntry[] };
+		applyToken: string | null;
+		approvalRequired: boolean;
+		faithful: AgentJudgement['faithful'];
+		/** False when a WebMCP agent staged the patch itself: no one judged it. */
+		judged: boolean;
+		/** The operator's explicit tick, when one is required. */
+		approved: boolean;
+		intent: string;
+		anchorId: string | null;
+	}
+
+	let staged = $state<StagedPatch | null>(null);
+
 	let history = $state.raw<HistorySnapshot[]>([]);
 	let historyIndex = $state<number>(-1);
 	let isUndoingOrRedoing = false;
@@ -254,6 +290,12 @@
 	}
 
 	function undo() {
+		// A staged patch is the last unaccepted change, so undo is the same as
+		// reverting it. One key, one meaning.
+		if (staged) {
+			revertStaged();
+			return;
+		}
 		if (burstKey !== null) {
 			// The typing never became an entry. Undo is the value before it started.
 			burstKey = null;
@@ -268,11 +310,296 @@
 	}
 
 	function redo() {
+		if (staged) return;
 		commitBurst();
 		if (historyIndex >= history.length - 1) return;
 		historyIndex += 1;
 		restore(history[historyIndex]);
 		announce = 'Redo';
+	}
+
+	/* -------------------------------------------------------- staged patch */
+
+	/** The document exactly as it stands, for a revert that records nothing. */
+	function currentSnapshot(): HistorySnapshot {
+		return {
+			nodes: JSON.parse(JSON.stringify(nodes)) as FlowNode[],
+			edges: JSON.parse(JSON.stringify(edges)) as FlowEdge[],
+			name,
+			enabled,
+			sig: snapshotSig()
+		};
+	}
+
+	/**
+	 * While a patch is staged the map is showing something the document does not
+	 * contain yet. Every path that would edit the document says so and stops,
+	 * because an edit there would land in the undo history as if it were real.
+	 */
+	function patchIsPending(): boolean {
+		if (!staged) return false;
+		announce = 'Accept or revert the staged patch first.';
+		return true;
+	}
+
+	/** The step the operator was looking at, so staging never moves their focus. */
+	function selectedNodeId(): string | null {
+		return nodes.find((node) => node.selected)?.id ?? null;
+	}
+
+	/** Draws the staged graph in place of the document, keeping the top layer honest. */
+	function adoptStaged(next: StagedPatch) {
+		const keep = selectedNodeId();
+		nodes = next.patchedFlow.nodes.map((node) => ({
+			...node,
+			selected: node.id === keep
+		}));
+		edges = next.patchedFlow.edges.map((edge) => ({ ...edge, selected: false }));
+		if (simResult) clearSimulation();
+	}
+
+	function stageProposal(proposal: AgentProposal) {
+		finderOpen = false;
+		// One pending patch at a time, and the new one is checked against the real
+		// document rather than the ghost an earlier patch left behind.
+		if (staged) revertStaged();
+		const misfit = patchFitsFlow(proposal.patch.patch, { nodes });
+		if (misfit) {
+			announce = `That patch does not fit this flow: ${misfit}`;
+			return;
+		}
+		commitBurst();
+		const next: StagedPatch = {
+			summary: proposal.patch.summary,
+			snapshotBefore: currentSnapshot(),
+			patchedFlow: {
+				nodes: JSON.parse(JSON.stringify(proposal.patch.patch.nodes)) as FlowNode[],
+				edges: JSON.parse(JSON.stringify(proposal.patch.patch.edges)) as FlowEdge[]
+			},
+			problems: proposal.problems,
+			entries: { added: proposal.patch.added, modified: proposal.patch.modified, removed: [] },
+			applyToken: proposal.judgement.apply_token,
+			approvalRequired: proposal.judgement.approval_required,
+			faithful: proposal.judgement.faithful,
+			judged: true,
+			approved: false,
+			intent: proposal.intent,
+			anchorId: proposal.patch.anchorId
+		};
+		staged = next;
+		adoptStaged(next);
+		announce = `Patch staged: ${next.summary} Accept with Enter, or revert with Escape.`;
+	}
+
+	/** A WebMCP agent can stage a patch directly. Nothing judged it, and the
+	 *  banner says so; a person still accepts it. */
+	function stageExternalPatch(input: { intent: string; patch: unknown }): {
+		ok: boolean;
+		message: string;
+		added: number;
+		modified: number;
+	} {
+		const shape = input.patch as { nodes?: unknown; edges?: unknown } | null;
+		if (
+			!shape ||
+			typeof shape !== 'object' ||
+			!Array.isArray(shape.nodes) ||
+			!Array.isArray(shape.edges)
+		) {
+			return { ok: false, message: 'The patch needs both a nodes array and an edges array.', added: 0, modified: 0 };
+		}
+		let graph: { nodes: FlowNode[]; edges: FlowEdge[] };
+		try {
+			graph = fromGraph(shape as Parameters<typeof fromGraph>[0]);
+		} catch (error) {
+			return { ok: false, message: (error as Error).message, added: 0, modified: 0 };
+		}
+		if (staged) revertStaged();
+		const misfit = patchFitsFlow(graph, { nodes });
+		if (misfit) return { ok: false, message: misfit, added: 0, modified: 0 };
+
+		const before = new Set(nodes.map((node) => node.id));
+		const after = new Set(graph.nodes.map((node) => node.id));
+		const addedIds = graph.nodes.filter((node) => !before.has(node.id)).map((node) => node.id);
+		const removedIds = nodes.filter((node) => !after.has(node.id)).map((node) => node.id);
+		const modifiedIds = nodes
+			.filter((node) => after.has(node.id))
+			.filter((node) => {
+				const beforeEdges = edges
+					.filter((edge) => edge.source === node.id || edge.target === node.id)
+					.map((edge) => `${edge.source}>${edge.target}:${edge.sourceHandle ?? ''}`)
+					.sort()
+					.join('|');
+				const afterEdges = graph.edges
+					.filter((edge) => edge.source === node.id || edge.target === node.id)
+					.map((edge) => `${edge.source}>${edge.target}:${edge.sourceHandle ?? ''}`)
+					.sort()
+					.join('|');
+				return beforeEdges !== afterEdges;
+			})
+			.map((node) => node.id);
+
+		const removed: PatchEntry[] = removedIds.map((id) => {
+			const node = nodes.find((item) => item.id === id);
+			return {
+				id,
+				title: node ? metaFor(node.type).title : 'Step',
+				detail: node ? nodeSummary(node) : ''
+			};
+		});
+		const added: PatchEntry[] = addedIds.map((id) => {
+			const node = graph.nodes.find((item) => item.id === id);
+			return {
+				id,
+				title: node ? metaFor(node.type).title : 'Step',
+				detail: node ? nodeSummary(node) : ''
+			};
+		});
+		const modified: PatchEntry[] = modifiedIds.map((id) => {
+			const node = graph.nodes.find((item) => item.id === id);
+			return {
+				id,
+				title: node ? metaFor(node.type).title : 'Step',
+				detail: node ? nodeSummary(node) : ''
+			};
+		});
+
+		const problems = verifyStagedGraph(graph);
+		const summary =
+			input.intent.trim() ||
+			`An agent proposes ${added.length} new step${added.length === 1 ? '' : 's'}${
+				removedIds.length > 0 ? ` and removes ${removedIds.length}` : ''
+			}.`;
+
+		commitBurst();
+		const next: StagedPatch = {
+			summary,
+			snapshotBefore: currentSnapshot(),
+			patchedFlow: graph,
+			problems,
+			entries: { added, modified, removed },
+			applyToken: null,
+			approvalRequired: false,
+			faithful: null,
+			judged: false,
+			approved: false,
+			intent: input.intent,
+			anchorId: addedIds.at(-1) ?? modifiedIds[0] ?? null
+		};
+		staged = next;
+		adoptStaged(next);
+		const removedNote =
+			removedIds.length > 0 ? ` It would also remove ${removedIds.length} step(s).` : '';
+		announce = `A patch is staged, and nothing judged it. ${summary}${removedNote} Accept with Enter, or revert with Escape.`;
+		return {
+			ok: true,
+			message: `Staged for review: ${summary}${removedNote} The operator must accept it; nothing is applied or saved.`,
+			added: added.length,
+			modified: modified.length
+		};
+	}
+
+	/** The same validator the palette uses, for a patch that arrived another way. */
+	function verifyStagedGraph(graph: { nodes: FlowNode[]; edges: FlowEdge[] }): PatchProblems {
+		const before = new Set(
+			validateWorkflow(staged?.snapshotBefore.nodes ?? nodes, staged?.snapshotBefore.edges ?? edges)
+				.map((issue) => `${issue.kind}\u0000${issue.path}\u0000${issue.message}`)
+		);
+		const all = validateWorkflow(graph.nodes, graph.edges).filter(
+			(issue) => !before.has(`${issue.kind}\u0000${issue.path}\u0000${issue.message}`)
+		);
+		return { all, blocking: all.filter((issue) => issue.kind === 'structure') };
+	}
+
+	/** Why Accept is or is not available right now. */
+	function acceptGate(): { ok: boolean; reason: string } {
+		if (!staged) return { ok: false, reason: 'Nothing is staged.' };
+		if (staged.problems.blocking.length > 0) {
+			return { ok: false, reason: staged.problems.blocking[0].message };
+		}
+		if (staged.approvalRequired && !staged.applyToken) {
+			return {
+				ok: false,
+				reason:
+					'The gateway asked for approval but minted no token for this patch, so it cannot be accepted yet.'
+			};
+		}
+		const needsTick = !staged.judged || (staged.approvalRequired && staged.applyToken !== null);
+		if (needsTick && !staged.approved) {
+			return {
+				ok: false,
+				reason: staged.judged
+					? 'Tick “I approve this patch” to accept it.'
+					: 'Tick “I have reviewed this patch” to accept it.'
+			};
+		}
+		return { ok: true, reason: 'Accept this patch (Enter)' };
+	}
+
+	const gate = $derived(acceptGate());
+
+	/**
+	 * Accept is one undo entry, not a rewrite of history.
+	 *
+	 * `beginEdit` closes the typing burst, the patched graph lands, and
+	 * `commitBurst` records it — so Ctrl+Z steps straight back to the snapshot
+	 * taken when the patch was staged, with the same step selected.
+	 */
+	function acceptStaged() {
+		if (!staged) return;
+		const decision = acceptGate();
+		if (!decision.ok) {
+			announce = decision.reason;
+			return;
+		}
+		const patch = staged;
+		const keep = selectedNodeId() ?? patch.anchorId;
+		staged = null;
+		beginEdit('agent-patch');
+		nodes = patch.patchedFlow.nodes.map((node) => ({
+			...node,
+			selected: node.id === keep
+		}));
+		edges = patch.patchedFlow.edges.map((edge) => ({ ...edge, selected: false }));
+		if (simResult) clearSimulation();
+		commitBurst();
+		touched = true;
+		announce = `Patch accepted: ${patch.summary} One undo restores the flow before it.`;
+	}
+
+	/** Revert changes nothing, so it records nothing: the snapshot goes back as-is. */
+	function revertStaged() {
+		if (!staged) return;
+		const snapshot = staged.snapshotBefore;
+		staged = null;
+		isUndoingOrRedoing = true;
+		nodes = JSON.parse(JSON.stringify(snapshot.nodes)) as FlowNode[];
+		edges = JSON.parse(JSON.stringify(snapshot.edges)) as FlowEdge[];
+		isUndoingOrRedoing = false;
+		if (simResult) clearSimulation();
+		announce = 'Patch reverted. The flow is exactly as it was.';
+	}
+
+	function ghostKindFor(nodeId: string): GhostKind | null {
+		if (!staged) return null;
+		if (staged.entries.added.some((entry) => entry.id === nodeId)) return 'added';
+		if (staged.entries.modified.some((entry) => entry.id === nodeId)) return 'modified';
+		return null;
+	}
+
+	const ghostUi: WorkflowGhostUi = {
+		kindOf(nodeId: string) {
+			return ghostKindFor(nodeId);
+		}
+	};
+	setContext(WORKFLOW_GHOST, ghostUi);
+
+	/** A field, a checkbox or a select owns Enter and Escape while it has focus. */
+	function isTypingTarget(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		if (target.isContentEditable) return true;
+		const tag = target.tagName;
+		return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
@@ -282,6 +609,25 @@
 			addOpen = false;
 			return;
 		}
+		// A staged patch owns Enter, Escape and Ctrl+Z until it is answered. The
+		// sheet and the palette are top layer, so they keep their own keys.
+		if (staged && !sourceOpen && !finderOpen) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				revertStaged();
+				return;
+			}
+			if (event.key === 'Enter' && !isTypingTarget(event.target)) {
+				event.preventDefault();
+				acceptStaged();
+				return;
+			}
+			if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+				event.preventDefault();
+				revertStaged();
+				return;
+			}
+		}
 		const mod = event.ctrlKey || event.metaKey;
 		if (mod && event.key.toLowerCase() === 's') {
 			event.preventDefault();
@@ -290,6 +636,13 @@
 		}
 		if (mod && event.key.toLowerCase() === 'k') {
 			event.preventDefault();
+			finderMode = 'steps';
+			finderOpen = true;
+			return;
+		}
+		if (mod && event.key.toLowerCase() === 'j') {
+			event.preventDefault();
+			finderMode = 'agent';
 			finderOpen = true;
 			return;
 		}
@@ -413,7 +766,9 @@
 	});
 
 	const blockedCount = $derived(issues.length);
-	const canSave = $derived(blockedCount === 0 && !saving);
+	// A staged patch is a question, not a document: saving now would save the
+	// ghost. Accept or revert first.
+	const canSave = $derived(blockedCount === 0 && !saving && staged === null);
 
 	const outline = $derived<OutlineItem[]>(outlineItems(nodes, edges));
 	const seed = $derived(previewSeed(nodes));
@@ -454,9 +809,11 @@
 		return { text: 'Draft · not saved', tone: 'muted' as const };
 	});
 	const blockedReason = $derived(
-		blockedCount === 0
-			? 'Save workflow'
-			: `${blockedCount} ${blockedCount === 1 ? 'problem' : 'problems'} to fix before saving`
+		staged !== null
+			? 'Accept or revert the staged patch first'
+			: blockedCount === 0
+				? 'Save workflow'
+				: `${blockedCount} ${blockedCount === 1 ? 'problem' : 'problems'} to fix before saving`
 	);
 
 	/* -------------------------------------------------------------- context */
@@ -552,10 +909,28 @@
 		loadedKey = id ?? '';
 		if (!id) startDraft();
 		else void load(id);
+
+		// WebMCP is an enhancement: with no API in this browser the call registers
+		// nothing, and the cleanup that comes back is a no-op. The tools read this
+		// editor through closures, so they always describe the flow on screen.
+		return registerWorkflowTools({
+			getFlowAst() {
+				return {
+					flow_id: workflowId,
+					name,
+					enabled,
+					dirty,
+					staged_patch: staged === null ? null : { summary: staged.summary, judged: staged.judged },
+					graph: toGraph(nodes, edges)
+				};
+			},
+			stagePatch: stageExternalPatch
+		});
 	});
 
 	/** A fresh draft: the new-workflow state, also used when the address loses its id. */
 	function startDraft() {
+		staged = null;
 		const draft = createDraft();
 		nodes = draft.nodes;
 		edges = draft.edges;
@@ -602,6 +977,8 @@
 	});
 
 	async function switchWorkflow(key: string) {
+		// A ghost belongs to the flow it was staged against, not to the next one.
+		staged = null;
 		commitBurst();
 		leavePrompt = null;
 		settingsOpen = false;
@@ -678,6 +1055,7 @@
 	/* --------------------------------------------------------------- edits */
 
 	function updateNodeData(nodeId: string, patch: Record<string, unknown>) {
+		if (patchIsPending()) return;
 		const keys = Object.keys(patch);
 		const burst = keys.length === 1 ? `data:${nodeId}:${keys[0]}` : undefined;
 		beginEdit(burst);
@@ -693,6 +1071,7 @@
 	 * move together. The rewrite lives in `applySwitchCase`; this only reports it.
 	 */
 	function updateSwitchCases(nodeId: string, op: SwitchCaseOp) {
+		if (patchIsPending()) return;
 		const burst = op.kind === 'rename' ? `cases:${nodeId}:${op.index}` : undefined;
 		beginEdit(burst);
 		const edit = applySwitchCase(nodes, edges, nodeId, op);
@@ -716,6 +1095,7 @@
 		cooldownS?: number;
 		maxPerHour?: number;
 	}) {
+		if (patchIsPending()) return;
 		const keys = Object.keys(patch);
 		const typed = keys.length === 1 && keys[0] !== 'enabled' ? `settings:${keys[0]}` : undefined;
 		beginEdit(typed);
@@ -817,6 +1197,7 @@
 	}
 
 	function addNode(type: WorkflowNodeType) {
+		if (patchIsPending()) return;
 		if (nodes.length >= NODE_LIMIT) {
 			announce = `A flow can hold at most ${NODE_LIMIT} steps.`;
 			return;
@@ -856,6 +1237,7 @@
 	}
 
 	function removeNode(nodeId: string) {
+		if (patchIsPending()) return;
 		const node = nodes.find((item) => item.id === nodeId);
 		if (!node) return;
 		nodes = nodes.filter((item) => item.id !== nodeId);
@@ -866,6 +1248,7 @@
 	}
 
 	function duplicateNode(nodeId: string) {
+		if (patchIsPending()) return;
 		const source = nodes.find((node) => node.id === nodeId);
 		if (!source) return;
 		if (source.type === 'unsupported') {
@@ -962,6 +1345,7 @@
 	}
 
 	function beforeConnect(connection: Connection): FlowEdge | false {
+		if (staged) return false;
 		if (!isValidConnection(connection)) return false;
 		const edge = createEdge(connection.source, connection.target, handleOf(connection), edges);
 		edge.type = 'smoothstep';
@@ -969,6 +1353,7 @@
 	}
 
 	function afterConnect(connection: Connection) {
+		if (patchIsPending()) return;
 		const handle = handleOf(connection);
 		if (simResult) clearSimulation();
 		touch();
@@ -985,6 +1370,7 @@
 	}
 
 	function handleDelete() {
+		if (patchIsPending()) return;
 		if (simResult) clearSimulation();
 		touch();
 		announce = 'Selection deleted.';
@@ -1012,6 +1398,7 @@
 	/* ------------------------------------------------------------- arrange */
 
 	function arrange() {
+		if (patchIsPending()) return;
 		if (nodes.length === 0) return;
 		const layout = computeLayout(nodes, edges);
 		let moved = 0;
@@ -1034,6 +1421,7 @@
 	/* ---------------------------------------------------------------- saving */
 
 	async function save() {
+		if (patchIsPending()) return;
 		if (!canSave) {
 			announce = blockedReason;
 			return;
@@ -1160,6 +1548,7 @@
 	const sourceJson = $derived(JSON.stringify(toGraph(nodes, edges), null, 2));
 
 	function applySource(text: string): ApplyResult {
+		if (patchIsPending()) return { ok: false, error: 'Accept or revert the staged patch first.' };
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(text);
@@ -1395,12 +1784,27 @@
 							role="menuitem"
 							onclick={() => {
 								menuOpen = false;
+								finderMode = 'steps';
 								finderOpen = true;
 							}}
 						>
 							<Icon name="filter" size={16} />
 							<span>Find a step</span>
 							<span class="menu-note mono">Ctrl K</span>
+						</button>
+						<button
+							type="button"
+							class="menu-item"
+							role="menuitem"
+							onclick={() => {
+								menuOpen = false;
+								finderMode = 'agent';
+								finderOpen = true;
+							}}
+						>
+							<Icon name="sparkles" size={16} />
+							<span>Ask the agent</span>
+							<span class="menu-note mono">Ctrl J</span>
 						</button>
 					</div>
 				{/if}
@@ -1514,8 +1918,11 @@
 				<button
 					type="button"
 					class="btn btn-ghost btn-sm find-button"
-					onclick={() => (finderOpen = true)}
-					title="Find a step by name (Ctrl+K)"
+					onclick={() => {
+						finderMode = 'steps';
+						finderOpen = true;
+					}}
+					title="Find a step by name, or press Ctrl+J to ask the agent (Ctrl+K)"
 				>
 					<Icon name="filter" size={16} /> Find
 				</button>
@@ -1584,6 +1991,122 @@
 				</Notice>
 			{/if}
 
+			{#if staged}
+				<section class="ghost-banner" aria-label="Staged patch">
+					<div class="ghost-top">
+						<span class="ghost-mark" aria-hidden="true"><Icon name="sparkles" size={17} /></span>
+						<div class="ghost-copy">
+							<p class="ghost-kicker">
+								Staged patch · not applied
+								{#if !staged.judged}
+									<span class="ghost-unjudged">no judgement</span>
+								{/if}
+							</p>
+							<p class="ghost-summary">{staged.summary}</p>
+							<div class="ghost-chips">
+								{#each staged.entries.added as entry (entry.id)}
+									<span class="chip" data-tone="info">+ {entry.title}</span>
+								{/each}
+								{#each staged.entries.modified as entry (entry.id)}
+									<span class="chip" data-tone="muted">~ {entry.title}</span>
+								{/each}
+								{#each staged.entries.removed as entry (entry.id)}
+									<span class="chip" data-tone="danger">− {entry.title}</span>
+								{/each}
+								{#if staged.judged}
+									<span
+										class="chip"
+										data-tone={(staged.faithful?.score ?? 0) >= 0.6 ? 'ok' : 'warn'}
+										title="How faithful the gateway judged this patch to the intent"
+									>
+										Faithful {percent(staged.faithful?.score)}
+									</span>
+								{/if}
+							</div>
+						</div>
+
+						<div class="ghost-actions">
+							<button
+								type="button"
+								class="btn btn-primary btn-sm"
+								disabled={!gate.ok}
+								title={gate.reason}
+								onclick={acceptStaged}
+							>
+								<Icon name="check" size={15} /> Accept
+								<kbd class="ghost-key">Enter</kbd>
+							</button>
+							<button
+								type="button"
+								class="btn btn-sm"
+								onclick={revertStaged}
+								title="Discard the patch and leave the flow as it was (Escape)"
+							>
+								<Icon name="x" size={15} /> Revert
+								<kbd class="ghost-key">Esc</kbd>
+							</button>
+						</div>
+					</div>
+
+					{#if staged.problems.all.length > 0}
+						<ul class="ghost-problems">
+							{#each staged.problems.all as problem (problem.path + problem.message)}
+								<li data-blocking={problem.kind === 'structure'}>
+									<span class="ghost-problem-kind">
+										{problem.kind === 'structure' ? 'blocks accept' : 'to fill in'}
+									</span>
+									{problem.message}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+
+					{#if staged.approvalRequired || !staged.judged}
+						<div class="ghost-approval">
+							{#if !staged.judged}
+								<p class="ghost-approval-line">
+									<Icon name="info" size={14} />
+									An agent staged this patch directly, so nothing has judged it against your
+									words. Read the changes, then accept or revert.
+								</p>
+							{:else if staged.applyToken}
+								<p class="ghost-approval-line">
+									<Icon name="key" size={14} />
+									The gateway judged that a person should approve this change. It minted a token
+									for this exact patch, which cannot be spent on anything else.
+								</p>
+								<p class="ghost-token">
+									<span class="ghost-token-label">Token</span>
+									<span class="mono">{staged.applyToken}</span>
+									<CopyButton value={staged.applyToken} label="Copy approval token" />
+								</p>
+							{:else}
+								<p class="ghost-approval-line is-blocked">
+									<Icon name="alert" size={14} />
+									The gateway asked for approval but sent no approval token, so this patch cannot
+									be accepted yet. Revert it, or ask the agent again.
+								</p>
+							{/if}
+
+							{#if !staged.judged || staged.applyToken}
+								<label class="ghost-tick">
+									<input
+										type="checkbox"
+										checked={staged.approved}
+										onchange={(event) => {
+											if (staged) staged.approved = event.currentTarget.checked;
+										}}
+									/>
+									<span>
+										{staged.judged ? 'I approve this patch' : 'I have reviewed this patch'}
+									</span>
+								</label>
+							{/if}
+						</div>
+					{/if}
+				</section>
+			{/if}
+
 			<div
 				class="work-surface"
 				onfocusout={(event) => {
@@ -1616,7 +2139,9 @@
 							minZoom={MIN_ZOOM}
 							maxZoom={1.8}
 							snapGrid={[16, 16]}
-							deleteKey={['Backspace', 'Delete']}
+							deleteKey={staged ? [] : ['Backspace', 'Delete']}
+							nodesDraggable={staged === null}
+							nodesConnectable={staged === null}
 							defaultMarkerColor={null}
 							attributionPosition="bottom-center"
 							onbeforeconnect={beforeConnect}
@@ -1693,6 +2218,8 @@
 										<li
 											class="outline-step"
 											class:is-selected={item.node.id === selectedNode?.id}
+											class:is-ghost={ghostKindFor(item.node.id) !== null}
+											class:is-ghost-added={ghostKindFor(item.node.id) === 'added'}
 											style="--depth: {item.depth}"
 										>
 											<div class="step-row-wrap">
@@ -1739,6 +2266,14 @@
 															title="More than one connection reaches this step. The Map shows where they come from."
 														>
 															shared · see Map
+														</span>
+													{/if}
+													{#if ghostKindFor(item.node.id) !== null}
+														<span
+															class="step-tag is-ghost"
+															title="Part of the patch waiting for you to accept or revert"
+														>
+															{ghostKindFor(item.node.id) === 'added' ? 'new' : 'changed'}
 														</span>
 													{/if}
 													{#if item.orphan}
@@ -1877,11 +2412,16 @@
 	<StepFinder
 		open={finderOpen}
 		{nodes}
+		{edges}
 		selectedId={selectedNode?.id ?? null}
+		flowId={workflowId}
+		corpusReport={`${nodeCount} steps, ${edgeCount} connections, ${issues.length} checks pending, ${templateVariables(nodes).length} variables`}
+		startMode={finderMode}
 		onpick={(nodeId) => {
 			finderOpen = false;
 			void reveal(nodeId, { focusField: true });
 		}}
+		onpropose={stageProposal}
 		onclose={() => (finderOpen = false)}
 	/>
 {/if}
@@ -2629,6 +3169,219 @@
 		.step-row,
 		.canvas-shell :global(.svelte-flow__minimap) {
 			transition: none;
+		}
+	}
+
+	/* ------------------------------------------------------- staged patch */
+
+	/* One banner for both surfaces: the ghost is drawn in the outline and on the
+	   map, and this is the only place the decision is made. */
+	.ghost-banner {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px dashed color-mix(in srgb, var(--df-state-info-ink) 55%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-md);
+		background: color-mix(in srgb, var(--df-state-info-bg) 40%, var(--df-surface-card));
+	}
+
+	.ghost-top {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+	}
+
+	.ghost-mark {
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		flex: none;
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-info-bg);
+		color: var(--df-state-info-ink);
+	}
+
+	.ghost-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.ghost-kicker {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-family: var(--df-p-font-mono);
+		font-size: 9.5px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-state-info-ink);
+	}
+
+	.ghost-unjudged {
+		padding: 0 5px;
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
+		letter-spacing: 0.04em;
+	}
+
+	.ghost-summary {
+		margin: 0;
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.ghost-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.ghost-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-1);
+		flex: none;
+	}
+
+	.ghost-key {
+		margin-left: 4px;
+		padding: 0 4px;
+		border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+		border-radius: 3px;
+		font-family: var(--df-p-font-mono);
+		font-size: 9px;
+		opacity: 0.72;
+	}
+
+	.ghost-problems {
+		margin: 0;
+		padding: 0 0 0 34px;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.ghost-problems li {
+		display: flex;
+		gap: 6px;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	.ghost-problems li[data-blocking='true'] {
+		color: var(--df-state-danger-ink);
+	}
+
+	.ghost-problem-kind {
+		flex: none;
+		font-family: var(--df-p-font-mono);
+		font-size: 9px;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.ghost-approval {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		padding: var(--df-p-space-2);
+		border-radius: var(--df-p-radius-sm);
+		border: 1px solid color-mix(in srgb, var(--df-state-warn-ink) 30%, var(--df-border-hairline));
+		background: color-mix(in srgb, var(--df-state-warn-bg) 55%, var(--df-surface-card));
+	}
+
+	.ghost-approval-line {
+		margin: 0;
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-primary);
+	}
+
+	.ghost-approval-line.is-blocked {
+		color: var(--df-state-danger-ink);
+	}
+
+	.ghost-token {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		min-width: 0;
+	}
+
+	.ghost-token .mono {
+		font-size: 11px;
+		color: var(--df-text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.ghost-token-label {
+		flex: none;
+		font-family: var(--df-p-font-mono);
+		font-size: 9px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.ghost-tick {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		align-self: flex-start;
+		padding: 3px 8px 3px 4px;
+		border-radius: var(--df-p-radius-xs);
+		background: color-mix(in srgb, var(--df-surface-card) 70%, transparent);
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-primary);
+		cursor: pointer;
+	}
+
+	.ghost-tick input {
+		accent-color: var(--df-accent-fill);
+	}
+
+	/* The outline half of the ghost: dashed border, and the same two words the
+	   card in the map carries. */
+	.outline-step.is-ghost > .step-row-wrap > .step-row {
+		border-style: dashed;
+		border-color: color-mix(in srgb, var(--df-state-info-ink) 50%, var(--df-border-hairline));
+		background: color-mix(in srgb, var(--df-state-info-bg) 32%, transparent);
+	}
+
+	.outline-step.is-ghost-added > .step-row-wrap > .step-row {
+		background: color-mix(in srgb, var(--df-state-info-bg) 52%, transparent);
+	}
+
+	.step-tag.is-ghost {
+		border-color: color-mix(in srgb, var(--df-state-info-ink) 40%, var(--df-border-hairline));
+		background: var(--df-state-info-bg);
+		color: var(--df-state-info-ink);
+	}
+
+	@media (max-width: 900px) {
+		.ghost-top {
+			flex-wrap: wrap;
+		}
+
+		.ghost-actions {
+			width: 100%;
+			justify-content: flex-end;
 		}
 	}
 </style>

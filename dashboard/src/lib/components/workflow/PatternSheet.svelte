@@ -17,6 +17,7 @@
 	import Badge from '$lib/components/Badge.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import Spinner from '$lib/components/Spinner.svelte';
 	import { STARTER_TEMPLATES, type StarterTemplate } from '$lib/workflow/starter-templates';
 	import {
 		suggestSpans,
@@ -24,6 +25,8 @@
 		type TemplateSpan,
 		type TemplateTestMatch
 	} from '$lib/workflow/wasm-engine';
+	import { triageMessage, unavailableCopy, type AgentTriageResult } from './agent';
+	import { toolForm, toolParam } from './webmcp-attributes';
 
 	let {
 		open = $bindable(true),
@@ -31,6 +34,8 @@
 		initialSample = '',
 		initialPattern = '',
 		initialSpans = [],
+		/** The sender the trigger matches, when the flow has one to offer. */
+		senderHint = '',
 		onapply,
 		oncancel,
 		onmanual
@@ -40,6 +45,7 @@
 		initialSample?: string;
 		initialPattern?: string;
 		initialSpans?: TemplateSpan[];
+		senderHint?: string;
 		onapply: (result: PatternApplyPayload) => void;
 		oncancel?: () => void;
 		onmanual?: () => void;
@@ -86,6 +92,33 @@
 		}
 	];
 
+	/**
+	 * What Clef's six span roles mean here.
+	 *
+	 * A role decides a field's name and its type, which is exactly the pair the
+	 * operator would otherwise type twice. The mapping is intentionally literal:
+	 * an unknown role, or a role on a part that is not being read, changes nothing
+	 * rather than inventing a field for it.
+	 */
+	const CLEF_ROLES: Record<string, { name: string; slot: string }> = {
+		principal_amount: { name: 'amount', slot: 'money_bdt' },
+		fee_or_charge: { name: 'fee', slot: 'money_bdt' },
+		running_balance: { name: 'balance', slot: 'money_bdt' },
+		reference_or_txid: { name: 'trx_id', slot: 'trx_id' },
+		sender_phone: { name: 'counterparty', slot: 'phone_bd' },
+		timestamp: { name: 'timestamp', slot: 'datetime_bd' }
+	};
+
+	/** The categories triage may answer with, in words rather than wire values. */
+	const CLEF_INTENTS: Record<string, string> = {
+		payment_credit: 'Money received',
+		payment_debit: 'Money paid out',
+		otp: 'A one-time code',
+		balance_alert: 'A balance notice',
+		delivery_update: 'A delivery notice',
+		spam: 'Unsolicited or fraudulent'
+	};
+
 	// Naming hints that only exist to make a selection easier to name. They never
 	// change how the pattern is built.
 	const LABEL_NAMES: Record<string, string> = {
@@ -121,6 +154,32 @@
 	let isSynthesizing = $state(false);
 	let isFinding = $state(false);
 	let findNote = $state<string | null>(null);
+
+	/**
+	 * "Auto-tag with Clef": four states, and only one of them touches the fields.
+	 *
+	 * `waiting` is the request. `unavailable` means there is no agent to ask — the
+	 * manual path is untouched and the sheet says so. `refused` is the gateway
+	 * rejecting the message. `done` is the only state that renames anything, and
+	 * even then the previous span list is in `undoState` first.
+	 */
+	type TriageState =
+		| { kind: 'idle' }
+		| { kind: 'waiting' }
+		| {
+				kind: 'done';
+				tagged: number;
+				skipped: number;
+				intent: string | null;
+				intentProbability: number;
+				invariant: boolean | null;
+				injection: number | null;
+		  }
+		| { kind: 'unavailable'; message: string; reason: string }
+		| { kind: 'refused'; message: string };
+
+	let triage = $state<TriageState>({ kind: 'idle' });
+	let triageController: AbortController | null = null;
 
 	// One action reverts the last "do it for me" move, whatever it touched.
 	let undoState = $state<{
@@ -376,6 +435,9 @@
 			presetsOpen = false;
 			editingSample = false;
 			newSample = '';
+			triageController?.abort();
+			triageController = null;
+			triage = { kind: 'idle' };
 			closeAssign();
 		});
 	});
@@ -1094,12 +1156,140 @@
 		}
 	}
 
+	/**
+	 * "Auto-tag with Clef": ask the gateway what each highlighted part *is*, and
+	 * write that into the field's name and type.
+	 *
+	 * The order matters. The current spans are copied into `undoState` before the
+	 * request, so the one button that can redo everything still covers a rename
+	 * that arrived over the network. Nothing is renamed until a real answer with
+	 * real roles comes back: an unavailable endpoint leaves the sheet exactly as
+	 * the operator left it, and says which of the two happened.
+	 */
+	async function autoTag() {
+		if (!sampleBody || spans.length === 0 || triage.kind === 'waiting') return;
+		const before = {
+			sampleBody,
+			additionalSamples: [...additionalSamples],
+			spans: spans.map((span) => ({ ...span }))
+		};
+		triage = { kind: 'waiting' };
+		findNote = null;
+		savedNote = null;
+		triageController = new AbortController();
+		const answer = await triageMessage(
+			{
+				message: sampleBody,
+				// The trigger's sender is context for the model, not a claim about this
+				// message; with no trigger to read it from, say exactly that.
+				sender: senderHint.trim() || 'unknown sender',
+				spans: spans.map((span, index) => ({
+					index,
+					text: sampleBody.slice(span.start, span.end)
+				}))
+			},
+			triageController.signal
+		);
+		triageController = null;
+
+		if (answer.status === 'unavailable') {
+			triage = {
+				kind: 'unavailable',
+				reason: answer.reason,
+				message: unavailableCopy(answer.reason)
+			};
+			return;
+		}
+		if (answer.status === 'refused') {
+			triage = { kind: 'refused', message: answer.message };
+			return;
+		}
+
+		const result: AgentTriageResult = answer.data;
+		if (result.source === 'unavailable') {
+			triage = {
+				kind: 'unavailable',
+				reason: 'provider',
+				message: unavailableCopy('provider')
+			};
+			return;
+		}
+
+		let tagged = 0;
+		let skipped = 0;
+		const next = spans.map((span, index) => {
+			const role = result.roles.find((entry) => entry.index === index);
+			if (!role) return span;
+			const mapping = CLEF_ROLES[role.role];
+			// A role on the opening words or on a gap is not a field to rename.
+			if (!mapping || span.role !== 'extract') {
+				skipped += 1;
+				return span;
+			}
+			tagged += 1;
+			return {
+				...span,
+				name: uniqueName(mapping.name, index),
+				slot_type: mapping.slot
+			};
+		});
+
+		if (tagged === 0) {
+			const because =
+				result.roles.length === 0
+					? 'Clef found no role in these parts, so nothing was renamed.'
+					: 'Clef read these parts as opening words or gaps, so nothing was renamed.';
+			triage = {
+				kind: 'done',
+				tagged: 0,
+				skipped,
+				intent: result.intent?.choice ?? null,
+				intentProbability: result.intent?.probability ?? 0,
+				invariant: result.invariant.balanceAtLeastPrincipal,
+				injection: result.injection?.probability ?? null
+			};
+			findNote = because;
+			return;
+		}
+
+		undoState = {
+			...before,
+			message: `Clef tagged ${tagged} ${tagged === 1 ? 'field' : 'fields'}. Check ${
+				tagged === 1 ? 'it' : 'them'
+			}, or undo.`
+		};
+		spans = next;
+		reviewedStarts = [];
+		closeAssign();
+		triage = {
+			kind: 'done',
+			tagged,
+			skipped,
+			intent: result.intent?.choice ?? null,
+			intentProbability: result.intent?.probability ?? 0,
+			invariant: result.invariant.balanceAtLeastPrincipal,
+			injection: result.injection?.probability ?? null
+		};
+	}
+
+	/** The one place that stops waiting: the sheet keeps what it had. */
+	function stopTriage() {
+		triageController?.abort();
+		triageController = null;
+		triage = {
+			kind: 'unavailable',
+			reason: 'aborted',
+			message: unavailableCopy('aborted')
+		};
+	}
+
 	function undoLast() {
 		if (!undoState) return;
 		const restore = undoState;
 		undoState = null;
 		findNote = null;
 		savedNote = null;
+		triage = { kind: 'idle' };
 		sampleDraft = restore.sampleBody;
 		sampleBody = restore.sampleBody;
 		additionalSamples = [...restore.additionalSamples];
@@ -1126,6 +1316,7 @@
 		editingSample = false;
 		findNote = null;
 		savedNote = null;
+		triage = { kind: 'idle' };
 		closeAssign();
 		void findFields(false);
 	}
@@ -1143,6 +1334,7 @@
 		undoState = null;
 		findNote = null;
 		savedNote = null;
+		triage = { kind: 'idle' };
 		closeAssign();
 	}
 
@@ -1293,6 +1485,51 @@
 							<Icon name="zap" size={14} />
 							{isFinding ? 'Looking...' : 'Find the fields'}
 						</button>
+
+						<!-- One field and one button: an agent can tag the parts already
+						     highlighted in the message. No auto-submit — tagging rewrites
+						     field names in a sheet a person is working in. -->
+						<form
+							class="tag-form"
+							{...toolForm(
+								'dakflare_autotag_spans',
+								'Asks Clef to name each highlighted part of the sample message as a field, using the role it reads for that part. Changes the field names and types in this sheet; nothing is saved.'
+							)}
+							onsubmit={(event) => {
+								event.preventDefault();
+								void autoTag();
+							}}
+						>
+							<input
+								class="sr-only"
+								type="text"
+								name="message"
+								tabindex="-1"
+								aria-hidden="true"
+								readonly
+								value={sampleBody}
+								{...toolParam(
+									'Message',
+									'The sample message whose highlighted parts are tagged. Read-only: it mirrors the message in the sheet, so change the message there first.'
+								)}
+							/>
+							<button
+								type="submit"
+								class="btn btn-sm"
+								disabled={!sampleBody || spans.length === 0 || triage.kind === 'waiting'}
+								title={spans.length === 0
+									? 'Find or select the fields first, then tag them'
+									: 'Ask Clef what each highlighted part is'}
+							>
+								{#if triage.kind === 'waiting'}
+									<Spinner />
+									Reading...
+								{:else}
+									<Icon name="sparkles" size={14} />
+									Auto-tag with Clef
+								{/if}
+							</button>
+						</form>
 					</div>
 				</div>
 
@@ -1417,6 +1654,80 @@
 								<Icon name="undo" size={13} />
 								Undo
 							</button>
+						</div>
+					{/if}
+
+					{#if triage.kind === 'waiting'}
+						<div class="clef clef-waiting" aria-live="polite">
+							<Spinner />
+							<div>
+								<strong>Clef is reading this message</strong>
+								<p>
+									It is naming the parts you highlighted. Your fields stay as they are until
+									the answer arrives.
+								</p>
+							</div>
+							<button type="button" class="undo" onclick={stopTriage}>Stop</button>
+						</div>
+					{:else if triage.kind === 'done'}
+						<div class="clef" data-tone={triage.invariant === false ? 'warn' : 'info'}>
+							<Icon name={triage.invariant === false ? 'alert' : 'sparkles'} size={15} />
+							<div class="clef-body">
+								<strong>
+									{triage.tagged > 0 ? 'What Clef read' : 'Clef could not name these parts'}
+								</strong>
+								{#if triage.tagged === 0}
+									<p>
+										{triage.skipped > 0
+											? 'It read them as opening words or as gaps, so the fields are unchanged.'
+											: 'It found no role in them, so the fields are unchanged.'}
+									</p>
+								{/if}
+								<div class="clef-chips">
+									{#if triage.intent}
+										<span class="chip" data-tone="muted">
+											{`${CLEF_INTENTS[triage.intent] ?? triage.intent} · ${Math.round(
+												triage.intentProbability * 100
+											)}%`}
+										</span>
+									{/if}
+									{#if triage.injection !== null && triage.injection >= 0.7}
+										<span class="chip" data-tone="warn">reads like an instruction</span>
+									{/if}
+								</div>
+								{#if triage.invariant === false}
+									<p class="clef-warn">
+										<strong>Spoofing signal.</strong> This message says the remaining balance is
+										lower than the amount that moved. In a genuine credit the balance after is at
+										least the amount, so this is worth checking with the sender — it is not a
+										mistake in your fields, and nothing here is blocked.
+									</p>
+								{:else if triage.invariant === null}
+									<p class="clef-note">
+										The balance check needs two amounts in the message; this one has no pair to
+										compare.
+									</p>
+								{/if}
+							</div>
+						</div>
+					{:else if triage.kind === 'unavailable'}
+						<div class="clef clef-plain" role="status">
+							<Icon name="info" size={15} />
+							<div>
+								<strong>Clef is not available</strong>
+								<p>
+									{triage.message} Name the fields by hand with “Find the fields”, or select a part
+									and press Enter.
+								</p>
+							</div>
+						</div>
+					{:else if triage.kind === 'refused'}
+						<div class="clef clef-plain" role="status">
+							<Icon name="info" size={15} />
+							<div>
+								<strong>Clef did not read this one</strong>
+								<p>{triage.message} The fields are untouched.</p>
+							</div>
 						</div>
 					{/if}
 
@@ -2129,6 +2440,95 @@
 		background: var(--df-state-warn-bg);
 		color: var(--df-text-secondary);
 		font-size: var(--df-p-text-sm);
+	}
+
+	/* --------------------------------------------------------------- clef */
+
+	.tag-form {
+		display: inline-flex;
+		align-items: center;
+	}
+
+	/* The one place the sheet reports what the agent said. It never carries a
+	   verdict about the operator's fields: a spoofed balance is a signal about
+	   the message, so it is drawn as a caution next to the tagging, not as a
+	   validation error on the pattern. */
+	.clef {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		padding: 9px 11px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-sm);
+	}
+
+	.clef > :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-state-info-ink);
+	}
+
+	.clef[data-tone='warn'] {
+		border-color: color-mix(in srgb, var(--df-state-warn-ink) 34%, var(--df-border-hairline));
+		background: color-mix(in srgb, var(--df-state-warn-bg) 55%, var(--df-surface-card));
+	}
+
+	.clef[data-tone='warn'] > :global(svg) {
+		color: var(--df-state-warn-ink);
+	}
+
+	.clef-waiting {
+		color: var(--df-text-primary);
+	}
+
+	.clef-waiting :global(.spinner) {
+		margin-top: 2px;
+		color: var(--df-state-info-ink);
+	}
+
+	.clef-body {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.clef strong {
+		font-size: var(--df-p-text-sm);
+		font-weight: 700;
+		color: var(--df-text-primary);
+	}
+
+	.clef p {
+		margin: 0;
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-secondary);
+	}
+
+	.clef-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.clef-warn {
+		padding: 7px 9px;
+		border-radius: var(--df-p-radius-xs);
+		border-left: 2px solid var(--df-state-warn-ink);
+		background: var(--df-state-warn-bg);
+	}
+
+	.clef p.clef-warn {
+		color: var(--df-text-primary);
+	}
+
+	.clef p.clef-note {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	/* -------------------------------------------------------------- names */

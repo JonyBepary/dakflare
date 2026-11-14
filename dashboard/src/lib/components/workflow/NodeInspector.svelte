@@ -72,6 +72,20 @@
 
 	let showWorkbench = $state(false);
 
+	/**
+	 * The sender the flow's trigger matches, offered to the pattern sheet as
+	 * context for triage. It is the trigger's own value, not a guess: with no
+	 * trigger sender set, the sheet is told there is nothing to read.
+	 */
+	const triggerSender = $derived.by(() => {
+		const trigger = nodes.find((candidate) => candidate.type === 'trigger');
+		if (!trigger) return '';
+		const data = trigger.data as { sender?: { mode?: string; value?: string } };
+		const spec = data.sender;
+		if (!spec || spec.mode === 'any' || typeof spec.value !== 'string') return '';
+		return spec.value;
+	});
+
 	const HELP: Record<string, string> = {
 		trigger: 'Starts the flow when a matching message arrives.',
 		extract: 'Pulls a value out of the message with a named capture group.',
@@ -275,6 +289,7 @@
 						initialPattern={extract.pattern ?? ''}
 						initialSample={extract.template_spec?.sample_body ?? ''}
 						initialSpans={extract.template_spec?.spans ?? []}
+						senderHint={triggerSender}
 						onapply={(res) => {
 							onupdate({
 								pattern: res.pattern,
