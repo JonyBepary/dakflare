@@ -49,8 +49,14 @@
 	const titleId = `pattern-title-${uid}`;
 	const modeId = `pattern-mode-${uid}`;
 	const nameId = `pattern-name-${uid}`;
+	const nameHintId = `pattern-name-hint-${uid}`;
 	const typeId = `pattern-type-${uid}`;
 	const assignTitleId = `pattern-assign-${uid}`;
+	const roleLabelId = `pattern-role-${uid}`;
+	const roleWhyId = `pattern-role-why-${uid}`;
+	const roleConsequenceId = `pattern-role-consequence-${uid}`;
+	const typeWhyId = `pattern-type-why-${uid}`;
+	const optionalHintId = `pattern-optional-hint-${uid}`;
 
 	const SLOT_TYPES = [
 		{ id: 'money_bdt', label: 'Money (Tk or BDT)', short: 'Money' },
@@ -66,17 +72,17 @@
 		{
 			id: 'extract',
 			label: 'A value to keep',
-			hint: 'The pattern reads this part of the message and keeps it for later steps.'
+			hint: 'Read from this part and kept for later steps.'
 		},
 		{
 			id: 'trigger',
 			label: 'Opening words',
-			hint: 'This exact text has to appear for the flow to start. Nothing is read from it.'
+			hint: 'Fixed words that start the flow. Nothing is read.'
 		},
 		{
 			id: 'ignore',
 			label: 'Anything else',
-			hint: 'Anything can appear here and nothing is read. Use it for a detail that changes.'
+			hint: 'A gap. Anything can appear here, and nothing is read.'
 		}
 	];
 
@@ -149,6 +155,14 @@
 	let editType = $state('free_text');
 	let editOptional = $state(false);
 	let dragFromSample = false;
+	let assignEl = $state<HTMLElement | null>(null);
+	// One line under the message after the editor closes: says the field was
+	// saved and what to do next, without a second dialog.
+	let savedNote = $state<string | null>(null);
+	let savedNoteEl = $state<HTMLElement | null>(null);
+	// Fields saved during this pass, keyed by their start offset. The rail draws
+	// a check for each one, so "2 of 4" is visible instead of inferred.
+	let reviewedStarts = $state<number[]>([]);
 
 	// Keyboard cursor, counted in words rather than characters.
 	let cursorWord = $state(-1);
@@ -270,7 +284,74 @@
 		return matched === testMatches.length ? 'ok' : 'warn';
 	});
 
-	const roleHint = $derived(ROLES.find((role) => role.id === editRole)?.hint ?? '');
+	// The fields the editor walks: every extract span, in message order. This is
+	// the same set the "Found 4 fields" banner counted and the same set "Fields
+	// it reads" lists, so "Field 2 of 4" cannot disagree with either.
+	const fieldIndexes = $derived.by(() => {
+		const out: Array<{ index: number; start: number; name: string }> = [];
+		spans.forEach((span, index) => {
+			if (span.role === 'extract') out.push({ index, start: span.start, name: span.name });
+		});
+		return out.sort((a, b) => a.start - b.start);
+	});
+	const reviewTotal = $derived(fieldIndexes.length);
+	const reviewPosition = $derived(
+		selectedSpanIndex === null
+			? 0
+			: fieldIndexes.findIndex((field) => field.index === selectedSpanIndex) + 1
+	);
+	// Only saved fields that are counted by the rail, so a trigger or an ignored
+	// run cannot push "n of m checked" past m.
+	const reviewedFields = $derived(
+		reviewedStarts.filter((start) => fieldIndexes.some((field) => field.start === start)).length
+	);
+	const editingName = $derived(
+		selectedSpanIndex !== null ? (spans[selectedSpanIndex]?.name ?? null) : null
+	);
+	const editingRole = $derived(
+		selectedSpanIndex !== null ? (spans[selectedSpanIndex]?.role ?? editRole) : editRole
+	);
+
+	// The next field still to check, so saving can move on instead of dropping
+	// the operator back at the message. A brand-new selection has nothing queued
+	// behind it: the action is "Add field", not "Save and next".
+	const nextFieldIndex = $derived.by(() => {
+		if (selectedSpanIndex === null || pendingEnd === null) return null;
+		for (const field of fieldIndexes) {
+			if (field.index === selectedSpanIndex) continue;
+			if (field.start >= pendingEnd) return field.index;
+		}
+		return null;
+	});
+
+	const assignKicker = $derived.by(() => {
+		if (selectedSpanIndex === null) return 'New field';
+		if (reviewPosition > 0) return `Field ${reviewPosition} of ${reviewTotal}`;
+		// A trigger or an ignored run is not one of the counted fields. Name the
+		// role instead of inventing a position for it.
+		return ROLES.find((role) => role.id === editingRole)?.label ?? 'Field';
+	});
+
+	const saveLabel = $derived(
+		nextFieldIndex !== null
+			? 'Save and next field'
+			: selectedSpanIndex !== null
+				? 'Save field'
+				: 'Add field'
+	);
+	const clearLabel = $derived(selectedSpanIndex !== null ? 'Close' : 'Clear selection');
+
+	// The sentence under the role choice: what the choice does to this pattern,
+	// in the words of the field being named rather than the role's own name.
+	const roleConsequence = $derived.by(() => {
+		if (editRole === 'extract') {
+			return `Read from the message as ${typeLabel(editType).toLowerCase()} and kept as ${finalName}.`;
+		}
+		if (editRole === 'trigger') {
+			return 'Fixed words: the flow starts only when they appear. Nothing is kept.';
+		}
+		return 'A gap: anything can sit here, and nothing is kept.';
+	});
 
 	// Seed from the props when the sheet opens, and only then. The parent may
 	// mount the sheet per node or keep it mounted and flip `open`; both work.
@@ -290,6 +371,8 @@
 			synthError = null;
 			undoState = null;
 			findNote = null;
+			savedNote = null;
+			reviewedStarts = [];
 			presetsOpen = false;
 			editingSample = false;
 			newSample = '';
@@ -318,7 +401,7 @@
 	$effect(() => {
 		if (!open) return;
 
-		const sync = () => {
+		const sync = (focusName = false) => {
 			const range = readSelection();
 			if (!range) return;
 			// The same range is already being named: keep the guess the user has
@@ -326,16 +409,18 @@
 			if (assignOpen && pendingStart === range.start && pendingEnd === range.end) return;
 			cursorWord = wordIndexAt(range.start);
 			extendAnchor = null;
-			setAssignment(range.start, range.end);
+			setAssignment(range.start, range.end, { focusName });
 		};
 
 		const onPointerUp = () => {
 			if (!dragFromSample) return;
 			dragFromSample = false;
-			void tick().then(sync);
+			// The gesture is finished, so the editor may take focus. Doing it on
+			// selectionchange instead would end the drag under the pointer.
+			void tick().then(() => sync(true));
 		};
 
-		const onSelectionChange = () => void tick().then(sync);
+		const onSelectionChange = () => void tick().then(() => sync());
 
 		document.addEventListener('pointerup', onPointerUp);
 		document.addEventListener('selectionchange', onSelectionChange);
@@ -352,6 +437,50 @@
 		const extras = additionalSamples;
 		if (!open || current.length === 0) return;
 		void synthesize(body, current, extras);
+	});
+
+	// The editor is the task while a field is being named, so it must never sit
+	// below the fold. The scroll is instant and minimal: it only moves when the
+	// panel's head or foot is out of view, and it never pushes the head off the
+	// top edge, which would hide the count and the quote.
+	$effect(() => {
+		if (!open || !assignOpen) return;
+		const from = pendingStart;
+		const to = pendingEnd;
+		if (from === null || to === null) return;
+		// Choosing a role changes the panel's height, so the scroll has to be
+		// reconsidered rather than only on open.
+		void editRole;
+		const scroller = bodyEl;
+		const panel = assignEl;
+		if (!scroller || !panel) return;
+		void tick().then(() => {
+			const view = scroller.getBoundingClientRect();
+			const rect = panel.getBoundingClientRect();
+			const gap = 12;
+			let delta: number;
+			if (rect.top < view.top + gap) delta = rect.top - (view.top + gap);
+			else if (rect.bottom > view.bottom - gap) delta = rect.bottom - (view.bottom - gap);
+			else return;
+			if (rect.top - delta < view.top + gap) delta = rect.top - (view.top + gap);
+			scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + delta) });
+		});
+	});
+
+	// Keep the bookend in the message visible for the field being edited. This
+	// runs as a class on the existing marks: rebuilding the message HTML here
+	// would drop the browser selection the naming flow depends on.
+	$effect(() => {
+		void sampleHtml;
+		const root = sampleEl;
+		const active = selectedSpanIndex;
+		if (!root) return;
+		for (const mark of root.querySelectorAll<HTMLElement>('[data-span-index]')) {
+			mark.classList.toggle(
+				'mk-active',
+				active !== null && Number(mark.dataset.spanIndex) === active
+			);
+		}
 	});
 
 	let synthSeq = 0;
@@ -609,9 +738,7 @@
 		if (!mark) return;
 		const index = Number(mark.dataset.spanIndex);
 		if (!Number.isInteger(index) || !spans[index]) return;
-		const span = spans[index];
-		setAssignment(span.start, span.end, { spanIndex: index });
-		selectChars(span.start, span.end);
+		openSpan(index);
 	}
 
 	function handleSampleKeydown(event: KeyboardEvent) {
@@ -648,6 +775,28 @@
 
 	/* ---------------------------------------------------------- assignment */
 
+	/** Open an existing span in the editor and show it in the message. */
+	function openSpan(index: number) {
+		const span = spans[index];
+		if (!span) return;
+		// Opening a field (a click on the mark, a rail dot, a row in the list) is
+		// an instruction to edit it, so the name is where typing goes next.
+		setAssignment(span.start, span.end, { spanIndex: index, focusName: true });
+		// The panel can stay open across fields (Save and next field), so the name
+		// of the field that just closed must not be carried into a fresh drag:
+		// a new selection guesses its own name again.
+		nameTouched = false;
+		selectChars(span.start, span.end);
+	}
+
+	/** Escape leaves the field, not the sheet, while a field is being named. */
+	function handleWindowKeydown(event: KeyboardEvent) {
+		if (!open || !assignOpen) return;
+		if (event.key !== 'Escape' || event.defaultPrevented) return;
+		event.preventDefault();
+		closeAssign(true);
+	}
+
 	function setAssignment(
 		start: number,
 		end: number,
@@ -657,6 +806,7 @@
 		pendingStart = start;
 		pendingEnd = end;
 		selectedSpanIndex = spanIndex;
+		savedNote = null;
 
 		if (spanIndex !== null) {
 			const span = spans[spanIndex];
@@ -687,19 +837,27 @@
 		}
 	}
 
-	function closeAssign() {
+	function closeAssign(returnToMessage = false) {
 		assignOpen = false;
 		selectedSpanIndex = null;
 		pendingStart = null;
 		pendingEnd = null;
 		nameTouched = false;
 		clearDomSelection();
+		// Closing takes the focused control with it. Sending focus back to the
+		// message keeps a keyboard operator where the work is instead of at the
+		// top of the document.
+		if (returnToMessage) {
+			void tick().then(() => sampleEl?.focus({ preventScroll: true }));
+		}
 	}
 
 	function commitSpan() {
 		const start = pendingStart;
 		const end = pendingEnd;
 		if (start === null || end === null) return;
+		// Read the queue before the spans move: the array is re-sorted by start.
+		const nextRange = nextFieldIndex !== null ? spans[nextFieldIndex] : null;
 		const name = uniqueName(sanitizeName(editName), selectedSpanIndex);
 		const next: TemplateSpan = {
 			role: editRole,
@@ -715,16 +873,65 @@
 		spans = [...kept, next].sort((a, b) => a.start - b.start);
 		editName = name;
 		undoState = null;
+		if (!reviewedStarts.includes(start)) reviewedStarts = [...reviewedStarts, start];
+
+		if (nextRange) {
+			// Auto-advance keeps the operator in the editor and the next quote
+			// selected in the message, rather than making them find it again. The
+			// panel stays open across the step: closing it here would replay its
+			// entrance animation and drop the focus the next field needs.
+			void tick().then(() => {
+				const index = spans.findIndex(
+					(span) =>
+						span.role === 'extract' &&
+						span.start === nextRange.start &&
+						span.end === nextRange.end
+				);
+				if (index < 0) {
+					// The field the queue pointed at is gone; close the same way a
+					// last save does, so focus does not fall back to the document.
+					closeAssign();
+					savedNote = completionNote(name);
+					void tick().then(() => savedNoteEl?.focus({ preventScroll: true }));
+					return;
+				}
+				openSpan(index);
+				void tick().then(() => {
+					nameEl?.focus({ preventScroll: true });
+					nameEl?.select();
+				});
+			});
+			return;
+		}
+
 		closeAssign();
+		savedNote = completionNote(name);
+		// The save button went with the panel. Put the reader on the sentence that
+		// says what happened, so the next Tab reaches the pattern controls.
+		void tick().then(() => savedNoteEl?.focus({ preventScroll: true }));
+	}
+
+	/** What to read after the editor closes, once nothing is left to check. */
+	function completionNote(name: string | null) {
+		const saved = name ? `Saved ${name}.` : 'Saved.';
+		const done = reviewedFields;
+		if (reviewTotal === 0) return `${saved} Select another part to name, or check the pattern below.`;
+		if (done >= reviewTotal) {
+			return `${saved} All ${reviewTotal} ${reviewTotal === 1 ? 'field is' : 'fields are'} checked, so the pattern below is ready to use.`;
+		}
+		return `${saved} ${done} of ${reviewTotal} fields checked. Open another field, or use the pattern below.`;
 	}
 
 	function removeSpanAt(index: number) {
 		if (!spans[index]) return;
+		const dropped = spans[index]!.start;
 		const next = spans.filter((_, i) => i !== index);
 		spans = next;
+		reviewedStarts = reviewedStarts.filter((start) => start !== dropped);
 		if (next.length === 0) clearPattern();
-		if (selectedSpanIndex !== null && index <= selectedSpanIndex) closeAssign();
+		if (selectedSpanIndex !== null && index <= selectedSpanIndex) closeAssign(true);
 		undoState = null;
+		savedNote = null;
 	}
 
 	function clearPattern() {
@@ -835,6 +1042,7 @@
 		if (!sampleBody || isFinding) return;
 		isFinding = true;
 		findNote = null;
+		savedNote = null;
 		const before = {
 			sampleBody,
 			additionalSamples: [...additionalSamples],
@@ -876,6 +1084,7 @@
 				};
 			}
 			spans = named;
+			reviewedStarts = [];
 			closeAssign();
 		} catch {
 			findNote = 'The pattern engine did not load. Reload the page and try again.';
@@ -890,10 +1099,12 @@
 		const restore = undoState;
 		undoState = null;
 		findNote = null;
+		savedNote = null;
 		sampleDraft = restore.sampleBody;
 		sampleBody = restore.sampleBody;
 		additionalSamples = [...restore.additionalSamples];
 		spans = restore.spans.map((span) => ({ ...span }));
+		reviewedStarts = [];
 		if (spans.length === 0) clearPattern();
 		closeAssign();
 	}
@@ -909,10 +1120,12 @@
 		sampleBody = sample;
 		sampleDraft = sample;
 		spans = [];
+		reviewedStarts = [];
 		additionalSamples = preset.testSamples.slice(1).map((test) => test.body);
 		presetsOpen = false;
 		editingSample = false;
 		findNote = null;
+		savedNote = null;
 		closeAssign();
 		void findFields(false);
 	}
@@ -925,9 +1138,11 @@
 		editingSample = false;
 		if (!changed) return;
 		spans = [];
+		reviewedStarts = [];
 		clearPattern();
 		undoState = null;
 		findNote = null;
+		savedNote = null;
 		closeAssign();
 	}
 
@@ -951,6 +1166,11 @@
 
 	function handleDialogCancel(event: Event) {
 		event.preventDefault();
+		// A field in progress is the nearest thing Escape can close.
+		if (assignOpen) {
+			closeAssign(true);
+			return;
+		}
 		requestClose();
 	}
 
@@ -982,6 +1202,8 @@
 		});
 	}
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <dialog
 	bind:this={dialogEl}
@@ -1203,111 +1425,195 @@
 					{/if}
 
 					{#if assignOpen}
-						<div class="assign" role="group" aria-labelledby={assignTitleId}>
-							<div class="assign-head">
-								<h4 class="assign-title" id={assignTitleId}>
-									{selectedSpanIndex !== null ? 'Edit this field' : 'Name this value'}
-								</h4>
-								<q class="assign-quote">{pendingText}</q>
-								{#if selectedSpanIndex !== null}
-									<button
-										type="button"
-										class="btn btn-sm btn-danger-ghost assign-remove"
-										onclick={() => removeSpanAt(selectedSpanIndex!)}
-									>
-										<Icon name="trash" size={13} />
-										Remove field
-									</button>
-								{/if}
-							</div>
-
-							<div class="assign-grid">
-								<div class="field">
-									<label class="label" for={nameId}>Name</label>
-									<input
-										id={nameId}
-										class="input input-mono"
-										bind:this={nameEl}
-										bind:value={editName}
-										oninput={() => (nameTouched = true)}
-										onkeydown={(event) => {
-											if (event.key === 'Enter') {
-												event.preventDefault();
-												commitSpan();
-											} else if (event.key === 'Escape') {
-												event.preventDefault();
-												closeAssign();
-											}
-										}}
-										autocomplete="off"
-										spellcheck="false"
-										placeholder="amount"
-									/>
-									<p class="hint">
-										Later steps refer to it as <code>{finalName}</code>.
+						<div
+							class="assign"
+							role="group"
+							aria-labelledby={assignTitleId}
+							bind:this={assignEl}
+						>
+							<header class="assign-head">
+								<div class="assign-heading" aria-live="polite" aria-atomic="true">
+									<p class="assign-kicker">
+										<span class="assign-step">{assignKicker}</span>
+										{#if fieldIndexes.length > 1}
+											<span class="assign-count">
+												{reviewedFields} checked
+											</span>
+										{/if}
 									</p>
+									<h4 class="assign-title" id={assignTitleId}>
+										{selectedSpanIndex !== null ? 'Edit' : 'Name'}
+										<q class="assign-quote">{pendingText}</q>
+									</h4>
 								</div>
 
-								<div class="field">
-									<span class="label">This part is</span>
-									<div class="roles">
-										{#each ROLES as role (role.id)}
+								{#if fieldIndexes.length > 1}
+									<div class="assign-rail" role="group" aria-label="Fields in this message">
+										{#each fieldIndexes as field, position (field.start)}
+											{@const done = reviewedStarts.includes(field.start)}
 											<button
 												type="button"
-												class="role-btn"
-												aria-pressed={editRole === role.id}
-												onclick={() => (editRole = role.id)}
+												class="rail-dot"
+												data-done={done ? 'true' : 'false'}
+												aria-current={selectedSpanIndex === field.index ? 'true' : undefined}
+												aria-label={`Field ${position + 1} of ${fieldIndexes.length}: ${field.name}${done ? ', checked' : ''}`}
+												title={`Field ${position + 1}: ${field.name}`}
+												onclick={() => openSpan(field.index)}
 											>
-												{role.label}
+												{position + 1}
 											</button>
 										{/each}
 									</div>
-								</div>
+								{/if}
+							</header>
 
-								{#if editRole === 'extract'}
-									<div class="field">
-										<label class="label" for={typeId}>Kind of value</label>
+							<ol class="assign-steps">
+								<li class="step">
+									<span class="step-num" aria-hidden="true">1</span>
+									<div class="step-body">
+										<label class="label step-label" for={nameId}>Name</label>
+										<input
+											id={nameId}
+											class="input input-mono"
+											bind:this={nameEl}
+											bind:value={editName}
+											aria-describedby={nameHintId}
+											oninput={() => (nameTouched = true)}
+											onkeydown={(event) => {
+												if (event.key === 'Enter') {
+													event.preventDefault();
+													commitSpan();
+												}
+											}}
+											autocomplete="off"
+											spellcheck="false"
+											placeholder="amount"
+										/>
+										<p class="step-note" id={nameHintId}>
+											{#if editRole === 'extract'}
+												Later steps use it as <code>{finalName}</code>.
+											{:else}
+												This name labels the part here. The pattern does not read it.
+											{/if}
+										</p>
+									</div>
+								</li>
+
+								<li class="step">
+									<span class="step-num" aria-hidden="true">2</span>
+									<div class="step-body">
+										<span class="label step-label" id={roleLabelId}>What this part is</span>
+										<div
+											class="roles"
+											role="radiogroup"
+											aria-labelledby={roleLabelId}
+											aria-describedby={roleConsequenceId}
+										>
+											{#each ROLES as role (role.id)}
+												<label class="role" data-active={editRole === role.id ? 'true' : 'false'}>
+													<input
+														type="radio"
+														name={`role-${uid}`}
+														value={role.id}
+														bind:group={editRole}
+														aria-describedby={`${roleWhyId}-${role.id}`}
+													/>
+													<span class="role-text">
+														<span class="role-name">{role.label}</span>
+														<span class="role-why" id={`${roleWhyId}-${role.id}`}>{role.hint}</span>
+													</span>
+												</label>
+											{/each}
+										</div>
+										<p class="role-consequence" id={roleConsequenceId}>
+											<span class="role-consequence-mark" aria-hidden="true"></span>
+											{roleConsequence}
+										</p>
+									</div>
+								</li>
+
+								<li class="step" data-off={editRole === 'extract' ? 'false' : 'true'}>
+									<span class="step-num" aria-hidden="true">3</span>
+									<div class="step-body">
+										<label class="label step-label" for={typeId}>Kind of value</label>
 										<select
 											id={typeId}
 											class="input type-select"
 											bind:value={editType}
-											title={SLOT_TYPES.find((type) => type.id === editType)?.label ?? ''}
+											disabled={editRole !== 'extract'}
+											aria-describedby={editRole === 'extract' ? undefined : typeWhyId}
 										>
 											{#each SLOT_TYPES as type (type.id)}
 												<option value={type.id}>{type.label}</option>
 											{/each}
 										</select>
+										{#if editRole !== 'extract'}
+											<p class="step-note" id={typeWhyId}>
+												{editRole === 'trigger'
+													? 'Not needed. These words are fixed text, so nothing is read from them.'
+													: 'Not needed. Nothing is read from this part.'}
+											</p>
+										{/if}
 									</div>
-								{/if}
-							</div>
+								</li>
 
-							<p class="role-hint">{roleHint}</p>
+								<li class="step" data-off={editRole === 'extract' ? 'false' : 'true'}>
+									<span class="step-num" aria-hidden="true">4</span>
+									<div class="step-body">
+										<span class="label step-label">Optional</span>
+										<label class="check assign-optional">
+											<input
+												type="checkbox"
+												bind:checked={editOptional}
+												disabled={editRole !== 'extract'}
+												aria-describedby={optionalHintId}
+											/>
+											<span>
+												Sometimes missing
+												<span class="hint" id={optionalHintId}>
+													{editRole === 'extract'
+														? 'The pattern still matches when this part is absent.'
+														: 'Only a value you keep can be missing. Choose “A value to keep” above.'}
+												</span>
+											</span>
+										</label>
+									</div>
+								</li>
+							</ol>
 
 							<div class="assign-foot">
-								{#if editRole === 'extract'}
-									<label class="check">
-										<input type="checkbox" bind:checked={editOptional} />
-										<span>
-											Sometimes missing
-											<span class="hint">The pattern still matches when this part is absent.</span>
-										</span>
-									</label>
-								{/if}
-								<div class="assign-actions">
-									<button type="button" class="btn btn-sm btn-ghost" onclick={closeAssign}>
-										Clear selection
-									</button>
-									<button type="button" class="btn btn-sm btn-primary" onclick={commitSpan}>
-										<Icon name="check" size={14} />
-										{selectedSpanIndex !== null
-											? 'Save this field'
-											: editRole === 'trigger'
-												? 'Use these words'
-												: 'Use this value'}
+								<div class="assign-quiet">
+									{#if selectedSpanIndex !== null}
+										<button
+											type="button"
+											class="btn btn-sm btn-danger-ghost"
+											onclick={() => removeSpanAt(selectedSpanIndex!)}
+										>
+											<Icon name="trash" size={13} />
+											Remove field
+										</button>
+									{/if}
+									<button
+										type="button"
+										class="btn btn-sm btn-ghost"
+										onclick={() => closeAssign(true)}
+									>
+										{clearLabel}
 									</button>
 								</div>
+								<button type="button" class="btn btn-primary assign-save" onclick={commitSpan}>
+									<Icon name="check" size={15} />
+									{saveLabel}
+								</button>
 							</div>
 						</div>
+					{:else if savedNote}
+						<!-- Where focus lands after the last save: the sentence is the
+						     result, and the panel that held the button is gone. -->
+						<p class="saved-note" role="status" tabindex="-1" bind:this={savedNoteEl}>
+							<Icon name="check" size={13} />
+							{savedNote}
+						</p>
 					{/if}
 				{/if}
 			</section>
@@ -1364,15 +1670,14 @@
 					{#if orderedVariables.length > 0}
 						<ul class="var-list">
 							{#each orderedVariables as name (name)}
-								<li class="var-row">
+								<li class="var-row" data-editing={editingName === name ? 'true' : 'false'}>
 									<button
 										type="button"
 										class="var-main"
+										aria-current={editingName === name ? 'true' : undefined}
 										onclick={() => {
 											const index = spans.findIndex((span) => span.name === name);
-											if (index < 0) return;
-											const span = spans[index];
-											setAssignment(span.start, span.end, { spanIndex: index });
+											if (index >= 0) openSpan(index);
 										}}
 										title="Show this field in the message"
 									>
@@ -1681,7 +1986,7 @@
 	/* ------------------------------------------------------------ message */
 
 	.message-card {
-		padding: 18px 20px;
+		padding: 15px 18px;
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-md);
 		background: var(--df-surface-well);
@@ -1741,6 +2046,14 @@
 		text-decoration-line: underline;
 		text-decoration-style: dashed;
 		text-decoration-color: var(--df-state-neutral-ink);
+	}
+
+	/* The field open in the editor keeps a ring in the message, so the panel and
+	   the words it quotes are one object on screen. */
+	.message-text :global(mark.mk-active) {
+		background: color-mix(in srgb, var(--df-accent-soft) 80%, transparent);
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 1px;
 	}
 
 	.sample-hint {
@@ -1820,16 +2133,33 @@
 
 	/* -------------------------------------------------------------- names */
 
+	/* The editor is the sheet's active task while a field is open: an accent
+	   rule, a tinted head and a raised surface lift it above the cards around
+	   it, so the eye lands here instead of between the pattern and the list. */
 	.assign {
 		display: flex;
 		flex-direction: column;
-		gap: var(--df-p-space-3);
-		padding: var(--df-p-space-4);
-		border: 1px solid color-mix(in srgb, var(--df-accent-text) 38%, var(--df-border-hairline));
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 46%, var(--df-border-control));
 		border-radius: var(--df-p-radius-md);
 		background: var(--df-surface-card);
-		box-shadow: var(--df-shadow-card);
+		box-shadow: var(--df-shadow-raised);
+		scroll-margin-block: 12px;
+		/* `clip`, not `hidden`: hidden would make this a scroll container and stop
+		   the footer sticking to the bottom of the sheet while the panel is
+		   taller than it (a phone with the role cards stacked). */
+		overflow: clip;
 		animation: assign-in var(--df-p-dur-lift) var(--df-p-ease-standard) both;
+	}
+
+	.assign::before {
+		content: '';
+		flex: none;
+		height: 3px;
+		background: linear-gradient(
+			90deg,
+			var(--df-accent-decor),
+			color-mix(in srgb, var(--df-accent-decor) 30%, transparent)
+		);
 	}
 
 	@keyframes assign-in {
@@ -1845,106 +2175,395 @@
 
 	.assign-head {
 		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-3);
+		padding: 8px var(--df-p-space-4) 10px;
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: color-mix(in srgb, var(--df-accent-soft) 55%, var(--df-surface-card));
+	}
+
+	.assign-heading {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 0;
+	}
+
+	.assign-kicker {
+		display: flex;
 		align-items: center;
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 	}
 
-	.assign-title {
-		font-size: var(--df-p-text-sm);
+	/* The count beside the position: the rail shows which fields are done, and
+	   this says how many, in words, for anyone who is not counting dots. */
+	.assign-count {
+		font-size: var(--df-p-text-2xs);
+		font-weight: 600;
+		color: var(--df-text-meta);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.assign-step {
+		display: inline-flex;
+		align-items: center;
+		padding: 1px 8px;
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 32%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-card);
+		color: var(--df-accent-text);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
 		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+
+	.assign-title {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		line-height: 1.3;
+		letter-spacing: -0.01em;
 		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
 	}
 
 	.assign-quote {
-		margin: 0;
-		max-width: 34ch;
-		padding: 2px 9px;
-		border-radius: var(--df-p-radius-pill);
-		background: var(--df-accent-soft);
+		margin-left: 2px;
+		padding: 1px 7px;
+		border-radius: var(--df-p-radius-xs);
+		background: color-mix(in srgb, var(--df-accent-soft) 80%, var(--df-surface-card));
 		color: var(--df-accent-text);
 		font-family: var(--df-p-font-mono);
-		font-size: var(--df-p-text-sm);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		font-size: 0.86em;
+		font-weight: 600;
+		overflow-wrap: anywhere;
 	}
 
-	.assign-remove {
+	/* One dot per field, in message order: the counter above and the list below
+	   both point at this position, and a dot jumps straight to that field. */
+	.assign-rail {
 		margin-left: auto;
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 4px;
+		flex-wrap: wrap;
+		flex: none;
 	}
 
-	.assign-grid {
+	.rail-dot {
 		display: grid;
-		/* The role group is `max-content`, not `auto`: sizing the type select to its
-		   content made this column compete with it, and the third role button ended
-		   up 14 to 25px underneath the select with its label cut off. A column whose
-		   contents must stay readable gets the width it needs, and the flexible one
-		   gives way. */
-		grid-template-columns: minmax(0, 200px) max-content minmax(190px, max-content);
-		gap: var(--df-p-space-3);
+		place-items: center;
+		/* 32px, not 24: the dot is a control the operator aims at, and a 24px
+		   circle is under the comfortable pointer size. The row wraps instead. */
+		width: 32px;
+		height: 32px;
+		border: 1px solid var(--df-border-control);
+		border-radius: 50%;
+		background: var(--df-surface-card);
+		color: var(--df-text-meta);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		transition:
+			border-color 140ms ease,
+			color 140ms ease;
+	}
+
+	.rail-dot:hover {
+		border-color: var(--df-accent-text);
+		color: var(--df-text-primary);
+	}
+
+	/* A saved field keeps its number and takes the ok tint: replacing the number
+	   with a tick would break the 1–4 order the rail exists to show. */
+	.rail-dot[data-done='true'] {
+		border-color: color-mix(in srgb, var(--df-state-ok-ink) 45%, var(--df-border-control));
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+	}
+
+	.rail-dot[data-done='true']:hover {
+		border-color: var(--df-state-ok-ink);
+	}
+
+	.rail-dot[aria-current='true'],
+	.rail-dot[aria-current='true']:hover {
+		border-color: var(--df-accent-fill);
+		background: var(--df-accent-fill);
+		color: var(--df-text-on-accent);
+	}
+
+	.assign-steps {
+		list-style: none;
+		margin: 0;
+		padding: 13px var(--df-p-space-4);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.step {
+		position: relative;
+		display: grid;
+		grid-template-columns: 24px minmax(0, 1fr);
+		gap: 10px;
 		align-items: start;
 	}
 
+	/* A hairline from one number to the next. The numbers already say "in this
+	   order"; the line is what makes 1–4 read as one sequence rather than four
+	   separate questions. */
+	.step:not(:last-child)::before {
+		content: '';
+		position: absolute;
+		left: 11px;
+		top: 28px;
+		bottom: -16px;
+		width: 1px;
+		background: var(--df-border-hairline);
+	}
+
+	.step[data-off='true']::before {
+		background: repeating-linear-gradient(
+			to bottom,
+			var(--df-border-hairline) 0 3px,
+			transparent 3px 6px
+		);
+	}
+
+	.step-num {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: 50%;
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-family: var(--df-p-font-mono);
+		font-size: 10px;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.step-body {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 0;
+		padding-top: 2px;
+	}
+
+	.step-label {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.step-note {
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--df-text-meta);
+	}
+
+	.step-note code {
+		font-family: var(--df-p-font-mono);
+		font-size: 10.5px;
+		color: var(--df-text-secondary);
+	}
+
+	/* A step that does not apply stays in the sequence with its reason, so
+	   choosing "Opening words" changes the answers without moving the questions. */
+	.step[data-off='true'] .step-num {
+		border-style: dashed;
+		color: var(--df-text-meta);
+	}
+
+	.step[data-off='true'] .step-label {
+		font-weight: 500;
+		color: var(--df-text-meta);
+	}
+
+	/* A width cap keeps a lone field from stretching to the full sheet. */
+	.assign .input {
+		max-width: 360px;
+	}
+
+	/* A native select, left alone: no appearance override and no drawn chevron,
+	   so the platform's own menu and keyboard behaviour come with it. */
 	.type-select {
-		width: max-content;
-		max-width: 100%;
+		width: 100%;
+	}
+
+	/* A role that does not read a value keeps the same step in the same place,
+	   with the control disabled and the reason next to it. */
+	.type-select:disabled {
+		cursor: not-allowed;
+		background: var(--df-surface-well);
+		color: var(--df-text-meta);
+		/* The platform greys a disabled control twice; once is enough. */
+		opacity: 1;
 	}
 
 	.roles {
-		display: inline-flex;
-		padding: 2px;
-		gap: 2px;
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+		gap: 6px;
+	}
+
+	.role {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 8px 10px;
 		border: 1px solid var(--df-border-control);
 		border-radius: var(--df-p-radius-sm);
-		background: var(--df-surface-well);
-	}
-
-	.role-btn {
-		padding: 4px 9px;
-		border: 0;
-		border-radius: var(--df-p-radius-xs);
-		background: transparent;
-		color: var(--df-text-meta);
-		font-size: var(--df-p-text-xs);
-		font-weight: 600;
-		white-space: nowrap;
+		background: var(--df-surface-field);
+		cursor: pointer;
 		transition:
-			background-color 140ms ease-out,
-			color 140ms ease-out;
+			border-color 140ms ease,
+			background-color 140ms ease;
 	}
 
-	.role-btn[aria-pressed='true'] {
-		background: var(--df-surface-selected);
+
+	.role:hover {
+		border-color: var(--df-border-strong);
+	}
+
+	.role[data-active='true'] {
+		border-color: var(--df-accent-text);
+		background: color-mix(in srgb, var(--df-accent-soft) 55%, var(--df-surface-field));
+		box-shadow: inset 0 0 0 1px var(--df-accent-text);
+	}
+
+	.role:has(input:focus-visible) {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	.role input[type='radio'] {
+		width: 15px;
+		height: 15px;
+		margin: 1px 0 0;
+		flex: none;
+		accent-color: var(--df-accent-text);
+	}
+
+	.role-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.role-name {
+		font-size: var(--df-p-text-base);
+		font-weight: 600;
+		line-height: 1.35;
+		color: var(--df-text-secondary);
+	}
+
+	.role[data-active='true'] .role-name {
 		color: var(--df-text-primary);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 	}
 
-	.role-hint {
-		font-size: var(--df-p-text-xs);
-		line-height: 1.5;
+	.role-why {
+		font-size: 11px;
+		line-height: 1.4;
 		color: var(--df-text-meta);
-		min-height: 1.5em;
+	}
+
+	.role[data-active='true'] .role-why {
+		color: var(--df-text-secondary);
+	}
+
+	/* The choice's effect, in the field's own words. It sits under the three
+	   cards and changes with them, which is what makes the control read as a
+	   choice rather than a label. */
+	.role-consequence {
+		display: flex;
+		align-items: baseline;
+		gap: 7px;
+		margin-top: 1px;
+		padding: 5px 9px;
+		border-radius: var(--df-p-radius-sm);
+		background: color-mix(in srgb, var(--df-accent-soft) 45%, transparent);
+		color: var(--df-text-secondary);
+		font-size: 11.5px;
+		line-height: 1.45;
+	}
+
+	.role-consequence-mark {
+		flex: none;
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--df-accent-text);
+		transform: translateY(-2px);
 	}
 
 	.assign-foot {
+		position: sticky;
+		bottom: 0;
+		z-index: 1;
 		display: flex;
-		align-items: flex-start;
-		gap: var(--df-p-space-3);
+		align-items: center;
+		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
+		padding: 10px var(--df-p-space-4);
+		border-top: 1px solid var(--df-border-hairline);
+		background: color-mix(in srgb, var(--df-surface-well) 40%, var(--df-surface-card));
 	}
 
-	.assign-foot .check .hint {
-		display: block;
-		margin-top: 1px;
-	}
-
-	.assign-actions {
-		margin-left: auto;
+	.assign-quiet {
 		display: flex;
 		align-items: center;
 		gap: var(--df-p-space-1);
 		flex-wrap: wrap;
+	}
+
+	.assign-save {
+		margin-left: auto;
+	}
+
+	.assign-optional .hint {
+		display: block;
+		margin-top: 1px;
+	}
+
+	.assign-optional:has(input:disabled) {
+		cursor: not-allowed;
+		color: var(--df-text-meta);
+	}
+
+	.saved-note {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 8px 12px;
+		border: 1px solid var(--df-c-tint-edge-ok);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+	}
+
+	.saved-note :global(svg) {
+		color: currentColor;
+	}
+
+	/* Focus lands here after the last save; a keyboard reader needs to see where.
+	   The ring takes the note's own green rather than the accent, because this is
+	   a result, not a control. */
+	.saved-note:focus-visible {
+		outline: 2px solid var(--df-state-ok-ink);
+		outline-offset: 2px;
 	}
 
 	/* ------------------------------------------------------------ pattern */
@@ -2076,6 +2695,14 @@
 		grid-template-columns: minmax(0, 1fr) auto auto;
 		align-items: center;
 		gap: 4px;
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	/* The row that matches the open editor: same field, same accent, so the
+	   list and the panel never look like two different selections. */
+	.var-row[data-editing='true'] {
+		background: color-mix(in srgb, var(--df-accent-soft) 65%, transparent);
+		box-shadow: inset 2px 0 0 var(--df-accent-text);
 	}
 
 	.var-main {
@@ -2389,8 +3016,49 @@
 			flex: 1 1 auto;
 		}
 
-		.assign-grid {
-			grid-template-columns: minmax(0, 1fr);
+		.assign-head {
+			flex-wrap: wrap;
+			padding: 8px 12px 10px;
+		}
+
+		.assign-rail {
+			margin-left: 0;
+			justify-content: flex-start;
+		}
+
+		.rail-dot {
+			width: 44px;
+			height: 44px;
+		}
+
+		/* A phone stacks the three role cards, so the panel renders taller than
+		   the same form on a wide screen. These are the padding and gap cuts that
+		   keep the save action inside the sheet without hiding a step. */
+		.assign-steps {
+			padding: 12px;
+			gap: 12px;
+		}
+
+		.role {
+			padding: 7px 9px;
+		}
+
+		.assign-foot {
+			padding: 10px 12px;
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.assign-save {
+			margin-left: 0;
+		}
+
+		.assign-quiet {
+			justify-content: space-between;
+		}
+
+		.assign .input {
+			max-width: none;
 		}
 
 		.pattern-block {
@@ -2401,17 +3069,23 @@
 			border-left: 0;
 			border-top: 1px solid var(--df-border-hairline);
 		}
-
-		.assign-actions {
-			width: 100%;
-			margin-left: 0;
-			justify-content: flex-end;
-		}
 	}
 
 	@media (hover: hover) and (pointer: fine) {
 		.mode-alt:hover {
 			color: var(--df-text-primary);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sheet,
+		.assign {
+			animation: none;
+		}
+
+		.rail-dot,
+		.role {
+			transition: none;
 		}
 	}
 </style>
