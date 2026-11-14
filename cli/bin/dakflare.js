@@ -239,6 +239,16 @@ const ERROR_RULES = {
   // operator has to decide whether the history or the pattern is wrong.
   heal_refused: { exit: 6, category: 'precondition' },
   wasm_missing: { exit: 2, category: 'tooling' },
+  // v7.1 WS8. No built engine is a precondition, not a tooling slip: `flow test`
+  // refuses to score an engine that is not there rather than reporting a pass.
+  flow_engine_missing: {
+    exit: 6,
+    category: 'precondition',
+    remediation: './simulator/flow-wasm/build.sh',
+    fix: 'build the flow engine, then retry',
+  },
+  flow_graph_missing: { exit: 6, category: 'precondition' },
+  flow_schema_missing: { exit: 2, category: 'tooling' },
   version_conflict: {
     exit: 5,
     category: 'conflict',
@@ -517,6 +527,79 @@ const COMMAND_SPECS = {
       'dakflare extract synthesize --samples bKash.json --group trx_id --verify-d1-limit 200',
     ],
   },
+  ask: {
+    summary: 'Ask for a patch to a flow, judged for faithfulness (v7.1)',
+    effect: 'mutating',
+    usage:
+      'dakflare ask "<intent>" --flow <id> [--diff-summary <text>] [--corpus-report <text>] [--ndjson] [--dry-run]',
+    flags: {
+      flow: { type: 'string', required: true, note: 'the flow id the patch is for' },
+      'diff-summary': {
+        type: 'string',
+        note: 'what the patch changes, max 4000 chars; default describes the intent',
+      },
+      'corpus-report': { type: 'string', note: 'the corpus numbers the judge should weigh, max 1000 chars' },
+      ndjson: { type: 'boolean', note: 'one JSON object per phase on stdout' },
+      'dry-run': { type: 'boolean', note: 'print the request; send nothing' },
+    },
+    response: {
+      faithful: '{score, probability, confidence} or null',
+      approval_required: 'true when a human must approve before apply',
+      apply_token: 'the ag1_ handle a later `flow apply` spends, or null',
+    },
+    examples: [
+      'dakflare ask "capture the trx id from bKash confirmations" --flow wf_bkash',
+      'dakflare ask "tighten the amount group" --flow wf_bkash --ndjson',
+      'dakflare ask "tighten the amount group" --flow wf_bkash --dry-run --json',
+    ],
+  },
+  fix: {
+    summary: 'Explain a flow failure as a root-cause card (v7.1)',
+    effect: 'read',
+    usage:
+      'dakflare fix --flow <id> [--message-id <id>] [--message <text>] [--pattern <regex>] [--ndjson] [--dry-run]',
+    flags: {
+      flow: { type: 'string', required: true, note: 'the flow, sent as flow_run_id' },
+      'message-id': { type: 'string', note: 'the stored message to explain' },
+      message: { type: 'string', note: 'diagnose this body directly instead of a stored row' },
+      pattern: { type: 'string', note: 'also check this pattern for a word-boundary cut' },
+      ndjson: { type: 'boolean', note: 'one JSON object per phase on stdout' },
+      'dry-run': { type: 'boolean', note: 'print the request; send nothing' },
+    },
+    response: {
+      card: '{code, summary, offset, highlight, encoding, segments, fix}',
+    },
+    examples: [
+      'dakflare fix --flow wf_bkash --message-id 6cb13963-f33c-49d0-b87f-2cc72844a426',
+      'dakflare fix --flow wf_bkash --message "Paid 500 at REF 12A45" --pattern "REF" --json',
+      'dakflare fix --flow wf_bkash --message-id 6cb13963 --ndjson',
+    ],
+  },
+  flow: {
+    summary: 'Test a flow against a corpus, or spend an apply handle (test|apply)',
+    effect: 'mutating',
+    usage:
+      'dakflare flow test --flow <id> --corpus <file.jsonl> [--json] | flow apply --token <handle> [--totp <code>]',
+    flags: {
+      flow: { type: 'string', note: 'test: the flow whose graph is run' },
+      corpus: { type: 'string', note: 'test: JSONL rows of {sender?, body, expect?}' },
+      token: { type: 'string', note: 'apply: the ag1_ handle `ask` printed' },
+      totp: { type: 'string', note: 'apply: six-digit code, sent as X-Dakflare-Totp' },
+    },
+    response: {
+      precision: 'correct extracted values / produced values, or null',
+      recall: 'expected values produced correctly / expected values, or null',
+      specificity: 'fixed-token mass / (fixed + wildcard), an estimate',
+      dfa_estimate: 'construct count / 2048-state budget, an estimate',
+      linear_time_guaranteed: 'true only when every pattern is RE2-compilable',
+      mismatches: '[{row, body, outcome, problems}]',
+    },
+    examples: [
+      'dakflare flow test --flow wf_bkash --corpus corpus.jsonl',
+      'dakflare flow test --flow wf_bkash --corpus corpus.jsonl --json',
+      'dakflare flow apply --token ag1_eyJmbG93X2lkIjoi...',
+    ],
+  },
   mcp: {
     summary: 'Serve this deployment over MCP on stdio (serve)',
     effect: 'read',
@@ -582,11 +665,17 @@ const COMMAND_SPECS = {
     examples: ['dakflare describe send'],
   },
   schema: {
-    summary: 'The flag contract for one command, or the state machine transitions (states)',
+    summary: 'The flag contract for one command, the state machines (states), or the flow v2 schema (--flow-v2)',
     effect: 'read',
-    usage: 'dakflare schema <command|states>',
-    flags: {},
-    examples: ['dakflare schema send --agent', 'dakflare schema states --agent'],
+    usage: 'dakflare schema <command|states> | schema --flow-v2 [--json]',
+    flags: {
+      'flow-v2': { type: 'boolean', note: 'print the dakflare.flow/v2 JSON Schema instead of a command contract' },
+    },
+    examples: [
+      'dakflare schema send --agent',
+      'dakflare schema states --agent',
+      'dakflare schema --flow-v2 --json',
+    ],
   },
   examples: {
     summary: 'Real invocations for one command, including a failing one',
@@ -747,6 +836,14 @@ const VALUE_FLAGS = new Set([
   'version',
   'node',
   'corpus-limit',
+  'flow',
+  'message-id',
+  'message',
+  'pattern',
+  'corpus',
+  'totp',
+  'diff-summary',
+  'corpus-report',
 ]);
 
 function parseArgv(argv) {
@@ -901,7 +998,13 @@ function requireConfig() {
 
 let d1SessionBookmark = null;
 
-async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS } = {}) {
+async function api(
+  cfg,
+  method,
+  pathname,
+  body,
+  { timeout = DEFAULT_TIMEOUT_MS, headers = {} } = {}
+) {
   const base = cfg.url.replace(/\/+$/, '');
   const target = `${base}${pathname}`;
   const controller = new AbortController();
@@ -917,6 +1020,7 @@ async function api(cfg, method, pathname, body, { timeout = DEFAULT_TIMEOUT_MS }
         'X-Dakflare-Client': 'cli',
         ...(d1SessionBookmark ? { 'X-D1-Bookmark': d1SessionBookmark } : {}),
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
@@ -2765,6 +2869,10 @@ function commandSchema(argv) {
   if (flags.help) return printHelp('schema');
   assertCommandFlags(flags, 'schema');
 
+  if (flags['flow-v2'] === true || rest[0] === 'flow-v2' || rest[0] === 'flow/v2') {
+    return printFlowV2Schema();
+  }
+
   if (rest[0] === 'states' || rest[0] === 'lifecycle') {
     const statesSchema = {
       command: 'states',
@@ -2808,6 +2916,52 @@ function commandSchema(argv) {
     return 0;
   }
   out(JSON.stringify(schema, null, 2));
+  return 0;
+}
+
+/**
+ * `schema --flow-v2` — the canonical flow document contract, as a document.
+ *
+ * With `--json` this is the schema and nothing else: a caller piping it into a
+ * validator must not have to unwrap an envelope. Without it, a person gets the
+ * shape in six lines and the path the file lives at.
+ */
+function printFlowV2Schema() {
+  let raw;
+  try {
+    raw = fs.readFileSync(FLOW_V2_SCHEMA_PATH, 'utf8');
+  } catch (error) {
+    throw new CliError(
+      `cannot read ${FLOW_V2_SCHEMA_PATH}: ${error?.message ?? error}. The schema ships with the CLI.`,
+      2,
+      { error: 'flow_schema_missing', schema: FLOW_V2_SCHEMA_PATH }
+    );
+  }
+
+  if (MODE.json) {
+    // Deliberately not the envelope: `--json` promises the document.
+    out(raw.trimEnd());
+    return 0;
+  }
+
+  let document;
+  try {
+    document = JSON.parse(raw);
+  } catch {
+    throw new CliError(`${FLOW_V2_SCHEMA_PATH} is not valid JSON.`, 2, {
+      error: 'flow_schema_missing',
+      schema: FLOW_V2_SCHEMA_PATH,
+    });
+  }
+  const nodeKinds = document?.$defs?.node?.properties?.type?.enum ?? [];
+  out(`Flow IR        ${document?.properties?.schema?.const ?? 'dakflare.flow/v2'}`);
+  out(`Schema file    ${FLOW_V2_SCHEMA_PATH}`);
+  out(`Nodes          ${nodeKinds.join(', ')}`);
+  out(`Limits         ${document?.properties?.nodes?.maxItems ?? '?'} nodes, ${document?.properties?.edges?.maxItems ?? '?'} edges`);
+  out(`Edges          id, source, target, sourceHandle (true|false, case:<i>|default), label`);
+  out(`Template spans role (trigger|extract|ignore), name, slot_type, start, end, optional`);
+  out(`Apply handle   ${Object.keys(document?.$defs?.authority_target?.properties ?? {}).join(', ')}`);
+  out(muted('  `dakflare schema --flow-v2 --json` prints the schema itself, nothing else'));
   return 0;
 }
 
@@ -2872,6 +3026,21 @@ const SUMMARY_BUILDERS = {
           ? 'flow applied'
           : 'flow diffed, nothing written',
   extract: (data) => (data.pattern ? 'pattern synthesized' : 'nothing synthesized'),
+  ask: (data) =>
+    data.approval_required === true
+      ? 'patch judged; approval required'
+      : data.faithful
+        ? 'patch judged'
+        : 'nothing judged',
+  fix: (data) => (data.card?.code ? `root cause ${data.card.code}` : 'no failure signature matched'),
+  flow: (data) =>
+    data.spent === true
+      ? 'apply handle spent'
+      : data.already_decided === true
+        ? `request already ${String(data.state ?? 'decided').toLowerCase()}`
+        : data.linear_time_guaranteed === true
+          ? `${(data.rows ?? 0) - (data.mismatches ?? []).length}/${data.rows ?? 0} corpus rows agreed`
+          : 'corpus scored',
   trace: (data) => `verdict ${data.verdict ?? 'unknown'}`,
   mcp: () => 'served MCP on stdio',
   alerts: (data) => `${(data.alerts ?? []).length} open alerts`,
@@ -4179,6 +4348,1126 @@ async function commandFlowsApply(argv) {
   return 0;
 }
 
+/* ───────────────────── flow v2 agent loop (v7.1 WS8) ───────────────────── */
+
+/**
+ * The canonical v2 schema lives beside the CLI, not in the Worker.
+ *
+ * There was no JSON Schema anywhere in the repo (the validator in
+ * `worker/src/lib/flow-ir.ts` and `simulator/flow/src/ir.rs` are the two copies
+ * that are kept honest by `test-support/flow-ir-vectors.json`), so this document
+ * was derived from that validator by hand. It is a description of the checker,
+ * never a second checker: `schema --flow-v2 --json` prints it unchanged.
+ */
+const FLOW_V2_SCHEMA_PATH = path.join(__dirname, '..', 'schema', 'flow-v2.json');
+
+/**
+ * Where a built `flow.wasm` may be, most-specific first.
+ *
+ * `dashboard/src/lib/wasm/flow.wasm` is what a dashboard build emits; the other
+ * two are the committed copies `simulator/flow-wasm/build.sh` writes. If none
+ * exists, `flow test` refuses rather than scoring an imagined engine.
+ */
+const FLOW_WASM_CANDIDATES = [
+  path.join(__dirname, '..', '..', 'dashboard', 'src', 'lib', 'wasm', 'flow.wasm'),
+  path.join(__dirname, '..', '..', 'worker', 'src', 'wasm', 'flow.wasm'),
+  path.join(__dirname, '..', '..', 'dashboard', 'static', 'flow.wasm'),
+  path.join(
+    __dirname,
+    '..',
+    '..',
+    'simulator',
+    'flow-wasm',
+    'target',
+    'wasm32-unknown-unknown',
+    'release',
+    'dakflare_flow_wasm.wasm'
+  ),
+];
+
+const FLOW_WASM_BUILD = './simulator/flow-wasm/build.sh';
+
+/** Builtin variables the trigger binds; never counted as extracted output. */
+const FLOW_BUILTIN_VARIABLES = new Set(['sender', 'body', 'received_at']);
+
+/**
+ * Characters that render as nothing and force UCS-2. Mirrors the list in
+ * `worker/src/routes/agent.ts`; the CLI re-escapes them so a highlight is safe
+ * even if an older Worker returns the raw bytes.
+ */
+const INVISIBLE_CODEPOINTS = new Set([
+  0x00ad, 0x061c, 0x180e, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b,
+  0x202c, 0x202d, 0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067,
+  0x2068, 0x2069, 0xfeff, 0xfff9, 0xfffa, 0xfffb,
+]);
+
+/** Make a fragment safe and honest to show: nothing invisible stays invisible. */
+function visibleBytes(text) {
+  let result = '';
+  for (const char of String(text ?? '')) {
+    const codepoint = char.codePointAt(0) ?? 0;
+    if (INVISIBLE_CODEPOINTS.has(codepoint)) {
+      result += `<U+${codepoint.toString(16).toUpperCase().padStart(4, '0')}>`;
+    } else if (codepoint < 0x20 || codepoint === 0x7f) {
+      result += `\\u${codepoint.toString(16).toUpperCase().padStart(4, '0')}`;
+    } else {
+      result += char;
+    }
+  }
+  return result;
+}
+
+/**
+ * Print an apply handle, masked unless the caller asked for a document.
+ *
+ * The handle is bearer authority for one apply, so it is not scribbled into a
+ * pipeline by default: a TTY or `--json` gets the whole value, everything else
+ * gets the ends and a length.
+ */
+function displayApplyToken(token) {
+  if (token === null || token === undefined) return null;
+  const value = String(token);
+  if (MODE.json || (process.stdout.isTTY && !AGENT)) return value;
+  if (value.length <= 12) return `${value.slice(0, 4)}…`;
+  return `${value.slice(0, 8)}…${value.slice(-4)} (${value.length} chars)`;
+}
+
+/** One NDJSON writer, so every phase line is flushed as it is produced. */
+function ndjson(writer) {
+  return (phase, fields = {}) => {
+    if (writer === null) return;
+    writer.write(`${JSON.stringify({ phase, ...fields })}\n`);
+  };
+}
+
+/** `--ndjson` and `--json` are two answers to the same question; pick one. */
+function ndjsonEnabled(flags) {
+  if (flags.ndjson !== true) return null;
+  if (MODE.json) throw usage('--ndjson and --json cannot be combined');
+  return process.stdout;
+}
+
+/** GET one workflow, with the failures the agent loop can act on. */
+async function fetchWorkflow(cfg, id) {
+  const result = await api(cfg, 'GET', `/v1/admin/workflows/${encodeURIComponent(id)}`);
+  if (result.status === 404) {
+    throw new CliError(`no flow "${id}" on this deployment.`, 3, {
+      error: 'not_found',
+      flow_id: id,
+    });
+  }
+  if (result.status !== 200) throw requestFailure('read the flow', result);
+  const workflow = result.data?.workflow ?? null;
+  if (workflow === null || typeof workflow !== 'object') {
+    throw new CliError('the Worker returned no workflow document.', 1, { error: 'bad_response' });
+  }
+  return workflow;
+}
+
+/** A body for `ask`: the four fields `/v1/agent/synthesize` requires. */
+function synthesisRequest(flags, intent, flowId) {
+  const diffSummary = stringFlag(flags, 'diff-summary') ?? `intent: ${intent}`;
+  const corpusReport = stringFlag(flags, 'corpus-report') ?? '';
+  if (intent.length > 1_000) throw usage('the intent is at most 1000 characters');
+  if (diffSummary.length > 4_000) throw usage('--diff-summary is at most 4000 characters');
+  if (corpusReport.length > 1_000) throw usage('--corpus-report is at most 1000 characters');
+  return {
+    intent,
+    flow_id: flowId,
+    diff_summary: diffSummary,
+    corpus_report: corpusReport,
+  };
+}
+
+/** Print the request `--dry-run` would have sent, and send nothing. */
+function printDryRun(pathname, body) {
+  out(muted('  --dry-run: nothing was sent'));
+  out(`  POST ${pathname}`);
+  out(
+    JSON.stringify(body, null, 2)
+      .split('\n')
+      .map((line) => `  ${line}`)
+      .join('\n')
+  );
+}
+
+/**
+ * `dakflare ask "<intent>" --flow <id>` — judge a candidate patch.
+ *
+ * The Worker does the judging and mints the handle; this command only reports
+ * what came back. An approval that is required is not an error: the handle is
+ * the thing a human's approval is spent on, so it is printed rather than the
+ * command failing.
+ */
+async function commandAsk(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('ask');
+  assertCommandFlags(flags, 'ask');
+  const stream = ndjsonEnabled(flags);
+  const phase = ndjson(stream);
+
+  const intent = rest.join(' ').trim();
+  if (intent === '') throw usage('dakflare ask "<intent>" --flow <id> [--ndjson]');
+  const flowId = stringFlag(flags, 'flow', { required: true });
+  const body = synthesisRequest(flags, intent, flowId);
+  const pathname = '/v1/agent/synthesize';
+
+  if (flags['dry-run'] === true) {
+    if (MODE.json) {
+      emitJson(
+        { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body } },
+        MODE
+      );
+      return 0;
+    }
+    phase('understand', { intent, flow_id: flowId, dry_run: true });
+    phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
+    if (stream === null) printDryRun(pathname, body);
+    return 0;
+  }
+
+  let cfg;
+  try {
+    cfg = requireConfig();
+    const workflow = await fetchWorkflow(cfg, flowId);    phase('understand', {
+      flow_id: flowId,
+      version: workflow.version ?? null,
+      nodes: Array.isArray(workflow.graph?.nodes) ? workflow.graph.nodes.length : 0,
+    });
+    phase('propose', { request: body });
+
+    const started = Date.now();
+    const result = await api(cfg, 'POST', pathname, body);
+    phase('verify', { http_status: result.status, took_ms: Date.now() - started });
+
+    if (result.status !== 200) {
+      const error = apiErrorBody(result.data, result.status);
+      const message =
+        result.data?.message ?? `synthesize failed: ${error} (HTTP ${result.status})`;
+      if (result.status === 401 || result.status === 403) {
+        throw new CliError(message, 4, { error, status: result.status });
+      }
+      if (error === 'ai_unavailable') {
+        throw new CliError(message, 75, {
+          error: 'network',
+          status: result.status,
+          reason: result.data?.reason ?? null,
+        });
+      }
+      throw requestFailure('synthesize', result);
+    }
+
+    const data = result.data ?? {};
+    const faithful = data.faithful ?? null;
+    const approvalRequired = data.approval_required === true;
+    const applyToken = typeof data.apply_token === 'string' ? data.apply_token : null;
+
+    phase('result', {
+      faithful,
+      approval_required: approvalRequired,
+      apply_token: displayApplyToken(applyToken),
+    });
+
+    if (stream !== null) return 0;
+
+    if (MODE.json) {
+      emitJson(
+        {
+          ok: true,
+          flow_id: flowId,
+          faithful,
+          approval_required: approvalRequired,
+          apply_token: applyToken,
+          request: body,
+        },
+        MODE
+      );
+      return 0;
+    }
+
+    out(`Flow        ${flowId} (v${workflow.version ?? '?'})`);
+    out(
+      `Faithfulness ${faithful?.score === null || faithful?.score === undefined ? 'not scored' : faithful.score}` +
+        (faithful?.confidence === undefined ? '' : muted(`  (confidence ${faithful.confidence})`))
+    );
+    if (approvalRequired) {
+      out(`Approval    ${warn('required')} — a human must approve before this can be applied`);
+      out(`Apply token ${displayApplyToken(applyToken)}`);
+      out(muted(`  spend it with: dakflare flow apply --token <token>`));
+    } else {
+      out('Approval    not required');
+      out(muted('  no handle was minted: the judge did not call for one'));
+    }
+    return 0;
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    phase('error', {
+      error: error.payload?.error ?? 'internal',
+      message: error.message,
+      exit: exitCodeFor(error.payload?.error ?? 'internal'),
+    });
+    throw error;
+  }
+}
+
+/** A root-cause card, as the operator reads it: code, offset, bytes, patch. */
+function printRootCauseCard(card) {
+  out(`Root cause  ${card.code === null ? muted('no signature matched') : fail(card.code ?? 'unknown')}`);
+  out(`Summary     ${card.summary ?? ''}`);
+  if (card.offset !== undefined && card.offset !== null) {
+    out(`Offset      char ${card.offset.char}, byte ${card.offset.byte}`);
+  }
+  if (card.highlight !== undefined && card.highlight !== null) {
+    const before = visibleBytes(card.highlight.before ?? '');
+    const bad = visibleBytes(card.highlight.bad ?? '');
+    const after = visibleBytes(card.highlight.after ?? '');
+    out(`Highlight   "${before}${fail(bad)}${after}"`);
+    out(`            ${' '.repeat(Math.max(0, before.length))}${fail('^'.repeat(Math.max(1, bad.length)))}`);
+  }
+  out(`Encoding    ${card.encoding ?? '?'}, ${card.segments ?? '?'} segment(s)`);
+  if (card.fix !== undefined && card.fix !== null && card.fix.kind === 'pattern_patch') {
+    out(`Patch       ${card.fix.pattern}`);
+  }
+}
+
+/**
+ * `dakflare fix --flow <id> [--message-id <id>]` — why did this fail.
+ *
+ * `--flow` is sent as `flow_run_id`: the Worker has no run-id column and says so
+ * in `resolveFlowIds`, trying the value as a flow id first and a message local id
+ * second. `--message` and `--pattern` exist so a card can be reproduced without a
+ * stored row, which is also how the tests exercise the invisible-Unicode case.
+ */
+async function commandFix(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('fix');
+  assertCommandFlags(flags, 'fix');
+  const stream = ndjsonEnabled(flags);
+  const phase = ndjson(stream);
+
+  const flowId = stringFlag(flags, 'flow', { required: true });
+  const messageId = stringFlag(flags, 'message-id');
+  const message = stringFlag(flags, 'message');
+  const pattern = stringFlag(flags, 'pattern');
+  if (message !== undefined && message.length > 4_096) {
+    throw usage('--message is at most 4096 characters');
+  }
+
+  const body = {
+    flow_run_id: flowId,
+    ...(messageId === undefined ? {} : { message_id: messageId }),
+    ...(message === undefined ? {} : { message }),
+    ...(pattern === undefined ? {} : { pattern }),
+  };
+  const pathname = '/v1/agent/diagnose';
+
+  if (flags['dry-run'] === true) {
+    if (MODE.json) {
+      emitJson(
+        { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body } },
+        MODE
+      );
+      return 0;
+    }
+    phase('understand', { flow_id: flowId, message_id: messageId ?? null, dry_run: true });
+    phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
+    if (stream === null) printDryRun(pathname, body);
+    return 0;
+  }
+
+  let cfg;
+  try {
+    cfg = requireConfig();
+    phase('understand', {
+      flow_id: flowId,
+      message_id: messageId ?? null,
+      inline_message: message !== undefined,
+    });
+    const started = Date.now();
+    phase('propose', { request: body });
+    const result = await api(cfg, 'POST', pathname, body);
+    phase('verify', { http_status: result.status, took_ms: Date.now() - started });
+
+    if (result.status !== 200) {
+      const error = apiErrorBody(result.data, result.status);
+      const text = result.data?.message ?? `diagnose failed: ${error} (HTTP ${result.status})`;
+      if (result.status === 401 || result.status === 403) {
+        throw new CliError(text, 4, { error, status: result.status });
+      }
+      throw requestFailure('diagnose', result);
+    }
+
+    const card = result.data ?? {};
+    phase('result', { card });
+
+    if (stream !== null) return 0;
+
+    if (MODE.json) {
+      emitJson({ ok: true, flow_id: flowId, card }, MODE);
+      return 0;
+    }
+    printRootCauseCard(card);
+    return 0;
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    phase('error', {
+      error: error.payload?.error ?? 'internal',
+      message: error.message,
+      exit: exitCodeFor(error.payload?.error ?? 'internal'),
+    });
+    throw error;
+  }
+}
+
+/** The built artifact `flow test` will instantiate, or `null`. */
+function findFlowWasm() {
+  for (const candidate of FLOW_WASM_CANDIDATES) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      /* try the next one */
+    }
+  }
+  return null;
+}
+
+/** Instantiate it with the built-in WebAssembly; no loader, no dependency. */
+async function loadFlowWasm(file) {
+  const bytes = fs.readFileSync(file);
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const exports = instance.exports;
+  for (const name of ['alloc', 'dealloc', 'run_json']) {
+    if (typeof exports[name] !== 'function') {
+      throw new CliError(`${file} is not a flow module: no ${name} export.`, 2, {
+        error: 'wasm_missing',
+        wasm: file,
+      });
+    }
+  }
+  return { file, exports };
+}
+
+/** One `[u32 LE length][JSON]` round trip through the module. */
+function callFlowWasm(wasm, fn, payload) {
+  const input = new TextEncoder().encode(JSON.stringify(payload));
+  const inputPtr = wasm.exports.alloc(input.byteLength);
+  new Uint8Array(wasm.exports.memory.buffer, inputPtr, input.byteLength).set(input);
+
+  const outPtr = fn(inputPtr, input.byteLength);
+  // Views are created after the call: alloc/run can grow memory and detach an
+  // earlier buffer.
+  const view = new DataView(wasm.exports.memory.buffer, outPtr, 4);
+  const length = view.getUint32(0, true);
+  const bytes = new Uint8Array(wasm.exports.memory.buffer, outPtr + 4, length).slice();
+  wasm.exports.dealloc(outPtr, 4 + length);
+  wasm.exports.dealloc(inputPtr, input.byteLength);
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+/**
+ * RE2 compatibility lint, condensed from `worker/src/lib/re2-compat.ts`.
+ *
+ * `linear_time_guaranteed` is only ever true when every pattern in the graph is
+ * something RE2 can compile: no backreference, lookaround, atomic group,
+ * conditional, possessive quantifier, or nested quantifier. A pattern outside
+ * that set is a real answer ("the guarantee does not hold"), not a warning.
+ */
+const RE_RE2_COUNTED = /^\{\d+(,\d*)?\}/;
+const RE_RE2_FLAG_SETTER = /^\(\?[aiLmsux-]*\)/;
+const RE_RE2_FLAG_SCOPE = /^\(\?[aiLmsux-]*:/;
+const RE_RE2_NAMED_GROUP = /^\(\?P?<[A-Za-z_][A-Za-z0-9_]*>/;
+
+function lintRe2Local(pattern) {
+  if (typeof pattern !== 'string' || pattern === '') return null;
+
+  const source = pattern;
+  const stack = [];
+  let i = 0;
+  let lastWasGroupClose = false;
+  let lastClosedGroup = null;
+
+  const branchesOf = (frame) => {
+    const cuts = [...frame.pipes, frame.end];
+    const parts = [];
+    let from = frame.bodyStart;
+    for (const cut of cuts) {
+      parts.push(source.slice(from, cut));
+      from = cut + 1;
+    }
+    return parts;
+  };
+  const overlapping = (branches) => {
+    const normalized = branches.map((branch) => branch.trim());
+    for (let a = 0; a < normalized.length; a += 1) {
+      for (let b = 0; b < normalized.length; b += 1) {
+        if (a === b || normalized[a] === '') continue;
+        if (normalized[b].startsWith(normalized[a])) return true;
+      }
+    }
+    return false;
+  };
+  const onQuantifier = () => {
+    for (const frame of stack) frame.containsQuantifier = true;
+    if (!lastWasGroupClose || lastClosedGroup === null) return null;
+    if (lastClosedGroup.containsQuantifier) return 'nested_quantifier';
+    const descendants = [];
+    const collect = (frame) => {
+      for (const child of frame.children) {
+        descendants.push(child);
+        collect(child);
+      }
+    };
+    collect(lastClosedGroup);
+    for (const candidate of [lastClosedGroup, ...descendants]) {
+      if (overlapping(branchesOf(candidate))) return 'ambiguous_alternation';
+    }
+    return null;
+  };
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (ch === '\\') {
+      const next = source[i + 1];
+      if (next === undefined) return 'dangling_backslash';
+      if (next >= '1' && next <= '9') return 'backreference';
+      if (next === 'k' && (source[i + 2] === '<' || source[i + 2] === "'")) return 'backreference';
+      if (next === 'Q' || next === 'E') return 'unsupported_escape_q_e';
+      i += 2;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    if (ch === '[') {
+      let j = i + 1;
+      if (source[j] === '^') j += 1;
+      if (source[j] === ']') j += 1;
+      let closed = false;
+      while (j < source.length) {
+        if (source[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (source[j] === ']') {
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      i = closed ? j + 1 : source.length;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    if (ch === '(') {
+      const rest = source.slice(i);
+      if (rest.startsWith('(?=') || rest.startsWith('(?!')) return 'lookahead';
+      if (rest.startsWith('(?<=') || rest.startsWith('(?<!')) return 'lookbehind';
+      if (rest.startsWith('(?>')) return 'atomic_group';
+      if (rest.startsWith('(?(')) return 'conditional';
+      if (rest.startsWith('(?#')) return 'comment_group_unsupported';
+      if (rest.startsWith('(?R')) return 'recursion_unsupported';
+      if (rest.startsWith('(?P=') || rest.startsWith('(?P>')) return 'backreference';
+
+      const flagSetter = RE_RE2_FLAG_SETTER.exec(rest);
+      if (flagSetter) {
+        i += flagSetter[0].length;
+        lastWasGroupClose = false;
+        lastClosedGroup = null;
+        continue;
+      }
+
+      let bodyStart = i + 1;
+      const named = RE_RE2_NAMED_GROUP.exec(rest);
+      const flagScope = RE_RE2_FLAG_SCOPE.exec(rest);
+      if (named) bodyStart = i + named[0].length;
+      else if (flagScope) bodyStart = i + flagScope[0].length;
+      else if (rest.startsWith('(?:')) bodyStart = i + 3;
+
+      const frame = {
+        start: i,
+        bodyStart,
+        end: -1,
+        pipes: [],
+        containsQuantifier: false,
+        children: [],
+      };
+      const parent = stack[stack.length - 1];
+      if (parent !== undefined) parent.children.push(frame);
+      stack.push(frame);
+      i = bodyStart;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    if (ch === ')') {
+      const frame = stack.pop() ?? null;
+      if (frame !== null) {
+        frame.end = i;
+        if (frame.containsQuantifier) {
+          const parent = stack[stack.length - 1];
+          if (parent !== undefined) parent.containsQuantifier = true;
+        }
+      }
+      i += 1;
+      lastWasGroupClose = true;
+      lastClosedGroup = frame;
+      continue;
+    }
+
+    if (ch === '|') {
+      const top = stack[stack.length - 1];
+      if (top !== undefined) top.pipes.push(i);
+      i += 1;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    if (ch === '*' || ch === '+' || ch === '?') {
+      if (source[i + 1] === '+') return 'possessive_quantifier';
+      const problem = onQuantifier();
+      if (problem !== null) return problem;
+      i += 1;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    if (ch === '{') {
+      const counted = RE_RE2_COUNTED.exec(source.slice(i));
+      if (counted === null) {
+        i += 1;
+        lastWasGroupClose = false;
+        lastClosedGroup = null;
+        continue;
+      }
+      const end = i + counted[0].length;
+      if (source[end] === '+') return 'possessive_quantifier';
+      const problem = onQuantifier();
+      if (problem !== null) return problem;
+      i = end;
+      lastWasGroupClose = false;
+      lastClosedGroup = null;
+      continue;
+    }
+
+    i += 1;
+    lastWasGroupClose = false;
+    lastClosedGroup = null;
+  }
+
+  return stack.length > 0 ? 'unbalanced_group' : null;
+}
+
+/** Every extract pattern in a graph, in node order. */
+function graphPatterns(graph) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  return nodes
+    .filter((node) => node?.type === 'extract' && typeof node.data?.pattern === 'string')
+    .map((node) => ({ node_id: node.id ?? '', pattern: node.data.pattern }));
+}
+
+/**
+ * Specificity and DFA size, as ESTIMATES.
+ *
+ * This mirrors the shape of `evaluate_corpus_and_score` in
+ * `simulator/flow/src/self_heal.rs`: count the fixed tokens a pattern pins down
+ * against the wildcards it leaves open, and normalise the construct count by the
+ * 2048-state budget. Neither number is a measurement of a determinised automaton;
+ * they are stable and monotone in the right direction, which is what a report
+ * needs. The Worker's own comment says the same about `dfa_complexity`.
+ */
+function patternShape(pattern) {
+  let literals = 0;
+  let wildcards = 0;
+  let branches = 1;
+  let i = 0;
+
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === '\\') {
+      const next = pattern[i + 1];
+      if (next === undefined) break;
+      if ('dDwWsSbBAzZ'.includes(next)) wildcards += 1;
+      else literals += 1;
+      i += 2;
+      continue;
+    }
+    if (ch === '[') {
+      const close = pattern.indexOf(']', i + 1);
+      i = close === -1 ? pattern.length : close + 1;
+      wildcards += 1;
+      continue;
+    }
+    if (ch === '|') {
+      branches += 1;
+      i += 1;
+      continue;
+    }
+    if ('.^$(){}*+?'.includes(ch)) {
+      if (ch === '.') wildcards += 1;
+      i += 1;
+      continue;
+    }
+    literals += 1;
+    i += 1;
+  }
+
+  const total = literals + wildcards;
+  return {
+    literals,
+    wildcards,
+    branches,
+    specificity: total === 0 ? 0 : literals / total,
+    dfa_estimate: Math.min(1, (literals + wildcards + branches) / 2048),
+  };
+}
+
+/** JSONL corpus: one `{ sender?, body, expect? }` object per line. */
+function readCorpus(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new CliError(`no corpus at ${file}.`, 3, { error: 'not_found', file });
+    }
+    throw new CliError(`cannot read ${file}: ${error?.message ?? error}`, 2, { error: 'usage' });
+  }
+
+  const rows = [];
+  const lines = text.split(/\r?\n/);
+  lines.forEach((line, index) => {
+    if (line.trim() === '') return;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      throw usage(`${file}:${index + 1} is not JSON`);
+    }
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      throw usage(`${file}:${index + 1} must be an object`);
+    }
+    if (typeof row.body !== 'string' || row.body === '') {
+      throw usage(`${file}:${index + 1} needs a non-empty "body"`);
+    }
+    rows.push({
+      sender: typeof row.sender === 'string' && row.sender !== '' ? row.sender : '+10000000000',
+      body: row.body,
+      expect: row.expect !== null && typeof row.expect === 'object' ? row.expect : null,
+    });
+  });
+
+  if (rows.length === 0) throw usage(`${file} has no rows`);
+  return rows;
+}
+
+/** Score every row against the built engine, and say exactly which disagreed. */
+function scoreCorpus(wasm, graph, rows) {
+  let expectedValues = 0;
+  let recalledValues = 0;
+  let producedValues = 0;
+  let correctValues = 0;
+  const mismatches = [];
+
+  rows.forEach((row, index) => {
+    const run = callFlowWasm(wasm, wasm.exports.run_json, {
+      graph,
+      message: { sender: row.sender, body: row.body },
+    });
+
+    const variables = run?.variables ?? {};
+    const expected = row.expect ?? {};
+    const expectedVars =
+      expected.variables !== null && typeof expected.variables === 'object'
+        ? expected.variables
+        : {};
+    const expectedOutcome = typeof expected.outcome === 'string' ? expected.outcome : null;
+
+    const problems = [];
+    if (expectedOutcome !== null && run?.outcome !== expectedOutcome) {
+      problems.push({ kind: 'outcome', expected: expectedOutcome, actual: run?.outcome ?? null });
+    }
+
+    for (const [name, value] of Object.entries(expectedVars)) {
+      expectedValues += 1;
+      if (variables[name] === value) {
+        recalledValues += 1;
+      } else {
+        problems.push({
+          kind: 'variable',
+          name,
+          expected: value,
+          actual: variables[name] ?? null,
+        });
+      }
+    }
+
+    for (const [name, value] of Object.entries(variables)) {
+      if (FLOW_BUILTIN_VARIABLES.has(name)) continue;
+      producedValues += 1;
+      if (Object.hasOwn(expectedVars, name) && expectedVars[name] === value) correctValues += 1;
+    }
+
+    if (problems.length > 0) {
+      mismatches.push({
+        row: index + 1,
+        body: visibleBytes(row.body).slice(0, 120),
+        outcome: run?.outcome ?? null,
+        problems,
+      });
+    }
+  });
+
+  return {
+    rows: rows.length,
+    recall: expectedValues === 0 ? null : recalledValues / expectedValues,
+    precision: producedValues === 0 ? null : correctValues / producedValues,
+    mismatches,
+  };
+}
+
+/**
+ * `dakflare flow test --flow <id> --corpus <file.jsonl>`
+ *
+ * Runs the real engine, locally, over a labelled corpus. If the artifact is not
+ * there the command exits 6 and names the build: an absent engine must never read
+ * as a pass. Nothing here contacts the Worker's simulation path, so the numbers
+ * are the same ones the handset will produce.
+ */
+async function commandFlowTest(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('flow');
+  assertCommandFlags(flags, 'flow');
+  const json = MODE.json;
+
+  const flowId = stringFlag(flags, 'flow', { required: true });
+  const corpusFile = stringFlag(flags, 'corpus', { required: true });
+
+  const wasmFile = findFlowWasm();
+  if (wasmFile === null) {
+    throw new CliError(
+      `no built flow engine found (looked for ${FLOW_WASM_CANDIDATES.join(', ')}). ` +
+        `Build it with: ${FLOW_WASM_BUILD}`,
+      6,
+      { error: 'flow_engine_missing', wasm_candidates: FLOW_WASM_CANDIDATES, build: FLOW_WASM_BUILD }
+    );
+  }
+
+  const rows = readCorpus(corpusFile);
+  const cfg = requireConfig();
+  const workflow = await fetchWorkflow(cfg, flowId);
+  if (workflow.graph === null || typeof workflow.graph !== 'object') {
+    throw new CliError(`flow "${flowId}" has no graph.`, 6, {
+      error: 'flow_graph_missing',
+      flow_id: flowId,
+    });
+  }
+
+  const wasm = await loadFlowWasm(wasmFile);
+  const validated =
+    typeof wasm.exports.validate_json === 'function'
+      ? callFlowWasm(wasm, wasm.exports.validate_json, workflow.graph)
+      : { ok: true, graph: workflow.graph };
+  if (validated?.ok === false) {
+    throw new CliError(`flow "${flowId}" does not validate; run \`dakflare flows apply\`.`, 6, {
+      error: 'workflow_invalid',
+      issues: validated.issues ?? [],
+    });
+  }
+  const graph = validated?.graph ?? workflow.graph;
+
+  const scored = scoreCorpus(wasm, graph, rows);
+  const patterns = graphPatterns(graph);
+  const shapes = patterns.map((entry) => ({
+    node_id: entry.node_id,
+    pattern: entry.pattern,
+    ...patternShape(entry.pattern),
+    re2: lintRe2Local(entry.pattern),
+  }));
+  const specificity =
+    shapes.length === 0
+      ? null
+      : shapes.reduce((total, shape) => total + shape.specificity, 0) / shapes.length;
+  const dfaEstimate =
+    shapes.length === 0
+      ? null
+      : shapes.reduce((total, shape) => total + shape.dfa_estimate, 0) / shapes.length;
+  const re2Problems = shapes.filter((shape) => shape.re2 !== null);
+
+  const report = {
+    flow_id: flowId,
+    version: workflow.version ?? null,
+    wasm: wasmFile,
+    rows: scored.rows,
+    matched_rows: scored.rows - scored.mismatches.length,
+    precision: scored.precision,
+    recall: scored.recall,
+    specificity,
+    dfa_estimate: dfaEstimate,
+    linear_time_guaranteed: re2Problems.length === 0,
+    re2_problems: re2Problems,
+    patterns: shapes,
+    mismatches: scored.mismatches,
+  };
+
+  if (json) {
+    emitJson(
+      {
+        ok: true,
+        ...report,
+        verification: {
+          passed: scored.mismatches.length === 0,
+          rows: report.rows,
+          mismatched_rows: scored.mismatches.length,
+          linear_time_guaranteed: report.linear_time_guaranteed,
+        },
+      },
+      MODE
+    );
+    return scored.mismatches.length === 0 ? 0 : 1;
+  }
+
+  out(`Flow        ${flowId} (v${workflow.version ?? '?'})`);
+  out(`Engine      ${wasmFile}`);
+  out(`Rows        ${report.matched_rows}/${report.rows} as expected`);
+  out(`Precision   ${scored.precision === null ? 'n/a (no extracted values)' : scored.precision.toFixed(3)}`);
+  out(`Recall      ${scored.recall === null ? 'n/a (no expected values)' : scored.recall.toFixed(3)}`);
+  out(`Specificity ${specificity === null ? 'n/a (no extract pattern)' : specificity.toFixed(3)}`);
+  out(`DFA est.    ${dfaEstimate === null ? 'n/a' : dfaEstimate.toFixed(3)} of the 2048-state budget`);
+  out(
+    `Linear time ${report.linear_time_guaranteed ? ok('guaranteed') : fail('not guaranteed')}` +
+      (re2Problems.length === 0
+        ? ''
+        : muted(`  (${re2Problems.length} pattern(s) outside RE2: ${re2Problems.map((p) => p.re2).join(', ')})`))
+  );
+
+  if (scored.mismatches.length > 0) {
+    out('');
+    out(fail(`${scored.mismatches.length} row(s) disagreed with the corpus`));
+    for (const row of scored.mismatches) {
+      out(`  row ${row.row}  ${muted(row.body)}`);
+      for (const problem of row.problems) {
+        if (problem.kind === 'outcome') {
+          out(`    outcome: expected ${problem.expected}, got ${problem.actual}`);
+        } else {
+          out(
+            `    ${problem.name}: expected ${JSON.stringify(problem.expected)}, got ${JSON.stringify(problem.actual)}`
+          );
+        }
+      }
+    }
+  }
+  return scored.mismatches.length === 0 ? 0 : 1;
+}
+
+/** Decode `ag1_<base64url(target)>` into the target it names. */
+function decodeApplyToken(raw) {
+  const token = String(raw ?? '').trim();
+  if (!token.startsWith('ag1_')) {
+    throw new CliError('not an apply handle: expected ag1_<base64url>', 2, { error: 'bad_target' });
+  }
+  const payload = token.slice(4);
+  if (!/^[A-Za-z0-9_-]+$/.test(payload)) {
+    throw new CliError('the apply handle is not base64url.', 2, { error: 'bad_target' });
+  }
+  const text = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  let target;
+  try {
+    target = JSON.parse(text);
+  } catch {
+    throw new CliError('the apply handle does not decode to a target document.', 2, {
+      error: 'bad_target',
+    });
+  }
+  if (target === null || typeof target !== 'object' || Array.isArray(target)) {
+    throw new CliError('the apply handle does not name a target.', 2, { error: 'bad_target' });
+  }
+  if (typeof target.flow_id !== 'string' || target.flow_id === '') {
+    throw new CliError('the apply handle does not name a flow.', 2, {
+      error: 'bad_target',
+      target,
+    });
+  }
+  return { token, target };
+}
+
+/** Which request the handle belongs to: exact body_hash first, then flow. */
+function approvalMatchesToken(approval, target) {
+  // A handle names a flow deploy, so it may only spend a request for that
+  // scope: answering an unrelated pending request would grant authority the
+  // handle never described.
+  if (approval?.scope !== undefined && approval.scope !== 'flow_deploy_prod') return false;
+  const at = approval?.target;
+  if (at === null || typeof at !== 'object') return false;
+  if (at.flow_id !== target.flow_id) return false;
+  if (typeof target.body_hash === 'string' && target.body_hash !== '') {
+    // A request minted by the apply path carries no body_hash; an exact match is
+    // the stronger evidence when both sides have one.
+    return at.body_hash === undefined || at.body_hash === target.body_hash;
+  }
+  return true;
+}
+
+/**
+ * `dakflare flow apply --token <handle> [--totp <code>]`
+ *
+ * The handle is not a new kind of authority: it decodes to the target the
+ * existing approval route spends. So this command finds the request that names
+ * that flow and answers it through `POST /v1/admin/approvals/:id/approve` — the
+ * same route a person uses. It never mints a grant itself.
+ *
+ * Idempotent by handle: if the request it names is already answered, the command
+ * says who answered it and exits 0 when that answer was an approval, 5 when it
+ * was not. A second run therefore cannot grant twice.
+ */
+async function commandFlowApply(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('flow');
+  assertCommandFlags(flags, 'flow');
+  const json = MODE.json;
+
+  const rawToken = stringFlag(flags, 'token', { required: true });
+  const totp = stringFlag(flags, 'totp');
+  if (totp !== undefined && !/^\d{6}$/.test(totp)) {
+    throw usage('--totp expects six digits');
+  }
+  const { target } = decodeApplyToken(rawToken);
+  const cfg = requireConfig();
+
+  const listed = await api(cfg, 'GET', '/v1/admin/approvals');
+  if (listed.status !== 200) throw requestFailure('read approvals', listed);
+  const approvals = Array.isArray(listed.data?.approvals) ? listed.data.approvals : [];
+  const matching = approvals.filter((approval) => approvalMatchesToken(approval, target));
+  const newest = [...matching].sort((left, right) => (right.requested_at ?? 0) - (left.requested_at ?? 0));
+  const pending = newest.find((approval) => approval.state === 'PENDING') ?? null;
+
+  if (pending === null) {
+    const decided = newest[0] ?? null;
+    if (decided === null) {
+      throw new CliError(
+        `no approval request names flow ${target.flow_id}; nothing to spend. ` +
+          'Ask for one (`dakflare ask`), or a human must open it.',
+        6,
+        { error: 'approval_required', flow_id: target.flow_id, target }
+      );
+    }
+    const payload = {
+      ok: decided.state === 'APPROVED',
+      spent: false,
+      already_decided: true,
+      state: decided.state,
+      approval_id: decided.id,
+      decided_by: decided.decided_by ?? null,
+      decided_at: decided.decided_at ?? null,
+      grant_id: decided.grant_id ?? null,
+      target,
+    };
+    if (decided.state === 'APPROVED') {
+      if (json) emitJson(payload, MODE);
+      else {
+        out(ok('Already applied') + ` — ${decided.id} was approved`);
+        out(`  by          ${decided.decided_by ?? 'unknown'} at ${iso(decided.decided_at)}`);
+        out(`  grant       ${decided.grant_id ?? 'none'}`);
+        out(muted('  the handle is spent; nothing was granted twice'));
+      }
+      return 0;
+    }
+    if (json) emitJson({ ...payload, ok: false, error: 'not_pending', message: `request is already ${decided.state.toLowerCase()}` }, MODE);
+    else {
+      out(fail(`Cannot spend: request ${decided.id} is ${decided.state.toLowerCase()}`));
+      out(`  by          ${decided.decided_by ?? 'unknown'} at ${iso(decided.decided_at)}`);
+    }
+    return exitCodeFor('not_pending');
+  }
+
+  const headers = totp === undefined ? {} : { 'X-Dakflare-Totp': totp };
+  const result = await api(
+    cfg,
+    'POST',
+    `/v1/admin/approvals/${encodeURIComponent(pending.id)}/approve`,
+    { duration_s: 3_600 },
+    headers
+  );
+
+  if (result.status === 409) {
+    let decidedBy = result.data?.decided_by ?? null;
+    let decidedAt = result.data?.decided_at ?? null;
+    if (decidedBy === null) {
+      // The route only carries these on a lost race; a plain "already decided"
+      // is looked up so the answer is always who and when, not just 409.
+      const after = await api(cfg, 'GET', '/v1/admin/approvals');
+      const match =
+        after.status === 200
+          ? (after.data?.approvals ?? []).find((approval) => approval.id === pending.id)
+          : undefined;
+      decidedBy = match?.decided_by ?? null;
+      decidedAt = match?.decided_at ?? null;
+    }
+    if (json) {
+      emitJson(
+        {
+          ok: false,
+          error: 'not_pending',
+          message: result.data?.message ?? 'the request is no longer pending',
+          approval_id: pending.id,
+          decided_by: decidedBy,
+          decided_at: decidedAt,
+        },
+        MODE
+      );
+    } else {
+      out(fail(`Cannot spend: request ${pending.id} is already decided`));
+      out(`  by          ${decidedBy ?? 'unknown'} at ${iso(decidedAt)}`);
+    }
+    return exitCodeFor('not_pending');
+  }
+  if (result.status !== 200) throw decisionFailure('apply the handle', result);
+
+  const data = result.data ?? {};
+  if (json) {
+    emitJson(
+      {
+        ok: true,
+        spent: true,
+        approval_id: pending.id,
+        scope: data.scope ?? null,
+        target: data.target ?? target,
+        grant: data.grant ?? null,
+        granted_s: data.granted_s ?? null,
+        clamped: data.clamped === true,
+      },
+      MODE
+    );
+    return 0;
+  }
+  out(ok('Applied') + ` — the handle was spent on request ${pending.id}`);
+  out(`  scope       ${data.scope ?? 'unknown'}  ${describeTarget(data.target ?? target)}`);
+  if (data.grant) {
+    out(`  grant       ${data.grant.id}`);
+    out(`  expires     ${iso(data.grant.expires_at)} (${humanDuration(data.granted_s)})`);
+  }
+  if (data.clamped === true) {
+    out(warn(`  clamped     asked for 1h, granted ${humanDuration(data.granted_s)}`));
+  }
+  return 0;
+}
+
+/** `dakflare flow <test|apply>` — the v2 loop, beside `flows` (documents). */
+async function commandFlow(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('flow');
+  if (sub === 'test') return commandFlowTest(rest);
+  if (sub === 'apply') return commandFlowApply(rest);
+  err(`dakflare: unknown flow subcommand "${sub}"`);
+  err('try `dakflare flow --help`');
+  return 2;
+}
+
 async function commandRules(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('rules');
@@ -4925,6 +6214,9 @@ Usage: dakflare <command> [options]
   examples      real invocations for one command
   audit         tail the audit log (phase 2; says so when the endpoint is absent)
   key           signing-key helpers: \`key fingerprint\`
+  ask           ask for a flow patch; prints the score and the ag1_ handle
+  fix           the root-cause card for one flow failure
+  flow          \`flow test\` (local corpus) and \`flow apply\` (spend a handle)
 
 Every command accepts --json. Each has its own --help.
 
@@ -5116,6 +6408,77 @@ precision and recall in the response are measured, not claimed.
 Runs offline against the bundled flow.wasm: the same engine the Worker uses, so
 what this prints is what a flow will do.`,
 
+  ask: `Usage: dakflare ask "<intent>" --flow <id> [options]
+
+Asks the deployment to judge a candidate patch for one flow, and prints what it
+found: the faithfulness score, whether a human must approve, and — when approval
+is required — the ag1_ handle that a later \`dakflare flow apply\` spends.
+
+  --flow <id>             the flow the patch is for (required)
+  --diff-summary <text>   what changes; default is "intent: <intent>"
+  --corpus-report <text>  the measured corpus numbers to weigh, max 1000 chars
+  --ndjson                one JSON object per phase, one per line
+  --dry-run               print the request and send nothing
+
+Phases, in order: understand (the flow was read), propose (the request body),
+verify (the HTTP outcome), result (score, approval, handle), and error when a
+phase fails. The handle is only masked on a non-TTY without --json: it is bearer
+authority for one apply, so it is not printed into a pipeline by accident.
+
+A required approval is not a failure: the command exits 0 and names the handle,
+because the handle is what a human's approval is for.`, 
+
+  fix: `Usage: dakflare fix --flow <id> [options]
+
+Prints the root-cause card for one failure: the code, a one-line summary, the
+character offset, a before/bad/after window with the offending bytes visible,
+the encoding and segment count, and the proposed pattern patch when there is one.
+
+  --flow <id>          the flow, sent as flow_run_id (required)
+  --message-id <id>    explain this stored message
+  --message <text>     diagnose this body directly, with no stored row
+  --pattern <regex>    also check whether the pattern cuts a reference in half
+  --ndjson             one JSON object per phase, one per line
+  --dry-run            print the request and send nothing
+
+Invisible characters are rendered as <U+XXXX> and control bytes as \\uXXXX, so a
+zero-width space is visible in the highlight rather than silently shortening it.
+Exit 0 means the card was produced, including when no signature matched: the card
+says "no signature matched" and that is an answer, not a failure.`,
+
+  flow: `Usage: dakflare flow test --flow <id> --corpus <file.jsonl> [--json]
+       dakflare flow apply --token <handle> [--totp <code>]
+
+  test   run the built flow engine over a labelled corpus, locally
+  apply  spend an ag1_ handle through the existing approval route
+
+\`flow test\` instantiates flow.wasm with Node's built-in WebAssembly — no
+dependency, no Worker round trip — and scores every row. The corpus is JSONL:
+
+  {"sender":"+8801...","body":"Paid 500 at REF 12A45","expect":{"outcome":"delivered","variables":{"amount":"500"}}}
+
+It prints precision (correct values / produced values), recall (expected values
+produced / expected values), specificity (fixed-token mass, an ESTIMATE),
+dfa_estimate (construct count against the 2048-state budget, an ESTIMATE), and
+linear_time_guaranteed, which is true only when every pattern is RE2-compilable
+(no backreference, lookaround, atomic group, conditional, possessive quantifier
+or nested quantifier). Per-row mismatches name the expected and the actual.
+
+If no built engine exists the command exits 6 and names the build command. It
+never reports a pass it did not run. A row mismatch exits 1.
+
+\`flow apply\` decodes the handle to the target it names, finds the pending
+approval request for that flow, and answers it through
+POST /v1/admin/approvals/:id/approve — the same route a person uses. It does not
+mint a grant itself. It is idempotent by handle: if that request is already
+answered it reports who and when instead of granting twice, exiting 0 when the
+answer was approval and 5 when it was not. A 401/403 exits 4.
+
+  --totp <code>   six digits, sent as X-Dakflare-Totp; never echoed
+
+Note the difference from \`dakflare flows apply <file>\`: that writes a flow
+document, this spends authority.`,
+
   flows: `Usage: dakflare flows apply <file> [--dry-run] [--agent]
 
   apply <file>    write one flow document and let the Worker compute its layout
@@ -5129,7 +6492,10 @@ an agent can author a flow without knowing anything about the canvas.
 --dry-run prints a structural diff (nodes, edges, variables, layout) as
 data.dry_run_diff and writes nothing. A stale expected_previous_version exits 5
 and names the current version to retry against. A refused graph exits 2 and
-prints every issue with its path.`,
+prints every issue with its path.
+
+This writes a DOCUMENT. \`dakflare flow apply --token <handle>\` is a different
+command: it spends the authority an \`ask\` handle names.`,
 
   rules: `Usage: dakflare rules <apply|test> [options]
 
@@ -5174,10 +6540,17 @@ Purpose, usage line and every flag for one command, in the words that command
 uses. \`dakflare describe send\` is the two-line version of \`send --help\`.
 `,
   schema: `Usage: dakflare schema <command> [--agent]
+       dakflare schema states [--agent]
+       dakflare schema --flow-v2 [--json]
 
 The flag contract as data: name, type, whether it is required, and what it means.
 Use this when you need to build a call rather than read about one.
-`,
+
+--flow-v2 prints the canonical dakflare.flow/v2 JSON Schema (node types, edges,
+template spans, and the fields an ag1_ apply handle carries). With --json the
+schema is the whole of stdout, with no envelope, so it can be piped straight
+into a validator. The document lives at ${FLOW_V2_SCHEMA_PATH}; it was derived
+from worker/src/lib/flow-ir.ts, which is the checker it describes.`,
   examples: `Usage: dakflare examples <command> [--agent]
 
 Real invocations, including one that shows the common mistake for that command.
@@ -5228,6 +6601,9 @@ const COMMANDS = {
   flows: commandFlows,
   rules: commandRules,
   extract: commandExtract,
+  ask: commandAsk,
+  fix: commandFix,
+  flow: commandFlow,
   trace: commandTrace,
   mcp: commandMcp,
   alerts: commandAlerts,
