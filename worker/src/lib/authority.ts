@@ -724,7 +724,19 @@ export async function decideApproval(
     return { ok: false, error: "not_found", message: `no approval request ${id}` };
   }
   if (approval.state !== "PENDING") {
-    return { ok: false, error: "not_pending", message: `request is already ${approval.state}` };
+    // The common shape of a lost race: the request was answered between this
+    // read and the decide. Name who answered, exactly as lostRace does, so a
+    // client never has to make a second call to find out.
+    return {
+      ok: false,
+      error: "not_pending",
+      message:
+        approval.decided_by === null || approval.decided_by === undefined
+          ? `request is already ${approval.state.toLowerCase()}`
+          : `request is already ${approval.state.toLowerCase()} by ${approval.decided_by}`,
+      decided_by: approval.decided_by,
+      decided_at: approval.decided_at,
+    };
   }
   if (approval.expires_at <= now) {
     await env.DB.prepare(

@@ -173,7 +173,14 @@ export async function handleApprovalReject(
   const decided = await decideApproval(env, id, "reject", { by: actor.label });
   if (!decided.ok) {
     const status = decided.error === "not_found" ? 404 : decided.error === "not_pending" ? 409 : 400;
-    return Response.json({ error: decided.error, message: decided.message }, { status });
+    return Response.json(
+      {
+        error: decided.error,
+        message: decided.message,
+        ...("decided_by" in decided ? { decided_by: decided.decided_by, decided_at: decided.decided_at } : {}),
+      },
+      { status }
+    );
   }
 
   await writeAudit(env, {
