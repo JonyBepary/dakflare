@@ -203,7 +203,9 @@ answered first (`request was already approved by <actor>`).
 
 `approval_requests` moves `PENDING` to `APPROVED`, `REJECTED`, `EXPIRED` or `CANCELLED`. The console's
 Approvals page and `dakflare auth approvals|approve|reject` answer the queue. An approval that is
-answered elsewhere is removed with the reason, not silently.
+answered elsewhere is removed with the reason, not silently. The same page lists the **live grants**
+the queue has minted, with a countdown and a revoke (`GET /v1/admin/grants?live=1`,
+`DELETE /v1/admin/grants/:id`); `dakflare auth grants` reads the same table.
 
 ### 5.4 MCP
 
@@ -309,7 +311,10 @@ Retention: messages older than `MESSAGE_RETENTION_DAYS` (90 by default) are dele
 cannot exhaust the D1 write budget. `audit_log` is append-only. `extract_misses` and `alerts` are
 operator evidence, not cache.
 
-The schema is applied by hand from `worker/migrations/0001..0007`; `d1_migrations` records what ran.
+A revoked device is a **tombstone**, not a deletion: `devices.revoked_at` is set, the public key and
+FCM token are cleared, messages stay, and alerts and flow runs go. Re-pairing the same device id
+revives the row. Migration `0008_revoked_devices.sql` adds the column; the schema is applied by hand
+from `worker/migrations/0001..0008`, and `d1_migrations` records what ran.
 
 ## 9. Console
 
@@ -319,11 +324,14 @@ SvelteKit with `adapter-static`, served at `/admin`. Routes:
 `/workflows`, `/workflows/edit`, `/approvals`, `/audit`, `/security`.
 
 - **Overview**: deployment health, fleet, the quiet panel, the rules-vs-flows pipeline.
-- **Devices**: the fleet with five presence states and the device detail drawer.
-- **Messages**: the message log with delivery state and the reply lineage.
+- **Devices**: the fleet with five presence states, a named group of revoked tombstones, and the
+  device detail drawer. A revoked drawer is read-only and says how to pair again.
+- **Messages**: the message log with delivery state, the reply lineage, and a trace for a command
+  that failed or expired.
 - **Automation**: rules and workflows; the editor has `Steps` (default), `Map` and a read-only
   `Source` sheet, with `Ctrl+K` finder, grouped undo, `Ctrl+S` and a leave guard.
-- **Approvals**: the pending authority queue with the duration ladder.
+- **Approvals**: the pending authority queue with the duration ladder, and the live grants already
+  handed out, with a countdown and a revoke.
 - **Audit log**: every privileged action.
 - **Security**: factors, invites, recovery.
 
@@ -395,6 +403,7 @@ Invariants:
 - A send is asynchronous; `SENT` is not delivery.
 - An agent cannot hold `devices:revoke` or `auth:reset`, and a costly scope needs a live grant.
 - The console measures its card, not the viewport.
+- A revoked device cannot authenticate, be a send target, inherit workflows or be woken.
 - Deploys are local; CI holds no Cloudflare credential.
 
 Known gaps:
@@ -406,6 +415,5 @@ Known gaps:
 - **Magic link** needs `RESEND_API_KEY`; without it the factor is not advertised.
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
-- **The approvals page mints authority but does not show or withdraw live grants**; the CLI does.
 - **A proxy in front of the console breaks the cookie**, not the sign-in, because the session cookie
   is host-only.

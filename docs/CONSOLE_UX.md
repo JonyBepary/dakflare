@@ -62,6 +62,11 @@ whether a push token exists (wake capability).
 Wake capability is a separate chip: `push` (FCM token present) or `poll-only`.
 "Offline + poll-only" is the state that must raise an alert; "synced + poll-only" is normal.
 
+A revoked device is a **lifecycle** state, not a presence one. It keeps a tombstone (`revoked_at`), loses
+its key and its wake token, and the fleet groups it separately from live and archived rows. The drawer
+is read-only and says how to pair the phone again; it is never drawn as offline, because there is no
+link left to be out of contact with.
+
 ---
 
 ## 3. Failure is a first-class state

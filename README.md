@@ -102,10 +102,12 @@ containers that never carry body text, one coral action per screen, mono for any
 compares with a log.
 
 - **Overview**: deployment health, fleet, the quiet panel, the rules-vs-flows pipeline.
-- **Devices / Messages**: the fleet with five states, and a message log that says who answered and
-  what happened to that answer (`Delivered · Sent · Queued · Failed, reason`).
+- **Devices / Messages**: the fleet with five presence states plus a revoked tombstone group, and a
+  message log that says who answered, what happened to that answer (`Delivered · Sent · Queued ·
+  Failed, reason`), and the trace behind a failure.
 - **Automation**: rules as one sentence each, workflows on a canvas.
-- **Approvals**: the queue of time-boxed authority an agent is waiting for, with the duration ladder.
+- **Approvals**: the queue of time-boxed authority an agent is waiting for, with the duration ladder,
+  and the live grants already handed out, with a countdown and a revoke.
 - **Audit log**: every privileged action, who took it and what it touched.
 - **Security**: sign-in factors (passkey, authenticator, password) and invites.
 
