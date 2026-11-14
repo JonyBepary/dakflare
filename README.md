@@ -20,9 +20,9 @@ Bengal station by station) with the **Cloudflare** edge where the coordinator li
 | Layer | Role |
 |---|---|
 | **Android app** (Tauri + Rust core) | Owns the SIM, is the default SMS app, holds a P-256 identity wrapped by Android Keystore, runs the flow engine on-device, mirrors what it did |
-| **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts, channels, flows and the agent control plane |
+| **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts, channels, flows, the agent control plane, and the Clef decision client behind it |
 | **Durable Objects** | `DeviceGateway` per handset (command queue, replay nonces, ack and offline alarms), `AuthGuard` (account lockout), `AuthorityGuard` (grant windows) |
-| **D1** | Fleet, messages, conversations, rules, flows, agents, approvals, grants, audit. Seven migrations, `0001` through `0007` |
+| **D1** | Fleet, messages, conversations, rules, flows, agents, approvals, grants, audit. Eight migrations, `0001` through `0008` |
 | **Queues and Workflows** | `dakflare-webhook-queue` for outbound webhooks; `FlowExecutionWorkflow` for flow delays longer than five seconds |
 | **Channels** | SMS through the handset, Telegram and WhatsApp Cloud webhooks, all stored as conversations |
 | **KV** | FCM bearer-token cache |
@@ -40,7 +40,7 @@ AndroidKeyStore AES-GCM key. A copied database alone cannot impersonate the phon
 | `cli/` | `dakflare`, a zero-dependency Node 22+ operator CLI |
 | `simulator/` | the Android app (Tauri + Rust core, Kotlin telephony, Svelte UI) and the on-device flow engine |
 | `design/` | design tokens and the token preview |
-| `docs/` | the master spec, runbooks, console and workflow notes, and `history/` for point-in-time plans |
+| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, and `history/` for point-in-time plans |
 | `skills/` | four `SKILL.md` packages for agents: provision, messaging, flows, agents |
 | `contracts/` | the MCP tool contract (`mcp-tools.json`) |
 | `test-support/` | local dev stack, protocol and flow vectors, platform and skills gates |
@@ -105,7 +105,9 @@ compares with a log.
 - **Devices / Messages**: the fleet with five presence states plus a revoked tombstone group, and a
   message log that says who answered, what happened to that answer (`Delivered · Sent · Queued ·
   Failed, reason`), and the trace behind a failure.
-- **Automation**: rules as one sentence each, workflows on a canvas.
+- **Automation**: rules as one sentence each, workflows on a canvas, and the agent facing
+  surfaces: a palette that proposes a patch with real phases, a dashed ghost patch you accept or
+  revert with one undo step, and "Auto-tag with Clef" in the pattern sheet.
 - **Approvals**: the queue of time-boxed authority an agent is waiting for, with the duration ladder,
   and the live grants already handed out, with a countdown and a revoke.
 - **Audit log**: every privileged action, who took it and what it touched.
@@ -192,12 +194,28 @@ irreversible action also needs a live, time-boxed grant that a human approves in
   `dakflare auth approvals|approve|reject`. A request that loses the race is told who answered first.
 - **Grants on record**: `dakflare auth grants [--live]` and `dakflare auth grants revoke <id>`.
 
+### Agent analysis
+
+Four routes give an agent the reading an operator does by eye, each behind the same gate as
+the console: `POST /v1/agent/triage` (intent, injection risk, template specificity, span
+roles, a spoofing invariant), `POST /v1/agent/telemetry` (a question mapped to one of six
+bounded D1 plans), `POST /v1/agent/diagnose` (one of six root causes with an exact character
+offset) and `POST /v1/agent/synthesize` (a faithfulness score, an approval verdict and an
+`apply_token`). The model is Cloudflare Clef, asked as a batch of typed questions in one
+pass; when it is unreachable the routes return less and say so. `docs/AGENT_SURFACE.md` is the
+reference.
+
 ### MCP
 
-`POST /v1/mcp` serves seven tools over the same token: `list_devices`, `read_messages`,
-`command_status`, `list_flows`, `get_flow`, `trace` and `send_sms`. The bearer is a static `dkf_agt_`
-token, and this is deliberately not MCP authorization: there is no OAuth 2.1 resource server here, so
-a conformant OAuth client cannot negotiate it. `dakflare mcp serve` bridges the same tools over stdio.
+`/mcp` serves the same seven tools (`list_devices`, `read_messages`, `command_status`,
+`list_flows`, `get_flow`, `trace`, `send_sms`) over streamable HTTP; `/v1/mcp` keeps the tokens
+already deployed against it. `POST` carries JSON-RPC, `GET` holds the SSE stream of a stateful
+session and `DELETE` ends it. `Accept` must include `application/json` or `text/event-stream`.
+Discovery is public at `/.well-known/oauth-protected-resource` (RFC 9728) and
+`/.well-known/oauth-authorization-server` (RFC 8414), and a 401 names the metadata document.
+Mutating tools require MCP elicitation first: the client confirms, supplies a TOTP code and
+names `max_uses`, and only then is a time-boxed grant minted. `dakflare mcp serve` bridges the
+same tools over stdio.
 
 ## Flows
 
@@ -211,7 +229,10 @@ author a flow without knowing anything about coordinates.
   against the negatives.
 - Drift alerts (`extraction_drift`) fire when a stored pattern stops matching traffic.
 - The editor has two surfaces (`Steps` and `Map`) and a read-only `Source` sheet; `PatternSheet`
-  explains a pattern with live samples.
+  explains a pattern with live samples and can auto-tag one from a message.
+- A proposed patch arrives as a ghost: dashed in the outline and on the map, with one banner to
+  accept or revert. Accept is a single undo step; while it is staged, every other edit path is
+  closed.
 
 The same engine also compiles to WebAssembly (`simulator/flow-wasm`), so the handset can evaluate a
 flow locally instead of waiting for the network.
@@ -257,12 +278,13 @@ means no future update can carry the same app id.** The certificate fingerprint 
 ## CLI
 
 `dakflare` is zero-dependency, speaks one compact JSON document under `--agent`, never prompts and
-never colours. Twenty-three commands:
+never colours. Twenty-eight commands:
 
 - **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`.
 - **Messaging**: `send`, `status`, `audit`.
 - **Accounts and agents**: `auth bootstrap|invite|invites|reset|mint-agent-token|agent-tokens|revoke-agent-token|approvals|approve|reject|grants`.
 - **Automation**: `flows apply|heal`, `rules apply|test`, `extract synthesize`.
+- **Agent work**: `ask`, `fix`, `flow test --corpus`, `flow apply --token`, `schema --flow-v2`.
 - **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`.
 - **Contract**: `capabilities`, `describe`, `schema` (including `schema states`), `examples`,
   `mcp serve`, `key fingerprint`.
@@ -302,7 +324,11 @@ cryptography rather than a mock. `test-support/` holds the dev stack and the sha
   not advertise the factor, because a door that cannot deliver a link would strand the login page.
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
-- **`MEDIA_BUCKET` and `AI` are bound but unused**; no Worker route reads media or calls a model yet.
+- **`MEDIA_BUCKET` is bound but unread**; no Worker route serves media yet.
+- **Workers AI is used by the agent routes only**; nothing else calls a model, and `jev` has
+  thresholds but no transport.
+- **Agent telemetry has no console surface yet**; the endpoint and the CLI cover it, the console
+  does not.
 - **A proxy in front of the console breaks the cookie**, not the sign-in. The session cookie is
   host-only, so an http preview or a second hostname signs in on the Worker and keeps nothing; open
   the deployment's own HTTPS URL. `/admin/login` is honest about this: it reports that the session

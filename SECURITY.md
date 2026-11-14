@@ -9,7 +9,7 @@ deployment action, not ours.
 | Version | Supported |
 |---|---|
 | latest release | yes |
-| anything older | no — upgrade |
+| anything older | no, upgrade |
 
 ## Reporting a vulnerability
 
@@ -37,9 +37,9 @@ Please include:
 
 ## What is out of scope
 
-- **Your Cloudflare account configuration** — WAF rules, Access policies, budget alerts,
+- **Your Cloudflare account configuration**: WAF rules, Access policies, budget alerts,
   DNS, TLS mode, workers.dev toggles. Those are yours to operate and are not shipped here.
-- **Your carrier and SIM** — including carrier rate limits and bundle exhaustion.
+- **Your carrier and SIM**: including carrier rate limits and bundle exhaustion.
 - Vulnerabilities in Cloudflare's platform, Android, or third-party dependencies that have
   no project-specific exploitation path.
 - Denial of service through sheer request volume against a deployment you exposed publicly
@@ -50,14 +50,14 @@ Please include:
 
 This repository must contain **no credentials**. A test fixture that is shaped like a key
 (the contract's published test vector, and a key generated at test time for the local FCM
-stub) is not a credential and is documented as such — but a committed OAuth client secret,
+stub) is not a credential and is documented as such, but a committed OAuth client secret,
 API token, service-account key, or admin token is a release blocker.
 
 ## AGPL-3.0 and security disclosure
 
 This project is licensed AGPL-3.0. Under section 13, if you run a modified version as a
 network service, you must offer its source to the people using it. That obligation is
-yours as the operator — and it is also why the shipped deployment exposes a `/source`
+yours as the operator, and it is also why the shipped deployment exposes a `/source`
 link: the unmodified deployment already satisfies it.
 
 If you patch a vulnerability locally, please still report it upstream. A silent local patch

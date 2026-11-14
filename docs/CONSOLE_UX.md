@@ -1,4 +1,4 @@
-# DakFlare console — UX decisions
+# DakFlare console: UX decisions
 
 Status: adopted 2026-10-22, layout updated 2026-11-14. Supersedes the implicit model in the dashboard as built.
 Wire behaviour this implies is normative in `history/PROTOCOL_CONTRACT_V5.md` §11.11–§11.12.
@@ -76,7 +76,7 @@ The operator's first job is knowing the gateway stopped answering. The console t
 - an **open-alert banner** on every console page, backed by `GET /v1/admin/alerts`;
 - an alert row written when `offline_alert` fires (the Worker previously only logged to the
   console, which nobody reads), armed by *any* authenticated contact so poll-only devices
-  are covered — not only by a WebSocket connect;
+  are covered, not only by a WebSocket connect;
 - an **acknowledge** action, so a known outage stops shouting without hiding the history;
 - an optional `ALERT_WEBHOOK_URL` for out-of-band delivery.
 
@@ -146,7 +146,33 @@ receipts (Wave 2) and must not be shown until then.
 
 ---
 
-## 7. Out of scope here
+## 7. Agent proposals are a state, not a surprise
+
+A proposal from an agent is not applied and is not ignored: it is staged.
+
+- **The palette says what it will do.** `Ctrl+K` filters steps locally. `>` or `Ctrl+J` opens
+  agent mode, `Tab` escalates a query with no local match, and the "Ask the agent" row is always
+  in the cursor ring. The phases are real: Understand is the local reading of the words against
+  this flow, Propose is the in-flight request, Verify re-runs the editor's own validator on the
+  patched graph. A failed phase reads "stopped", never "done".
+- **A staged patch is visible in both surfaces.** Dashed on the Steps outline and on the Map,
+  with one banner: Accept (Enter) or Revert (Esc). Accept is a single undo step; Revert writes
+  nothing. While a patch is staged, Save, drag, connect and delete are closed, because two
+  authors on one graph is how a change gets lost.
+- **Approval is a visible gate.** When the judge says approval is required, Accept is disabled
+  until the minted token is present and the operator ticks "I approve this patch". A patch the
+  judge never scored requires "I have reviewed this patch" instead.
+- **Auto-tag does not replace the manual flow.** "Auto-tag with Clef" snapshots the current
+  spans into the same undo state first, and a balance below the principal is shown as a
+  spoofing signal, explicitly not an error in the operator's fields. Unavailable or refused
+  leaves the manual path untouched with a note.
+
+The rule behind all four: an agent proposes, a person accepts, and the console never renders a
+model's guess as if it were a measurement.
+
+---
+
+## 8. Out of scope here
 
 Multi-tenant isolation and RCS. Roles exist (owner, admin, member) and the nav hides the
 owner/admin group; the console is still designed for one deployment, not a tenant fleet.

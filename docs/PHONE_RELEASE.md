@@ -26,7 +26,7 @@ Output:
 simulator/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
-(`universal` is the Gradle flavour name; the APK is arm64-v8a only — verified
+(`universal` is the Gradle flavour name; the APK is arm64-v8a only, verified
 with `unzip -l`.)
 
 Manual equivalent, if the script is in the way:
@@ -64,7 +64,7 @@ DAKFLARE_KEY_ALIAS          key alias (default: dakflare)
 DAKFLARE_KEY_PASSWORD       optional; PKCS#12 shares the store password
 ```
 
-To recreate the key (only if it is truly gone — see below):
+To recreate the key (only if it is truly gone; see below):
 
 ```sh
 keytool -genkeypair -keystore ~/.config/dakflare/dakflare-release.jks \
@@ -157,7 +157,7 @@ the role without them:
 - `SmsReceiver` handles `SMS_DELIVER` (and `SMS_RECEIVED`, so the gateway keeps
   working when another app holds the role);
 - `RespondViaMessageService` answers `RESPOND_VIA_MESSAGE` (protected by
-  `SEND_RESPOND_VIA_MESSAGE`) — a deliberate no-op required for eligibility;
+  `SEND_RESPOND_VIA_MESSAGE`), a deliberate no-op required for eligibility;
 - `MmsReceiver` accepts `WAP_PUSH_DELIVER` and drops the push; the role requires
   the receiver even though MMS is out of scope.
 
@@ -176,7 +176,7 @@ Pairing stores `https://…workers.dev`-style worker URLs.
 Not submitted. When it is, F-Droid reviewers will ask:
 
 1. **SMS permissions and the default-SMS role.** SMS apps are allowed, but the
-   app must actually be a default SMS handler — here the role is also what makes
+   app must actually be a default SMS handler; here the role is also what makes
    the gateway work. Google Play's SMS policy is a separate reason this is
    sideload/F-Droid only.
 2. **`NonFreeNet` / remote backend.** The app is useless without a backend for

@@ -1,11 +1,11 @@
-# DakFlare — the warm console
+# DakFlare: the warm console
 
 Status: proposed 2026-10-29, supersedes the visual language in `dashboard/src/app.css`
 (not its structure). `docs/CONSOLE_UX.md` stays normative: the five device states,
 the rules-vs-flows pipeline and one-reply-per-message are not style.
 
 The console is used by one operator who watches phones that answer strangers' SMS.
-Warmth buys attention — a dashboard nobody opens is a dashboard that hides a dead
+Warmth buys attention: a dashboard nobody opens is a dashboard that hides a dead
 gateway. It must not buy carelessness: every number an operator acts on stays mono,
 high-contrast and still.
 
@@ -25,8 +25,8 @@ text: it is a container, a chip or a fill behind dark ink.
 | `--ink-3` | `#6B6053` | metadata, timestamps |
 | `--line` | `#E7DCCB` | hairlines |
 | `--line-strong` | `#D3C4AC` | input borders, focus ring base |
-| `--accent` | `#B93F22` | accent **text** — 5.14:1 on `--bg` |
-| `--accent-fill` | `#C9482A` | primary button fill, white text — 4.73:1 |
+| `--accent` | `#B93F22` | accent **text**, 5.14:1 on `--bg` |
+| `--accent-fill` | `#C9482A` | primary button fill, white text, 4.73:1 |
 | `--accent-soft` | `#FBE3DA` | selected nav, tinted cards |
 
 Pastel containers, each with a matching ink that clears 4.5:1:
@@ -79,7 +79,7 @@ One set, named, with places they are allowed. Every one is disabled wholesale by
 | `settle` | `opacity 0→1`, `translateY(6px)→0`, 220ms `cubic-bezier(.2,.8,.2,1)`, 40ms stagger, max 6 items | first paint of a page section, list rows on navigation |
 | `pop` | `scale(.8)→1.06→1`, 320ms `cubic-bezier(.34,1.56,.64,1)` | avatar entering a stack, success check, mascot reaction |
 | `mascot-idle` | `translateY(0→-3px)` + blink, 4s `ease-in-out` infinite | empty state only, one instance per page |
-| `pulse` | `opacity .55→1`, 2.4s infinite | the deployment beacon on Overview, and nav presence — never a row chip |
+| `pulse` | `opacity .55→1`, 2.4s infinite | the deployment beacon on Overview, and nav presence, never a row chip |
 
 Forbidden: motion on the alert/error path, motion that delays a reading (no animated
 counters, no skeleton shimmer over 1.2s, no marquee), infinite animation inside a table
@@ -96,7 +96,7 @@ stable hash of the label; stack overlap `-8px`, show three then `+N` in `--stone
 for device groups and the operator, never for a phone number (a number is never
 decorative and never truncated into an avatar).
 
-Mascot: one line-drawn doodle, ink stroke 2px, appears in exactly three places — pairing
+Mascot: one line-drawn doodle, ink stroke 2px, appears in exactly three places: pairing
 success, the "all quiet" panel, and the *no alerts* empty state. It never appears beside an
 error, a destructive dialog or a message body, and never on "no messages yet": a cheerful
 mark beside an empty thread list would claim health nobody has measured.
@@ -110,7 +110,7 @@ absolutely on error, destructive and alert surfaces.
 
 12-column bento inside a fixed outer margin of 32px (24px below 720px). Internal gaps
 are 16px within a group and 24px between groups. Cards may span 3, 4, 6, 8 or 12 columns
-— five patterns, reused; a new width needs a reason in the PR.
+Five patterns, reused; a new width needs a reason in the PR.
 
 - The shell: 248px sidebar (`--surface-2`, no shadow, hairline right rule), a 64px
   sticky header, content in a single scroll.
@@ -139,7 +139,7 @@ one dopamine moment; the carrier panel keeps mono for the injected number and bo
 - The five device states and their chips (`CONSOLE_UX.md` §2), and `push` / `poll-only`.
 - Rules vs workflows, one reply per message, and `reply_source` on the row.
 - Mono for ids, phone numbers, versions, counts in tables. A phone number is never
-  abbreviated in a data row — it may be masked only where the protocol already masks it.
+  abbreviated in a data row; it may be masked only where the protocol already masks it.
 - Focus rings: 2px `--accent` offset 2px on every interactive element, visible on cream,
   pastel and dark.
 - The dashboard remains a prerendered static build with no new runtime dependency.

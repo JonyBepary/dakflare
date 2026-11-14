@@ -43,7 +43,7 @@ same rules-then-flows pipeline.
 | `WEBHOOK_QUEUE` | Queue `dakflare-webhook-queue` | outbound webhook delivery |
 | `FLOW_WORKFLOW` | Workflow `flow-execution-workflow` | delays longer than five seconds |
 | `MEDIA_BUCKET` | R2 `dakflare-media` | declared; no route reads it yet |
-| `AI` | Workers AI | declared; no route calls a model yet |
+| `AI` | Workers AI (Clef) | triage, telemetry routing and patch judging in `lib/system1.ts` |
 | `ASSETS` | `public/` | the console and the landing page |
 | limiters | `PAIR`, `ADMIN`, `DEVICE`, `AUTH_FAIL`, `PAIR_GLOBAL`, `AUTH_ACCOUNT`, `AUTH_IP` | request budgets |
 
@@ -209,15 +209,38 @@ the queue has minted, with a countdown and a revoke (`GET /v1/admin/grants?live=
 
 ### 5.4 MCP
 
-`POST /v1/mcp` serves seven tools over the same token:
+`/mcp` serves seven tools over the same token:
 
 `list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `trace`, `send_sms`.
 
+`/v1/mcp` remains for tokens already deployed against it. `POST` carries JSON-RPC, `GET` holds the
+SSE stream of a stateful session and `DELETE` ends it; `Accept` must include `application/json` or
+`text/event-stream`, otherwise `406`. Discovery is public at
+`/.well-known/oauth-protected-resource` (RFC 9728) and
+`/.well-known/oauth-authorization-server` (RFC 8414), audience binding follows RFC 8707, and a `401`
+names the metadata document in `WWW-Authenticate`.
+
 `send_sms` uses multi-round-trip: with no grant it returns `input_required` naming the approval
-request; the retry re-reads the grant store, so a client cannot widen its own permission. The bearer
-is a static `dkf_agt_` token and this is deliberately not MCP authorization: there is no OAuth 2.1
-resource server, and a conformant OAuth client cannot negotiate it. `dakflare mcp serve` bridges the
-same tools over stdio.
+request; the retry re-reads the grant store, so a client cannot widen its own permission. Mutating
+tools require MCP elicitation first (`confirm_deployment`, `totp_code`, `max_uses`); a declined or
+timed-out elicitation aborts the call with nothing executed. `dakflare mcp serve` bridges the same
+tools over stdio.
+
+### 5.5 Agent analysis
+
+Four routes give an agent the reading an operator does by eye, behind the same gate as the console:
+
+| Route | Scope | Returns |
+|---|---|---|
+| `POST /v1/agent/triage` | `messages:read` | intent, injection risk, template specificity, span roles, `balance >= principal` |
+| `POST /v1/agent/telemetry` | `devices:read` | one of six fixed plans, executed as one bounded D1 batch |
+| `POST /v1/agent/diagnose` | `messages:read` | one of six root causes with a character offset and a highlight |
+| `POST /v1/agent/synthesize` | `flows:write` | faithfulness score, approval verdict, `apply_token` |
+
+The model is Cloudflare Clef, asked as one batch of typed questions (`noul`, `choice`, `score`).
+When it is unreachable the routes return less and say so; they never invent a classification, and
+`synthesize` returns `503` rather than minting authority without a verdict. `docs/AGENT_SURFACE.md`
+has the request and response shapes, the thresholds and the error codes.
 
 ## 6. Automation
 
@@ -344,12 +367,13 @@ ellipsis. Measured at 390, 768, 914, 1024 and 1440 with no horizontal overflow.
 ## 10. CLI
 
 `dakflare` is zero-dependency, speaks one compact JSON document under `--agent`, and never prompts or
-colours. Twenty-three commands:
+colours. Twenty-eight commands:
 
 `init`, `up`, `doctor`, `pair`, `devices`, `revoke`, `send`, `status`, `audit`, `auth` (bootstrap,
 invite, invites, reset, mint-agent-token, agent-tokens, revoke-agent-token, approvals, approve, reject,
 grants), `flows apply|heal`, `rules apply|test`, `extract synthesize`, `trace`, `alerts`, `dlq`,
-`ws inspect`, `capabilities`, `describe`, `schema`, `examples`, `mcp serve`, `key fingerprint`.
+`ws inspect`, `ask`, `fix`, `flow test|apply`, `schema --flow-v2`, `capabilities`, `describe`,
+`schema`, `examples`, `mcp serve`, `key fingerprint`.
 
 Exit codes: `0` ok, `1` failed, `2` usage, `3` not found, `4` permission, `5` conflict, `6`
 precondition, `75` still in flight. A send waits 10 seconds by default and exits from the outcome;
@@ -411,7 +435,11 @@ Known gaps:
 - **MMS** is not supported; a push produces a notification saying so.
 - **Signal** and the Android notification bridge are not implemented.
 - **Plugin registry and WASM sandbox** are not implemented; the tables exist.
-- **R2 media and Workers AI** bindings are declared and unread by any route.
+- **R2 media** is declared and unread by any route; Workers AI is read by the agent routes only.
+- **`jev`** has thresholds but no transport yet.
+- **Agent telemetry** has no console surface yet; the endpoint and the CLI cover it.
+- **The palette composer** stages insertions only; moves and renames arrive from a staged patch.
+
 - **Magic link** needs `RESEND_API_KEY`; without it the factor is not advertised.
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.

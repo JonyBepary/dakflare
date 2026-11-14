@@ -35,7 +35,11 @@ dashboard/src/lib/components/workflow/
 ├── NodeInspector.svelte    the selected step's properties
 ├── PatternSheet.svelte     pattern workbench for extract and switch
 ├── SourceSheet.svelte      read-only JSON and apply
-├── StepFinder.svelte       Ctrl+K over step titles and ids
+├── StepFinder.svelte       Ctrl+K over steps; `>` / Ctrl+J asks the agent
+├── agent.ts                typed client: ok / unavailable / refused
+├── agent-patch.ts          deterministic insert composer and verifier
+├── ghost.ts               staged-patch context for NodeCard and the outline
+├── webmcp.ts               WebMCP tool registration (no-op without the API)
 ├── SimulationPanel.svelte  the in-browser run and trace
 ├── ValidationList.svelte   structural problems
 ├── WorkflowSettings.svelte name, scope, enabled
@@ -139,3 +143,29 @@ A flow is fleet-wide (`device_id: null`) or scoped to one handset. The CLI speak
 | Offline | no | yes |
 | Limits | cooldown and hourly cap | graph limits above; authority via grants for agents |
 | Order | rules first | flows only if no rule replied |
+
+## 9. Agent proposals and WebMCP
+
+A proposal is staged, never applied in place.
+
+1. `StepFinder` sends `{ intent, flow_id, diff_summary, corpus_report }` to
+   `POST /v1/agent/synthesize` and renders the verdict: faithfulness, whether approval is
+   required, and the movement the patch makes (`+1 step`, `1 connection moved`).
+2. `WorkflowEditor.stageProposal` builds the patched graph, snapshots the current one, and
+   renders the ghost: dashed cards in the outline and on the map, one banner with Accept and
+   Revert.
+3. Accept runs `beginEdit('agent-patch')`, applies the graph, then `commitBurst()`, so one
+   `Ctrl+Z` restores the snapshot with selection intact. Revert clears the stage and records
+   nothing. While staged, Save and every structural edit path return early.
+4. An approval-gated patch needs the minted token and an explicit tick before Accept enables.
+
+`webmcp.ts` registers four tools through `document.modelContext` when the browser provides it:
+`get_flow_ast` (read-only), `stage_flow_patch` (consequential), `synthesize_pattern` (local
+WASM) and `diagnose_message`. Registration shares one `AbortController`, unregisters on destroy,
+and is a no-op elsewhere. Declarative `tool*` attributes on the agent input and the auto-tag form
+cover clients that read the DOM instead of the API; neither form sets `toolautosubmit`.
+
+The pattern sheet's "Auto-tag with Clef" calls `/v1/agent/triage` after snapshotting the current
+spans, maps roles to slot names and types, and shows a false `balance >= principal` as a
+spoofing signal rather than an error.
+

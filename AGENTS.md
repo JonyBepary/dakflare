@@ -11,15 +11,22 @@ dakflare describe <command>       # purpose, usage, flags
 dakflare schema <command> --agent # the flag contract as data
 dakflare schema states --agent    # state machines and transitions
 dakflare examples <command>       # real invocations
+dakflare schema --flow-v2 --json  # the canonical flow IR schema
+dakflare ask "<intent>" --flow <id> --dry-run --ndjson   # what a patch request would be
+dakflare fix --flow <id> --message "<a message>"         # why a pattern did not match
 ```
 
 `--agent` prints one compact JSON document per call, never prompts, and never uses
 colour. Exit codes are semantic: `0` ok, `1` failed, `2` usage, `3` not found,
 `4` permission, `5` conflict, `6` precondition, `75` temporary.
 
+The HTTP surface behind those commands is documented in `docs/AGENT_SURFACE.md`:
+`/v1/agent/triage|telemetry|diagnose|synthesize`, and `/mcp` over streamable HTTP with
+public OAuth discovery. A model never authorises a change; a grant does.
+
 ## Skills
 
-Three focused skills live in `skills/`. Load the one that matches the task rather than
+Four focused skills live in `skills/`. Load the one that matches the task rather than
 reading all of them:
 
 | Skill | Load it when |
@@ -36,7 +43,7 @@ install them into another repository unchanged.
 
 - **A send is asynchronous.** `send` waits 10 s by default and exits from the outcome;
   `--no-wait` returns as soon as the deployment queues it. Exit 75 means still in
-  flight — check it with `status`, never by sending again.
+  flight, so check it with `status` and never by sending again.
 - **`SENT` is not delivery.** `verification.passed` is true only on `DELIVERED`. The
   landing page's "Not claimed" block and the CLI agree on this; keep it that way.
 - **Idempotency is opt-in.** Pass `--idempotency-key` if a retry is possible; the same
@@ -54,10 +61,11 @@ install them into another repository unchanged.
 | `simulator/` | the Android app (Tauri + Rust core) |
 | `design/` | the landing page sources and tokens |
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
-| `docs/` | the master spec, runbooks, console and workflow notes, and `history/` for point-in-time plans |
+| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, and `history/` for point-in-time plans |
 
 ## Before you claim something works
 
 `node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite` against a
-local stack (`./test-support/dev.sh`), and `cargo test` in `simulator/core`. A summary is
-a claim; the suite is evidence.
+local stack (`./test-support/dev.sh`), `cargo test` in `simulator/core` and
+`simulator/flow`, `npm run typecheck && npm run check:config` in `worker/`, and
+`npm run check` in `dashboard/`. A summary is a claim; the suite is evidence.
