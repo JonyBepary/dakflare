@@ -12,6 +12,7 @@ import type {
 	ApprovalDecision,
 	ApprovalRequest,
 	AuditResult,
+	AuthorityGrant,
 	CommandInfo,
 	Device,
 	DeviceCommand,
@@ -28,6 +29,7 @@ import type {
 	RuleInput,
 	RuleTestResult,
 	SessionInfo,
+	TraceResult,
 	Workflow,
 	WorkflowIssue,
 	WorkflowSaveInput,
@@ -452,6 +454,54 @@ export function rejectApproval(
 	return get<{ ok: boolean; approval: ApprovalRequest }>(
 		`/v1/admin/approvals/${encodeURIComponent(id)}/reject`,
 		{ method: 'POST', body: JSON.stringify({}) }
+	);
+}
+
+/**
+ * `GET /v1/admin/grants[?live=1]` — what an agent may do right now.
+ *
+ * The list is the other half of the queue: an approval mints a grant, and until
+ * this read existed the console could not show what it had minted. `live` asks
+ * the Worker to drop revoked and expired rows itself, so a stale browser clock
+ * cannot present a dead grant as usable.
+ */
+export async function getGrants(options: { live?: boolean } = {}): Promise<AuthorityGrant[]> {
+	const query = options.live === true ? '?live=1' : '';
+	const data = await get<{ grants: AuthorityGrant[] }>(`/v1/admin/grants${query}`);
+	return data.grants ?? [];
+}
+
+/**
+ * `DELETE /v1/admin/grants/:id` — takes effect on the agent's next request.
+ *
+ * A 404 means someone (or the expiry timer) already closed it: the row is gone,
+ * and the next read is the truth. The console says so rather than reporting a
+ * failure the operator cannot act on.
+ */
+export function revokeGrant(
+	id: string
+): Promise<{ ok: boolean; grant: AuthorityGrant | null }> {
+	return get<{ ok: boolean; grant: AuthorityGrant | null }>(
+		`/v1/admin/grants/${encodeURIComponent(id)}`,
+		{ method: 'DELETE' }
+	);
+}
+
+/**
+ * `GET /v1/admin/trace/:id[?device_id=]` — the verdict, the reasons and the
+ * lineage for one message, command or approval request.
+ *
+ * `deviceId` is optional but useful: a command that never became a message row
+ * is only found in the phone's Durable Object, and that object is chosen by the
+ * device. Passing the device the console already knows is what makes a bare
+ * command id resolvable.
+ */
+export function getTrace(id: string, deviceId?: string): Promise<TraceResult> {
+	const params = new URLSearchParams();
+	if (deviceId) params.set('device_id', deviceId);
+	const query = params.toString();
+	return get<TraceResult>(
+		`/v1/admin/trace/${encodeURIComponent(id)}${query === '' ? '' : `?${query}`}`
 	);
 }
 

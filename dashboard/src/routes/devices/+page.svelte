@@ -10,7 +10,7 @@
 		revokeDevice,
 		unarchiveDevice
 	} from '$lib/api';
-	import type { Device, DeviceStatus, PairingCode } from '$lib/types';
+	import { isRevoked, type Device, type DeviceStatus, type PairingCode } from '$lib/types';
 	import {
 		deviceLabel,
 		deviceOptionLabel,
@@ -24,6 +24,7 @@
 		formatClock,
 		formatDate,
 		formatDuration,
+		formatRelative,
 		RELATIVE_MAX_MS
 	} from '$lib/format';
 	import { ROUTES } from '$lib/paths';
@@ -127,26 +128,40 @@
 	);
 
 	/**
-	 * The rows as they are drawn: active devices first, archived ones after them
-	 * when the toggle is on. Archiving is not a state of the phone, it is a state
-	 * of the list, so the two groups never interleave.
+	 * The rows as they are drawn: live devices first, then the rows the list
+	 * parks. Archiving is a state of the list; revoking is a tombstone, so those
+	 * rows come last, after the archived ones, under their own heading.
 	 */
 	const fleet = $derived.by(() => {
 		const rows = devices.map((device, index) => ({
 			device,
 			archived: isArchived(device),
+			revoked: isRevoked(device),
 			presence: fleetStates[index]
 		}));
-		if (!showArchived) return rows;
-		return [...rows.filter((row) => !row.archived), ...rows.filter((row) => row.archived)];
+		const active = rows.filter((row) => !row.archived && !row.revoked);
+		const parked = rows.filter((row) => row.archived || row.revoked);
+		return [
+			...active,
+			...parked.filter((row) => !row.revoked),
+			...parked.filter((row) => row.revoked)
+		];
 	});
 
-	const activeCount = $derived(fleet.filter((row) => !row.archived).length);
+	const activeCount = $derived(
+		fleet.filter((row) => !row.archived && !row.revoked).length
+	);
 	const answering = $derived(
 		fleet.filter(
-			(row) => !row.archived && (row.presence === 'live' || row.presence === 'synced')
+			(row) =>
+				!row.archived &&
+				!row.revoked &&
+				(row.presence === 'live' || row.presence === 'synced')
 		).length
 	);
+	const revokedTotal = $derived(fleet.filter((row) => row.revoked).length);
+	/** A revoked id has no key to rotate: pairing it again is the way back. */
+	const rotatable = $derived(devices.filter((device) => !isRevoked(device)));
 	const archivedTotal = $derived(
 		showArchived ? fleet.filter((row) => row.archived).length : archivedCount
 	);
@@ -204,10 +219,21 @@
 		return { main: null, sub: formatAbsolute(value) };
 	}
 
+	/**
+	 * The age under a revoked chip. Recent stamps stay relative ("2h ago");
+	 * an older one becomes a date, because the relative label would be the full
+	 * absolute stamp and that does not fit a table cell.
+	 */
+	function shortWhen(value: number | null | undefined): string {
+		if (!value) return 'recently';
+		if (Date.now() - value > RELATIVE_MAX_MS) return formatDate(value);
+		return formatRelative(value);
+	}
+
 	// The rotate picker borrows the shared scope error, and gains a hint only when
 	// there is nothing to pick. Build the reference list so neither goes dangling.
 	const scopeSelectDescribedBy = $derived(
-		[devices.length === 0 ? 'scope-select-hint' : null, scopeError ? 'scope-error' : null]
+		[rotatable.length === 0 ? 'scope-select-hint' : null, scopeError ? 'scope-error' : null]
 			.filter(Boolean)
 			.join(' ') || undefined
 	);
@@ -236,7 +262,10 @@
 			if (includeArchived !== showArchived) return;
 			devices = list;
 			if (showArchived) archivedCount = list.filter(isArchived).length;
-			await loadStatuses(list.filter((device) => !isArchived(device)), background);
+			await loadStatuses(
+				list.filter((device) => !isArchived(device) && !isRevoked(device)),
+				background
+			);
 			lastRefreshedAt = Date.now();
 			refreshError = null;
 			error = null;
@@ -401,7 +430,7 @@
 			if (!match) return;
 			devices = list;
 			if (showArchived) archivedCount = list.filter(isArchived).length;
-			void loadStatuses(list.filter((device) => !isArchived(device)));
+			void loadStatuses(list.filter((device) => !isArchived(device) && !isRevoked(device)));
 			paired = match;
 			waitState = 'paired';
 			stopWatching();
@@ -450,12 +479,29 @@
 		await openMint('enroll', id);
 	}
 
+	/**
+	 * Revoking leaves a tombstone, so the row is marked rather than dropped: the
+	 * key is gone, the history stays, and the operator can still see what was
+	 * there. The status entry goes with the key.
+	 */
+	function markRevoked(id: string): void {
+		devices = devices.map((device) =>
+			device.device_id === id
+				? { ...device, revoked_at: Date.now(), archived_at: null }
+				: device
+		);
+		statuses = Object.fromEntries(Object.entries(statuses).filter(([key]) => key !== id));
+		// A revoked row stops being archived, so the toggle's count follows when
+		// the archived rows are the ones on screen.
+		if (showArchived) archivedCount = devices.filter(isArchived).length;
+	}
+
 	function handleRevoked(id: string): void {
-		const revoked = devices.find((device) => device.device_id === id);
-		devices = devices.filter((device) => device.device_id !== id);
-		const name = revoked ? devicePrimary(revoked) : id;
-		const alsoId = revoked && deviceLabel(revoked) ? ` (${id})` : '';
-		revokedNotice = `Revoked ${name}${alsoId}. Its key no longer authenticates.`;
+		const revoked = devices.find((device) => device.device_id === id) ?? null;
+		markRevoked(id);
+		revokedNotice = revoked
+			? `Revoked ${archiveCopy(revoked)}. Its key no longer authenticates, and the row is kept as a record. Pair the phone again to revive it.`
+			: `Revoked ${id}. Its key no longer authenticates, and the row is kept as a record. Pair the phone again to revive it.`;
 		detailOpen = false;
 		syncDetailUrl(null);
 	}
@@ -492,10 +538,8 @@
 		const target = revokeTarget;
 		try {
 			await revokeDevice(target.device_id);
-			devices = devices.filter((device) => device.device_id !== target.device_id);
-			const name = devicePrimary(target);
-			const alsoId = deviceLabel(target) ? ` (${target.device_id})` : '';
-			revokedNotice = `Revoked ${name}${alsoId}. Its key no longer authenticates.`;
+			markRevoked(target.device_id);
+			revokedNotice = `Revoked ${archiveCopy(target)}. Its key no longer authenticates, and the row is kept as a record. Pair the phone again to revive it.`;
 			revokeTarget = null;
 		} catch (failure) {
 			revokeError = describeError(failure);
@@ -728,11 +772,11 @@
 								aria-describedby={scopeSelectDescribedBy}
 							>
 								<option value="">Select a device…</option>
-								{#each devices as device (device.device_id)}
+								{#each rotatable as device (device.device_id)}
 									<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 								{/each}
 							</select>
-							{#if devices.length === 0}
+							{#if rotatable.length === 0}
 								<p class="hint" id="scope-select-hint">No paired devices to rotate yet.</p>
 							{/if}
 						{:else}
@@ -986,7 +1030,7 @@
 				<div class="fleet-card-head">
 					<h2 id="fleet-heading" class="card-title">Fleet</h2>
 					<span class="fleet-count mono">
-						{activeCount} paired · {answering} answering{#if showArchived && archivedTotal > 0}{' · '}{archivedTotal} archived{/if}
+						{activeCount} paired · {answering} answering{#if showArchived && archivedTotal > 0}{' · '}{archivedTotal} archived{/if}{#if revokedTotal > 0}{' · '}{revokedTotal} revoked{/if}
 					</span>
 					{#if statusesLoading}
 						<span class="fleet-checking"><Spinner /> checking links</span>
@@ -1036,13 +1080,23 @@
 							<span></span>
 						</div>
 						<ul class="fleet-rows">
-							{#each fleet as row (row.device.device_id)}
+							{#each fleet as row, index (row.device.device_id)}
 								{@const device = row.device}
 								{@const archived = row.archived}
+								{@const revoked = row.revoked}
 								{@const status = statuses[device.device_id]}
 								{@const presence = row.presence}
 								{@const seen = seenParts(device.last_seen)}
-								<li class="fleet-row" class:is-archived={archived}>
+								{#if revoked && (index === 0 || !fleet[index - 1]?.revoked)}
+									<li class="fleet-group">
+										<span class="fleet-group-title">Revoked</span>
+										<span class="fleet-group-count mono">{revokedTotal}</span>
+										<span class="fleet-group-note">
+											Key destroyed, history kept. Pair the phone again to revive it.
+										</span>
+									</li>
+								{/if}
+								<li class="fleet-row" class:is-archived={archived} class:is-revoked={revoked}>
 									<div class="cell-device">
 										<span class="sr-only">Device</span>
 										<button
@@ -1069,7 +1123,15 @@
 
 									<div class="cell-state">
 										<span class="sr-only">State </span>
-										{#if archived}
+										{#if revoked}
+											<span
+												class="revoked-mark"
+												title={`Revoked ${formatAbsolute(device.revoked_at)}`}
+											>
+												<Badge tone="muted">revoked</Badge>
+											</span>
+											<span class="cell-sub">{shortWhen(device.revoked_at)}</span>
+										{:else if archived}
 											<span
 												class="archived-mark"
 												title={`Archived ${formatAbsolute(device.archived_at)}`}
@@ -1112,51 +1174,66 @@
 
 									<div class="cell-wake">
 										<span class="sr-only">Wake </span>
-										<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
+										{#if revoked}
+											<span class="cell-muted" title="A revoked device has no key left to push to.">
+												none
+											</span>
+										{:else}
+											<Badge tone={device.fcm_token ? 'accent' : 'muted'}>{wakeMode(device)}</Badge>
+										{/if}
 									</div>
 
 									<div class="cell-actions">
-										<button
-											type="button"
-											class="btn btn-ghost btn-sm"
-											onclick={() => void startRotate(device)}
-											aria-label={`Rotate key for ${devicePrimary(device)}`}
-										>
-											<Icon name="key" size={12} /> Rotate
-										</button>
-										{#if archived}
-											<button
-												type="button"
-												class="btn btn-sm"
-												onclick={() => void unarchiveFromRow(device)}
-												aria-label={`Unarchive ${devicePrimary(device)}`}
+										{#if revoked}
+											<span
+												class="cell-revoked-note"
+												title="Open this device for the pairing instructions"
 											>
-												<Icon name="unarchive" size={12} /> Unarchive
-											</button>
+												Pair again to revive
+											</span>
 										{:else}
 											<button
 												type="button"
 												class="btn btn-ghost btn-sm"
-												onclick={() => {
-													archiveError = null;
-													archiveTarget = device;
-												}}
-												aria-label={`Archive ${devicePrimary(device)}`}
+												onclick={() => void startRotate(device)}
+												aria-label={`Rotate key for ${devicePrimary(device)}`}
 											>
-												<Icon name="archive" size={12} /> Archive
+												<Icon name="key" size={12} /> Rotate
+											</button>
+											{#if archived}
+												<button
+													type="button"
+													class="btn btn-sm"
+													onclick={() => void unarchiveFromRow(device)}
+													aria-label={`Unarchive ${devicePrimary(device)}`}
+												>
+													<Icon name="unarchive" size={12} /> Unarchive
+												</button>
+											{:else}
+												<button
+													type="button"
+													class="btn btn-ghost btn-sm"
+													onclick={() => {
+														archiveError = null;
+														archiveTarget = device;
+													}}
+													aria-label={`Archive ${devicePrimary(device)}`}
+												>
+													<Icon name="archive" size={12} /> Archive
+												</button>
+											{/if}
+											<button
+												type="button"
+												class="btn btn-danger btn-sm"
+												onclick={() => {
+													revokeError = null;
+													revokeTarget = device;
+												}}
+												aria-label={`Revoke ${devicePrimary(device)}`}
+											>
+												<Icon name="trash" size={12} /> Revoke
 											</button>
 										{/if}
-										<button
-											type="button"
-											class="btn btn-danger btn-sm"
-											onclick={() => {
-												revokeError = null;
-												revokeTarget = device;
-											}}
-											aria-label={`Revoke ${devicePrimary(device)}`}
-										>
-											<Icon name="trash" size={12} /> Revoke
-										</button>
 									</div>
 								</li>
 							{/each}
@@ -1168,7 +1245,8 @@
 						minutes · <strong>stale</strong>: within 24 hours · <strong>offline</strong>: over 24
 						hours · <strong>unknown</strong>: no contact recorded. Wake is
 						<span class="mono">push</span> when the phone holds a push token, otherwise
-						<span class="mono">poll-only</span>.
+						<span class="mono">poll-only</span>. <strong>revoked</strong> is not a presence
+						state: the key is destroyed and the row is kept as a record.
 					</p>
 				{/if}
 			</section>
@@ -1664,6 +1742,72 @@
 		font-weight: 500;
 	}
 
+	/* A tombstone: the row still opens (that is where the record is explained),
+	   but nothing else on it is an action. The wash is light and the left rule
+	   carries the group, so two revoked rows do not read as a grey block. */
+	.fleet-row.is-revoked {
+		background: color-mix(in srgb, var(--df-surface-well) 34%, transparent);
+		box-shadow: inset 2px 0 0 color-mix(in srgb, var(--df-text-meta) 40%, transparent);
+	}
+
+	.fleet-row.is-revoked .device-name {
+		color: var(--df-text-secondary);
+	}
+
+	.fleet-row.is-revoked .device-id {
+		color: var(--df-text-meta);
+	}
+
+	/* The heading that names the group, so a revoked row never reads as one more
+	   (very quiet) device in the fleet. */
+	.fleet-group {
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-2) var(--df-p-space-5);
+		border-top: 1px solid var(--df-border-hairline);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+	}
+
+	.fleet-group-title {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-secondary);
+	}
+
+	.fleet-group-count {
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+	}
+
+	.fleet-group-note {
+		font-size: var(--df-p-text-2xs);
+		line-height: 1.5;
+		color: var(--df-text-meta);
+	}
+
+	.cell-muted {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.cell-revoked-note {
+		font-size: var(--df-p-text-2xs);
+		line-height: 1.4;
+		color: var(--df-text-meta);
+		text-align: right;
+	}
+
+	.revoked-mark {
+		display: inline-flex;
+		min-width: 0;
+	}
+
 	.archived-mark {
 		display: inline-flex;
 		min-width: 0;
@@ -1843,6 +1987,7 @@
 		.fleet-card-head,
 		.fleet-head,
 		.fleet-row,
+		.fleet-group,
 		.fleet-note,
 		.fleet-skeletons {
 			padding-inline: var(--df-p-space-4);
@@ -1909,6 +2054,10 @@
 			grid-area: actions;
 			justify-content: flex-start;
 			padding-top: var(--df-p-space-1);
+		}
+
+		.cell-revoked-note {
+			text-align: left;
 		}
 
 		.cell-key {

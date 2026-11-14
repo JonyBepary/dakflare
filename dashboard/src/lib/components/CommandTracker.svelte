@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { describeError, getCommand } from '$lib/api';
+	import { describeError, getCommand, getTrace } from '$lib/api';
 	import {
 		COMMAND_STEPS,
+		commandFailureReason,
 		commandStateLabel,
 		commandStateNote,
 		commandStateTone,
@@ -9,8 +10,16 @@
 		commandStepLabel,
 		isTerminalCommand
 	} from '$lib/commands';
-	import type { CommandInfo } from '$lib/types';
+	import type { CommandInfo, TraceResult } from '$lib/types';
 	import { formatAbsolute, formatClock } from '$lib/format';
+	import {
+		traceAuditRows,
+		traceKindNoun,
+		traceLineage,
+		verdictLabel,
+		verdictNote,
+		verdictTone
+	} from '$lib/trace';
 	import Badge from './Badge.svelte';
 	import CopyButton from './CopyButton.svelte';
 	import Icon from './Icon.svelte';
@@ -19,17 +28,18 @@
 	let {
 		deviceId,
 		commandId,
-		compact = false,
 		onResend
 	}: {
 		deviceId: string;
 		commandId: string;
-		compact?: boolean;
 		onResend?: (to: string, body: string) => void | Promise<void>;
 	} = $props();
 
 	const POLL_INTERVAL_MS = 2_000;
 	const POLL_WINDOW_MS = 30_000;
+
+	const uid = $props.id();
+	const tracePanelId = `trace-${uid}`;
 
 	let command = $state<CommandInfo | null | undefined>(undefined);
 	let error = $state<string | null>(null);
@@ -40,8 +50,20 @@
 	let resending = $state(false);
 	let resendError = $state<string | null>(null);
 
+	/**
+	 * The trace is fetched, not assumed. It is the only place the reason for a
+	 * failure and the records behind it are joined (`reply-fate-trace.ts`), so the
+	 * panel loads on first open and stays until the command it describes changes.
+	 */
+	let traceOpen = $state(false);
+	let trace = $state<TraceResult | null>(null);
+	let traceError = $state<string | null>(null);
+	let traceLoading = $state(false);
+	let traceRun = 0;
+
 	const commandState = $derived(command?.state ?? null);
 	const failed = $derived(commandState === 'FAILED' || commandState === 'EXPIRED');
+	const failureReason = $derived(commandFailureReason(command));
 	const canResend = $derived(
 		Boolean(
 			command &&
@@ -54,27 +76,35 @@
 	const shortId = $derived(
 		commandId.length > 14 ? `${commandId.slice(0, 8)}…${commandId.slice(-4)}` : commandId
 	);
+	/**
+	 * Which command this tracker follows, as one value.
+	 *
+	 * A parent that re-reads its list hands over the same ids again, and reading
+	 * the props one by one let that restart the poll and close the trace. A
+	 * derived string compares by value, so only a genuinely different command (or
+	 * "Check again") restarts anything.
+	 */
+	const trackerKey = $derived(`${deviceId}\u0000${commandId}\u0000${run}`);
+	const lineage = $derived(trace === null ? [] : traceLineage(trace));
+	const auditRows = $derived(trace === null ? [] : traceAuditRows(trace));
 
 	const announcement = $derived.by(() => {
 		if (command === undefined && !error) return 'Checking the message state.';
 		if (error && command === undefined) return `Message state unavailable. ${error}`;
 		if (command === null) return 'The gateway has no record of this message.';
 		if (!command) return '';
-		return `Message state: ${commandStateLabel(command.state)}. ${commandStateNote(command.state)}`;
+		const reason = failed && failureReason ? ` ${failureReason}` : '';
+		return `Message state: ${commandStateLabel(command.state)}. ${commandStateNote(command.state)}${reason}`;
 	});
 
 	/**
 	 * Poll every two seconds for thirty seconds, or until the command reaches a
-	 * terminal state. `run` lets the operator start a fresh window on demand.
-	 * The cleanup clears the pending timer on unmount and on a new command.
+	 * terminal state. `trackerKey` carries `run`, so "Check again" starts a fresh
+	 * window. The cleanup clears the pending timer on unmount and on a new command.
 	 */
 	$effect(() => {
-		const device = deviceId;
-		const id = commandId;
+		const [device, id] = trackerKey.split('\u0000');
 		if (!device || !id) return;
-
-		// Reading `run` is what makes "Check again" restart this effect.
-		void run;
 		let cancelled = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const started = Date.now();
@@ -86,6 +116,13 @@
 		furthest = 0;
 		resending = false;
 		resendError = null;
+		// A trace belongs to the command it was read for, so a new command drops it
+		// and invalidates any answer still in flight.
+		traceOpen = false;
+		trace = null;
+		traceError = null;
+		traceLoading = false;
+		traceRun += 1;
 
 		async function poll() {
 			try {
@@ -142,15 +179,32 @@
 			resending = false;
 		}
 	}
+
+	async function loadTrace(): Promise<void> {
+		const current = ++traceRun;
+		traceLoading = true;
+		traceError = null;
+		try {
+			const next = await getTrace(commandId, deviceId);
+			if (current !== traceRun) return;
+			trace = next;
+		} catch (failure) {
+			if (current !== traceRun) return;
+			traceError = describeError(failure);
+		} finally {
+			if (current === traceRun) traceLoading = false;
+		}
+	}
+
+	function toggleTrace(): void {
+		traceOpen = !traceOpen;
+		if (traceOpen && trace === null && !traceLoading) void loadTrace();
+	}
 </script>
 
-{#if compact}
-	<span
-		class="compact"
-		title={command === null
-			? 'The gateway has no record of this message.'
-			: (error ?? undefined)}
-	>
+<div class="tracker" data-state={commandState ?? 'checking'}>
+	<div class="tracker-head">
+		<span class="eyebrow">Delivery</span>
 		{#if command === undefined && !error}
 			<span class="checking mono"><Spinner /> checking</span>
 		{:else if command === null}
@@ -163,133 +217,239 @@
 					{commandStateLabel(command.state)}
 				</Badge>
 			</span>
-			<span class="mini" aria-hidden="true">
-				{#each COMMAND_STEPS as step, index (step)}
-					<span
-						class="mini-seg"
-						class:on={index <= furthest}
-						class:bad={failed && index === furthest}
-					></span>
-				{/each}
-			</span>
 		{/if}
-		<span class="sr-only" aria-live="polite">{announcement}</span>
-	</span>
-{:else}
-	<div class="tracker" data-state={commandState ?? 'checking'}>
-		<div class="tracker-head">
-			<span class="eyebrow">Delivery</span>
-			{#if command === undefined && !error}
-				<span class="checking mono"><Spinner /> checking</span>
-			{:else if command === null}
-				<Badge tone="muted">No record</Badge>
-			{:else if !command}
-				<Badge tone="warn">Unreachable</Badge>
-			{:else}
-				<span title={command.state}>
-					<Badge tone={commandStateTone(command.state)}>
-						{commandStateLabel(command.state)}
-					</Badge>
-				</span>
-			{/if}
-			<span class="spacer"></span>
-			<span class="cmd-id mono" title={commandId}>{shortId}</span>
-			<CopyButton value={commandId} label="Copy message id" iconOnly />
-		</div>
+		<span class="spacer"></span>
+		<span class="cmd-id mono" title={commandId}>{shortId}</span>
+		<CopyButton value={commandId} label="Copy message id" iconOnly />
+	</div>
 
-		{#if command}
-			<dl class="tracker-meta">
-				<div>
-					<dt>To</dt>
-					<dd class="mono">{command.to}</dd>
-				</div>
-				<div>
-					<dt>Queued</dt>
-					<dd class="mono" title={formatAbsolute(command.created_at)}>
-						{formatClock(command.created_at)}
-					</dd>
-				</div>
-				<div>
-					<dt>Expires</dt>
-					<dd class="mono" title={formatAbsolute(command.expires_at)}>
-						{formatClock(command.expires_at)}
-					</dd>
-				</div>
-			</dl>
-		{/if}
-
-		<ol class="timeline" class:failed aria-label="Message state">
-			{#each COMMAND_STEPS as step, index (step)}
-				{@const reached = command !== undefined && command !== null && index <= furthest}
-				{@const current = command !== undefined && command !== null && index === furthest}
-				<li class:reached class:current class:bad={failed && index === furthest}>
-					<span class="step-mark" aria-hidden="true">
-						{#if index < furthest || (current && finished && !failed)}
-							<Icon name="check" size={9} />
-						{/if}
-					</span>
-					<span class="step-name">{commandStepLabel(step)}</span>
-					{#if current && !failed && !finished}
-						<span class="step-live" aria-hidden="true"></span>
-					{/if}
-				</li>
-			{/each}
-		</ol>
-
-		{#if command === null}
-			<div class="tracker-note">
-				<Icon name="info" size={13} />
-				<span>
-					No record of this message. It either expired before the phone collected it, or it
-					was never a message.
-				</span>
+	{#if command}
+		<dl class="tracker-meta">
+			<div>
+				<dt>To</dt>
+				<dd class="mono">{command.to}</dd>
 			</div>
-		{:else if command}
-			<div class="state-line">
+			<div>
+				<dt>Queued</dt>
+				<dd class="mono" title={formatAbsolute(command.created_at)}>
+					{formatClock(command.created_at)}
+				</dd>
+			</div>
+			<div>
+				<dt>Expires</dt>
+				<dd class="mono" title={formatAbsolute(command.expires_at)}>
+					{formatClock(command.expires_at)}
+				</dd>
+			</div>
+		</dl>
+	{/if}
+
+	<ol class="timeline" class:failed aria-label="Message state">
+		{#each COMMAND_STEPS as step, index (step)}
+			{@const reached = command !== undefined && command !== null && index <= furthest}
+			{@const current = command !== undefined && command !== null && index === furthest}
+			<li class:reached class:current class:bad={failed && index === furthest}>
+				<span class="step-mark" aria-hidden="true">
+					{#if index < furthest || (current && finished && !failed)}
+						<Icon name="check" size={9} />
+					{/if}
+				</span>
+				<span class="step-name">{commandStepLabel(step)}</span>
+				{#if current && !failed && !finished}
+					<span class="step-live" aria-hidden="true"></span>
+				{/if}
+			</li>
+		{/each}
+	</ol>
+
+	{#if command === null}
+		<div class="tracker-note">
+			<Icon name="info" size={13} />
+			<span>
+				No record of this message. It either expired before the phone collected it, or it
+				was never a message.
+			</span>
+		</div>
+	{:else if command}
+		{#if failed && failureReason}
+			<div class="failure" data-tone={commandState === 'EXPIRED' ? 'warn' : 'danger'}>
+				<Icon name="alert" size={13} />
+				<div class="failure-body">
+					<span class="failure-label mono">
+						{commandState === 'EXPIRED' ? 'Why' : 'Reason'}
+					</span>
+					<p>{failureReason}</p>
+				</div>
+			</div>
+		{/if}
+
+		<div class="state-line">
+			{#if failed}
+				<span class="spacer"></span>
+			{:else}
 				<p class="note">{commandStateNote(command.state)}</p>
-				{#if canResend}
-					<button
-						type="button"
-						class="btn btn-sm"
-						onclick={() => void resend()}
-						disabled={resending}
-						aria-busy={resending}
+			{/if}
+			{#if canResend}
+				<button
+					type="button"
+					class="btn btn-sm"
+					onclick={() => void resend()}
+					disabled={resending}
+					aria-busy={resending}
+				>
+					{#if resending}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+					Send again
+				</button>
+			{/if}
+		</div>
+		{#if resendError}
+			<p class="field-error" role="alert">{resendError}</p>
+		{/if}
+
+		{#if failed}
+			<div class="trace-block">
+				<button
+					type="button"
+					class="btn btn-ghost btn-sm trace-toggle"
+					onclick={toggleTrace}
+					aria-expanded={traceOpen}
+					aria-controls={traceOpen ? tracePanelId : undefined}
+				>
+					<Icon name={traceOpen ? 'chevron-up' : 'chevron-down'} size={13} />
+					{traceOpen ? 'Hide trace' : 'Trace'}
+				</button>
+
+				{#if traceOpen}
+					<div
+						class="trace"
+						id={tracePanelId}
+						aria-busy={traceLoading}
+						aria-live="polite"
 					>
-						{#if resending}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
-						Send again
-					</button>
+						{#if traceLoading && trace === null}
+							<p class="trace-reading mono" aria-busy="true">
+								<Spinner /> reading the trace
+							</p>
+						{:else if trace === null && traceError}
+							<div class="trace-failed" role="alert">
+								<p class="field-error">{traceError}</p>
+								<button type="button" class="btn btn-sm" onclick={() => void loadTrace()}>
+									<Icon name="refresh" size={12} /> Try again
+								</button>
+							</div>
+						{:else if trace}
+							<div class="trace-head">
+								<Badge tone={verdictTone(trace.verdict)}>
+									{verdictLabel(trace.verdict)}
+								</Badge>
+								<span class="trace-kind">This id is {traceKindNoun(trace.kind)}.</span>
+							</div>
+
+							{#if verdictNote(trace.verdict)}
+								<p class="trace-line">{verdictNote(trace.verdict)}</p>
+							{/if}
+
+							{#if trace.why.length > 0}
+								<div class="trace-part">
+									<span class="trace-label mono">Why</span>
+									<ul class="trace-why">
+										{#each trace.why as line, index (index)}
+											<li>{line}</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							{#if lineage.length > 0}
+								<div class="trace-part">
+									<span class="trace-label mono">Lineage</span>
+									<dl class="trace-lineage">
+										{#each lineage as row (`${row.label}-${row.value}`)}
+											<div class="trace-row">
+												<dt>{row.label}</dt>
+												<dd>
+													<span class="trace-value mono">{row.value}</span>
+													{#if row.note}
+														<span class="trace-note">{row.note}</span>
+													{/if}
+												</dd>
+											</div>
+										{/each}
+									</dl>
+								</div>
+							{/if}
+
+							{#if auditRows.length > 0}
+								<div class="trace-part">
+									<span class="trace-label mono">Audit</span>
+									<ul class="trace-audit">
+										{#each auditRows as row, index (index)}
+											<li>
+												<span class="trace-value mono">{row.value}</span>
+												{#if row.note}<span class="trace-note">{row.note}</span>{/if}
+											</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							{#if trace.warnings.length > 0}
+								<div class="trace-part">
+									<span class="trace-label mono">Gaps</span>
+									<ul class="trace-why">
+										{#each trace.warnings as line, index (index)}
+											<li>{line}</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							<div class="trace-foot">
+								<button
+									type="button"
+									class="btn btn-sm"
+									onclick={() => void loadTrace()}
+									disabled={traceLoading}
+									aria-busy={traceLoading}
+								>
+									{#if traceLoading}<Spinner />{:else}<Icon name="refresh" size={12} />{/if}
+									Refresh trace
+								</button>
+								{#if traceError}
+									<p class="field-error">The last read failed: {traceError}</p>
+								{/if}
+							</div>
+						{/if}
+					</div>
 				{/if}
 			</div>
-			{#if resendError}
-				<p class="field-error" role="alert">{resendError}</p>
-			{/if}
-		{:else if error}
-			<p class="field-error">{error}</p>
 		{/if}
+	{:else if error}
+		<p class="field-error">{error}</p>
+	{/if}
 
-		{#if timedOut}
-			<div class="tracker-foot">
-				<span class="hint">No change after 30 seconds. The phone has not reported back.</span>
-				<span class="spacer"></span>
-				<button type="button" class="btn btn-sm" onclick={restart}>
-					<Icon name="refresh" size={12} /> Check again
-				</button>
-			</div>
-		{:else if !finished && command !== undefined && !error}
-			<span class="tracker-foot hint">Waiting for the phone…</span>
-		{/if}
+	{#if timedOut}
+		<div class="tracker-foot">
+			<span class="hint">No change after 30 seconds. The phone has not reported back.</span>
+			<span class="spacer"></span>
+			<button type="button" class="btn btn-sm" onclick={restart}>
+				<Icon name="refresh" size={12} /> Check again
+			</button>
+		</div>
+	{:else if !finished && command !== undefined && !error}
+		<span class="tracker-foot hint">Waiting for the phone…</span>
+	{/if}
 
-		{#if error && command !== undefined}
-			<p class="field-error">
-				<!-- The error already ends in a full stop when it comes from the gateway,
-				     so appending one rendered "try again.. Retrying…". -->
-				Last check failed: {error.replace(/\.$/, '')}.{finished ? ' Checks stopped.' : ' Retrying…'}
-			</p>
-		{/if}
+	{#if error && command !== undefined}
+		<p class="field-error">
+			<!-- The error already ends in a full stop when it comes from the gateway,
+			     so appending one rendered "try again.. Retrying…". -->
+			Last check failed: {error.replace(/\.$/, '')}.{finished ? ' Checks stopped.' : ' Retrying…'}
+		</p>
+	{/if}
 
-		<span class="sr-only" aria-live="polite">{announcement}</span>
-	</div>
-{/if}
+	<span class="sr-only" aria-live="polite">{announcement}</span>
+</div>
 
 <style>
 	.tracker {
@@ -490,31 +650,229 @@
 		color: var(--df-text-secondary);
 	}
 
-	.compact {
+	.failure {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		padding: 9px 11px;
+		border: 1px solid var(--df-c-tint-edge-danger);
+		border-left-width: 2px;
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-danger-bg);
+		color: var(--df-state-danger-ink);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+	}
+
+	.failure[data-tone='warn'] {
+		border-color: var(--df-c-tint-edge-warn);
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
+	}
+
+	.failure :global(svg) {
+		flex: none;
+		margin-top: 2px;
+	}
+
+	.failure-body {
+		min-width: 0;
+	}
+
+	.failure-label {
+		display: block;
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		opacity: 0.8;
+	}
+
+	.failure-body p {
+		margin: 2px 0 0;
+		overflow-wrap: anywhere;
+	}
+
+	.trace-block {
+		display: grid;
+		gap: var(--df-p-space-2);
+		justify-items: start;
+		padding-top: var(--df-p-space-1);
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.trace-toggle {
+		color: var(--df-text-secondary);
+	}
+
+	.trace {
+		display: grid;
+		gap: var(--df-p-space-3);
+		justify-self: stretch;
+		width: 100%;
+		min-width: 0;
+		padding: var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+	}
+
+	.trace-reading {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--df-p-space-1);
-		white-space: nowrap;
+		font-size: var(--df-p-text-xs);
+		letter-spacing: 0.04em;
+		color: var(--df-text-meta);
 	}
 
-	.mini {
-		display: inline-flex;
-		gap: 2px;
+	.trace-failed {
+		display: grid;
+		gap: var(--df-p-space-2);
+		justify-items: start;
 	}
 
-	.mini-seg {
-		width: 7px;
-		height: 3px;
-		border-radius: 1px;
+	.trace-head {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		min-width: 0;
+	}
+
+	.trace-kind {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.trace-line {
+		margin: 0;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.trace-part {
+		display: grid;
+		gap: 5px;
+		min-width: 0;
+	}
+
+	.trace-label {
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.trace-why,
+	.trace-audit {
+		display: grid;
+		gap: 4px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		min-width: 0;
+	}
+
+	.trace-why li {
+		position: relative;
+		padding-left: 13px;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.trace-why li::before {
+		content: '';
+		position: absolute;
+		left: 2px;
+		top: 0.62em;
+		width: 4px;
+		height: 4px;
+		border-radius: 50%;
 		background: var(--df-border-control);
 	}
 
-	.mini-seg.on {
-		background: var(--df-accent-fill);
+	.trace-lineage {
+		display: grid;
+		gap: 4px;
+		margin: 0;
+		min-width: 0;
 	}
 
-	.mini-seg.bad {
-		background: var(--df-state-danger-fill);
+	.trace-row,
+	.trace-audit li {
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-3);
+		min-width: 0;
+	}
+
+	.trace-row dt {
+		flex: none;
+		width: 88px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.trace-row dd {
+		margin: 0;
+		min-width: 0;
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+	}
+
+	/* The note is a second fact, not part of the id: a dot keeps the mono value
+	   from running into it. */
+	.trace-row dd .trace-note::before {
+		content: '·';
+		margin-right: 6px;
+		color: var(--df-text-meta);
+	}
+
+	.trace-value {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.trace-note {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+		overflow-wrap: anywhere;
+	}
+
+	.trace-foot {
+		display: grid;
+		gap: var(--df-p-space-2);
+		justify-items: start;
+		padding-top: var(--df-p-space-2);
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	@media (max-width: 560px) {
+		.trace-row,
+		.trace-audit li {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 1px;
+		}
+
+		.trace-row dt {
+			width: auto;
+		}
+
+		/* A wrapped note would start a line with a separator, which reads as a
+		   stray bullet; the gap is enough once the label sits above. */
+		.trace-row dd .trace-note::before {
+			content: none;
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {

@@ -48,3 +48,6 @@ design/landing/hero.html
 
 # Local review prompts and archives, deliberately not in git
 docs/archive/
+
+# Local design review screenshots and preview artifacts
+.openchamber/

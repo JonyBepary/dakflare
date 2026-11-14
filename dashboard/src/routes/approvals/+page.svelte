@@ -6,7 +6,9 @@
 		describeError,
 		getApprovals,
 		getDevices,
-		rejectApproval
+		getGrants,
+		rejectApproval,
+		revokeGrant
 	} from '$lib/api';
 	import {
 		countdownLabel,
@@ -20,7 +22,8 @@
 	import { formatAbsolute, formatClock } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
-	import type { ApprovalDecision, ApprovalRequest, Device } from '$lib/types';
+	import type { ApprovalDecision, ApprovalRequest, AuthorityGrant, Device } from '$lib/types';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
@@ -77,11 +80,27 @@
 	let cardErrors = $state<Record<string, string>>({});
 	let outcome = $state<Outcome | null>(null);
 
+	/*
+	 * The grants panel is a second read with its own failure: a deployment whose
+	 * grant list cannot be read must still answer the queue, so the two loads
+	 * never share an error. `grants === null` is "not read yet", which is not the
+	 * same sentence as "nothing is granted".
+	 */
+	let grants = $state<AuthorityGrant[] | null>(null);
+	let grantsLoading = $state(false);
+	let grantsError = $state<string | null>(null);
+	let grantsUpdatedAt = $state<number | null>(null);
+	let revokeTarget = $state<AuthorityGrant | null>(null);
+	let revoking = $state(false);
+	let revokeError = $state<string | null>(null);
+
 	let version = 0;
+	let grantsVersion = 0;
 	let outcomeKey = 0;
 	let lastSweep = 0;
 
 	const allowed = $derived(session.canViewSecurity);
+	const revokeOpen = $derived(revokeTarget !== null);
 
 	async function load(soft = false): Promise<void> {
 		const current = ++version;
@@ -113,6 +132,31 @@
 			devicesById = new Map(fleet.map((device) => [device.device_id, device]));
 		} catch {
 			// A friendly handset name is a convenience; the id is still shown.
+		}
+	}
+
+	/**
+	 * `GET /v1/admin/grants?live=1`.
+	 *
+	 * The gateway drops revoked and expired rows itself, so this list is exactly
+	 * what an agent may use right now. A soft read keeps the rows on screen while
+	 * it runs: a failed refresh must not make a live grant look withdrawn.
+	 */
+	async function loadGrants(soft = false): Promise<void> {
+		const current = ++grantsVersion;
+		if (!soft || grants === null) grantsLoading = true;
+
+		try {
+			const live = await getGrants({ live: true });
+			if (current !== grantsVersion) return;
+			grants = live;
+			grantsError = null;
+			grantsUpdatedAt = Date.now();
+		} catch (failure) {
+			if (current !== grantsVersion) return;
+			grantsError = describeError(failure);
+		} finally {
+			if (current === grantsVersion) grantsLoading = false;
 		}
 	}
 
@@ -187,8 +231,44 @@
 		return rows;
 	}
 
-	function blockedRungs(approval: ApprovalRequest): number[] {
-		const max = approval.max_s;
+	/**
+	 * One line for what a grant covers, on the same words as the request cards.
+	 *
+	 * A scope with no target requirement has no `target` at all, and that is the
+	 * permission's whole range rather than a missing field. The handset is named
+	 * by its label when the fleet read supplied one.
+	 */
+	function grantTarget(grant: AuthorityGrant): string {
+		const target = grant.target;
+		if (!target) return 'Everything this permission covers';
+		const parts: string[] = [];
+
+		if (target.recipients && target.recipients.length > 0) {
+			parts.push(
+				target.recipients.length === 1
+					? target.recipients[0]
+					: `${target.recipients.length} numbers`
+			);
+		}
+		if (target.device_id) {
+			const label = devicesById.get(target.device_id)?.label?.trim() ?? '';
+			parts.push(label === '' ? target.device_id : label);
+		}
+		if (target.flow_id) parts.push(`flow ${target.flow_id}`);
+		if (target.rule_id) parts.push(`rule ${target.rule_id}`);
+
+		return parts.length === 0 ? 'Everything this permission covers' : parts.join(', ');
+	}
+
+	/** A grant nobody has spent is a fact worth reading as a sentence. */
+	function useCountWords(count: number): string {
+		if (count <= 0) return 'not used yet';
+		if (count === 1) return 'used once';
+		return `used ${count} times`;
+	}
+
+
+	function blockedRungs(approval: ApprovalRequest): number[] {		const max = approval.max_s;
 		if (max === null) return [...approval.ladder_s];
 		return approval.ladder_s.filter((rung) => rung > max);
 	}
@@ -290,6 +370,8 @@
 				outcome = rejectedOutcome(approval);
 			}
 			void load(true);
+			// An approval mints a grant; the panel beside the queue must show it.
+			void loadGrants(true);
 		} catch (failure) {
 			setCardError(approval.id, decisionError(failure));
 			if (isStaleDecision(failure)) {
@@ -313,21 +395,92 @@
 
 	async function refresh(): Promise<void> {
 		now = Date.now();
-		await load(true);
+		await Promise.all([load(true), loadGrants(true)]);
+	}
+
+	/* ------------------------------------------------------------ live grants */
+
+	function openRevoke(grant: AuthorityGrant): void {
+		revokeError = null;
+		revokeTarget = grant;
+	}
+
+	function closeRevoke(): void {
+		if (revoking) return;
+		revokeTarget = null;
+		revokeError = null;
+	}
+
+	/**
+	 * `DELETE /v1/admin/grants/:id`.
+	 *
+	 * The gateway honours this on the agent's next request, so the row is removed
+	 * here and the list is re-read rather than decremented: a grant that was
+	 * already revoked elsewhere is a 404, and "it was already gone" is a better
+	 * sentence than an error the operator cannot act on.
+	 */
+	async function confirmRevoke(): Promise<void> {
+		const target = revokeTarget;
+		if (target === null || revoking) return;
+
+		revoking = true;
+		revokeError = null;
+		try {
+			await revokeGrant(target.id);
+			dropGrant(target.id);
+			revokeTarget = null;
+			outcome = {
+				key: ++outcomeKey,
+				tone: 'info',
+				title: 'Grant revoked',
+				body: `${scopeTitle(target.scope)}: revoked. The agent's next request will be refused.`
+			};
+			void loadGrants(true);
+		} catch (failure) {
+			if (failure instanceof ApiError && failure.status === 404) {
+				dropGrant(target.id);
+				revokeTarget = null;
+				outcome = {
+					key: ++outcomeKey,
+					tone: 'info',
+					title: 'That grant was already gone',
+					body: 'It had expired or been revoked before this action reached the gateway. Nothing is allowed by it now.'
+				};
+				void loadGrants(true);
+			} else if (failure instanceof ApiError && failure.status === 403) {
+				revokeError =
+					'This account can read the grants but cannot revoke one. Ask an owner to withdraw it.';
+			} else {
+				revokeError = `${describeError(failure)} Try again. If it keeps failing, the grant may still be live, so treat the agent as still allowed.`;
+			}
+		} finally {
+			revoking = false;
+		}
+	}
+
+	function dropGrant(id: string): void {
+		if (grants === null) return;
+		grants = grants.filter((grant) => grant.id !== id);
 	}
 
 	onMount(() => {
 		void load();
+		void loadGrants();
 		void loadDevices();
 
 		const clockTimer = setInterval(() => {
 			if (document.visibilityState !== 'visible') return;
 			now = Date.now();
 			const hasExpired = approvals.some((approval) => approval.expires_at <= now);
-			if (!hasExpired || loading || refreshing) return;
+			const grantExpired =
+				grants !== null && grants.some((grant) => grant.expires_at <= now);
+			if (!hasExpired && !grantExpired) return;
+			if (loading || refreshing || grantsLoading) return;
 			if (Date.now() - lastSweep < SWEEP_MS) return;
 			lastSweep = Date.now();
-			void load(true);
+			if (hasExpired) void load(true);
+			// A grant that ran out is no longer live, and the list must say so.
+			if (grantExpired) void loadGrants(true);
 		}, TICK_MS);
 
 		const pollTimer = setInterval(() => {
@@ -338,6 +491,7 @@
 				!refreshing
 			) {
 				void load(true);
+				if (!grantsLoading) void loadGrants(true);
 			}
 		}, POLL_MS);
 
@@ -345,6 +499,7 @@
 			if (document.visibilityState !== 'visible') return;
 			now = Date.now();
 			if (!loading && !refreshing) void load(true);
+			if (!grantsLoading) void loadGrants(true);
 		};
 
 		document.addEventListener('visibilitychange', onVisible);
@@ -610,9 +765,168 @@
 					</article>
 				{/each}
 			{/if}
+
+			<section class="card grants" aria-labelledby="grants-title">
+				<header class="grants-head">
+					<div class="grants-title">
+						<p class="eyebrow">Currently allowed</p>
+						<h2 id="grants-title">Live grants</h2>
+					</div>
+					<div class="grants-meta">
+						{#if grantsLoading && grants === null}
+							<span class="chip" data-tone="muted"><Spinner /> reading</span>
+						{:else if grants === null}
+							<span class="chip" data-tone="muted">unknown</span>
+						{:else if grants.length === 0}
+							<span class="chip" data-tone="muted">none live</span>
+						{:else}
+							<span class="chip" data-tone="ok">{grants.length} live</span>
+						{/if}
+						{#if grantsUpdatedAt}
+							<span class="grants-checked mono">
+								checked <RelativeTime value={grantsUpdatedAt} />
+							</span>
+						{/if}
+					</div>
+				</header>
+
+				<p class="grants-lede">
+					What agents may do until these run out. Each one ends at its expiry, or when
+					you revoke it; a revoked grant is refused on the agent's next request.
+				</p>
+
+				{#if grantsLoading && grants === null}
+					<div class="grants-loading" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Reading the live grants</span>
+						{#each ['a', 'b'] as key (key)}
+							<div class="skeleton" style="height: 56px; width: 100%"></div>
+						{/each}
+					</div>
+				{:else if grants === null}
+					<Notice tone="danger" title="The live grants did not load">
+						{grantsError ??
+							'The gateway did not answer, so this console cannot say what agents are allowed to do.'}
+					</Notice>
+					<div class="row" style="margin-top: 12px">
+						<button type="button" class="btn btn-primary" onclick={() => void loadGrants()}>
+							<Icon name="refresh" size={14} /> Try again
+						</button>
+					</div>
+				{:else}
+					{#if grantsError}
+						<Notice tone="warn" title="Could not refresh the live grants">
+							{grantsError}
+							{#if grants.length === 0}
+								The last successful read found nothing granted, and this read failed, so the
+								list may have changed.
+							{:else}
+								The rows below are the last answer from the gateway, so one may have ended
+								since.
+							{/if}
+						</Notice>
+					{/if}
+
+					{#if grants.length === 0}
+						<EmptyState
+							icon="key"
+							title="Nothing is granted right now"
+							description="Approving an agent request opens one of these. Until something is granted, an agent cannot send, deploy or change anything that needs authority."
+						/>
+					{:else}
+						<ul class="grant-list">
+							{#each grants as grant (grant.id)}
+								{@const remaining = grant.expires_at - now}
+								{@const expired = remaining <= 0}
+								<li class="grant" class:ended={expired}>
+									<div class="grant-main">
+										<p class="grant-scope">{scopeTitle(grant.scope)}</p>
+										<p class="grant-raw mono">{grant.scope}</p>
+										<p class="grant-target">
+											<span class="fact-label">Applies to</span>
+											<span class="grant-target-value">{grantTarget(grant)}</span>
+										</p>
+									</div>
+
+									<div class="grant-when">
+										<span class="grant-when-label mono">Expires in</span>
+										{#if expired}
+											<span class="grant-when-value">Just now</span>
+										{:else}
+											<time
+												class="grant-when-value mono"
+												datetime={new Date(grant.expires_at).toISOString()}
+												title={formatAbsolute(grant.expires_at)}
+											>
+												{countdownLabel(remaining)}
+											</time>
+										{/if}
+										<span class="grant-at mono">{formatClock(grant.expires_at)}</span>
+									</div>
+
+									<div class="grant-facts">
+										<span class="fact">
+											<span class="fact-label">Granted by</span>
+											{grant.granted_by}
+										</span>
+										<span class="fact-sep" aria-hidden="true">·</span>
+										<span class="fact">
+											<span class="fact-label">Use</span>
+											{useCountWords(grant.use_count)}
+										</span>
+										{#if grant.last_used_at}
+											<span class="fact-sep" aria-hidden="true">·</span>
+											<span class="fact">
+												<span class="fact-label">Last used</span>
+												<RelativeTime value={grant.last_used_at} />
+											</span>
+										{/if}
+									</div>
+
+									<button
+										type="button"
+										class="btn btn-danger-ghost btn-sm grant-revoke"
+										onclick={() => openRevoke(grant)}
+										disabled={expired || revoking}
+										aria-label={`Revoke ${scopeTitle(grant.scope)} for ${grant.agent_token_id}`}
+									>
+										<Icon name="trash" size={13} /> Revoke
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				{/if}
+			</section>
 		</div>
 	{/if}
 </div>
+
+<ConfirmDialog
+	open={revokeOpen}
+	title="Revoke this grant?"
+	confirmLabel="Revoke grant"
+	tone="danger"
+	pending={revoking}
+	error={revokeError}
+	onconfirm={() => void confirmRevoke()}
+	oncancel={closeRevoke}
+>
+	{#if revokeTarget}
+		<p>
+			<strong>{scopeTitle(revokeTarget.scope)}</strong>
+			for <span class="mono">{revokeTarget.agent_token_id}</span>
+			is withdrawn. The agent's next request that needs it is refused, and anything it already
+			did stands.
+		</p>
+		<p class="grant-dialog-target">
+			<span class="fact-label">Applies to</span>
+			{grantTarget(revokeTarget)}
+		</p>
+		<p class="hint" style="margin-top: 10px">
+			This takes effect on the next request, not on one already in flight.
+		</p>
+	{/if}
+</ConfirmDialog>
 
 <style>
 	.loading-card {
@@ -939,6 +1253,203 @@
 	.reject {
 		margin-left: auto;
 	}
+
+	/* ------------------------------------------------------------ live grants */
+
+	.grants {
+		display: grid;
+		gap: var(--df-p-space-3);
+		min-width: 0;
+	}
+
+	.grants-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+	}
+
+	.grants-title h2 {
+		margin-top: 3px;
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.grants-meta {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+	}
+
+	.grants-checked {
+		font-size: 10.5px;
+		color: var(--df-text-meta);
+	}
+
+	.grants-lede {
+		max-width: 74ch;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.55;
+		color: var(--df-text-secondary);
+	}
+
+	.grants-loading {
+		display: grid;
+		gap: var(--df-p-space-2);
+	}
+
+	.grant-list {
+		display: grid;
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.grant {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto auto;
+		grid-template-areas:
+			'main when action'
+			'facts facts facts';
+		align-items: center;
+		gap: 7px var(--df-p-space-4);
+		padding: var(--df-p-space-3) 0;
+		border-top: 1px solid var(--df-border-hairline);
+		min-width: 0;
+	}
+
+	.grant:first-child {
+		padding-top: 0;
+		border-top: 0;
+	}
+
+	.grant-main {
+		grid-area: main;
+		min-width: 0;
+	}
+
+	.grant-scope {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-base);
+		font-weight: 700;
+		line-height: 1.3;
+		letter-spacing: -0.005em;
+		overflow-wrap: anywhere;
+	}
+
+	.grant-raw {
+		margin-top: 1px;
+		font-size: 10.5px;
+		color: var(--df-text-meta);
+		overflow-wrap: anywhere;
+	}
+
+	.grant-target {
+		margin-top: 3px;
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.grant-target-value {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.grant-when {
+		grid-area: when;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 1px;
+		flex: none;
+		min-width: 74px;
+		padding: 5px 9px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+	}
+
+	.grant-when-label {
+		font-size: 9.5px;
+		letter-spacing: 0.07em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.grant-when-value {
+		font-size: var(--df-p-text-sm);
+		font-weight: 700;
+		line-height: 1.2;
+		color: var(--df-text-primary);
+	}
+
+	.grant.ended .grant-when-value {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	.grant-at {
+		font-size: 10px;
+		color: var(--df-text-meta);
+	}
+
+	.grant-facts {
+		grid-area: facts;
+		display: flex;
+		align-items: baseline;
+		gap: 3px 9px;
+		flex-wrap: wrap;
+		font-size: 11.5px;
+		color: var(--df-text-secondary);
+		min-width: 0;
+	}
+
+	.grant-revoke {
+		grid-area: action;
+		flex: none;
+	}
+
+	.grant-dialog-target {
+		margin-top: 8px;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	@media (max-width: 640px) {
+		.grant {
+			grid-template-columns: minmax(0, 1fr);
+			grid-template-areas:
+				'main'
+				'when'
+				'facts'
+				'action';
+			align-items: start;
+		}
+
+		.grant-facts .fact-sep {
+			display: none;
+		}
+
+		.grant-when {
+			justify-self: start;
+			align-items: flex-start;
+		}
+
+		.grant-revoke {
+			width: 100%;
+			justify-content: center;
+			min-height: 44px;
+		}
+	}
+
 
 	@media (max-width: 640px) {
 		.approval-head {

@@ -11,6 +11,9 @@
  * support can still quote it.
  */
 
+import { replyReason } from './replies';
+import type { CommandInfo } from './types';
+
 export const COMMAND_STEPS = [
 	'PENDING',
 	'LEASED',
@@ -99,4 +102,65 @@ export function commandStateTone(
 		default:
 			return 'muted';
 	}
+}
+
+/**
+ * What a failed command carries: the reason, when there is one.
+ *
+ * Two different senders answer for a failure. A channel that could not queue the
+ * message at all writes a code of its own (`no_paired_handset`), while a phone
+ * that tried and failed reports a radio result code. The phone's code
+ * translations live in `replies.ts` because the messages list already reads them
+ * and the two screens must not disagree about what "no signal" means.
+ *
+ * `null` for every state that is not a failure, and a sentence that admits the
+ * gap when the command failed without a reason. Guessing one would be worse than
+ * saying so: the trace expander is where the missing detail can be found.
+ */
+export function commandFailureReason(command: CommandInfo | null | undefined): string | null {
+	const state = command?.state;
+	if (state !== 'FAILED' && state !== 'EXPIRED') return null;
+
+	const written = (command?.error_message ?? '').trim();
+	if (written !== '') return withStop(written);
+
+	const code = (command?.error_code ?? '').trim();
+	if (code !== '') {
+		const gateway = GATEWAY_CODES[code];
+		if (gateway !== undefined) return gateway;
+
+		const channel = /^(telegram|whatsapp)_error_(\d+)$/.exec(code);
+		if (channel !== null) {
+			const name = channel[1] === 'telegram' ? 'Telegram' : 'WhatsApp';
+			return `${name} answered HTTP ${channel[2]}.`;
+		}
+
+		const phone = replyReason(code);
+		// The same sentence `replies.ts` uses for a code it cannot read.
+		if (phone === 'a failure this console does not recognise') {
+			return `The command failed with code ${code}, which this console does not read.`;
+		}
+		return `The phone reported it failed: ${phone}.`;
+	}
+
+	if (state === 'EXPIRED') {
+		return 'The phone did not collect it before its window closed, so nothing was sent.';
+	}
+	return 'The phone reported the send failed, and did not say why.';
+}
+
+/**
+ * A channel that refused to queue the message, in a sentence. These are the
+ * Worker's own codes (`worker/src/channels/`), and each names the thing to fix.
+ */
+const GATEWAY_CODES: Record<string, string> = {
+	no_paired_handset: 'No handset is paired, so there was nothing to send it with.',
+	enqueue_failed: 'The gateway could not queue it for the phone.',
+	telegram_bot_token_missing: 'This deployment has no Telegram bot token.',
+	whatsapp_credentials_missing: 'This deployment has no WhatsApp credentials.',
+	template_required: 'WhatsApp needs an approved template for this message.'
+};
+
+function withStop(sentence: string): string {
+	return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }

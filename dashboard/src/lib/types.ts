@@ -68,6 +68,31 @@ export interface Device {
 	 * the gateway clears this again by itself the next time the phone polls.
 	 */
 	archived_at?: number | null;
+	/**
+	 * Set when the operator revoked the device; `null` (or absent) while it is
+	 * not revoked. A revoked row is a tombstone: the key is destroyed, its
+	 * alerts and flow runs are gone, and its messages stay. The gateway keeps
+	 * the row so that history still has an owner, and pairing the same id again
+	 * revives it. `null` also covers a Worker built before the column existed.
+	 */
+	revoked_at?: number | null;
+}
+
+/**
+ * Revoked is a lifecycle state, not a presence one.
+ *
+ * `revoked_at` is the only signal, and a missing field means "not revoked". The
+ * fleet and the drawer both ask here so a revoked device can never be drawn as
+ * offline: it has no link left to be out of contact with.
+ */
+export function isRevoked(device: Pick<Device, 'revoked_at'>): boolean {
+	const at = device.revoked_at;
+	return typeof at === 'number' && Number.isFinite(at) && at > 0;
+}
+
+/** The stamp behind "revoked 3d ago", or `null` while the device is not revoked. */
+export function revokedAt(device: Pick<Device, 'revoked_at'>): number | null {
+	return isRevoked(device) ? (device.revoked_at as number) : null;
 }
 
 export interface DeviceStatus {
@@ -86,6 +111,23 @@ export type CommandState =
 	| 'FAILED'
 	| 'EXPIRED';
 
+/**
+ * The edge's own reduction of a command's state (`canonical-lifecycle.ts`).
+ *
+ * The Worker sends this beside every command it reads, and it is where a failed
+ * command's `substate` lives: a channel that could not even queue the message
+ * (`no_paired_handset`, `telegram_bot_token_missing`) records it here, and
+ * `remediation` is the step that clears it.
+ */
+export interface CommandLifecycle {
+	channel: string;
+	state: string;
+	substate: string | null;
+	is_terminal: boolean;
+	settled: boolean;
+	remediation: { command: string; description: string } | null;
+}
+
 /** `GET /v1/sms/commands/:command_id` → `{ command }`. Unknown ids return `null`. */
 export interface CommandInfo {
 	command_id: string;
@@ -95,6 +137,12 @@ export interface CommandInfo {
 	state: CommandState | string;
 	created_at: number;
 	expires_at: number;
+	channel?: string;
+	/** Present on a command a channel refused, and on some phone reports. */
+	error_code?: string | null;
+	/** A sentence, when the sender wrote one instead of a code. */
+	error_message?: string | null;
+	lifecycle?: CommandLifecycle;
 }
 
 /**
@@ -521,11 +569,54 @@ export interface AuthorityGrant {
 	id: string;
 	agent_token_id: string;
 	scope: string;
+	/** What the grant covers. `null` when a scope needs no target. */
+	target?: ApprovalTarget | null;
 	granted_by: string;
 	granted_at: number;
 	expires_at: number;
+	/** The gateway's own call at answer time: not revoked and not yet expired. */
+	live?: boolean;
 	revoked_at: number | null;
 	use_count: number;
+	last_used_at?: number | null;
+	/** The request this grant answered, when a human approved one. */
+	approval_request_id?: string | null;
+}
+
+/**
+ * `GET /v1/admin/trace/:id` — one id's whole story across D1 and the phone's
+ * Durable Object (`reply-fate-trace.ts`). The nested records are read field by
+ * field where they are shown, because the Worker owns their exact shape.
+ */
+export type TraceKind = 'approval' | 'message' | 'command' | 'unknown';
+
+export type TraceVerdict =
+	| 'replied'
+	| 'queued'
+	| 'failed'
+	| 'suppressed_cooldown'
+	| 'suppressed_hourly_cap'
+	| 'no_match'
+	| 'paused_hitl_approval';
+
+export interface TraceResult {
+	id: string;
+	kind: TraceKind;
+	device_id: string | null;
+	verdict: TraceVerdict | string;
+	/** Why, in operator words, one line per reason. */
+	why: string[];
+	message: Record<string, unknown> | null;
+	command: Record<string, unknown> | null;
+	automation: {
+		rules: Array<Record<string, unknown>>;
+		flows: Array<Record<string, unknown>>;
+	};
+	approval: Record<string, unknown> | null;
+	audit: Array<Record<string, unknown>>;
+	durable_object: Record<string, unknown> | null;
+	/** Reads that did not answer. Shown, because a gap is a fact too. */
+	warnings: string[];
 }
 
 /**

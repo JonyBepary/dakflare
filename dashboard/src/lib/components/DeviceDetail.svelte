@@ -12,7 +12,14 @@
 		sendSms,
 		unarchiveDevice
 	} from '$lib/api';
-	import type { Device, DeviceCommand, DeviceStatus, Message } from '$lib/types';
+	import {
+		isRevoked,
+		revokedAt,
+		type Device,
+		type DeviceCommand,
+		type DeviceStatus,
+		type Message
+	} from '$lib/types';
 	import { COPIED_WORKFLOWS_ACTION, copiedFlowsFor, type CopiedFlows } from '$lib/copied-flows';
 	import { archivedAt, isArchived } from '$lib/device-archive';
 	import {
@@ -116,6 +123,12 @@
 	);
 	const archived = $derived(device ? isArchived(device) : false);
 	const archivedStamp = $derived(device ? archivedAt(device) : null);
+	/**
+	 * A revoked row is a tombstone, not a phone: no key, no socket, no queue.
+	 * The drawer reads it as a record and never asks the live endpoints about it.
+	 */
+	const revoked = $derived(device ? isRevoked(device) : false);
+	const revokedStamp = $derived(device ? revokedAt(device) : null);
 	/** "copied from" as it should read: a label when one exists, otherwise the id in mono. */
 	const copiedFrom = $derived.by(() => {
 		if (!copied) return null;
@@ -213,7 +226,7 @@
 	});
 
 	$effect(() => {
-		if (!open) return;
+		if (!open || revoked) return;
 		const id = deviceId;
 		const timer = setInterval(() => {
 			if (document.visibilityState === 'visible' && id === deviceId) {
@@ -239,8 +252,11 @@
 			statusError = null;
 			messagesError = null;
 		}
+		// A revoked device has no socket left to ask about, and the status route is
+		// entitled to refuse it. Skipping the read is how the drawer stays quiet
+		// instead of explaining a failure that is simply the state of the device.
 		const [statusResult, messagesResult, copiedResult] = await Promise.allSettled([
-			getDeviceStatus(id),
+			revoked ? Promise.resolve<DeviceStatus | null>(null) : getDeviceStatus(id),
 			getMessages(id, MESSAGE_LIMIT),
 			// Owner/admin only. A refusal here hides one sentence, nothing else.
 			getAudit({ action: COPIED_WORKFLOWS_ACTION, limit: 100 })
@@ -249,7 +265,10 @@
 		// late answer belongs to the device that is no longer on screen.
 		if (id !== deviceId) return;
 		status = statusResult.status === 'fulfilled' ? statusResult.value : null;
-		statusError = statusResult.status === 'rejected' ? describeError(statusResult.reason) : null;
+		statusError =
+			!revoked && statusResult.status === 'rejected'
+				? describeError(statusResult.reason)
+				: null;
 		if (messagesResult.status === 'fulfilled') {
 			messages = messagesResult.value.messages;
 			messagesError = null;
@@ -265,7 +284,10 @@
 	}
 
 	async function loadCommands(id = deviceId, initial = false): Promise<void> {
-		if (!id || (commandInFlight && !initial)) return;
+		// Outbound rows are a queue for a phone that answers. A revoked device has
+		// no phone, and its queue was dropped with the key, so there is nothing to
+		// poll and nothing to offer.
+		if (!id || revoked || (commandInFlight && !initial)) return;
 		const version = ++commandVersion;
 		commandInFlight = true;
 		if (initial || commands.length === 0) commandsLoading = true;
@@ -390,7 +412,9 @@
 			<div class="drawer-title">
 				<div class="head-eyebrow">
 					<p class="eyebrow">Device</p>
-					{#if archived}
+					{#if revoked}
+						<Badge tone="muted">Revoked</Badge>
+					{:else if archived}
 						<Badge tone="muted">Archived</Badge>
 					{/if}
 				</div>
@@ -413,33 +437,56 @@
 		</header>
 
 		<div class="drawer-body">
-			<!-- The one tinted container: the state the operator opened this for. -->
-			<section
-				class="state-block"
-				data-presence={presence}
-				aria-labelledby={`state-${uid}`}
-			>
-				<div class="state-lead">
-					<p class="state-word" id={`state-${uid}`}>
-						<span class="state-glyph" data-presence={presence} aria-hidden="true"></span>
-						{presence}
-					</p>
-					<p class="state-sentence">
-						{stateSentence}
-						{#if device?.last_seen}
-							Last contact <RelativeTime value={device.last_seen} fallback="never" />.
-						{:else}
-							No authenticated contact has been recorded.
-						{/if}
-					</p>
-				</div>
-				<div class="state-queue">
-					<span class="fact-k">Queue</span>
-					<span class="fact-v mono">{status ? status.queue_depth : '—'}</span>
-				</div>
-			</section>
+			{#if revoked}
+				<!-- Read-only: a revoked device has no state to act on, only a record
+				     to read and one way back (pair it again). -->
+				<section class="revoked-banner" aria-labelledby={`revoked-${uid}`}>
+					<div class="revoked-lead">
+						<p class="revoked-word" id={`revoked-${uid}`}>
+							<span class="revoked-glyph" aria-hidden="true"></span>
+							Revoked
+						</p>
+						<p class="revoked-sentence">
+							{#if revokedStamp}
+								Revoked <RelativeTime value={revokedStamp} fallback="recently" /> ·{' '}
+								{formatDate(revokedStamp)} at {formatClock(revokedStamp)}. Its key was
+								destroyed, so this phone cannot authenticate, queue a message or be woken.
+							{:else}
+								Its key was destroyed, so this phone cannot authenticate, queue a message or
+								be woken.
+							{/if}
+						</p>
+					</div>
+				</section>
+			{:else}
+				<!-- The one tinted container: the state the operator opened this for. -->
+				<section
+					class="state-block"
+					data-presence={presence}
+					aria-labelledby={`state-${uid}`}
+				>
+					<div class="state-lead">
+						<p class="state-word" id={`state-${uid}`}>
+							<span class="state-glyph" data-presence={presence} aria-hidden="true"></span>
+							{presence}
+						</p>
+						<p class="state-sentence">
+							{stateSentence}
+							{#if device?.last_seen}
+								Last contact <RelativeTime value={device.last_seen} fallback="never" />.
+							{:else}
+								No authenticated contact has been recorded.
+							{/if}
+						</p>
+					</div>
+					<div class="state-queue">
+						<span class="fact-k">Queue</span>
+						<span class="fact-v mono">{status ? status.queue_depth : '—'}</span>
+					</div>
+				</section>
+			{/if}
 
-			{#if statusError}
+			{#if statusError && !revoked}
 				<Notice tone="warn" title="Live status unavailable">{statusError}</Notice>
 			{/if}
 
@@ -460,6 +507,13 @@
 				</div>
 
 				<dl class="facts">
+					{#if revoked}
+						<div class="fact-row">
+							<dt>Device id</dt>
+							<dd><span class="mono">{deviceId}</span></dd>
+						</div>
+					{/if}
+
 					<div class="fact-row">
 						<dt>Label</dt>
 						<dd>
@@ -484,7 +538,31 @@
 						</dd>
 					</div>
 
-					{#if archivedStamp}
+					{#if revokedStamp}
+						<div class="fact-row">
+							<dt>Revoked</dt>
+							<dd>
+								<span title={formatAbsolute(revokedStamp)}>
+									{formatDate(revokedStamp)} · {formatClock(revokedStamp)}
+								</span>
+							</dd>
+						</div>
+					{/if}
+
+					{#if revoked}
+						<div class="fact-row">
+							<dt>Last seen</dt>
+							<dd>
+								{#if device?.last_seen}
+									<span title={formatAbsolute(device.last_seen)}>
+										{formatDate(device.last_seen)} · {formatClock(device.last_seen)}
+									</span>
+								{:else}
+									<span class="muted">No authenticated contact recorded</span>
+								{/if}
+							</dd>
+						</div>
+					{:else if archivedStamp}
 						<div class="fact-row">
 							<dt>Archived</dt>
 							<dd>
@@ -495,33 +573,35 @@
 						</div>
 					{/if}
 
-					<div class="fact-row">
-						<dt>SIM slot</dt>
-						<dd>
-							{#if simSlot}
-								<span class="mono">{simSlot}</span>
-							{:else}
-								<span class="muted">Not reported</span>
-							{/if}
-						</dd>
-					</div>
+					{#if !revoked}
+						<div class="fact-row">
+							<dt>SIM slot</dt>
+							<dd>
+								{#if simSlot}
+									<span class="mono">{simSlot}</span>
+								{:else}
+									<span class="muted">Not reported</span>
+								{/if}
+							</dd>
+						</div>
 
-					<div class="fact-row">
-						<dt>Wake</dt>
-						<dd>
-							{#if wake}
-								<span class="mono">{wake}</span>
-								<span class="muted">
-									·
-									{wake === 'push'
-										? 'the gateway can wake the phone.'
-										: 'the phone is reached on its next check-in.'}
-								</span>
-							{:else}
-								<span class="muted">—</span>
-							{/if}
-						</dd>
-					</div>
+						<div class="fact-row">
+							<dt>Wake</dt>
+							<dd>
+								{#if wake}
+									<span class="mono">{wake}</span>
+									<span class="muted">
+										·
+										{wake === 'push'
+											? 'the gateway can wake the phone.'
+											: 'the phone is reached on its next check-in.'}
+									</span>
+								{:else}
+									<span class="muted">—</span>
+								{/if}
+							</dd>
+						</div>
+					{/if}
 				</dl>
 
 				{#if copied}
@@ -544,61 +624,76 @@
 				{/if}
 			</section>
 
-			<div class="action-row">
-				<button
-					type="button"
-					class="btn btn-primary btn-sm"
-					onclick={() => {
-						onmint?.(deviceId);
-						onclose();
-					}}
-				>
-					<Icon name="key" size={13} /> Mint enroll code
-				</button>
-				<button
-					type="button"
-					class="btn btn-sm"
-					onclick={() => (sendOpen = !sendOpen)}
-					aria-expanded={sendOpen}
-					aria-controls={sendOpen ? `send-panel-${uid}` : undefined}
-				>
-					<Icon name="send" size={13} /> Send SMS
-				</button>
-				<span class="spacer"></span>
-				{#if archived}
+			{#if revoked}
+				<section class="pair-again" aria-labelledby={`pair-again-${uid}`}>
+					<div class="pair-again-head">
+						<span class="pair-again-mark" aria-hidden="true"><Icon name="key" size={14} /></span>
+						<h3 class="pair-again-title" id={`pair-again-${uid}`}>Pair again</h3>
+					</div>
+					<p class="pair-again-text">
+						Mint a new enrollment code on the Devices page and open the link on this phone.
+						Pairing issues a fresh key, and the row becomes a live device again with its
+						messages still attached. Nothing here can be sent, archived or purged while the
+						device is revoked.
+					</p>
+				</section>
+			{:else}
+				<div class="action-row">
 					<button
 						type="button"
-						class="btn btn-sm"
-						onclick={() => void unarchiveNow()}
-						disabled={archiving}
-						aria-busy={archiving}
-					>
-						{#if archiving}<Spinner />{:else}<Icon name="unarchive" size={13} />{/if}
-						Unarchive
-					</button>
-				{:else}
-					<button
-						type="button"
-						class="btn btn-sm"
+						class="btn btn-primary btn-sm"
 						onclick={() => {
-							archiveError = null;
-							archiveOpen = true;
+							onmint?.(deviceId);
+							onclose();
 						}}
 					>
-						<Icon name="archive" size={13} /> Archive
+						<Icon name="key" size={13} /> Mint enroll code
 					</button>
-				{/if}
-				<button
-					type="button"
-					class="btn btn-danger btn-sm"
-					onclick={() => {
-						revokeError = null;
-						revokeOpen = true;
-					}}
-				>
-					<Icon name="trash" size={13} /> Revoke
-				</button>
-			</div>
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => (sendOpen = !sendOpen)}
+						aria-expanded={sendOpen}
+						aria-controls={sendOpen ? `send-panel-${uid}` : undefined}
+					>
+						<Icon name="send" size={13} /> Send SMS
+					</button>
+					<span class="spacer"></span>
+					{#if archived}
+						<button
+							type="button"
+							class="btn btn-sm"
+							onclick={() => void unarchiveNow()}
+							disabled={archiving}
+							aria-busy={archiving}
+						>
+							{#if archiving}<Spinner />{:else}<Icon name="unarchive" size={13} />{/if}
+							Unarchive
+						</button>
+					{:else}
+						<button
+							type="button"
+							class="btn btn-sm"
+							onclick={() => {
+								archiveError = null;
+								archiveOpen = true;
+							}}
+						>
+							<Icon name="archive" size={13} /> Archive
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="btn btn-danger btn-sm"
+						onclick={() => {
+							revokeError = null;
+							revokeOpen = true;
+						}}
+					>
+						<Icon name="trash" size={13} /> Revoke
+					</button>
+				</div>
+			{/if}
 
 			{#if unarchiveError}
 				<Notice tone="danger" title="Could not unarchive this device">{unarchiveError}</Notice>
@@ -624,69 +719,71 @@
 				</div>
 			{/if}
 
-			<section class="section" aria-labelledby={`commands-${uid}`}>
-				<div class="section-head">
-					<h3 class="section-title" id={`commands-${uid}`}>Outbound</h3>
-					<span class="section-meta">
-						{#if commandsLoading && commands.length === 0}<Spinner />{:else}newest {COMMAND_LIMIT}{/if}
-					</span>
-				</div>
-				{#if commandsError}
-					<p class="field-error">Could not refresh this list. {commandsError}</p>
-				{/if}
-				{#if commandsLoading && commands.length === 0}
-					<div class="row-skeletons" aria-busy="true" aria-live="polite">
-						<span class="sr-only">Loading outbound messages</span>
-						{#each ['a', 'b'] as key (key)}
-							<div class="skeleton" style="height: 46px"></div>
-						{/each}
+			{#if !revoked}
+				<section class="section" aria-labelledby={`commands-${uid}`}>
+					<div class="section-head">
+						<h3 class="section-title" id={`commands-${uid}`}>Outbound</h3>
+						<span class="section-meta">
+							{#if commandsLoading && commands.length === 0}<Spinner />{:else}newest {COMMAND_LIMIT}{/if}
+						</span>
 					</div>
-				{:else if commands.length === 0}
-					<p class="section-note">Nothing has been queued for this device.</p>
-				{:else}
-					<ul class="cmd-list">
-						{#each commands as command (command.command_id)}
-							<li class="cmd-row">
-								<div class="cmd-head">
-									<span class="mono cmd-peer">{command.to_e164 || '(no recipient)'}</span>
-									<span title={command.state}>
-										<Badge tone={commandStateTone(command.state)}>
-											{commandStateLabel(command.state)}
-										</Badge>
-									</span>
-									<span class="cmd-time mono">
-										<RelativeTime value={command.created_at} />
-									</span>
-									<span class="spacer"></span>
-									<button
-										type="button"
-										class="link-btn cmd-track-btn"
-										onclick={() => toggleCommandTracker(command.command_id, command.command_id)}
-										aria-expanded={command.command_id in trackedCommands}
-										aria-controls={command.command_id in trackedCommands
-											? `cmd-tracker-${command.command_id}`
-											: undefined}
-										title={commandStateNote(command.state)}
-									>
-										{command.command_id in trackedCommands ? 'Hide' : 'Track'}
-									</button>
-								</div>
-								<p class="cmd-body">{command.body || '(empty message)'}</p>
-								{#if command.command_id in trackedCommands}
-									<div class="cmd-tracker" id={`cmd-tracker-${command.command_id}`}>
-										<CommandTracker
-											deviceId={deviceId}
-											commandId={trackedCommands[command.command_id] ?? command.command_id}
-											onResend={(to, body) =>
-												resendCommand(command.command_id, to, body)}
-										/>
+					{#if commandsError}
+						<p class="field-error">Could not refresh this list. {commandsError}</p>
+					{/if}
+					{#if commandsLoading && commands.length === 0}
+						<div class="row-skeletons" aria-busy="true" aria-live="polite">
+							<span class="sr-only">Loading outbound messages</span>
+							{#each ['a', 'b'] as key (key)}
+								<div class="skeleton" style="height: 46px"></div>
+							{/each}
+						</div>
+					{:else if commands.length === 0}
+						<p class="section-note">Nothing has been queued for this device.</p>
+					{:else}
+						<ul class="cmd-list">
+							{#each commands as command (command.command_id)}
+								<li class="cmd-row">
+									<div class="cmd-head">
+										<span class="mono cmd-peer">{command.to_e164 || '(no recipient)'}</span>
+										<span title={command.state}>
+											<Badge tone={commandStateTone(command.state)}>
+												{commandStateLabel(command.state)}
+											</Badge>
+										</span>
+										<span class="cmd-time mono">
+											<RelativeTime value={command.created_at} />
+										</span>
+										<span class="spacer"></span>
+										<button
+											type="button"
+											class="link-btn cmd-track-btn"
+											onclick={() => toggleCommandTracker(command.command_id, command.command_id)}
+											aria-expanded={command.command_id in trackedCommands}
+											aria-controls={command.command_id in trackedCommands
+												? `cmd-tracker-${command.command_id}`
+												: undefined}
+											title={commandStateNote(command.state)}
+										>
+											{command.command_id in trackedCommands ? 'Hide' : 'Track'}
+										</button>
 									</div>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</section>
+									<p class="cmd-body">{command.body || '(empty message)'}</p>
+									{#if command.command_id in trackedCommands}
+										<div class="cmd-tracker" id={`cmd-tracker-${command.command_id}`}>
+											<CommandTracker
+												deviceId={deviceId}
+												commandId={trackedCommands[command.command_id] ?? command.command_id}
+												onResend={(to, body) =>
+													resendCommand(command.command_id, to, body)}
+											/>
+										</div>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</section>
+			{/if}
 
 			<section class="section" aria-labelledby={`messages-${uid}`}>
 				<div class="section-head">
@@ -695,7 +792,7 @@
 						{#if loading}<Spinner />{:else}newest {MESSAGE_LIMIT}{/if}
 					</span>
 					<span class="spacer"></span>
-					{#if messages.length > 0}
+					{#if messages.length > 0 && !revoked}
 						<button
 							type="button"
 							class="btn btn-danger-ghost btn-sm"
@@ -724,8 +821,10 @@
 				{:else if messages.length === 0}
 					<EmptyState
 						icon="message"
-						title="No messages for this device yet"
-						description="Inbound SMS appears after the phone syncs. Anything you queue here appears immediately."
+						title={revoked ? 'No messages were kept' : 'No messages for this device yet'}
+						description={revoked
+							? 'Revoking keeps the history, but this device had none on the gateway.'
+							: 'Inbound SMS appears after the phone syncs. Anything you queue here appears immediately.'}
 					/>
 				{:else}
 					<ul class="dlog">
@@ -781,7 +880,7 @@
 					</ul>
 				{/if}
 			</section>
-		</div>
+	</div>
 	</div>
 </dialog>
 
@@ -995,6 +1094,103 @@
 	.state-block[data-presence='offline'] {
 		border-color: var(--df-c-tint-edge-danger);
 		background: var(--df-state-danger-bg);
+	}
+
+	/* ---------- revoked ---------- */
+
+	/* Read-only, and deliberately not an alarm colour: revoking was a decision,
+	   not a failure. A crossed box marks it as out of service, and none of the
+	   five presence shapes are reused, so it cannot be read as `offline`. */
+	.revoked-banner {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-4);
+		padding: var(--df-p-space-4);
+		border: 1px solid var(--df-c-tint-edge-neutral);
+		border-radius: var(--df-p-radius-lg);
+		background: var(--df-surface-well);
+	}
+
+	.revoked-lead {
+		min-width: 0;
+	}
+
+	.revoked-word {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-xl);
+		font-weight: 700;
+		line-height: 1.1;
+		letter-spacing: -0.02em;
+		color: var(--df-text-primary);
+	}
+
+	.revoked-glyph {
+		width: var(--df-c-chip-dot-size);
+		height: var(--df-c-chip-dot-size);
+		flex: none;
+		border-radius: 1px;
+		box-shadow: inset 0 0 0 1.5px var(--df-text-meta);
+		background: linear-gradient(
+			135deg,
+			transparent 44%,
+			var(--df-text-meta) 44%,
+			var(--df-text-meta) 56%,
+			transparent 56%
+		);
+	}
+
+	.revoked-sentence {
+		margin-top: var(--df-p-space-1);
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	/* The one way back is an instruction, not a button: the drawer stays read
+	   only, and minting belongs on the Devices page. */
+	.pair-again {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-4);
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 26%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-accent-soft);
+	}
+
+	.pair-again-head {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+	}
+
+	.pair-again-mark {
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		flex: none;
+		border: 1px solid color-mix(in srgb, var(--df-accent-text) 30%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+		color: var(--df-accent-text);
+	}
+
+	.pair-again-title {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		color: var(--df-text-primary);
+	}
+
+	.pair-again-text {
+		font-size: var(--df-p-text-sm);
+		line-height: 1.55;
+		color: var(--df-text-secondary);
 	}
 
 	.state-lead {
