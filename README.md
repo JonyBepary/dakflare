@@ -325,10 +325,11 @@ cryptography rather than a mock. `test-support/` holds the dev stack and the sha
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
 - **`MEDIA_BUCKET` is bound but unread**; no Worker route serves media yet.
-- **Workers AI is used by the agent routes only**; nothing else calls a model, and `jev` has
-  thresholds but no transport.
-- **Agent telemetry has no console surface yet**; the endpoint and the CLI cover it, the console
-  does not.
+- **Workers AI is used by the agent routes only**; nothing else calls a model. `jev` is opt-in
+  through `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`, and reports `provider_unavailable` unless
+  both are set.
+- **Agent telemetry in the console is one question at a time**: no transcript, no polling, no
+  filter or export, and a 403 renders as a permission state rather than signing you out.
 - **A proxy in front of the console breaks the cookie**, not the sign-in. The session cookie is
   host-only, so an http preview or a second hostname signs in on the Worker and keeps nothing; open
   the deployment's own HTTPS URL. `/admin/login` is honest about this: it reports that the session

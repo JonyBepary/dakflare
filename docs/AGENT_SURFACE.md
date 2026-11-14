@@ -53,8 +53,11 @@ Thresholds (`SYSTEM1_THRESHOLDS`): auto-route 0.90 / 0.85, tie-break 0.70 / 0.65
 block 0.70. `SYSTEM1_DEFAULT_MODEL` selects the default and is declared in all five config
 files so `check-config` stays green.
 
-`jev` (TypeSafe) is named in the model map but has no transport yet; without
-`TYPESAFE_API_KEY` it reports `provider_unavailable`.
+`jev` (TypeSafe) is an opt-in adapter: with `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY` set it
+posts the same typed questions to `{base}/v1/decide` and normalises the answers through the same
+path, and `AskResult.provider` names whichever backend answered. With either value missing it
+reports `provider_unavailable` rather than falling back to Clef. The assumed wire shape is
+isolated in one function so a different real shape changes one place.
 
 ## Endpoints
 
@@ -169,4 +172,5 @@ request, `4` for permission.
 - It does not apply anything from `synthesize`. A human approves, then an apply spends.
 - It does not act on a stale read: a diagnosis is a snapshot, and a grant is the only thing
   that authorises a change.
-- `jev` has thresholds but no transport yet.
+- `jev` needs both TypeSafe values before it can answer; the contract is our assumption about
+  their wire shape, isolated in one function.

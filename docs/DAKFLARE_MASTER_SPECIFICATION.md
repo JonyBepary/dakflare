@@ -436,8 +436,10 @@ Known gaps:
 - **Signal** and the Android notification bridge are not implemented.
 - **Plugin registry and WASM sandbox** are not implemented; the tables exist.
 - **R2 media** is declared and unread by any route; Workers AI is read by the agent routes only.
-- **`jev`** has thresholds but no transport yet.
-- **Agent telemetry** has no console surface yet; the endpoint and the CLI cover it.
+- **`jev`** is opt-in through `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`; without both it reports
+  `provider_unavailable`. Its wire shape is our assumption, isolated in one adapter.
+- **Agent telemetry in the console** answers one question at a time; no transcript, filter or
+  export.
 - **The palette composer** stages insertions only; moves and renames arrive from a staged patch.
 
 - **Magic link** needs `RESEND_API_KEY`; without it the factor is not advertised.
