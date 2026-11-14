@@ -122,6 +122,11 @@ export interface Env {
   KV: KVNamespace;
   /** Cloudflare Workers AI binding for intent classification and text extraction. */
   AI?: Ai;
+  /** System 1 default model: clef-flash (default) | clef | jev. */
+  SYSTEM1_DEFAULT_MODEL?: string;
+  /** TypeSafe Jev, opt-in: both must be set for the jev provider to answer. */
+  TYPESAFE_BASE_URL?: string;
+  TYPESAFE_API_KEY?: string;
   /** R2 bucket for multi-channel media storage and presigned download links. */
   MEDIA_BUCKET?: R2Bucket;
   /** Cloudflare Queue for reliable asynchronous outbound webhook delivery. */

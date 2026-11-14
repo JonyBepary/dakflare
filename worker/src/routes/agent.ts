@@ -84,10 +84,22 @@ async function readValidated<T>(req: Request, schema: z.ZodType<T>): Promise<Val
 
 /** The System1 binding surface, without leaking `Ai`'s overloads into routes. */
 function system1Env(env: Env): System1Env {
-  const configured = (env as { SYSTEM1_DEFAULT_MODEL?: string }).SYSTEM1_DEFAULT_MODEL;
+  const { SYSTEM1_DEFAULT_MODEL, TYPESAFE_BASE_URL, TYPESAFE_API_KEY } = env as {
+    SYSTEM1_DEFAULT_MODEL?: string;
+    TYPESAFE_BASE_URL?: string;
+    TYPESAFE_API_KEY?: string;
+  };
   return {
     AI: env.AI,
-    ...(typeof configured === "string" ? { SYSTEM1_DEFAULT_MODEL: configured } : {}),
+    ...(typeof SYSTEM1_DEFAULT_MODEL === "string" ? { SYSTEM1_DEFAULT_MODEL } : {}),
+    // Jev is opt-in: both values must be present or ask() reports
+    // provider_unavailable rather than falling back to Clef.
+    ...(typeof TYPESAFE_BASE_URL === "string" && TYPESAFE_BASE_URL.trim()
+      ? { TYPESAFE_BASE_URL }
+      : {}),
+    ...(typeof TYPESAFE_API_KEY === "string" && TYPESAFE_API_KEY.trim()
+      ? { TYPESAFE_API_KEY }
+      : {}),
   };
 }
 

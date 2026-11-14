@@ -52,6 +52,9 @@ export const SYSTEM1_THRESHOLDS: Record<System1Model, System1Thresholds> = {
 export interface System1Env {
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   SYSTEM1_DEFAULT_MODEL?: string;
+  /** TypeSafe Jev, an external provider. Absent or empty keeps `jev` unavailable. */
+  TYPESAFE_BASE_URL?: string;
+  /** Bearer token for TypeSafe. Absent or empty keeps `jev` unavailable. */
   TYPESAFE_API_KEY?: string;
 }
 
@@ -94,6 +97,10 @@ export interface AskResult {
   model: System1Model;
   answers: Record<string, Answer>;
   usage?: { input_tokens?: number; output_tokens?: number };
+  /** Which backend handled the attempt: Cloudflare Clef or the TypeSafe Jev adapter. */
+  provider?: "clef" | "typesafe";
+  /** 429 only: the provider's `retry-after`, passed through untouched. */
+  retryAfter?: string;
   reason?: "no_ai_binding" | "provider_unavailable" | "invalid_question" | "unparseable";
 }
 
@@ -202,22 +209,139 @@ function normalise(id: string, raw: unknown): Answer | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// TypeSafe Jev adapter
+// ---------------------------------------------------------------------------
+/**
+ * Contract assumed for TypeSafe's Jev — our reading of their wire format, not a
+ * shape verified against a live endpoint. It lives in this one section so that
+ * a different real shape costs one function, not a rewrite of every caller:
+ *
+ *   POST {TYPESAFE_BASE_URL}/v1/decide
+ *   authorization: Bearer {TYPESAFE_API_KEY}
+ *   content-type: application/json
+ *
+ *   { model: "jev", state, questions }        // questions as Clef defines them
+ *
+ *   200 { answers: { id: { type, choice?, probabilities?, confidence?,
+ *                          noul?, score?, legend? } } }
+ *
+ * The state and questions are the same abstract shape Clef takes, and the
+ * answers go through the same `normalise`, so callers cannot tell the two
+ * providers apart except by `AskResult.provider`. Both env values are required;
+ * with either missing, `jev` reports `provider_unavailable` rather than falling
+ * back to Clef behind the caller's back.
+ */
+export const TYPESAFE_TIMEOUT_MS = 5_000;
+export const TYPESAFE_DECIDE_PATH = "/v1/decide";
+
+export interface TypesafeConfig {
+  baseUrl: string;
+  apiKey: string;
+}
+
+export function typesafeConfig(env: System1Env): TypesafeConfig | null {
+  const baseUrl = env.TYPESAFE_BASE_URL?.trim().replace(/\/+$/, "");
+  const apiKey = env.TYPESAFE_API_KEY?.trim();
+  // A base URL alone is not enough to authenticate, and a key alone has nowhere
+  // to go. Either missing is a configuration gap, reported as unavailable.
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl, apiKey };
+}
+
+/** Reject when `signal` aborts, even if `fetch` itself ignores the signal. */
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("system1: typesafe request timed out"));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
+async function askTypesafe(
+  env: System1Env,
+  state: string | Record<string, unknown>,
+  questions: Record<string, ClefQuestion>
+): Promise<AskResult> {
+  const model: System1Model = "jev";
+  const unavailable: AskResult = { ok: false, model, answers: {}, provider: "typesafe", reason: "provider_unavailable" };
+
+  const config = typesafeConfig(env);
+  if (!config) return unavailable;
+
+  let body: ReturnType<typeof buildClefRequest>;
+  try {
+    // Clone the record: buildClefRequest normalises choice criteria in place.
+    body = buildClefRequest(state, { ...questions }, "jev");
+  } catch {
+    return { ok: false, model, answers: {}, provider: "typesafe", reason: "invalid_question" };
+  }
+
+  let response: Response;
+  try {
+    const signal = AbortSignal.timeout(TYPESAFE_TIMEOUT_MS);
+    response = await Promise.race([
+      fetch(`${config.baseUrl}${TYPESAFE_DECIDE_PATH}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${config.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "jev", state: body.state, questions: body.questions }),
+        signal,
+      }),
+      rejectOnAbort(signal),
+    ]);
+  } catch {
+    return unavailable;
+  }
+
+  // 401/403 mean the credentials are wrong, which is configuration, not a
+  // transient fault; 429 carries the provider's backoff. Neither is retried here.
+  if (response.status === 429) {
+    return { ...unavailable, retryAfter: response.headers.get("retry-after") ?? undefined };
+  }
+  if (!response.ok) return unavailable;
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    return { ok: false, model, answers: {}, provider: "typesafe", reason: "unparseable" };
+  }
+
+  const answersEnvelope = (raw ?? {}) as { answers?: unknown };
+  const incoming = answersEnvelope.answers;
+  if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return { ok: false, model, answers: {}, provider: "typesafe", reason: "unparseable" };
+  }
+
+  const answers: Record<string, Answer> = {};
+  for (const [id, value] of Object.entries(incoming)) {
+    const answer = normalise(id, value);
+    if (answer) answers[id] = answer;
+  }
+  const ok = Object.keys(answers).length > 0;
+  return { ok, model, answers, provider: "typesafe", reason: ok ? undefined : "unparseable" };
+}
+
 export async function ask(
   env: System1Env,
   state: string | Record<string, unknown>,
   questions: Record<string, ClefQuestion>,
   model: System1Model = defaultModel(env)
 ): Promise<AskResult> {
-  if (model === "jev") {
-    return { ok: false, model, answers: {}, reason: env.TYPESAFE_API_KEY ? "provider_unavailable" : "provider_unavailable" };
-  }
-  if (!env.AI?.run) return { ok: false, model, answers: {}, reason: "no_ai_binding" };
+  if (model === "jev") return askTypesafe(env, state, questions);
+  if (!env.AI?.run) return { ok: false, model, answers: {}, provider: "clef", reason: "no_ai_binding" };
 
   let body: ReturnType<typeof buildClefRequest>;
   try {
     body = buildClefRequest(state, questions, model);
   } catch {
-    return { ok: false, model, answers: {}, reason: "invalid_question" };
+    return { ok: false, model, answers: {}, provider: "clef", reason: "invalid_question" };
   }
 
   try {
@@ -230,9 +354,17 @@ export async function ask(
       const answer = normalise(id, value);
       if (answer) answers[id] = answer;
     }
-    return { ok: Object.keys(answers).length > 0, model, answers, usage: raw?.usage, reason: Object.keys(answers).length ? undefined : "unparseable" };
+    const ok = Object.keys(answers).length > 0;
+    return {
+      ok,
+      model,
+      answers,
+      provider: "clef",
+      usage: raw?.usage,
+      reason: ok ? undefined : "unparseable",
+    };
   } catch {
-    return { ok: false, model, answers: {}, reason: "provider_unavailable" };
+    return { ok: false, model, answers: {}, provider: "clef", reason: "provider_unavailable" };
   }
 }
 
