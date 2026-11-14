@@ -62,7 +62,7 @@ export async function handleHealth(env: Env): Promise<Response> {
   try {
     const row = (await env.DB.prepare(
       `SELECT
-         (SELECT COUNT(*) FROM devices WHERE archived_at IS NULL) AS devices,
+         (SELECT COUNT(*) FROM devices WHERE archived_at IS NULL AND revoked_at IS NULL) AS devices,
          (SELECT COUNT(*) FROM messages)      AS messages,
          (SELECT COUNT(*) FROM rules)         AS rules,
          (SELECT COUNT(*) FROM pairing_codes WHERE expires_at > ?) AS pairing_codes,

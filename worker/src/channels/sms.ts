@@ -33,7 +33,7 @@ export class SmsChannelPlugin implements ChannelPlugin {
   async sendOutbound(params: OutboundMessageParams, env: Env): Promise<OutboundDeliveryResult> {
     // Look up primary paired device
     const device = await env.DB.prepare(
-      `SELECT device_id FROM devices WHERE archived_at IS NULL ORDER BY last_seen DESC LIMIT 1`
+      `SELECT device_id FROM devices WHERE archived_at IS NULL AND revoked_at IS NULL ORDER BY last_seen DESC LIMIT 1`
     ).first<{ device_id: string }>();
 
     if (!device) {

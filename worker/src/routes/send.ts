@@ -268,7 +268,9 @@ function readPriority(value: unknown): string {
  * never authenticate and never poll.
  */
 async function deviceIsRegistered(env: Env, deviceId: string): Promise<boolean> {
-  const row = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+  const row = await env.DB.prepare(
+    `SELECT 1 AS ok FROM devices WHERE device_id = ? AND revoked_at IS NULL`
+  )
     .bind(deviceId)
     .first();
   return row !== null;

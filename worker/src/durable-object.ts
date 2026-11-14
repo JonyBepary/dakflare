@@ -413,6 +413,10 @@ export class DeviceGateway extends DurableObject<Env> {
     }
 
     // --- §3.2 step 7: curve verification --------------------------------
+    // The device's public key lives in this DO, and `handleRevoke` deletes this
+    // row, so a revoked device falls through to `device_unknown` below. There is
+    // no `revoked_at` here: revocation is the absence of the DO row (the D1
+    // tombstone is a separate registry concern).
     const deviceRows = this.ctx.storage.sql
       .exec(`SELECT public_key_spki FROM devices WHERE device_id = ?`, deviceId)
       .toArray() as { public_key_spki: string }[];

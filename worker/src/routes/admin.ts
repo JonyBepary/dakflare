@@ -46,8 +46,17 @@ export async function handleDeviceRevoke(
     return Response.json({ error: "revoke_failed" }, { status: 502 });
   }
 
+  // Keep a tombstone instead of deleting the row: the console needs to show that
+  // this device was revoked (`revoked_at`), and re-pairing the same device_id
+  // revives the row with a fresh key (pair.ts clears `revoked_at` on conflict).
+  // The key is cleared here so no copy of it remains; the DO above already
+  // dropped its own copy, so a revoked device cannot authenticate either way.
+  // Alerts and flow runs go (the operator does not get to keep a compromised
+  // phone's history). Messages stay: they are the fleet's delivery record.
   const [d1] = await env.DB.batch([
-    env.DB.prepare(`DELETE FROM devices WHERE device_id = ?`).bind(deviceId),
+    env.DB.prepare(
+      `UPDATE devices SET public_key = '', fcm_token = NULL, revoked_at = ?, archived_at = NULL WHERE device_id = ?`
+    ).bind(Date.now(), deviceId),
     env.DB.prepare(`DELETE FROM alerts WHERE device_id = ?`).bind(deviceId),
     env.DB.prepare(`DELETE FROM flow_runs WHERE device_id = ?`).bind(deviceId),
   ]);
@@ -56,10 +65,10 @@ export async function handleDeviceRevoke(
     action: "device.revoked",
     actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
     subject: deviceId,
-    detail: { d1_deleted: Number(d1.meta?.changes ?? 0) },
+    detail: { tombstoned: true },
   });
 
-  return Response.json({ ok: true, d1_deleted: Number(d1.meta?.changes ?? 0) });
+  return Response.json({ ok: true, tombstoned: true });
 }
 
 /**

@@ -111,7 +111,9 @@ export async function verifyDeviceSignature(req: Request, env: Env): Promise<Dev
   // durable, billable Durable Objects by inventing device ids. One indexed point
   // read on the primary key, and it fails before any body is read or digested.
   // `send.ts` already does the equivalent on the admin send path.
-  const known = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+  const known = await env.DB.prepare(
+    `SELECT 1 AS ok FROM devices WHERE device_id = ? AND revoked_at IS NULL`
+  )
     .bind(deviceId)
     .first();
   if (!known) {

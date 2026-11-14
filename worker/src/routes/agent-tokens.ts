@@ -60,7 +60,9 @@ export async function handleAgentTokenMint(
   // An agent bound to a handset that is not in the fleet would look valid and
   // fail on its first send. Refuse it at mint time instead.
   if (deviceId !== null) {
-    const device = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+    const device = await env.DB.prepare(
+      `SELECT 1 AS ok FROM devices WHERE device_id = ? AND revoked_at IS NULL`
+    )
       .bind(deviceId)
       .first();
     if (device === null) return err("device_unknown", 404);

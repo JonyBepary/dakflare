@@ -225,7 +225,7 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
         AND expires_at > ?1
         AND (claimed_at IS NULL OR claimed_at <= ?1 - ${CLAIM_LEASE_MS})
         AND (device_id IS NULL OR device_id = ?3)
-        AND (purpose = 'rotate' OR NOT EXISTS (SELECT 1 FROM devices WHERE device_id = ?3))
+        AND (purpose = 'rotate' OR NOT EXISTS (SELECT 1 FROM devices WHERE device_id = ?3 AND revoked_at IS NULL))
      RETURNING purpose`
   )
     .bind(now, pairingCode, deviceId)
@@ -243,7 +243,9 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
       .first<{ purpose: string }>();
 
     if (row?.purpose === "enroll") {
-      const device = await env.DB.prepare(`SELECT 1 AS ok FROM devices WHERE device_id = ?`)
+      const device = await env.DB.prepare(
+        `SELECT 1 AS ok FROM devices WHERE device_id = ? AND revoked_at IS NULL`
+      )
         .bind(deviceId)
         .first<{ ok: number }>();
       if (device) return err("device_exists", 409);
@@ -317,7 +319,10 @@ export async function handleDevicePair(req: Request, env: Env): Promise<Response
        -- A re-pair that does not report a label must not erase one an operator
        -- set (or a previous build reported). Null means "unknown", not "clear".
        label      = COALESCE(excluded.label, devices.label),
-       sim_slot   = COALESCE(excluded.sim_slot, devices.sim_slot)`
+       sim_slot   = COALESCE(excluded.sim_slot, devices.sim_slot),
+       -- A re-pair revives a revoked tombstone: the device holds a new key again,
+       -- so it is live, not revoked.
+       revoked_at = NULL`
   )
     .bind(deviceId, publicKeySpki, fcmToken, now, now, label, simSlot)
     .run();
@@ -401,7 +406,7 @@ export async function handleDevicesList(env: Env, requestUrl: URL): Promise<Resp
     includeArchived === "1" || includeArchived === "true" ? "" : "WHERE archived_at IS NULL";
 
   const rows = await env.DB.prepare(
-    `SELECT device_id, fcm_token, label, sim_slot, paired_at, last_seen, archived_at
+    `SELECT device_id, fcm_token, label, sim_slot, paired_at, last_seen, archived_at, revoked_at
        FROM devices
        ${archivedFilter}
       ORDER BY last_seen DESC`
@@ -415,6 +420,7 @@ export async function handleDevicesList(env: Env, requestUrl: URL): Promise<Resp
     paired_at: number;
     last_seen: number | null;
     archived_at: number | null;
+    revoked_at: number | null;
   }>;
 
   const devices = rawDevices.map((d) => ({
@@ -470,7 +476,7 @@ async function inheritWorkflows(
   // whole fleet: `paired_at DESC` makes row 0 the most recent candidate.
   const candidates = await env.DB.prepare(
     `SELECT device_id FROM devices
-      WHERE label = ? AND device_id <> ?
+      WHERE label = ? AND device_id <> ? AND revoked_at IS NULL
       ORDER BY paired_at DESC, device_id DESC
       LIMIT 2`
   )

@@ -1300,9 +1300,16 @@ async function cmdSuite() {
       (await flowsFor(old.deviceId)).length + (await flowsFor(fresh.deviceId)).length, 0);
     await admin('DELETE', `/v1/admin/devices/${old.deviceId}`);
     await admin('DELETE', `/v1/admin/devices/${fresh.deviceId}`);
-    rep.check('both harness devices are revoked',
-      (await fleet('?include_archived=1')).filter(
-        (d) => d.device_id === old.deviceId || d.device_id === fresh.deviceId).length, 0);
+    // Revocation leaves a tombstone: the row stays in the fleet with `revoked_at`
+    // set and no public key, instead of disappearing. The console filters it.
+    const revokedRows = (await fleet('?include_archived=1')).filter(
+      (d) => d.device_id === old.deviceId || d.device_id === fresh.deviceId);
+    rep.check('both harness devices remain as revoked tombstones',
+      revokedRows.length, 2);
+    rep.check('both tombstones carry revoked_at',
+      revokedRows.every((d) => typeof d.revoked_at === 'number'), true);
+    rep.check('tombstones expose no public key when the list includes it',
+      revokedRows.every((d) => !('public_key' in d) || d.public_key === ''), true);
 
     run(rep);
   }
@@ -1794,12 +1801,19 @@ async function cmdSuite() {
       401);
 
     const rulesAfter = ((await admin('GET', '/v1/admin/rules')).data?.rules ?? []).length;
-    const devicesAfter = ((await admin('GET', '/v1/devices')).data?.devices ?? []).length;
+    const devicesAfterList = (await admin('GET', '/v1/devices')).data?.devices ?? [];
+    const devicesAfter = devicesAfterList.length;
     const messagesAfter =
       ((await admin('GET', `/v1/messages?device_id=${consoleDevice.deviceId}&limit=200`)).data
         ?.messages ?? []).length;
     rep.check('rule count returned to its pre-section value', rulesAfter, rulesBefore);
-    rep.check('device count returned to its pre-section value', devicesAfter, devicesBefore);
+    // Revocation keeps the row as a tombstone, so the fleet is one larger than
+    // before this section — and that extra row is this device, revoked.
+    rep.check('the revoked device stays as exactly one tombstone',
+      devicesAfter, devicesBefore + 1);
+    rep.check('the tombstone is the revoked console device',
+      devicesAfterList.find((d) => d.device_id === consoleDevice.deviceId)?.revoked_at != null,
+      true);
     rep.check('message count returned to its pre-section value', messagesAfter, messagesBefore);
     run(rep);
   }

@@ -999,7 +999,11 @@ function publicDevice(device) {
     sim_slot: device.sim_slot ?? null,
     paired_at: device.paired_at ?? null,
     last_seen: device.last_seen ?? null,
-    state: devicePresenceState(device.last_seen),
+    state:
+      device.revoked_at === null || device.revoked_at === undefined
+        ? devicePresenceState(device.last_seen)
+        : 'revoked',
+    revoked_at: device.revoked_at ?? null,
     fcm: Boolean(device.fcm_token),
   };
 }
@@ -2036,11 +2040,20 @@ function parseDuration(value, { fallbackMs = WAIT_DEFAULT_MS } = {}) {
 async function resolveDevice(cfg, explicitId) {
   if (explicitId) return { deviceId: explicitId, note: null };
 
-  const devices = (await listDevices(cfg)).map(publicDevice);
+  // A revoked device is a tombstone the console keeps for its record; it is not
+  // a target. Ranking it by `last_seen` would pick a phone that cannot answer.
+  const all = await listDevices(cfg);
+  const devices = all
+    .filter((device) => device.revoked_at === null || device.revoked_at === undefined)
+    .map(publicDevice);
   if (devices.length === 0) {
-    throw new CliError('no paired device yet: run `dakflare pair` first.', 1, {
-      error: 'no_device',
-    });
+    throw new CliError(
+      all.length === 0
+        ? 'no paired device yet: run `dakflare pair` first.'
+        : 'every paired device is revoked: pair one again.',
+      1,
+      { error: 'no_device' }
+    );
   }
   if (devices.length === 1) return { deviceId: devices[0].device_id, note: null };
 
