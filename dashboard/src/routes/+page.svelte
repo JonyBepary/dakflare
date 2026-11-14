@@ -19,6 +19,7 @@
 	import { consoleCounts } from '$lib/console-counts.svelte';
 	import { formatAbsolute, formatCount, plural } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
+	import AgentTelemetryPanel from '$lib/components/AgentTelemetryPanel.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -618,8 +619,14 @@
 				</section>
 			</div>
 
-			<!-- 12 — what answers a stranger. -->
+			<!-- 12 — ask about the state above. Read-only; the panel hides itself
+			     when the session has no read role. -->
 			<div class="bento" class:settle={!refreshNote} style="--i: 3">
+				<AgentTelemetryPanel />
+			</div>
+
+			<!-- 12 — what answers a stranger. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 4">
 				<section class="card span-12" aria-labelledby="automation-heading">
 					<div class="card-head">
 						<h2 id="automation-heading" class="card-title">Automation</h2>
