@@ -75,15 +75,13 @@ const { runTurn, WAITING_HEARTBEAT_MS } = await import("../../agent/loop.ts");
       lastBeforeCall = frames.at(-1);
       if (calls === 1) {
         return {
-          text: JSON.stringify({
-            answer: "",
-            calls: [{ tool: "echo", input: { value: "x" } }],
-          }),
+          text: "",
+          toolCalls: [{ id: "call_1", name: "echo", arguments: '{"value":"x"}' }],
           tokensIn: 1,
           tokensOut: 1,
         };
       }
-      return { text: JSON.stringify({ answer: "done", calls: [] }), tokensIn: 1, tokensOut: 1 };
+      return { text: "done", tokensIn: 1, tokensOut: 1 };
     },
   };
   const journal = {
@@ -155,7 +153,7 @@ const { runTurn, WAITING_HEARTBEAT_MS } = await import("../../agent/loop.ts");
       // cadence that must produce at least two `waiting` frames.
       await new Promise((resolve) => setTimeout(resolve, 25_000));
       return {
-        text: JSON.stringify({ answer: "slow but alive", calls: [] }),
+        text: "slow but alive",
         tokensIn: 1,
         tokensOut: 1,
       };

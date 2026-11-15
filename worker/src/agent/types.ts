@@ -50,9 +50,3 @@ export interface ToolContext {
   budget: AgentBudget;
   signal: AbortSignal;
 }
-
-/** The JSON shape the model must answer with. */
-export interface ModelEnvelope {
-  answer: string;
-  calls: Array<{ tool: string; input: Record<string, unknown> }>;
-}

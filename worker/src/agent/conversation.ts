@@ -41,8 +41,22 @@ export type ConversationSession = Pick<
 >;
 
 /** One durable conversation id per operator, shared by socket and HTTP paths. */
+/**
+ * The operator's conversation.
+ *
+ * Versioned, because a transcript is training data for the next turn. The first
+ * protocol asked the model for a JSON envelope and stored those replies as
+ * assistant messages; replaying them taught the model to answer in JSON again
+ * even after the loop moved to native tool calling. Bumping the prefix retires
+ * that transcript instead of trying to sanitise it — the old rows stay in the
+ * object's SQLite, unreferenced.
+ *
+ * Bump this whenever the message contract changes shape.
+ */
+const CONVERSATION_VERSION = "v2";
+
 export function conversationIdFor(actorLabel: string): string {
-  return `${CONVERSATION_PREFIX}${actorLabel}`;
+  return `${CONVERSATION_PREFIX}${CONVERSATION_VERSION}:${actorLabel}`;
 }
 
 /**

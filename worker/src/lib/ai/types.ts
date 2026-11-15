@@ -8,12 +8,40 @@
  * honestly, because the daily budget is only real if the number is.
  */
 
-export type ChatRole = "system" | "user" | "assistant";
+export type ChatRole = "system" | "user" | "assistant" | "tool";
+
+/** A tool call exactly as the provider returned it. */
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  /**
+   * The raw `function.arguments` string. Kept as text, not parsed: a provider
+   * may send malformed JSON and the agent loop must be able to report that
+   * instead of throwing inside an adapter.
+   */
+  arguments: string;
+}
+
+/** The JSON-schema manifest both chat-completions shapes accept. */
+export interface ChatToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
 
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Assistant messages that called tools. */
+  toolCalls?: ChatToolCall[];
+  /** `role: "tool"`: which assistant call this result answers. */
+  toolCallId?: string;
+  /** `role: "tool"`: the tool name, which Workers AI also accepts. */
+  name?: string;
 }
+
+/** A streaming delta. Nothing else is streamed: the loop owns the frames. */
+export type ChatStreamEvent = { type: "token"; text: string };
 
 /**
  * `workers-ai` is the Worker's own AI binding (no key). `openai-compatible` is
@@ -46,6 +74,12 @@ export interface ChatOptions {
   temperature?: number;
   /** Per-call timeout for HTTP adapters. Default 20 s. */
   timeoutMs?: number;
+  /**
+   * Tools the model may call. The loop supplies the same manifest to every
+   * model call; an adapter that cannot express tools ignores it and the model
+   * simply answers in prose.
+   */
+  tools?: ChatToolDefinition[];
 }
 
 export interface ChatResult {
@@ -54,6 +88,10 @@ export interface ChatResult {
   tokensIn?: number;
   /** Completion tokens, when the provider reports them. */
   tokensOut?: number;
+  /** Structured calls, when the provider returned any. */
+  toolCalls?: ChatToolCall[];
+  /** The provider's own stop reason, when it sent one. */
+  finishReason?: string;
   /** The model that actually answered (the adapter echoes what it was given). */
   model: string;
   /** The provider kind, so a response can never claim a different backend. */
@@ -63,6 +101,16 @@ export interface ChatResult {
 export interface ChatAdapter {
   kind: ChatProviderKind;
   chat(messages: ChatMessage[], opts?: ChatOptions): Promise<ChatResult>;
+  /**
+   * Streaming chat. Optional: an adapter without it keeps working through
+   * `chat()`, and the loop emits the finished answer once. A streaming adapter
+   * emits only prose deltas, and returns the same `ChatResult` as `chat()`.
+   */
+  chatStream?(
+    messages: ChatMessage[],
+    opts: ChatOptions,
+    onEvent: (event: ChatStreamEvent) => void
+  ): Promise<ChatResult>;
 }
 
 /** Why an adapter could not answer. The routes turn these into one 503 shape. */

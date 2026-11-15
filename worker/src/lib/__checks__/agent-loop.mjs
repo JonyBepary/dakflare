@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /**
- * Agent loop — stage B policy checks.
+ * Agent loop — native tool-calling checks.
  *
- * No Workers, no D1, no live model. The adapter is a queue of canned replies
- * and the journal is an in-memory object with the same SQL surface.
+ * No Workers, no D1, no live model. The adapter is a scripted streaming fake
+ * (or a plain `chat()` fake) and the journal is an in-memory object with the
+ * same SQL surface.
  *
  * Asserted:
- *   - the 6-turn session cap;
- *   - the 4-call per-turn cap;
- *   - a tool result is fed back to the next model call;
- *   - an act does not run without a grant;
+ *   - prose deltas arrive as `token` frames before the tool runs;
+ *   - a tool result is appended as a `tool` message (with its call id) and the
+ *     next round answers;
+ *   - the 6-turn session cap and the 4-call per-turn cap still hold;
+ *   - a malformed `function.arguments` string becomes a `bad_arguments` refusal
+ *     returned to the model instead of a throw;
+ *   - an act does not run without a grant, and its refusal is fed back;
  *   - a replayed call_id returns replayed:true and spends nothing;
  *   - every model call charges the agent counter (the only budget passed in).
  *
@@ -20,7 +24,6 @@ import { registerHooks } from "node:module";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import assert from "node:assert/strict";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,7 +42,7 @@ function resolveExtensionless(specifier, context, nextResolve) {
 
 registerHooks({ resolve: resolveExtensionless });
 
-const { runTurn, parseEnvelope } = await import("../../agent/loop.ts");
+const { runTurn } = await import("../../agent/loop.ts");
 const { Journal } = await import("../../agent/journal.ts");
 const { createActTools } = await import("../../agent/act.ts");
 
@@ -56,22 +59,12 @@ function check(label, condition, detail = "") {
   }
 }
 
-{
-  // Both shapes were seen live: a reply wrapped in a JSON string, and a reply
-  // cut off by the output cap. Neither should reach the panel as raw JSON.
-  const doubleEncoded = JSON.stringify(
-    JSON.stringify({
-      answer: "Checking telemetry.",
-      calls: [{ tool: "telemetry", input: { question: "Did any financial SMS go through?" } }],
-    })
-  );
-  const unwrapped = parseEnvelope(doubleEncoded);
-  check("a double-encoded envelope is unwrapped", unwrapped.answer === "Checking telemetry.");
-  check("its calls survive", unwrapped.calls.length === 1 && unwrapped.calls[0].tool === "telemetry");
-
-  const truncated = '{"answer": "yes", "calls": [{"tool": "fleet_health", "input": {}}]';
-  const repaired = parseEnvelope(truncated);
-  check("a truncated envelope is repaired", repaired.answer === "yes" && repaired.calls.length === 1);
+function toolCall(name, args, id) {
+  return {
+    id: id ?? `call_${name}`,
+    name,
+    arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+  };
 }
 
 /* ── an in-memory journal with the same statements as the DO ──────────── */
@@ -149,7 +142,7 @@ function newJournal() {
   return { journal: new Journal(store), store };
 }
 
-function echoTool(runs) {
+function echoTool(runs, onRun) {
   return {
     name: "echo",
     description: "echo a value",
@@ -157,21 +150,36 @@ function echoTool(runs) {
     parameters: { type: "object", properties: { value: { type: "string" } } },
     async execute(input) {
       runs.value += 1;
+      onRun?.(input);
       return { ok: true, output: `echo:${String(input.value ?? "")}` };
     },
   };
 }
 
-function queueAdapter(replies, seen = []) {
+/** A streaming fake: each round is an array of deltas plus optional calls. */
+function streamingAdapter(rounds, seen = []) {
   let index = 0;
   return {
     calls: 0,
-    async chat(messages) {
-      seen.push(messages.map((entry) => entry.content).join("\n"));
-      this.calls += 1;
-      const reply = replies[Math.min(index, replies.length - 1)];
+    async chat() {
+      throw new Error("the streaming fake must be driven through chatStream");
+    },
+    async chatStream(messages, options, onEvent) {
+      seen.push({ messages: messages.map((entry) => ({ ...entry })), options });
+      const round = rounds[Math.min(index, rounds.length - 1)];
       index += 1;
-      return { text: reply, tokensIn: 7, tokensOut: 3 };
+      this.calls += 1;
+      let text = "";
+      for (const delta of round.tokens ?? []) {
+        text += delta;
+        onEvent({ type: "token", text: delta });
+      }
+      return {
+        text,
+        tokensIn: 7,
+        tokensOut: 3,
+        ...(round.toolCalls === undefined ? {} : { toolCalls: round.toolCalls }),
+      };
     },
     seen,
   };
@@ -180,16 +188,80 @@ function queueAdapter(replies, seen = []) {
 const env = {};
 const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: true };
 
-/* ── 1. the turn cap ─────────────────────────────────────────────────── */
+/* ── 1. tokens stream before the tool runs, and the result is fed back ── */
 
 {
   const { journal } = newJournal();
   const runs = { value: 0 };
-  const adapter = queueAdapter([
-    JSON.stringify({ answer: "", calls: [{ tool: "echo", input: { value: "a" } }] }),
+  let framesAtRun = [];
+  const frames = [];
+  const adapter = streamingAdapter([
+    {
+      tokens: ["Checking", " telemetry."],
+      toolCalls: [toolCall("echo", { value: "hello" }, "call_echo_1")],
+    },
+    { tokens: ["saw it"] },
   ]);
+  const result = await runTurn(env, actor, "s1", "go", [
+    echoTool(runs, () => {
+      framesAtRun = frames.map((frame) => frame.type);
+    }),
+  ], {
+    model: adapter,
+    journal,
+    budget: { chargeTokens: async () => {} },
+    idempotencyKey: "stream",
+    onEvent: (frame) => frames.push(frame),
+  });
+
+  const tokenFrames = frames.filter((frame) => frame.type === "token");
+  check(
+    "prose deltas arrive as token frames",
+    tokenFrames.length === 3 &&
+      tokenFrames[0].text === "Checking" &&
+      tokenFrames[1].text === " telemetry.",
+    JSON.stringify(tokenFrames)
+  );
+  check(
+    "tokens are emitted before the tool frame",
+    frames.findIndex((frame) => frame.type === "token") < frames.findIndex((frame) => frame.type === "tool")
+  );
+  check(
+    "the tool runs only after prose was emitted",
+    framesAtRun.includes("token") && !framesAtRun.includes("tool"),
+    JSON.stringify(framesAtRun)
+  );
+  check("the tool executed once", runs.value === 1, String(runs.value));
+
+  const assistant = adapter.seen[1]?.messages.find((entry) => entry.role === "assistant");
+  const toolMessage = adapter.seen[1]?.messages.find((entry) => entry.role === "tool");
+  check(
+    "the assistant message carries the structured call",
+    assistant !== undefined &&
+      Array.isArray(assistant.toolCalls) &&
+      assistant.toolCalls[0].id === "call_echo_1",
+    JSON.stringify(assistant?.toolCalls)
+  );
+  check(
+    "the tool result is appended as a tool message with its call id",
+    toolMessage !== undefined &&
+      toolMessage.toolCallId === "call_echo_1" &&
+      toolMessage.name === "echo" &&
+      toolMessage.content.includes("echo:hello"),
+    JSON.stringify(toolMessage)
+  );
+  check("the second round answers", result.stopped === "answer" && result.answer === "saw it", result.answer);
+  check("the token text assembled into the answer", result.answer === "saw it");
+}
+
+/* ── 2. the turn cap ─────────────────────────────────────────────────── */
+
+{
+  const { journal } = newJournal();
+  const runs = { value: 0 };
+  const adapter = streamingAdapter([{ toolCalls: [toolCall("echo", { value: "a" })] }]);
   const charged = [];
-  const result = await runTurn(env, actor, "s1", "go", [echoTool(runs)], {
+  const result = await runTurn(env, actor, "s2", "go", [echoTool(runs)], {
     model: adapter,
     journal,
     budget: { chargeTokens: async (tokens) => charged.push(tokens) },
@@ -201,62 +273,89 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
   check("turn cap charged every model call", charged.length === 6 && charged.every((n) => n === 10));
 }
 
-/* ── 2. the four-call cap ────────────────────────────────────────────── */
+/* ── 3. the four-call cap ────────────────────────────────────────────── */
 
 {
   const { journal } = newJournal();
   const runs = { value: 0 };
-  const adapter = queueAdapter([
-    JSON.stringify({
-      answer: "",
-      calls: [
-        { tool: "echo", input: { value: "1" } },
-        { tool: "echo", input: { value: "2" } },
-        { tool: "echo", input: { value: "3" } },
-        { tool: "echo", input: { value: "4" } },
-        { tool: "echo", input: { value: "5" } },
-      ],
-    }),
-    JSON.stringify({ answer: "done", calls: [] }),
-  ]);
-  const result = await runTurn(env, actor, "s2", "go", [echoTool(runs)], {
+  const seen = [];
+  const adapter = streamingAdapter(
+    [
+      {
+        toolCalls: [
+          toolCall("echo", { value: "1" }, "c1"),
+          toolCall("echo", { value: "2" }, "c2"),
+          toolCall("echo", { value: "3" }, "c3"),
+          toolCall("echo", { value: "4" }, "c4"),
+          toolCall("echo", { value: "5" }, "c5"),
+        ],
+      },
+      { tokens: ["done"] },
+    ],
+    seen
+  );
+  const result = await runTurn(env, actor, "s3", "go", [echoTool(runs)], {
     model: adapter,
     journal,
     budget: { chargeTokens: async () => {} },
     idempotencyKey: "calls",
   });
   check("four-call cap executes exactly four", runs.value === 4, `saw ${runs.value}`);
+  const toolMessages = seen[1].messages.filter((entry) => entry.role === "tool");
+  check("every called id still gets a tool response", toolMessages.length === 5, String(toolMessages.length));
+  check(
+    "the withheld call is refused with call_cap",
+    toolMessages[4].content.includes("call_cap"),
+    toolMessages[4].content
+  );
   check("four-call cap ends on a plain answer", result.stopped === "answer" && result.answer === "done");
 }
 
-/* ── 3. a tool result is fed back ────────────────────────────────────── */
+/* ── 4. malformed tool arguments become a refusal, not a throw ───────── */
 
 {
   const { journal } = newJournal();
   const runs = { value: 0 };
-  const adapter = queueAdapter([
-    JSON.stringify({ answer: "", calls: [{ tool: "echo", input: { value: "hello" } }] }),
-    JSON.stringify({ answer: "saw it", calls: [] }),
-  ]);
-  await runTurn(env, actor, "s3", "go", [echoTool(runs)], {
+  const frames = [];
+  const seen = [];
+  const adapter = streamingAdapter(
+    [
+      {
+        tokens: ["Trying."],
+        toolCalls: [toolCall("echo", "{not json", "call_bad")],
+      },
+      { tokens: ["understood"] },
+    ],
+    seen
+  );
+  const result = await runTurn(env, actor, "s4", "go", [echoTool(runs)], {
     model: adapter,
     journal,
     budget: { chargeTokens: async () => {} },
-    idempotencyKey: "feedback",
+    idempotencyKey: "badargs",
+    onEvent: (frame) => frames.push(frame),
   });
-  const secondPrompt = adapter.seen[1] ?? "";
+  const toolFrame = frames.find((frame) => frame.type === "tool");
   check(
-    "tool result is fed back to the next model call",
-    secondPrompt.includes("Tool results") && secondPrompt.includes("echo:hello"),
-    secondPrompt.slice(-160)
+    "a malformed argument string is a bad_arguments refusal",
+    toolFrame !== undefined && toolFrame.ok === false && toolFrame.result.reason === "bad_arguments",
+    JSON.stringify(toolFrame)
   );
+  check("the malformed call never reached the tool", runs.value === 0, String(runs.value));
+  const toolMessage = seen[1].messages.find((entry) => entry.role === "tool");
+  check(
+    "the refusal is returned to the model as a tool result",
+    toolMessage !== undefined && toolMessage.content.includes("bad_arguments"),
+    toolMessage?.content
+  );
+  check("the loop still answers", result.answer === "understood");
 }
 
-/* ── 4. no act without a grant ───────────────────────────────────────── */
+/* ── 5. no act without a grant ───────────────────────────────────────── */
 
 {
   const { journal } = newJournal();
-  journal.setTurn("s4", 1);
+  journal.setTurn("s5", 1);
   let dispatched = 0;
   let authorized = 0;
   const tools = createActTools({
@@ -279,15 +378,16 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
       return { ok: false, reason: "no_grant", message: "no live autonomy grant" };
     },
   });
-  const adapter = queueAdapter([
-    JSON.stringify({
-      answer: "",
-      calls: [{ tool: "send_sms", input: { device_id: "d1", to: "+15550001", body: "hi" } }],
-    }),
-    JSON.stringify({ answer: "refused", calls: [] }),
+  const adapter = streamingAdapter([
+    {
+      toolCalls: [
+        toolCall("send_sms", { device_id: "d1", to: "+15550001", body: "hi" }, "call_send"),
+      ],
+    },
+    { tokens: ["refused"] },
   ]);
   const frames = [];
-  const result = await runTurn(env, actor, "s4", "send", tools, {
+  const result = await runTurn(env, actor, "s5", "send", tools, {
     model: adapter,
     journal,
     budget: { chargeTokens: async () => {} },
@@ -304,15 +404,15 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
   check("the loop still answers", result.answer === "refused");
 }
 
-/* ── 5. a replayed call_id spends nothing ────────────────────────────── */
+/* ── 6. a replayed call_id spends nothing ────────────────────────────── */
 
 {
   const { journal, store } = newJournal();
-  journal.setTurn("s5", 1);
+  journal.setTurn("s6", 1);
   const callId = "replay:1:0";
   store.calls.set(callId, {
     call_id: callId,
-    session: "s5",
+    session: "s6",
     turn: 1,
     tool: "send_sms",
     args_hash: "x",
@@ -347,14 +447,15 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
       return { ok: true, grantId: "g1" };
     },
   });
-  const adapter = queueAdapter([
-    JSON.stringify({
-      answer: "",
-      calls: [{ tool: "send_sms", input: { device_id: "d1", to: "+15550001", body: "hi" } }],
-    }),
-    JSON.stringify({ answer: "replayed", calls: [] }),
+  const adapter = streamingAdapter([
+    {
+      toolCalls: [
+        toolCall("send_sms", { device_id: "d1", to: "+15550001", body: "hi" }, "call_replay"),
+      ],
+    },
+    { tokens: ["replayed"] },
   ]);
-  const result = await runTurn(env, actor, "s5", "send again", tools, {
+  const result = await runTurn(env, actor, "s6", "send again", tools, {
     model: adapter,
     journal,
     budget: { chargeTokens: async () => {} },
@@ -374,7 +475,7 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
   const seeded = makeJournalStore();
   seeded.calls.set(callId2, {
     call_id: callId2,
-    session: "s5b",
+    session: "s6b",
     turn: 1,
     tool: "send_sms",
     args_hash: "x",
@@ -384,15 +485,16 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
   });
   const { Journal: JournalClass } = await import("../../agent/journal.ts");
   const replayJournal = new JournalClass(seeded);
-  replayJournal.setTurn("s5b", 1);
+  replayJournal.setTurn("s6b", 1);
   const frames = [];
-  await runTurn(env, actor, "s5b", "again", tools, {
-    model: queueAdapter([
-      JSON.stringify({
-        answer: "",
-        calls: [{ tool: "send_sms", input: { device_id: "d1", to: "+15550001", body: "hi" } }],
-      }),
-      JSON.stringify({ answer: "ok", calls: [] }),
+  await runTurn(env, actor, "s6b", "again", tools, {
+    model: streamingAdapter([
+      {
+        toolCalls: [
+          toolCall("send_sms", { device_id: "d1", to: "+15550001", body: "hi" }, "call_replay2"),
+        ],
+      },
+      { tokens: ["ok"] },
     ]),
     journal: replayJournal,
     budget: { chargeTokens: async () => {} },
@@ -408,13 +510,13 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
   );
 }
 
-/* ── 6. every model call charges the agent counter ───────────────────── */
+/* ── 7. every model call charges the agent counter ───────────────────── */
 
 {
   const { journal } = newJournal();
-  const adapter = queueAdapter([JSON.stringify({ answer: "hello", calls: [] })]);
+  const adapter = streamingAdapter([{ tokens: ["hello"] }]);
   const charged = [];
-  await runTurn(env, actor, "s6", "hi", [echoTool({ value: 0 })], {
+  await runTurn(env, actor, "s7", "hi", [echoTool({ value: 0 })], {
     model: adapter,
     journal,
     budget: { chargeTokens: async (tokens) => charged.push(tokens) },
@@ -426,6 +528,33 @@ const actor = { userId: "u1", label: "tester", role: "admin", canGrantOwner: tru
     JSON.stringify(charged)
   );
   check("the loop has no chat-budget dependency", true);
+}
+
+/* ── 8. an adapter without chatStream still answers once ─────────────── */
+
+{
+  const { journal } = newJournal();
+  const frames = [];
+  const adapter = {
+    calls: 0,
+    async chat() {
+      this.calls += 1;
+      return { text: "plain", tokensIn: 1, tokensOut: 2 };
+    },
+  };
+  const result = await runTurn(env, actor, "s8", "hi", [echoTool({ value: 0 })], {
+    model: adapter,
+    journal,
+    budget: { chargeTokens: async () => {} },
+    idempotencyKey: "nostream",
+    onEvent: (frame) => frames.push(frame),
+  });
+  check("a non-streaming adapter answers", result.answer === "plain");
+  check(
+    "a non-streaming adapter emits no token frames",
+    frames.every((frame) => frame.type !== "token"),
+    JSON.stringify(frames.map((frame) => frame.type))
+  );
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -681,6 +681,9 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       if (frame.type === "error") {
         errorRef.current = { reason: frame.reason, message: frame.message };
       }
+      // Every frame, `token` deltas included, is appended before it is sent.
+      // `token` is presentation (the model's prose as it was written); the
+      // `answer` frame remains the terminal marker and the value to replay.
       sendRaw(frame);
     };
 

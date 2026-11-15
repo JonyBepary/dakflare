@@ -14,9 +14,26 @@
  * for models that bill per token and omits `usage` for models that do not. Both
  * are honest answers, so both are passed through and the route estimates only
  * when a value is absent.
+ *
+ * Tools and streaming: the installed `@cloudflare/workers-types` declares both
+ * `AiTextGenerationInput.tools` (function manifest) and `.stream`, so this
+ * adapter forwards `tools` and, in `chatStream`, `stream: true`. Not every
+ * Workers AI model implements tool calling, and the binding answers in one of
+ * two shapes: chat-completions (`choices[0].message`) or the classic text shape
+ * (`{ response, tool_calls }`). A model that ignores either option falls back
+ * through the non-streaming parse path below: `chatStream` still works and
+ * emits the finished text once, and a model that cannot tool-call returns prose
+ * with no `toolCalls`. There is no second prompt parser.
  */
 
-import type { ChatAdapter, ChatMessage, ChatOptions, ChatResult } from "./types";
+import type {
+  ChatAdapter,
+  ChatMessage,
+  ChatOptions,
+  ChatResult,
+  ChatStreamEvent,
+  ChatToolCall,
+} from "./types";
 import { ChatAdapterError, clampOutputTokens, readTokenCount } from "./types";
 
 /** The slice of the AI binding this adapter uses. */
@@ -31,7 +48,17 @@ interface WorkersAiUsage {
 
 interface WorkersAiResult {
   response?: unknown;
+  tool_calls?: unknown;
   usage?: WorkersAiUsage;
+  choices?: unknown;
+}
+
+interface WorkersAiToolCall {
+  index?: unknown;
+  id?: unknown;
+  name?: unknown;
+  arguments?: unknown;
+  function?: { name?: unknown; arguments?: unknown };
 }
 
 /** The text in whichever of the three shapes the binding answered with. */
@@ -68,61 +95,267 @@ function readText(raw: unknown): string | null {
   return null;
 }
 
+function readOneToolCall(value: unknown, index: number): ChatToolCall | null {
+  if (value === null || typeof value !== "object") return null;
+  const entry = value as WorkersAiToolCall;
+  // Newer shape: { id, type, function: { name, arguments } }.
+  // Classic shape: { name, arguments: object|string }.
+  const name =
+    typeof entry.function?.name === "string"
+      ? entry.function.name
+      : typeof entry.name === "string"
+        ? entry.name
+        : null;
+  if (name === null) return null;
+  const rawArguments =
+    entry.function !== undefined ? entry.function.arguments : entry.arguments;
+  const args =
+    typeof rawArguments === "string"
+      ? rawArguments
+      : rawArguments === undefined || rawArguments === null
+        ? ""
+        : JSON.stringify(rawArguments);
+  const id =
+    typeof entry.id === "string" && entry.id !== "" ? entry.id : `call_${index}`;
+  return { id, name, arguments: args };
+}
+
+/** Tool calls from either the top-level classic shape or a chat message. */
+function readToolCalls(raw: unknown): ChatToolCall[] {
+  if (raw === null || typeof raw !== "object") return [];
+  const record = raw as WorkersAiResult;
+  let value: unknown = record.tool_calls;
+  if (value === undefined) {
+    const choices = record.choices;
+    if (Array.isArray(choices) && choices.length > 0) {
+      const first = choices[0];
+      if (first !== null && typeof first === "object") {
+        const message = (first as { message?: unknown }).message;
+        if (message !== null && typeof message === "object") {
+          value = (message as { tool_calls?: unknown }).tool_calls;
+        }
+      }
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  const calls: ChatToolCall[] = [];
+  value.forEach((entry, index) => {
+    const call = readOneToolCall(entry, index);
+    if (call !== null) calls.push(call);
+  });
+  return calls;
+}
+
+function readUsage(raw: unknown): WorkersAiUsage | undefined {
+  return raw !== null && typeof raw === "object" ? (raw as WorkersAiResult).usage : undefined;
+}
+
+function inputMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
+  return messages.map((message) => {
+    if (message.role === "tool") {
+      // Workers AI's `RoleScopedChatInput` has role "tool" and an optional
+      // `name`; it has no `tool_call_id` field.
+      return { role: "tool", content: message.content, name: message.name ?? "" };
+    }
+    return { role: message.role, content: message.content };
+  });
+}
+
+function inputTools(opts: ChatOptions): Array<Record<string, unknown>> | undefined {
+  if (opts.tools === undefined || opts.tools.length === 0) return undefined;
+  return opts.tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }));
+}
+
+function inputBody(messages: ChatMessage[], opts: ChatOptions, stream: boolean): Record<string, unknown> {
+  const tools = inputTools(opts);
+  return {
+    messages: inputMessages(messages),
+    max_tokens: clampOutputTokens(opts.maxOutputTokens),
+    ...(opts.temperature === undefined ? {} : { temperature: opts.temperature }),
+    ...(tools === undefined ? {} : { tools }),
+    ...(stream ? { stream: true } : {}),
+  };
+}
+
+function resultFromRaw(raw: unknown, model: string): ChatResult {
+  const text = readText(raw);
+  const toolCalls = readToolCalls(raw);
+  if (text === null && toolCalls.length === 0) {
+    // Name the shape, never the payload: "no text" alone cannot tell an
+    // empty completion from a model that answered in another field or an
+    // error object delivered with a 200.
+    const shape =
+      raw === null
+        ? "null"
+        : typeof raw === "object"
+          ? `object with keys ${Object.keys(raw as Record<string, unknown>).join(",") || "none"}`
+          : typeof raw;
+    throw new ChatAdapterError("unparseable", `Workers AI returned no text (${shape})`);
+  }
+  const usage = readUsage(raw);
+  return {
+    text: text ?? "",
+    tokensIn: readTokenCount(usage?.prompt_tokens),
+    tokensOut: readTokenCount(usage?.completion_tokens),
+    ...(toolCalls.length === 0 ? {} : { toolCalls }),
+    model,
+    provider: "workers-ai",
+  };
+}
+
 export function createWorkersAiAdapter(
   binding: WorkersAiBinding,
   model: string
 ): ChatAdapter {
+  const run = async (messages: ChatMessage[], opts: ChatOptions, stream: boolean): Promise<unknown> => {
+    try {
+      return await binding.run(model, inputBody(messages, opts, stream));
+    } catch (error) {
+      throw new ChatAdapterError(
+        "provider_unavailable",
+        `Workers AI did not answer: ${String(error).slice(0, 200)}`
+      );
+    }
+  };
+
   return {
     kind: "workers-ai",
+
     async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResult> {
-      const maxTokens = clampOutputTokens(opts.maxOutputTokens);
+      const raw = await run(messages, opts, false);
+      return resultFromRaw(raw, model);
+    },
 
-      let raw: unknown;
+    async chatStream(
+      messages: ChatMessage[],
+      opts: ChatOptions = {},
+      onEvent: (event: ChatStreamEvent) => void
+    ): Promise<ChatResult> {
+      const raw = await run(messages, opts, true);
+
+      // A model that ignores `stream` (or a binding that resolved it to one
+      // object) answers in the non-streaming shapes. Emit the text once.
+      if (raw === null || typeof raw !== "object" || !(raw instanceof ReadableStream)) {
+        if (typeof raw === "string") {
+          if (raw !== "") onEvent({ type: "token", text: raw });
+          return { text: raw, model, provider: "workers-ai" };
+        }
+        const result = resultFromRaw(raw, model);
+        if (result.text !== "") onEvent({ type: "token", text: result.text });
+        return result;
+      }
+
+      const reader = raw.getReader();
+      const decoder = new TextDecoder();
+      const accumulated: Array<{ id: string; name: string; arguments: string }> = [];
+      let text = "";
+      let usage: WorkersAiUsage | undefined;
+      let buffer = "";
+
+      const apply = (data: string): void => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return;
+        }
+        if (parsed === null || typeof parsed !== "object") return;
+        const record = parsed as WorkersAiResult;
+        if (typeof record.response === "string" && record.response !== "") {
+          text += record.response;
+          onEvent({ type: "token", text: record.response });
+        }
+        const chunkUsage = readUsage(parsed);
+        if (chunkUsage !== undefined) usage = chunkUsage;
+        if (Array.isArray(record.tool_calls)) {
+          record.tool_calls.forEach((entry, index) => {
+            const call = readOneToolCall(entry, accumulated.length + index);
+            if (call === null) return;
+            const explicitIndex =
+              entry !== null && typeof entry === "object" && typeof (entry as { index?: unknown }).index === "number";
+            const explicitId =
+              entry !== null && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string";
+            // OpenAI-style streams send fragments addressed by `index`; the
+            // classic Workers AI shape repeats the whole call. Replace an
+            // existing call rather than appending it twice, and append when
+            // the model genuinely returned a second call.
+            const existing = accumulated.findIndex((candidate) =>
+              explicitId || explicitIndex ? candidate.id === call.id : candidate.name === call.name
+            );
+            if (existing === -1) accumulated.push(call);
+            else accumulated[existing] = call;
+          });
+        }
+      };
+
+      const drain = (flush: boolean): void => {
+        buffer = buffer.replace(/\r\n/g, "\n");
+        for (;;) {
+          const boundary = buffer.indexOf("\n\n");
+          if (boundary === -1) break;
+          const rawEvent = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const data = rawEvent
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n");
+          if (data !== "" && data !== "[DONE]") apply(data);
+        }
+        if (flush && buffer.trim() !== "") {
+          const data = buffer
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n");
+          if (data !== "" && data !== "[DONE]") apply(data);
+          buffer = "";
+        }
+      };
+
       try {
-        raw = await binding.run(model, {
-          messages: messages.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-          max_tokens: maxTokens,
-          ...(opts.temperature === undefined ? {} : { temperature: opts.temperature }),
-        });
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          drain(false);
+        }
+        buffer += decoder.decode();
+        drain(true);
       } catch (error) {
-        throw new ChatAdapterError(
-          "provider_unavailable",
-          `Workers AI did not answer: ${String(error).slice(0, 200)}`
-        );
+        if (text === "" && accumulated.length === 0) {
+          throw new ChatAdapterError(
+            "provider_unavailable",
+            `Workers AI stream failed: ${String(error).slice(0, 200)}`
+          );
+        }
+        return {
+          text,
+          tokensIn: readTokenCount(usage?.prompt_tokens),
+          tokensOut: readTokenCount(usage?.completion_tokens),
+          ...(accumulated.length === 0 ? {} : { toolCalls: accumulated }),
+          finishReason: "aborted",
+          model,
+          provider: "workers-ai",
+        };
       }
 
-      // Three shapes are live in the wild for the same binding: a bare string,
-      // `{ response: "…" }` (the classic text-model shape), and a chat-completions
-      // object with `choices[]` (measured on llama-3.3-70b in production). Read
-      // all three rather than assume one and call a good answer "no text".
-      const text = readText(raw);
-
-      if (text === null) {
-        // Name the shape, never the payload: "no text" alone cannot tell an
-        // empty completion from a model that answered in another field or an
-        // error object delivered with a 200.
-        const shape =
-          raw === null
-            ? "null"
-            : typeof raw === "object"
-              ? `object with keys ${Object.keys(raw as Record<string, unknown>).join(",") || "none"}`
-              : typeof raw;
-        throw new ChatAdapterError(
-          "unparseable",
-          `Workers AI returned no text (${shape})`
-        );
+      if (text === "" && accumulated.length === 0) {
+        throw new ChatAdapterError("unparseable", "Workers AI streamed no message content");
       }
-
-      const usage =
-        raw !== null && typeof raw === "object" ? (raw as WorkersAiResult).usage : undefined;
 
       return {
         text,
         tokensIn: readTokenCount(usage?.prompt_tokens),
         tokensOut: readTokenCount(usage?.completion_tokens),
+        ...(accumulated.length === 0 ? {} : { toolCalls: accumulated }),
         model,
         provider: "workers-ai",
       };
