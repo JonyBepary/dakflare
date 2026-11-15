@@ -171,10 +171,10 @@ the request without sending it. Exit codes keep their meaning: `75` for a tempor
 or model failure, `6` when there is nothing to spend or no built engine, `5` for a decided
 request, `4` for permission.
 
-## The console assistant is not part of this surface
+## The console assistant and the agent runtime
 
-A model that writes prose needs a human on the other end of it, so `/v1/admin/assistant/chat`
-and `/v1/admin/ai/*` sit outside everything above:
+A model that writes prose needs a human on the other end of it, so `/v1/admin/assistant/chat`,
+`/v1/admin/ai/*` and the agent runtime under `/agents/*` sit outside everything above:
 
 - none of their action names exist in `SCOPE_FOR_ACTION`, so an agent token gets `403`
   before the handler runs and no agent can spend the operator's model budget;
@@ -183,7 +183,18 @@ and `/v1/admin/ai/*` sit outside everything above:
 - the prose exception is therefore narrow and stated: it is admin-only, it is labelled as
   prose in the UI, and it never becomes a number, a state or a row.
 
-Read `ASSISTANT.md` for the routes, the budget and the proposal lifecycle.
+The runtime adds acts, and it keeps the rule by moving the human decision rather than the
+model's judgement: enabling autonomy mints effect-shaped grants for a bounded window (explicit
+recipients and uses for SMS, a flow plus graph hash for a deploy, or the operator's explicit
+"any rule" consent, which is the only grant a rule can match because the rule's id is minted by
+the act). Every act re-checks the live grant, the window and the daily caps at call time — the
+socket's identity is not authorisation — writes the same audit row the console writes, and is
+journalled before its effect so a retry returns the recorded result instead of repeating it.
+`assertHuman` guards `createGrant` and `decideApproval`, so the runtime cannot mint its own
+authority. With no live grant the act is refused by name, not silently downgraded to a proposal.
+
+Read `ASSISTANT.md` for the routes, the budget and the proposal lifecycle, and
+`AGENT_RUNTIME.md` for the runtime's invariants, stages and evidence.
 
 ## What this does not do
 

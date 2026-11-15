@@ -19,8 +19,10 @@ three ways:
   handler runs, so no agent can spend the operator's model budget or read the settings.
 - Its prose is labelled as prose. The panel shows the answer verbatim and never turns
   it into a row, a count, or a state.
-- It cannot act. It can only propose, and a proposal executes only when a person
-  presses Accept on a card, which calls a route that re-validates the payload.
+- By default it cannot act: it proposes, and a proposal executes only when a person
+  presses Accept on a card, which calls a route that re-validates the payload. The agent
+  runtime changes that for one deployment at a time and always behind a grant — see
+  `AGENT_RUNTIME.md`; with autonomy off (the shipped default) this sentence is exact.
 
 ## What the operator configures
 
