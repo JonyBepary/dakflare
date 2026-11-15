@@ -21,6 +21,13 @@ import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost, handleRulesTest } from "./routes/rules";
 import {
+  handleAiSettingsGet,
+  handleAiSettingsPut,
+  handleAiTest,
+  handleAssistantChat,
+  handleAssistantProposalAccept,
+} from "./routes/assistant";
+import {
   handleDeviceFlows,
   handleWorkflowDelete,
   handleWorkflowGet,
@@ -127,6 +134,24 @@ export interface Env {
   /** TypeSafe Jev, opt-in: both must be set for the jev provider to answer. */
   TYPESAFE_BASE_URL?: string;
   TYPESAFE_API_KEY?: string;
+  /**
+   * Console assistant (AI chat) defaults. The provider/model/base URL can also be
+   * overridden per deployment in D1 (`ai_settings`); these env values are what a
+   * deployment with no row reads. `AI_CHAT_PROVIDER` is one of `workers-ai` |
+   * `openai-compatible`.
+   */
+  AI_CHAT_PROVIDER?: string;
+  AI_CHAT_MODEL?: string;
+  /** Origin for an OpenAI-compatible provider. Unused by workers-ai. */
+  AI_CHAT_BASE_URL?: string;
+  /**
+   * Bearer key for an OpenAI-compatible provider. A Worker secret, never `[vars]`
+   * and never written to D1: absent makes that provider answer `ai_unavailable`,
+   * and `apiKeyConfigured` on the settings route is computed from it.
+   */
+  AI_CHAT_API_KEY?: string;
+  /** Daily prompt+completion token ceiling for chat and the connectivity probe. */
+  AI_DAILY_TOKEN_BUDGET?: string;
   /** R2 bucket for multi-channel media storage and presigned download links. */
   MEDIA_BUCKET?: R2Bucket;
   /** Cloudflare Queue for reliable asynchronous outbound webhook delivery. */
@@ -1138,6 +1163,42 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     if (method === "POST" && alertAckMatch) {
       return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
         handleAlertAck(env, decodeURIComponent(alertAckMatch[1]))
+      );
+    }
+
+    /* ---- AI console assistant (pass 1) --------------------------------- */
+    // Human-only by construction: none of these actions appear in
+    // SCOPE_FOR_ACTION, so an agent token is refused with 403 before the handler
+    // runs. An assistant that spends the operator's token budget must not be
+    // drivable by a credential another agent can mint.
+    if (method === "GET" && pathname === "/v1/admin/ai/settings") {
+      return withAdminAccess(req, env, "read", "read AI settings", (_actor) =>
+        handleAiSettingsGet(env)
+      );
+    }
+    if (method === "PUT" && pathname === "/v1/admin/ai/settings") {
+      return withAdminAccess(req, env, "write", "update AI settings", (actor) =>
+        handleAiSettingsPut(req, env, actor)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/ai/test") {
+      return withAdminAccess(req, env, "write", "test AI provider", (_actor) =>
+        handleAiTest(env)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/assistant/chat") {
+      return withAdminAccess(req, env, "write", "use the AI assistant", (actor) =>
+        handleAssistantChat(req, env, actor)
+      );
+    }
+    // The id segment is passed RAW and matched there: a malformed escape is a
+    // 404 rather than a throw on an authenticated path.
+    const proposalAcceptMatch = pathname.match(
+      /^\/v1\/admin\/assistant\/proposals\/([^/]+)\/accept$/
+    );
+    if (method === "POST" && proposalAcceptMatch) {
+      return withAdminAccess(req, env, "write", "accept AI proposals", (actor) =>
+        handleAssistantProposalAccept(env, proposalAcceptMatch[1], actor)
       );
     }
 

@@ -226,6 +226,16 @@ MESSAGE_RETENTION_DAYS = "90"
 # Read per request in src/lib/system1.ts; an unsupported value falls back to
 # clef-flash rather than failing the route.
 SYSTEM1_DEFAULT_MODEL = "clef-flash"
+# Console assistant (AI chat). Provider/model/base URL are defaults; the console
+# may override them in D1 (`ai_settings`) without a deploy. AI_CHAT_API_KEY is a
+# Worker secret, never a var and never stored in D1:
+#   wrangler secret put AI_CHAT_API_KEY
+# Empty base URL means "not configured"; openai-compatible requires one.
+AI_CHAT_PROVIDER = "workers-ai"
+AI_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_CHAT_BASE_URL = ""
+# Daily prompt+completion token ceiling, shared by chat and the test probe.
+AI_DAILY_TOKEN_BUDGET = "20000"
 # Per-device daily inbound row budget (D1 writes), enforced in the device's DO.
 # Bounds how much of the shared daily write allowance one device can consume.
 INCOMING_ROWS_PER_DAY = "10000"

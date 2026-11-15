@@ -145,6 +145,11 @@ MESSAGE_RETENTION_DAYS = "90"
 # Read per request in src/lib/system1.ts; an unsupported value falls back to
 # clef-flash rather than failing the route.
 SYSTEM1_DEFAULT_MODEL = "clef-flash"
+# Console assistant (AI chat). AI_CHAT_API_KEY is a Worker secret, never a var.
+AI_CHAT_PROVIDER = "workers-ai"
+AI_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_CHAT_BASE_URL = ""
+AI_DAILY_TOKEN_BUDGET = "20000"
 INCOMING_ROWS_PER_DAY = "10000"
 SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 

@@ -74,6 +74,12 @@ export default defineConfig({
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
 			SYSTEM1_DEFAULT_MODEL: bindings.text("clef-flash"),
+			// Console assistant (AI chat). AI_CHAT_API_KEY is a Worker secret and is
+			// never a var or a D1 row; it is set with `wrangler secret put`.
+			AI_CHAT_PROVIDER: bindings.text("workers-ai"),
+			AI_CHAT_MODEL: bindings.text("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+			AI_CHAT_BASE_URL: bindings.text(""),
+			AI_DAILY_TOKEN_BUDGET: bindings.text("20000"),
 			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/OWNER/dakflare"),
