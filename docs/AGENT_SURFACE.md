@@ -164,11 +164,25 @@ the request without sending it. Exit codes keep their meaning: `75` for a tempor
 or model failure, `6` when there is nothing to spend or no built engine, `5` for a decided
 request, `4` for permission.
 
+## The console assistant is not part of this surface
+
+A model that writes prose needs a human on the other end of it, so `/v1/admin/assistant/chat`
+and `/v1/admin/ai/*` sit outside everything above:
+
+- none of their action names exist in `SCOPE_FOR_ACTION`, so an agent token gets `403`
+  before the handler runs and no agent can spend the operator's model budget;
+- the model's only output is a proposal with a server-minted id, and accepting one calls
+  the same handlers the console does, after re-validating the payload;
+- the prose exception is therefore narrow and stated: it is admin-only, it is labelled as
+  prose in the UI, and it never becomes a number, a state or a row.
+
+Read `ASSISTANT.md` for the routes, the budget and the proposal lifecycle.
+
 ## What this does not do
 
-- It does not compose arbitrary edits. The palette stages insertions (`add <kind> after <n>`,
-  "at the end"); moves, renames and removals still arrive from an agent that stages a patch
-  directly.
+- It does not compose arbitrary edits from inside the Worker. The palette reads `add`,
+  `move`, `rename` and `remove` deterministically and stages the result (`agent-patch.ts`);
+  an agent stages a graph directly with `stage_flow_patch`.
 - It does not apply anything from `synthesize`. A human approves, then an apply spends.
 - It does not act on a stale read: a diagnosis is a snapshot, and a grant is the only thing
   that authorises a change.

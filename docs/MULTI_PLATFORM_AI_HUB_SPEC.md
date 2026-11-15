@@ -23,7 +23,8 @@
 | Signal and the Android notification bridge | not implemented |
 | Plugin registry, signed catalogs and the WASM sandbox | not implemented; the tables exist |
 | `WEBHOOK_DLQ` | not implemented; device dead letters live in the Durable Object and are read by `dakflare dlq` |
-| AI Gateway, BYOK and OAuth provider phases | not implemented |
+| AI chat connector and console assistant | shipped (pass 1): two provider kinds (`workers-ai`, `openai-compatible`), a provider chosen in the console or `dakflare ai`, a daily token budget, and a floating assistant whose only output is a proposal. See `ASSISTANT.md` |
+| AI Gateway, BYOK and OAuth provider phases | BYOK shipped as a Worker secret (`AI_CHAT_API_KEY`) with the selection in `ai_settings`; no AI Gateway, and OAuth/PKCE is deliberately not built |
 
 ---
 

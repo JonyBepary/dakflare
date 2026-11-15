@@ -325,9 +325,12 @@ cryptography rather than a mock. `test-support/` holds the dev stack and the sha
 - **TOTP enrolment needs a passkey**; a password-only account cannot turn it on.
 - **`server-kdf`** is paid-tier only, by measurement.
 - **`MEDIA_BUCKET` is bound but unread**; no Worker route serves media yet.
-- **Workers AI is used by the agent routes only**; nothing else calls a model. `jev` is opt-in
-  through `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`, and reports `provider_unavailable` unless
-  both are set.
+- **The console assistant is one question at a time**: no streaming, no history, no per-user
+  budget, and no PKCE/OAuth (a provider's static key goes in the Worker secret
+  `AI_CHAT_API_KEY`). It answers prose for an admin only and can only *propose* rules,
+  templates and workflow patches. See `docs/ASSISTANT.md`.
+- **`jev` is opt-in** through `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`; without both it
+  reports `provider_unavailable` rather than falling back to Clef.
 - **Agent telemetry in the console is one question at a time**: no transcript, no polling, no
   filter or export, and a 403 renders as a permission state rather than signing you out.
 - **A proxy in front of the console breaks the cookie**, not the sign-in. The session cookie is

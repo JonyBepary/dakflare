@@ -1,0 +1,146 @@
+# The console assistant
+
+Status: pass 1. Applies to `worker/src/routes/assistant.ts`, `worker/src/lib/ai/`,
+`dashboard/src/lib/assistant.ts`, the AI settings page and the floating panel, and the
+`dakflare ai` command group. Read `AGENT_SURFACE.md` first for what the agent surface
+is allowed to do; this document is about the one part of the product where a model
+writes prose.
+
+## Why it is separate from the agent surface
+
+`AGENT_SURFACE.md` states that a model never writes prose the console renders as fact.
+That rule exists so an operator cannot be handed a sentence and mistake it for a
+reading. The assistant breaks the rule in one place, deliberately, and earns it back
+three ways:
+
+- It is reachable only by a human session. Every route is at `/v1/admin/assistant/*`
+  or `/v1/admin/ai/*`, and none of the action names appear in
+  `worker/src/lib/agent-scopes.ts`. An agent token is refused with `403` before the
+  handler runs, so no agent can spend the operator's model budget or read the settings.
+- Its prose is labelled as prose. The panel shows the answer verbatim and never turns
+  it into a row, a count, or a state.
+- It cannot act. It can only propose, and a proposal executes only when a person
+  presses Accept on a card, which calls a route that re-validates the payload.
+
+## What the operator configures
+
+One selection, one secret.
+
+| Where | What |
+|---|---|
+| `ai_settings` (D1, singleton row) | `provider`, `model`, `base_url` |
+| Worker secret `AI_CHAT_API_KEY` | the provider's key, never stored in D1, never returned |
+| `AI_CHAT_PROVIDER`, `AI_CHAT_MODEL`, `AI_CHAT_BASE_URL` | defaults for a deployment with no row |
+| `AI_DAILY_TOKEN_BUDGET` | daily ceiling, default `20000` |
+| `ai_usage` (D1) | the counter, one row per UTC day |
+
+Two providers are implemented, and they cover most of the market:
+
+- `workers-ai` uses the Worker's own `AI` binding. No key, no egress, an account that
+  already deploys this gateway can use it immediately.
+- `openai-compatible` is one adapter for every gateway that speaks `POST
+  {baseUrl}/chat/completions` with a Bearer key: OpenAI, OpenRouter, Groq, Together,
+  DeepSeek, Mistral, vLLM, Ollama, LM Studio, and most corporate proxies. A key is
+  required; the base URL must be `https`, or `http` on localhost.
+
+`baseUrl` is rejected for `workers-ai` rather than stored and ignored, so a settings
+page can never look configured while pointing nowhere.
+
+## The five routes
+
+All are admin-gated: `read` for the settings GET (a member may look), `write` for
+everything else, and an agent token is refused on every one. Writes that change a setting
+are audited.
+
+| Route | Answers |
+|---|---|
+| `GET /v1/admin/ai/settings` | `{provider, model, baseUrl, apiKeyConfigured, hint, budget:{day,used,limit}}` |
+| `PUT /v1/admin/ai/settings` | the read shape after validating and saving |
+| `POST /v1/admin/ai/test` | `{ok, provider, model, took_ms, sample}`, capped at 64 output tokens |
+| `POST /v1/admin/assistant/chat` | `{answer, proposals:[{id, kind, title, summary, payload}]}` |
+| `POST /v1/admin/assistant/proposals/:id/accept` | `{kind, result, patch?}` |
+
+The chat body is `{message, context?: {route?, flowId?}}`, capped at 8 KiB. Any other
+context key is a `400`: message bodies, message lists and contact data never enter the
+context, so an attacker's own SMS cannot steer a proposal.
+
+A missing key is `503 {error:"ai_unavailable", reason:"missing_key"}` and no outbound
+call is made. Budget exhaustion is `429 {error:"budget_exhausted", used, limit}`.
+
+## Proposals: what a model may suggest, and what happens on accept
+
+The model must answer with one JSON object holding `answer` and at most three
+proposals of a closed set. Parsing is defensive in this order: clean JSON, then a
+fenced block, then the first-to-last brace span. Anything else returns the raw text as
+the answer with zero proposals, which is honest and useless in the right way.
+
+Each proposal is stored with a **server-minted** id (`ap_…`), a 15-minute expiry and
+the actor who asked. Accept re-reads the row, requires it unconsumed and unexpired, and
+re-validates the payload:
+
+- `create_rule` drops any model-supplied `id`, refuses a `regex` matcher, forces
+  `allow_shortcode:false` and `device_id:null`, then calls the same handler the console
+  uses (`handleRulesPost`). A model can create a rule; it cannot overwrite one, and it
+  cannot make one reply to a shortcode.
+- `create_template` writes nothing. It returns a validated `{name, body}` draft that the
+  card shows as text, because a template is only real once something references it. The
+  operator copies it from there; the panel keeps nothing after it closes.
+- `stage_workflow_patch` writes nothing. It returns `{patch}` and the console hands it
+  to the editor's own sink, which draws it as a ghost that still needs a human Accept.
+
+Consumption is a timestamp written **after** success, so a failed accept leaves the
+proposal usable and a successful one cannot be replayed.
+
+## Cost, and what stops a loop
+
+The daily budget is checked before dispatch and charged after, from the provider's
+reported usage or, when it reports none, from a deliberately pessimistic estimate of
+three characters per token. The same counter covers `/ai/test`. There is no per-user
+split and no streaming; a deployment that wants a tighter leash lowers
+`AI_DAILY_TOKEN_BUDGET` or configures it in D1 (`ai_usage`).
+
+Adapters cap output at 400 tokens by default and 1024 hard. The registry refuses an
+unknown provider kind, a missing `AI` binding, a missing key, and a missing base URL,
+each with a machine-readable reason that becomes the `503` body.
+
+## In the console
+
+`/admin/security/ai` (rail: Security → AI assistant) holds the provider form, the key
+state and the allowance. The panel is honest about the two things it cannot do: a
+missing key is shown as the command that installs one (`wrangler secret put
+AI_CHAT_API_KEY`), and there is no field anywhere to type a key, because a key typed
+into a browser ends up in a history, a log or a screenshot.
+
+The floating button bottom-right opens one question at a time. It sends the current
+`route` and `flowId` as context, renders proposals as cards, and keeps nothing after
+the panel closes: no transcript, no storage, no history.
+
+`stage_workflow_patch` is the one proposal with a second step. The card offers "Stage
+the patch" only while a workflow editor is mounted, because the handover is a function
+the editor registers on mount (`registerWorkflowPatchSink`). With no editor open the
+card says so and links to the editor rather than pretending a POST would do something.
+
+## In the CLI
+
+```bash
+dakflare ai providers                 # what the gateway is set to, key present or not, budget
+dakflare ai configure --provider openai-compatible --model gpt-4o-mini --base-url https://api.example.com/v1
+dakflare ai test                      # one small call, prints the sample
+```
+
+`--agent` prints one compact JSON document. Exit codes are semantic: `2` bad input
+(including `--api-key`, which the CLI refuses because the key belongs in a Worker
+secret), `4` permission, `5` a budget or state conflict, `6` a precondition (no key),
+`75` the provider or network was unreachable.
+
+## What this pass does not do
+
+- **No PKCE or OAuth.** One vendor's flow does not justify a second credential
+  lifecycle and a code-redeeming endpoint, and this repo has no CSP to protect a
+  verifier. Use the provider's static key as a Worker secret.
+- **No streaming, no history, no multi-turn.** One question, one answer.
+- **No per-user or per-token budgets**, and no cost table: tokens, not currency.
+- **No `anthropic` or `gemini` adapter.** Both are a `chat(messages)` shape and fit the
+  interface; neither is written until something needs it.
+- **No recommender.** The assistant can propose a rule, a template or a staged patch.
+  It does not analyse the fleet for you; that is `/v1/agent/telemetry`, which is typed.
