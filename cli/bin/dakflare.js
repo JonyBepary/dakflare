@@ -714,37 +714,53 @@ const COMMAND_SPECS = {
     examples: ['dakflare key fingerprint', 'dakflare key fingerprint --json'],
   },
   ai: {
-    summary: 'Read or change the console AI provider, list its models, and probe it (providers|configure|models|test)',
+    summary: 'Read or change the console AI provider, list its models, and probe chat or System One (providers|configure|models|test)',
     effect: 'mutating',
     usage:
-      'dakflare ai providers [--json] | ai configure --provider <workers-ai|openai-compatible> [--model <id>] [--base-url <url>] [--dry-run] [--json] | ai models [--json] | ai test [--json]',
+      'dakflare ai providers [--json] | ai configure --provider <workers-ai|openai-compatible> [--model <id>] [--base-url <url>] [--system1-model <id>] [--system1-base-url <url>] [--dry-run] [--json] | ai models [--json] | ai test [--system-one] [--json]',
     flags: {
       provider: { type: 'string', note: 'configure: workers-ai or openai-compatible' },
       model: {
         type: 'string',
-        note: 'configure: model id; omitted uses the provider default',
+        note: 'configure: chat model id; omitted uses the provider default',
       },
       'base-url': {
         type: 'string',
         note: 'configure: required for openai-compatible; https, or http on localhost',
       },
+      'system1-model': {
+        type: 'string',
+        note: 'configure: System One model id; omitted inherits the chat model',
+      },
+      'system1-base-url': {
+        type: 'string',
+        note: 'configure: System One base URL; omitted inherits the chat base; refused for workers-ai',
+      },
+      'system-one': {
+        type: 'boolean',
+        note: 'test: probe the System One decision route instead of chat',
+      },
       'dry-run': { type: 'boolean', note: 'configure: print the request; change nothing' },
     },
     response: {
       provider: 'workers-ai|openai-compatible',
-      model: 'the model id',
+      model: 'the chat model id',
       models: 'ai models: [{id, owned_by?}] with source static|provider',
       base_url: 'https URL, or null for workers-ai',
-      api_key_configured: 'whether AI_CHAT_API_KEY is set on the Worker',
+      system1: '{provider, model, base_url, inherits_model, inherits_base}',
+      api_key_configured: 'whether both roles have a key on the Worker',
+      key_source: '{chat, system1}: the secret name that answered each role, or none',
+      answers: 'ai test --system-one: {id: {type, choice?, probability, noul?, score?, legend?}}',
       budget: '{day, used, limit}',
     },
     examples: [
       'dakflare ai providers',
       'dakflare ai providers --agent',
       'dakflare ai configure --provider workers-ai',
-      'dakflare ai configure --provider openai-compatible --model gpt-4o-mini --base-url https://api.openai.com/v1 --dry-run',
+      'dakflare ai configure --provider openai-compatible --model gpt-4o-mini --base-url https://api.openai.com/v1 --system1-model Clef --system1-base-url https://api.tokenlab.amd.com/v1 --dry-run',
       'dakflare ai models --json',
       'dakflare ai test --json',
+      'dakflare ai test --system-one --json',
     ],
   },
 };
@@ -900,6 +916,8 @@ const VALUE_FLAGS = new Set([
   'provider',
   'model',
   'base-url',
+  'system1-model',
+  'system1-base-url',
   'api-key',
 ]);
 
@@ -6167,24 +6185,68 @@ function aiWorkerName() {
 }
 
 function aiKeyCommand() {
-  // `cf` is this project's deploy path, and it can set a secret; nothing here
-  // needs a second CLI. The key is never an argument, so it cannot land in a
-  // shell history or a process list.
-  return `cf workers secrets update AI_CHAT_API_KEY --worker ${aiWorkerName()} --type secret_text`;
+  // Readiness needs a key for BOTH roles, so the command must name a secret both
+  // chains read: AI_PROVIDER_API_KEY. The role-local fallbacks (AI_CHAT_API_KEY
+  // for chat, TOKENLAB_API_KEY for System One) are listed after it, because a
+  // command that sets only one leaves the other role reporting "none" and this
+  // same message printing again.
+  return `cf workers secrets update AI_PROVIDER_API_KEY --worker ${aiWorkerName()} --type secret_text`;
+}
+
+/** The role-local names, for an operator who splits providers across vendors. */
+function aiKeyFallbacks() {
+  return 'AI_CHAT_API_KEY (chat) or TOKENLAB_API_KEY (System One)';
 }
 
 function aiKeyMissingMessage() {
-  return `AI_CHAT_API_KEY is not configured on the Worker. Set it with: ${aiKeyCommand()}`;
+  return `No AI provider key is configured on the Worker. Set one with: ${aiKeyCommand()} — or, if the roles use different vendors, ${aiKeyFallbacks()}.`;
 }
 
-/** The settings view, in the CLI's snake_case vocabulary. */
+/**
+ * The settings view, in the CLI's snake_case vocabulary.
+ *
+ * The route reports System One's *effective* model and base (already resolved
+ * against chat), not its stored columns, so "inherits" is the honest reading
+ * only when the two values are equal.
+ */
 function aiSettingsView(data) {
   const budget = data?.budget ?? {};
+  const rawSystem1 = data?.system1;
+  const rawKeySource = data?.keySource;
+  // The unified route always reports both. A Worker still on the older settings
+  // shape does not, and inventing "inherits" or "none" there would be a claim
+  // the CLI cannot support, so those two members read as null instead.
+  const hasSystem1 =
+    rawSystem1 !== null && typeof rawSystem1 === 'object' && !Array.isArray(rawSystem1);
+  const hasKeySource =
+    rawKeySource !== null && typeof rawKeySource === 'object' && !Array.isArray(rawKeySource);
+  const provider = data?.provider ?? null;
+  const model = data?.model ?? null;
+  const baseUrl = data?.baseUrl ?? null;
+  const system1Model = hasSystem1 ? rawSystem1.model ?? model : null;
+  const system1BaseUrl = hasSystem1 ? rawSystem1.baseUrl ?? null : null;
+  const keyName = (value) =>
+    typeof value === 'string' && value.trim() !== '' ? value.trim() : 'none';
   return {
-    provider: data?.provider ?? null,
-    model: data?.model ?? null,
-    base_url: data?.baseUrl ?? null,
+    provider,
+    model,
+    base_url: baseUrl,
+    system1: hasSystem1
+      ? {
+          provider: rawSystem1.provider ?? provider,
+          model: system1Model,
+          base_url: system1BaseUrl,
+          inherits_model: system1Model === model,
+          // workers-ai has no origin at all, so "inherits the base" has no
+          // meaning there; null says that instead of claiming either way.
+          inherits_base:
+            provider === 'openai-compatible' ? system1BaseUrl === baseUrl : null,
+        }
+      : null,
     api_key_configured: data?.apiKeyConfigured === true,
+    key_source: hasKeySource
+      ? { chat: keyName(rawKeySource.chat), system1: keyName(rawKeySource.system1) }
+      : null,
     ...(typeof data?.hint === 'string' ? { hint: data.hint } : {}),
     budget: {
       day: budget.day ?? null,
@@ -6200,30 +6262,52 @@ function aiNeedsKey(view) {
 }
 
 function printAiSettings(view) {
-  out(`  provider     ${view.provider ?? 'unknown'}`);
-  out(`  model        ${view.model ?? 'unknown'}`);
-  out(`  base_url     ${view.base_url ?? '—'}`);
-  out(`  api key      ${view.api_key_configured ? 'configured' : 'not configured'}`);
+  out(`  provider      ${view.provider ?? 'unknown'}`);
+  out(`  chat model    ${view.model ?? 'unknown'}`);
+  if (view.provider === 'openai-compatible') out(`  chat base     ${view.base_url ?? '—'}`);
+  if (view.system1 === null) {
+    out(muted('  system one    not reported by this Worker; deploy the unified settings route'));
+  } else {
+    const system1 = view.system1;
+    out(
+      `  system one    ${system1.model ?? 'unknown'}` +
+        (system1.inherits_model ? ' (inherits the chat model)' : '')
+    );
+    if (view.provider === 'openai-compatible') {
+      out(
+        `  system1 base  ${system1.base_url ?? '—'}` +
+          (system1.inherits_base ? ' (inherits the chat base)' : '')
+      );
+    }
+  }
   out(
-    `  budget       ${view.budget.used}/${view.budget.limit} tokens` +
+    `  api key       ${view.api_key_configured ? 'configured' : 'not configured'}`
+  );
+  if (view.key_source === null) {
+    out(muted('  key source    not reported by this Worker'));
+  } else {
+    out(`  key source    chat ${view.key_source.chat} · system1 ${view.key_source.system1}`);
+  }
+  out(
+    `  budget        ${view.budget.used}/${view.budget.limit} tokens` +
       (view.budget.day ? ` (${view.budget.day})` : '')
   );
-  if (typeof view.hint === 'string' && view.hint !== '') out(muted(`  hint         ${view.hint}`));
+  if (typeof view.hint === 'string' && view.hint !== '') out(muted(`  hint          ${view.hint}`));
 }
 
 /** Validate a base URL the same way `worker/src/lib/ai/settings.ts` does. */
-function aiBaseUrl(value) {
+function aiBaseUrl(value, label = '--base-url') {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw usage('--base-url is required for openai-compatible');
+    throw usage(`${label} is required for openai-compatible`);
   }
   let parsed;
   try {
     parsed = new URL(value.trim());
   } catch {
-    throw usage('--base-url must be an absolute URL');
+    throw usage(`${label} must be an absolute URL`);
   }
   if (parsed.username !== '' || parsed.password !== '') {
-    throw usage('--base-url must not carry credentials');
+    throw usage(`${label} must not carry credentials`);
   }
   const loopback =
     parsed.hostname === 'localhost' ||
@@ -6231,12 +6315,25 @@ function aiBaseUrl(value) {
     parsed.hostname === '[::1]' ||
     parsed.hostname === '::1';
   if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
-    throw usage('--base-url must be https, or http on localhost');
+    throw usage(`${label} must be https, or http on localhost`);
   }
   if (parsed.search !== '' || parsed.hash !== '') {
-    throw usage('--base-url must not carry a query or fragment');
+    throw usage(`${label} must not carry a query or fragment`);
   }
   return parsed.toString().replace(/\/+$/, '');
+}
+
+/**
+ * What the omitted System One fields will do, for `--dry-run`. Saying "inherits"
+ * is better than sending empty strings: the route clears a value it does not
+ * receive, and a cleared value is exactly "use the chat value".
+ */
+function aiSystem1InheritNote(system1, provider) {
+  const parts = [];
+  if (system1.model === undefined) parts.push('model');
+  if (provider === 'openai-compatible' && system1.baseUrl === undefined) parts.push('base');
+  if (parts.length === 0) return null;
+  return `System One inherits the chat ${parts.join(' and ')}; pass --system1-model / --system1-base-url to override.`;
 }
 
 /**
@@ -6344,19 +6441,47 @@ async function commandAiConfigure(argv) {
     throw usage('--base-url is not used by workers-ai');
   }
 
+  // System One is a replacement, exactly like the rest of the body: a member
+  // that is absent is cleared on the row and reads back as "use the chat
+  // value". So an omitted pair is left out entirely, never sent as "".
+  const system1 = {};
+  const rawSystem1Model = stringFlag(flags, 'system1-model');
+  if (rawSystem1Model !== undefined) {
+    if (rawSystem1Model.trim() === '') throw usage('--system1-model needs a value');
+    if (rawSystem1Model.length > 200) {
+      throw usage('--system1-model must be at most 200 characters');
+    }
+    system1.model = rawSystem1Model;
+  }
+  const rawSystem1BaseUrl = stringFlag(flags, 'system1-base-url');
+  if (rawSystem1BaseUrl !== undefined) {
+    if (provider !== 'openai-compatible') {
+      throw usage('--system1-base-url is not used by workers-ai');
+    }
+    system1.baseUrl = aiBaseUrl(rawSystem1BaseUrl, '--system1-base-url');
+  }
+
   const body = { provider, model, baseUrl };
+  if (Object.keys(system1).length > 0) body.system1 = system1;
   const pathname = '/v1/admin/ai/settings';
   const method = 'PUT';
 
   if (flags['dry-run'] === true) {
+    const inheritNote = aiSystem1InheritNote(system1, provider);
     if (MODE.json) {
       emitJson(
-        { ok: true, dry_run: true, request: { method, path: pathname, body } },
+        {
+          ok: true,
+          dry_run: true,
+          request: { method, path: pathname, body },
+          ...(inheritNote === null ? {} : { note: inheritNote }),
+        },
         MODE,
       );
       return 0;
     }
     printDryRun(pathname, body, method);
+    if (inheritNote !== null) out(muted(`  note: ${inheritNote}`));
     return 0;
   }
 
@@ -6415,11 +6540,81 @@ async function commandAiModels(argv) {
   return 0;
 }
 
+/** One readable line per System One answer: id, type, and its decision. */
+function aiAnswerLine(id, answer) {
+  const type = typeof answer?.type === 'string' ? answer.type : 'unknown';
+  const probability = Number(answer?.probability ?? 0);
+  const p = Number.isFinite(probability) ? probability.toFixed(2) : '0.00';
+  if (type === 'choice') {
+    return `  ${pad(id, 12)} ${pad(type, 7)} ${answer?.choice ?? '—'} (p ${p})`;
+  }
+  if (type === 'noul') {
+    return `  ${pad(id, 12)} ${pad(type, 7)} noul ${p}`;
+  }
+  if (type === 'score') {
+    // `score` is a model-weighted level and can be fractional; the legend is
+    // indexed by the nearest level, so a 1.82 reads as "Medium", not as a miss.
+    const rawScore = Number(answer?.score ?? 0);
+    const score = Number.isFinite(rawScore) ? Math.round(rawScore * 100) / 100 : 0;
+    const legend = Array.isArray(answer?.legend) ? answer.legend : [];
+    const label = legend[Math.round(rawScore)];
+    return `  ${pad(id, 12)} ${pad(type, 7)} ${score}${
+      typeof label === 'string' ? ` (${label})` : ''
+    } (p ${p})`;
+  }
+  return `  ${pad(id, 12)} ${type} (p ${p})`;
+}
+
+/**
+ * `dakflare ai test --system-one` — one fixed decision through the same
+ * selection path production uses. A 503 keeps the gateway's own reason: the
+ * route distinguishes a missing key, a bad base URL, an unparseable answer and
+ * an unreachable provider, and collapsing those into "failed" loses the fix.
+ */
+async function commandAiSystem1Test(cfg) {
+  const result = await api(cfg, 'POST', '/v1/admin/ai/system1/test', {});
+  if (result.status !== 200) {
+    const failure = aiFailure('test the System One provider', result);
+    if (result.status === 503 && failure.code === 75) {
+      const reason = typeof result.data?.reason === 'string' ? result.data.reason : null;
+      if (reason !== null && !failure.message.includes(reason)) {
+        failure.message = `${failure.message} (reason: ${reason})`;
+      }
+    }
+    throw failure;
+  }
+
+  const raw = result.data?.answers;
+  const answers = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const view = {
+    ok: true,
+    provider: result.data?.provider ?? null,
+    model: result.data?.model ?? null,
+    took_ms: Number(result.data?.took_ms ?? 0),
+    answers,
+  };
+
+  if (MODE.json) {
+    emitJson(view, MODE);
+    return 0;
+  }
+
+  out(`${ok('System One test ok')} (${view.provider ?? 'unknown'})`);
+  out(`  model        ${view.model ?? 'unknown'}`);
+  out(`  took         ${view.took_ms} ms`);
+  const entries = Object.entries(answers);
+  if (entries.length === 0) out(muted('  answers      none returned'));
+  for (const [id, answer] of entries) out(aiAnswerLine(id, answer));
+  return 0;
+}
+
 async function commandAiTest(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('ai');
   assertCommandFlags(flags, 'ai');
   const cfg = requireConfig();
+
+  if (flags['system-one'] === true) return commandAiSystem1Test(cfg);
 
   const result = await api(cfg, 'POST', '/v1/admin/ai/test');
   if (result.status !== 200) throw aiFailure('test the AI provider', result);
@@ -6958,32 +7153,42 @@ Requires keytool (JDK). This only reads the key; it never changes it.`,
 
   ai: `Usage: dakflare ai <providers|configure|models|test> [options]
 
-  providers                       read the active provider, model, base URL,
-                                  whether AI_CHAT_API_KEY is set, and today's budget
-  configure --provider <kind> [--model <id>] [--base-url <url>] [--dry-run]
+  providers                       both roles: provider, chat model, System One model
+                                  (and whether it inherits the chat model/base),
+                                  the key source for each role, and today's budget
+  configure --provider <kind> [--model <id>] [--base-url <url>]
+            [--system1-model <id>] [--system1-base-url <url>] [--dry-run]
                                   write the singleton AI settings row
   models                          the catalog the provider publishes (GET {base}/models);
                                   workers-ai answers a short static list instead
-  test                            one tiny provider call; prints ok, provider,
+  test                            one tiny chat provider call; prints ok, provider,
                                   model, took_ms and a sample
+  test --system-one               one tiny System One decision; prints provider,
+                                  model, took_ms and each answer (id, type, and
+                                  choice/probability, noul or score)
 
 Providers: workers-ai (the Worker's AI binding, no key) and
-openai-compatible (any /chat/completions endpoint, reached with AI_CHAT_API_KEY).
+openai-compatible (any /chat/completions endpoint, reached with a key).
 
 --provider is required. --model is optional and falls back to the provider's
 default. --base-url is required for openai-compatible and must be https, or
-http on localhost; it is refused for workers-ai. --dry-run prints the PUT
-request and sends nothing.
+http on localhost; it is refused for workers-ai. --system1-model overrides the
+model System One uses; --system1-base-url does the same for its origin, with the
+same https-or-loopback rule, and is refused for workers-ai. Omitting them leaves
+System One on the chat model and base, which is what --dry-run says instead of
+sending empty strings. --dry-run prints the PUT request and sends nothing.
 
 The API key is never accepted here: it belongs in a Worker secret, set with
 \`cf workers secrets update AI_CHAT_API_KEY --worker <worker> --type secret_text\` (the CLI names
-dakflare-worker unless DAKFLARE_WORKER_NAME says otherwise). If that secret is
-missing for openai-compatible, the command prints that exact remediation and
-exits 6, because it is a precondition rather than a network failure.
+dakflare-worker unless DAKFLARE_WORKER_NAME says otherwise). Chat and System One
+resolve their own secret, and \`ai providers\` names the one that answered each
+role (or "none"). If a key is missing for openai-compatible, the command prints
+that exact remediation and exits 6, because it is a precondition rather than a
+network failure.
 
-Exit: 0 ok · 2 usage or refused --api-key · 4 permission · 5 daily budget
-exhausted (prints used/limit) · 6 missing key or binding · 75 provider
-unreachable`,
+Exit: 0 ok · 2 usage or refused --api-key/--system1-base-url · 4 permission ·
+5 daily budget exhausted (prints used/limit) · 6 missing key or binding ·
+75 provider unreachable (a System One 503 also prints the gateway's reason)`,
 };
 
 function printHelp(topic = 'root') {
