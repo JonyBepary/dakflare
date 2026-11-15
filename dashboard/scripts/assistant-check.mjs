@@ -141,18 +141,30 @@ const STUB = String.raw`
 		if (path === '/v1/admin/ai/settings') {
 			const configured = knobs().keyConfigured !== false;
 			const workers = knobs().provider === 'workers-ai';
+			const base = workers ? null : 'https://api.example.com/v1';
+			const model = workers ? '@cf/meta/llama-3.3-70b-instruct-fp8-fast' : 'gpt-4o-mini';
 			return json({
 				provider: workers ? 'workers-ai' : 'openai-compatible',
-				model: workers ? '@cf/meta/llama-3.3-70b-instruct-fp8-fast' : 'gpt-4o-mini',
-				baseUrl: workers ? null : 'https://api.example.com/v1',
-				// Workers AI answers through the binding, so the gateway reports no
-				// key either way. That is exactly the case the page must not call broken.
-				apiKeyConfigured: workers ? false : configured,
+				model,
+				baseUrl: base,
+				// One row, two roles: the effective System One values are resolved
+				// server-side, so an inheriting row arrives already filled in.
+				system1: {
+					model,
+					provider: workers ? 'workers-ai' : 'openai-compatible',
+					baseUrl: base
+				},
+				// Workers AI answers through the binding, so neither role needs a key.
+				apiKeyConfigured: configured,
+				keySource: {
+					chat: configured ? 'AI_CHAT_API_KEY' : 'none',
+					system1: configured ? 'TOKENLAB_API_KEY' : 'none'
+				},
 				hint: workers
 					? "Uses the Worker's AI binding; no API key is needed."
 					: configured
 						? 'Key configured.'
-						: 'Set AI_CHAT_API_KEY with wrangler secret put.',
+						: 'No key for chat or System One.',
 				budget: { day: '2026-11-15', used: 12, limit: 20000 }
 			});
 		}
@@ -282,8 +294,12 @@ try {
 		`(() => {
 			const text = document.body.innerText;
 			const flat = text.replace(/\\s+/g, ' ');
+			const commands = flat.match(/cf workers secrets update [A-Z_]+/g) ?? [];
 			return {
-				command: text.includes('wrangler secret put AI_CHAT_API_KEY'),
+				// This deployment sets secrets with cf; the page must not send an
+				// operator to a second CLI. One command per role.
+				command: commands.length > 0,
+				commands,
 				password: document.querySelectorAll('input[type="password"]').length,
 				chip: /not configured/i.test(text),
 				budget: /12\\s*\\/\\s*20000/.test(flat),
@@ -292,7 +308,11 @@ try {
 			};
 		})()`
 	);
-	check('a missing key is stated as a command', key.command, '');
+	check(
+		'a missing key is stated as a cf command, one per role',
+		key.command === true && key.commands.length === 2,
+		key.commands.join(' | ') || 'none found'
+	);
 	check('the page has no place to type a key', key.password === 0, 'input[type=password] count 0');
 	check('key state and budget are both rendered', key.chip && key.budget, '');
 	check('the allowance counts tokens, not calls', key.unit === 'tokens' && !key.calls, key.unit);
@@ -312,7 +332,7 @@ try {
 		`(() => {
 			const text = document.body.innerText;
 			return {
-				command: text.includes('wrangler secret put'),
+				command: /cf workers secrets update AI_/.test(text.replace(/\s+/g, ' ')),
 				notNeeded: /not needed/i.test(text),
 				binding: /AI\b binding|binding/i.test(text),
 				baseField: [...document.querySelectorAll('label')].some((l) => /base url/i.test(l.innerText))

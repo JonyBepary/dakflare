@@ -5,18 +5,26 @@
  * nothing, and answer with the plainest true sentence when the endpoint does not
  * answer the question that was asked.
  *
- *   GET  /v1/admin/ai/settings                     provider, model, key state, budget
+ *   GET  /v1/admin/ai/settings                     provider, both roles, key names, budget
  *   PUT  /v1/admin/ai/settings                     the same document, written back
+ *   GET  /v1/admin/ai/models                       the models the saved provider lists
  *   POST /v1/admin/ai/test                         one sample answer from the provider
+ *   POST /v1/admin/ai/system1/test                 one fixed routing decision, in three answers
  *   POST /v1/admin/assistant/chat                  one answer, and proposals
  *   POST /v1/admin/assistant/proposals/:id/accept  the only write a proposal makes
+ *
+ * One provider answers both roles: chat, and System One (the routing decision
+ * that runs before a reply). They are two *selections* and two *secrets*: the
+ * settings document carries System One's effective model and base, and
+ * `keySource` names the secret each role read. This module keeps the names and
+ * nothing else — there is still no key value in this browser.
  *
  * Three things this module is strict about, because they are the ones that cost
  * an operator real time when they are fudged:
  *
  *  1. The key never exists in this browser. There is no field for it, no state
- *     for it and no parameter for it; `wrangler secret put AI_CHAT_API_KEY` is a
- *     deployment step the settings screen explains rather than imitates.
+ *     for it and no parameter for it; `cf workers secrets update` on the Worker
+ *     is a deployment step the settings screen explains rather than imitates.
  *  2. `used` and `limit` are `number | null`, not `number`. A zero the gateway
  *     never sent would read as "you have used none of today's allowance", which
  *     is a different and safer-sounding fact than "nobody said".
@@ -40,6 +48,37 @@ const ADMIN_HEADER = 'X-Admin-Session';
 
 export type AiProvider = 'workers-ai' | 'openai-compatible';
 
+/** The two roles a key can answer. They may resolve to different secrets. */
+export type AiRole = 'chat' | 'system1';
+
+/**
+ * The name of the secret that answered a role. `AI_PROVIDER_API_KEY`,
+ * `AI_CHAT_API_KEY` and `TOKENLAB_API_KEY` are the three this deployment reads;
+ * a name added later still arrives here as a name, and is printed as one.
+ *
+ * `none` is the gateway's word for "this role has no key". No value of any kind
+ * is ever part of this document.
+ */
+export type KeySource = string;
+
+export interface AiKeySource {
+	chat: KeySource;
+	system1: KeySource;
+}
+
+/**
+ * System One's *effective* selection: the gateway resolves the row's fallback
+ * before it answers, so `model` and `baseUrl` are already what a routing call
+ * would use, whether or not the row set its own.
+ *
+ * `baseUrl` is `null` for Workers AI, which has no origin at all.
+ */
+export interface AiSystem1 {
+	model: string;
+	provider: AiProvider;
+	baseUrl: string | null;
+}
+
 /**
  * Today's allowance as the gateway reports it. `null` is "not said", and the
  * settings page prints a dash rather than a zero.
@@ -55,17 +94,45 @@ export interface AiSettings {
 	provider: AiProvider;
 	model: string;
 	baseUrl: string;
+	/**
+	 * `null` when the gateway sent no System One block. That is a gateway from
+	 * before the two roles were split, and the honest reading is the one the page
+	 * prints: System One answers with the chat model, because there is nothing
+	 * else it could answer with.
+	 */
+	system1: AiSystem1 | null;
 	apiKeyConfigured: boolean;
+	/**
+	 * `null` when the gateway did not say. The page then reports the absence
+	 * rather than guessing a secret name it was not given.
+	 */
+	keySource: AiKeySource | null;
 	/** The gateway's own suggestion, if it sent one. Rendered when present. */
 	hint: string | null;
 	budget: AiBudget;
 }
 
-/** What `PUT` accepts. There is no key field: the type says so out loud. */
+/**
+ * What `PUT` accepts. There is no key field: the type says so out loud.
+ *
+ * A member of `system1` that is absent is a *replacement*: the Worker clears the
+ * stored column, which reads back as "use the chat value". That is why the page
+ * sends `system1: {}` for a role that inherits everything — an omitted object
+ * would leave an older own model in place.
+ */
+export interface AiSystem1Input {
+	/** Omit to inherit the chat model. */
+	model?: string;
+	/** Omit to inherit the chat base URL. Refused by Workers AI, which has none. */
+	baseUrl?: string;
+}
+
 export interface AiSettingsInput {
 	provider: AiProvider;
 	model: string;
+	/** Empty for Workers AI: it has no base URL, and one is refused. */
 	baseUrl: string;
+	system1: AiSystem1Input;
 }
 
 /** Why a request did not produce the thing that was asked for. */
@@ -111,6 +178,53 @@ export type TestOutcome =
 	| { status: 'ok'; sample: string; model: string | null }
 	| { status: 'failed'; failure: Failure };
 
+/**
+ * Where a catalogue came from. `static` is the Workers AI binding, which has no
+ * catalog endpoint: the gateway sent a short list of its own and says so, and a
+ * page that printed it as a published catalogue would be putting words in the
+ * provider's mouth.
+ */
+export type ModelSource = 'provider' | 'static';
+
+/** One model, in the provider's own name. `owned_by` is printed, never interpreted. */
+export interface AiModel {
+	id: string;
+	ownedBy: string | null;
+}
+
+/**
+ * The `reason` a 503 from `/v1/admin/ai/models` carries. `bad_base_url` is the
+ * one the Worker refuses before it ever asks the provider; the rest are answers
+ * the provider gave the Worker. A reason this console does not know reads as
+ * `null` and keeps the gateway's own message, rather than being guessed at.
+ */
+export type ModelsFailureReason =
+	| 'missing_key'
+	| 'missing_base_url'
+	| 'bad_base_url'
+	| 'provider_auth'
+	| 'provider_rate_limited'
+	| 'provider_unavailable'
+	| 'unparseable';
+
+export type ModelsOutcome =
+	| {
+			status: 'ok';
+			provider: AiProvider;
+			source: ModelSource;
+			/** The gateway's sentence about where the list came from, if it sent one. */
+			note: string | null;
+			models: AiModel[];
+	  }
+	| {
+			status: 'failed';
+			failure: Failure;
+			/** The 503's machine-readable reason; `null` when there was no 503 to read. */
+			reason: ModelsFailureReason | null;
+			/** The provider's own `Retry-After`, as it arrived, for a rate-limited list. */
+			retryAfter: string | null;
+	  };
+
 export type AcceptOutcome =
 	| { status: 'ok'; message: string; ids: string[]; detail: string | null }
 	| { status: 'failed'; failure: Failure };
@@ -147,6 +261,42 @@ function readDay(value: unknown): string | null {
 	return null;
 }
 
+/**
+ * One role's secret name, as the Worker resolved it.
+ *
+ * Any non-empty string is a name and is printed as it arrived: a console that
+ * recognised only the three it knows would have to either hide a name it does
+ * not recognise or silently call it "no key", and the second one would send an
+ * operator looking for a deployment step that is not needed.
+ */
+function readKeySource(value: unknown): KeySource | null {
+	return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function readKeySources(value: unknown): AiKeySource | null {
+	if (!isRecord(value)) return null;
+	const chat = readKeySource(value.chat);
+	const system1 = readKeySource(value.system1);
+	// Both or neither: half a document is not one this console can print.
+	if (chat === null || system1 === null) return null;
+	return { chat, system1 };
+}
+
+/**
+ * System One's effective block. `model` is what decides whether the group shows
+ * an own model or an inheritance, so a block without one is not readable.
+ */
+function readSystem1(value: unknown): AiSystem1 | null {
+	if (!isRecord(value)) return null;
+	const provider = readProvider(value.provider);
+	if (provider === null || typeof value.model !== 'string') return null;
+	return {
+		model: value.model,
+		provider,
+		baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : null
+	};
+}
+
 function readSettings(value: unknown): AiSettings | null {
 	if (!isRecord(value)) return null;
 	const provider = readProvider(value.provider);
@@ -159,7 +309,9 @@ function readSettings(value: unknown): AiSettings | null {
 		provider,
 		model,
 		baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : '',
+		system1: readSystem1(value.system1),
 		apiKeyConfigured: value.apiKeyConfigured === true,
+		keySource: readKeySources(value.keySource),
 		hint: readString(value.hint),
 		budget: {
 			day: readDay(budget.day),
@@ -376,6 +528,271 @@ export async function testAi(): Promise<TestOutcome> {
 	const text = raw.text.trim();
 	if (text !== '') return { status: 'ok', sample: text, model: null };
 	return { status: 'failed', failure: { kind: 'unreadable' } };
+}
+
+/* ------------------------------------------------------- system one probe */
+
+/** The three local aliases the probe accepts. The wire model is never one of them. */
+export type System1ProbeModel = 'clef' | 'clef-flash' | 'clef-omni';
+
+/**
+ * One typed answer from the probe, with only the fields a compact row prints.
+ *
+ * `probability` is the number the provider gave for the thing that was chosen —
+ * the option's probability, the noul probability, or a score's top probability.
+ * `null` is "not sent", and the page then prints no number at all: a `0` here
+ * would be an invented one.
+ */
+export interface System1ChoiceAnswer {
+	kind: 'choice';
+	id: string;
+	choice: string | null;
+	probability: number | null;
+}
+
+export interface System1NoulAnswer {
+	kind: 'noul';
+	id: string;
+	probability: number | null;
+}
+
+export interface System1ScoreAnswer {
+	kind: 'score';
+	id: string;
+	/** The 0-based level the provider weighted. */
+	score: number | null;
+	/** The provider's own labels for those levels; `legend[score]` is the name. */
+	legend: string[] | null;
+	probability: number | null;
+}
+
+export type System1Answer = System1ChoiceAnswer | System1NoulAnswer | System1ScoreAnswer;
+
+/**
+ * The probe's two outcomes. A failure keeps the gateway's `reason` verbatim
+ * (`reason: null` for a status that carries none, such as the 429 limiter), so
+ * the page names a reason it was given and never one it guessed.
+ */
+export type System1TestOutcome =
+	| {
+			status: 'ok';
+			/** The backend that answered: `workers-ai`, `openai-compatible`, or `none`. */
+			provider: string | null;
+			/** The probe label the answer came back under. */
+			model: string | null;
+			tookMs: number | null;
+			answers: System1Answer[];
+			/** Ids of answers whose kind this console does not render. */
+			unknown: string[];
+	  }
+	| {
+			status: 'failed';
+			failure: Failure;
+			reason: string | null;
+			/** The provider's own `Retry-After`, as it arrived. */
+			retryAfter: string | null;
+	  };
+
+/**
+ * The alias a probe asks as.
+ *
+ * The row holds a provider's model name, and the probe accepts only its three
+ * local labels; the closest one is sent and the page prints the label the
+ * gateway reports back, so nothing here claims the stored name and the probed
+ * one are the same string.
+ */
+export function system1ProbeModel(effectiveModel: string): System1ProbeModel {
+	const name = effectiveModel.toLowerCase();
+	if (name.includes('omni')) return 'clef-omni';
+	if (name.includes('flash')) return 'clef-flash';
+	return 'clef';
+}
+
+/** One row per answer the gateway sent, in the order it sent them. */
+function readAnswers(value: unknown): { answers: System1Answer[]; unknown: string[] } | null {
+	if (!isRecord(value)) return null;
+	const answers: System1Answer[] = [];
+	const unknown: string[] = [];
+
+	for (const [key, entry] of Object.entries(value)) {
+		if (!isRecord(entry)) {
+			unknown.push(key);
+			continue;
+		}
+		const id = readString(entry.id) ?? key;
+		const probability = readFinite(entry.probability);
+
+		if (entry.type === 'choice') {
+			answers.push({ kind: 'choice', id, choice: readString(entry.choice), probability });
+		} else if (entry.type === 'noul') {
+			answers.push({ kind: 'noul', id, probability });
+		} else if (entry.type === 'score') {
+			const legend = Array.isArray(entry.legend)
+				? entry.legend.filter((label): label is string => typeof label === 'string')
+				: null;
+			answers.push({
+				kind: 'score',
+				id,
+				score: readFinite(entry.score),
+				legend: legend !== null && legend.length > 0 ? legend : null,
+				probability
+			});
+		} else {
+			// A kind this console has no row for. Its id is reported, and no value
+			// is invented out of fields whose meaning is unknown here.
+			unknown.push(id);
+		}
+	}
+
+	return { answers, unknown };
+}
+
+/**
+ * `POST /v1/admin/ai/system1/test` — one fixed routing decision, in three answers.
+ *
+ * The probe asks about a ticket the Worker fixes in code, so two runs are
+ * comparable; it is the same selection path production uses, which is what makes
+ * its reported `provider` worth printing.
+ */
+export async function testSystem1(model: System1ProbeModel): Promise<System1TestOutcome> {
+	const raw = await call('/v1/admin/ai/system1/test', {
+		method: 'POST',
+		body: JSON.stringify({ model })
+	});
+
+	if (!raw.ok) {
+		const body = isRecord(raw.json) ? raw.json : {};
+		return {
+			status: 'failed',
+			failure: failureFrom(raw),
+			// Only a 503 carries a provider reason. A 403 or a 429 from the
+			// limiter is this gateway's own answer, and has none to report.
+			reason: raw.status === 503 ? readString(body.reason) : null,
+			retryAfter: raw.status === 503 ? readRetryAfter(body.retry_after) : null
+		};
+	}
+
+	const body = isRecord(raw.json) ? raw.json : null;
+	if (body === null) return { status: 'failed', failure: { kind: 'unreadable' }, reason: null, retryAfter: null };
+
+	const parsed = readAnswers(body.answers);
+	// An answer with no rows in it is not a sample of anything; say so rather
+	// than show an empty list that looks like a rendering bug.
+	if (parsed === null || (parsed.answers.length === 0 && parsed.unknown.length === 0)) {
+		return { status: 'failed', failure: { kind: 'unreadable' }, reason: null, retryAfter: null };
+	}
+
+	return {
+		status: 'ok',
+		provider: readString(body.provider),
+		model: readString(body.model),
+		tookMs: readFinite(body.took_ms),
+		answers: parsed.answers,
+		unknown: parsed.unknown
+	};
+}
+
+/**
+ * The `reason` a 503 from the probe carries, in the operator's words.
+ *
+ * The reasons are not interchangeable: a key that was refused is replaced, a
+ * gateway with no key is given one, a rate limit is waited out, and an answer
+ * the gateway could not read is a provider problem that is not the operator's
+ * key. A reason this console does not know keeps the gateway's own sentence on
+ * screen and is not renamed.
+ */
+export function system1ReasonLine(reason: string | null): string {
+	switch (reason) {
+		case 'missing_key':
+			return 'The gateway holds no System One key, so it asked the provider nothing.';
+		case 'provider_auth':
+			return 'The provider refused the System One key.';
+		case 'provider_rate_limited':
+			return 'The provider is limiting this key.';
+		case 'provider_unavailable':
+			return 'The System One provider could not be reached.';
+		case 'unparseable':
+			return 'The provider answered, but not with the three answers this probe asks for.';
+		default:
+			// `null` (no 503 to read) and a reason added later both land here, and
+			// the page prints the token beside it when there is one.
+			return 'The gateway refused the System One probe.';
+	}
+}
+
+/* ----------------------------------------------------------------- models */
+
+const MODELS_REASONS: readonly string[] = [
+	'missing_key',
+	'missing_base_url',
+	'bad_base_url',
+	'provider_auth',
+	'provider_rate_limited',
+	'provider_unavailable',
+	'unparseable'
+];
+
+/** A reason this console knows, or `null`: an unknown one is not renamed. */
+function readModelsReason(value: unknown): ModelsFailureReason | null {
+	if (typeof value !== 'string' || !MODELS_REASONS.includes(value)) return null;
+	return value as ModelsFailureReason;
+}
+
+/** `Retry-After` as the Worker copied it: seconds or a date, printed verbatim. */
+function readRetryAfter(value: unknown): string | null {
+	if (typeof value === 'string' && value.trim() !== '') return value.trim();
+	if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+	return null;
+}
+
+/** `{provider, source, note, models}`, or `null` when the answer is not that document. */
+function readCatalogue(value: unknown): Extract<ModelsOutcome, { status: 'ok' }> | null {
+	if (!isRecord(value)) return null;
+	const provider = readProvider(value.provider);
+	const source: ModelSource | null =
+		value.source === 'provider' || value.source === 'static' ? value.source : null;
+	// A list with no array is a document this console cannot read; an empty array
+	// is an answer, and says the provider listed nothing.
+	if (provider === null || source === null || !Array.isArray(value.models)) return null;
+
+	const models: AiModel[] = [];
+	const seen = new Set<string>();
+	for (const entry of value.models) {
+		const id = typeof entry === 'string' ? entry : isRecord(entry) ? readString(entry.id) : null;
+		if (id === null || seen.has(id)) continue;
+		seen.add(id);
+		models.push({ id, ownedBy: isRecord(entry) ? readString(entry.owned_by) : null });
+	}
+	return { status: 'ok', provider, source, note: readString(value.note), models };
+}
+
+/**
+ * `GET /v1/admin/ai/models` — the models the saved provider offers right now.
+ *
+ * The catalogue is a read: it changes nothing, and picking an id out of it is
+ * the operator's next decision, not this call's. `source` travels all the way to
+ * the page because the two are not the same promise: one is the provider's own
+ * endpoint, the other is the gateway's short static list for an AI binding that
+ * publishes nothing.
+ */
+export async function listModels(): Promise<ModelsOutcome> {
+	const raw = await call('/v1/admin/ai/models');
+	if (!raw.ok) {
+		const body = isRecord(raw.json) ? raw.json : {};
+		return {
+			status: 'failed',
+			failure: failureFrom(raw),
+			// Only a 503 carries these: a 403 is this console's own permission
+			// problem, and has no provider reason to report.
+			reason: raw.status === 503 ? readModelsReason(body.reason) : null,
+			retryAfter: raw.status === 503 ? readRetryAfter(body.retry_after) : null
+		};
+	}
+	const catalogue = readCatalogue(raw.json);
+	if (catalogue === null) {
+		return { status: 'failed', failure: { kind: 'unreadable' }, reason: null, retryAfter: null };
+	}
+	return catalogue;
 }
 
 /* ------------------------------------------------------------------- chat */
