@@ -49,6 +49,13 @@ export interface AutonomyRow {
    * cover a rule. Bounded by the write cap and the window.
    */
   allow_rules?: number;
+  /**
+   * The operator this window belongs to. A window is a per-session grant: an act
+   * from a different actor is refused with `autonomy_other_session` even while
+   * the row is enabled, because "somebody enabled autonomy" must never mean
+   * "this operator may act".
+   */
+  actor?: string | null;
 }
 
 export interface UsageRow {
@@ -95,7 +102,7 @@ export function d1AutonomyStore(env: Env): AutonomyStore {
   return {
     async readAutonomy() {
       const row = await env.DB.prepare(
-        `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules
+        `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor
            FROM agent_autonomy WHERE id = 1`
       ).first<AutonomyRow>();
       return row ?? null;
@@ -171,6 +178,16 @@ export async function authorizeActWithStore(
   const autonomy = await store.readAutonomy(now);
   if (autonomy === null || Number(autonomy.enabled) !== 1) {
     return { ok: false, reason: "autonomy_off", message: "agent autonomy is off" };
+  }
+  // A window is opened by one operator for one session. Someone else holding a
+  // live socket does not inherit it.
+  const owner = typeof autonomy.actor === "string" ? autonomy.actor : "";
+  if (owner !== "" && owner !== (_actor?.label ?? "")) {
+    return {
+      ok: false,
+      reason: "autonomy_other_session",
+      message: `the autonomy window was opened by ${owner}, not by ${_actor?.label ?? "this session"}`,
+    };
   }
   if (Number(autonomy.expires_at) <= now) {
     return {
@@ -396,6 +413,8 @@ export async function mintAutonomyGrants(
 
 export interface EnableAutonomyInput extends AutonomyPlan {
   updated_by: string;
+  /** The operator the window belongs to; defaults to `updated_by`. */
+  actor?: string;
 }
 
 /** Write the singleton row: the window and the two daily caps. */
@@ -414,10 +433,11 @@ export async function enableAutonomy(
     expires_at: now + ttl * 1_000,
     updated_by: input.updated_by,
     allow_rules: input.allow_rules === true ? 1 : 0,
+    actor: input.actor ?? input.updated_by,
   };
   await env.DB.prepare(
-    `INSERT INTO agent_autonomy (id, enabled, sms_cap, write_cap, expires_at, updated_by, updated_at, allow_rules)
-     VALUES (1, 1, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO agent_autonomy (id, enabled, sms_cap, write_cap, expires_at, updated_by, updated_at, allow_rules, actor)
+     VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        enabled = 1,
        sms_cap = excluded.sms_cap,
@@ -425,9 +445,10 @@ export async function enableAutonomy(
        expires_at = excluded.expires_at,
        updated_by = excluded.updated_by,
        updated_at = excluded.updated_at,
-       allow_rules = excluded.allow_rules`
+       allow_rules = excluded.allow_rules,
+       actor = excluded.actor`
   )
-    .bind(smsCap, writeCap, row.expires_at, row.updated_by, now, row.allow_rules)
+    .bind(smsCap, writeCap, row.expires_at, row.updated_by, now, row.allow_rules, row.actor ?? null)
     .run();
   return row;
 }
@@ -483,7 +504,7 @@ export async function readAutonomyStatus(
   now: number = Date.now()
 ): Promise<AutonomyStatus> {
   const row = await env.DB.prepare(
-    `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules
+    `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor
        FROM agent_autonomy WHERE id = 1`
   ).first<AutonomyRow>();
   const day = utcDay(now);

@@ -220,6 +220,8 @@ export async function handleAutonomyEnable(
     : [];
 
   const row = await enableAutonomy(env, {
+    // Bound to the caller: a window is per session, not per deployment.
+    actor: actor.label,
     ttl_s: ttlS,
     sms_cap: smsCap,
     write_cap: writeCap,
@@ -256,6 +258,8 @@ export async function handleAutonomyEnable(
     subject: "autonomy",
     detail: {
       expires_at: row.expires_at,
+        actor: typeof row.actor === "string" ? row.actor : null,
+        mine: (typeof row.actor === "string" ? row.actor : null) === actor.label,
       sms_cap: smsCap,
       write_cap: writeCap,
       grants: minted.grants.map((grant) => ({ id: grant.id, scope: grant.scope })),

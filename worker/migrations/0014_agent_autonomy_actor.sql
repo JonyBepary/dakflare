@@ -1,0 +1,12 @@
+-- DakFlare — an autonomy window belongs to one operator.
+--
+-- The row is a singleton, so without an owner "autonomy is on" would mean "any
+-- session that reaches this agent may act". The owner is the actor label that
+-- opened the window (the signed-in operator, or `admin-token` for the machine
+-- path), and `authorizeAct` refuses a mismatch with `autonomy_other_session`
+-- before it looks at a grant.
+--
+-- NULL means a row written by migration 0013 (or hand-edited): treated as
+-- ownerless by `authorizeAct`, which accepts the mismatch check but still needs a
+-- live grant, and every use is audited. New windows always set it.
+ALTER TABLE agent_autonomy ADD COLUMN actor TEXT;

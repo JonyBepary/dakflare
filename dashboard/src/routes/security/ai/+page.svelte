@@ -1412,12 +1412,20 @@
 					<!-- The consequence, in one sentence, in both states. Off is not
 					     described as safe: it is described as what it is. -->
 					<p class="autonomy-consequence" data-state={autonomy.enabled ? 'open' : 'off'}>
-						{#if autonomy.enabled}
-							Open. The assistant can act without an Accept: it may send SMS and write to this
-							deployment on its own until the window closes or a cap is reached.
+						{#if autonomy.enabled && autonomy.mine === false}
+							<!-- A window belongs to the operator who opened it. Saying this plainly is
+							     what stops a second operator assuming their session may act. -->
+							Open, but not for you: <span class="mono">{autonomy.actor ?? 'another operator'}</span>
+							opened it, and acts from this session are refused until it closes or you open
+							your own.
+						{:else if autonomy.enabled}
+							Open for this session. The assistant can act without an Accept: it may send SMS
+							and write to this deployment on its own until the window closes or a cap is
+							reached.
 						{:else}
-							Off. Opening a window lets the assistant act without an Accept: it may send SMS and
-							write to this deployment on its own until the window closes or a cap is reached.
+							Off. Opening a window lets the assistant act without an Accept, for your session
+							only: it may send SMS and write to this deployment on its own until the window
+							closes or a cap is reached.
 						{/if}
 					</p>
 

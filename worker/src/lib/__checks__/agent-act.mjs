@@ -56,6 +56,38 @@ function check(label, condition, detail = "") {
   }
 }
 
+{
+  // A window is per operator. Someone else's live socket must not inherit it,
+  // even while the row says enabled.
+  const { authorizeActWithStore } = await import("../../agent/grants.ts");
+  const baseRow = {
+    enabled: 1,
+    sms_cap: 5,
+    write_cap: 5,
+    expires_at: Date.now() + 60_000,
+    updated_by: "jony@example.com",
+    allow_rules: 1,
+    actor: "jony@example.com",
+  };
+  const store = {
+    async readAutonomy() { return baseRow; },
+    async readUsage() { return { tokens: 0, writes: 0, sms: 0 }; },
+    async chargeUsage() { return "ok"; },
+    async refundUsage() {},
+    async findGrant() { return { id: "grant_1", scope: "rules:write", target: {} }; },
+    async consumeGrant() { return true; },
+    async refundGrant() {},
+  };
+  const mine = await authorizeActWithStore(store, { label: "jony@example.com" }, { kind: "write", scope: "rules:write", target: {} });
+  check("the operator who opened the window may act", mine.ok === true, mine.ok ? "ok" : mine.reason);
+  const other = await authorizeActWithStore(store, { label: "rae@example.com" }, { kind: "write", scope: "rules:write", target: {} });
+  check(
+    "another operator does not inherit it",
+    other.ok === false && other.reason === "autonomy_other_session",
+    other.ok ? "allowed" : other.reason
+  );
+}
+
 function makeJournalStore() {
   const calls = new Map();
   const turns = new Map();

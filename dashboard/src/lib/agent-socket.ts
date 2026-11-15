@@ -1267,6 +1267,14 @@ export interface AgentAutonomy {
 	expiresAt: number | null;
 	caps: AgentAutonomyCaps;
 	usage: AgentAutonomyUsage;
+	/**
+	 * Who opened this window. A window is per operator, so a session that did not
+	 * open it is refused with `autonomy_other_session` even while it is open.
+	 * Absent from an older Worker, where the notion did not exist.
+	 */
+	actor?: string | null;
+	/** True when the caller is the operator the window belongs to. */
+	mine?: boolean | null;
 }
 
 export type AutonomyOutcome =
@@ -1285,6 +1293,8 @@ function parseAutonomy(value: unknown): AgentAutonomy | null {
 	return {
 		enabled: value.enabled,
 		expiresAt: readInstant(value.expiresAt),
+		actor: typeof value.actor === 'string' ? value.actor : null,
+		mine: typeof value.mine === 'boolean' ? value.mine : null,
 		caps: { sms: readCount(caps.sms), writes: readCount(caps.writes) },
 		usage: {
 			day:
