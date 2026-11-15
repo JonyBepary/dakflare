@@ -1,203 +1,252 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": {
     "articulate": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/articulate/SKILL.md",
-      "computedHash": "170ac312f9d874cce6326016b0641f36c002fea14ed3032537af0bbc9bae7915"
+      "computedHash": ""
     },
     "better-accessibility": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-accessibility/SKILL.md",
-      "computedHash": "7fe3f3727dc1c15b5148e1b8d47f1b025f9886348ec8a33f4c4536aa5372cbbe"
+      "computedHash": "b08dea072cfa1a31ec93a7f50849780d09b5a36aa82ce50a3a3f06408bc679f1"
     },
     "better-colors": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-colors/SKILL.md",
-      "computedHash": "b24b63ebd25658a95e5f791cd83552aca6554dd6746aa6065d930a9492fb9886"
+      "computedHash": "6c40244bd9bc5ed1ddb4357ddc1a4787d0f3d8743928627979c4d3edda98f665"
     },
     "better-interface": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-interface/SKILL.md",
-      "computedHash": "c4f8a7862c00e63ae0df73fa29137f01a7fdd16354919e718dcf7e9f1a3f9445"
+      "computedHash": "37ae068dc11f7548c3064848cb6d97f4e4626e689ad374c192ddc05d11641c04"
     },
     "better-layout": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-layout/SKILL.md",
-      "computedHash": "822bb216c43ce743221b1afe42a21c7efc80d85b71847cf109c33af9513da655"
+      "computedHash": "1c42c9853d688e741b9ee520040171e2eb40e6cbab2302cd8bd351b447a6d4c7"
     },
     "better-typography": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-typography/SKILL.md",
-      "computedHash": "6546baea71117ed05b74dd9fb4ebf25300b3a8c9fab1751fd9981701550bd1b7"
+      "computedHash": "7c81bcecb6b765269959cc06c3bd1af2719df7594bbda02817d1b284f4991812"
     },
     "better-ui": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-ui/SKILL.md",
-      "computedHash": "8a21f243313aa3b7f6bb5e13d241eef07926fe52bc0a866d154a10f88b7c007a"
+      "computedHash": "36417d09a0d91fb8c8cbbbeeb14f0ac0c0d4399342d80bcec02c8c446ebadce3"
     },
     "better-writing": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/better-writing/SKILL.md",
-      "computedHash": "5dcd97f7df29f92ef99901601b2a63e2c709f49f9748fd6b61c751b667468564"
+      "computedHash": "1a0f637280dfd4d2a3245ab6a0dad4b48b22a4a2ced64915eb51876012cf46f0"
     },
     "blueprint": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/blueprint/SKILL.md",
-      "computedHash": "1ee7e1329a2b3b4406668fe7879fc9d8f1632278ab6c4e13c6bb6c014b6e9337"
+      "computedHash": ""
     },
     "break": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/break/SKILL.md",
-      "computedHash": "a31627543d546b00ee744d6cbc31889a4eef67b25f854007b99344f022fc0c05"
+      "computedHash": "4dc3ebcbe19fde77ea97f01bd85c43e9091e54cab5f818fc51ccae8ead60f9ec"
     },
     "build-design": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/build-design/SKILL.md",
-      "computedHash": "46337926e5e37e492fd4e576413b96528d8aa3b4857f90fcb0e587214d15006e"
+      "computedHash": "9935cc12c9138b34c3cb8f1827d30286e87a3b274fd7f194b97cf6d94a5a79f0"
+    },
+    "build-design-system": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "b0fca5c25fbf7640c82ba5a289861e289c09fa4bfc7708c3a465c136266cbd3f",
+      "wellKnownDigest": "sha256:cd0298ea97c501f0387ea5aeef864580c06f5e01de1e8197c7d6376dfe7f568c"
+    },
+    "component-docs": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "e769b686e6a8e1955ae06085cee773ef70e2cbd502c0bf906a12e8483d66ab58",
+      "wellKnownDigest": "sha256:ed50d4af6037f8fcc54f0e1b863a0ef6456551928d0911ebe2d6c0bbabe7e006"
+    },
+    "design-system-boss": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "1b06e362de47f4b8eb54d2a9f84e89f5d2856f417f7190b07a6be96da1202752",
+      "wellKnownDigest": "sha256:041cb28de5f14846bd65b185e12059bee3472d24a27797eb23dde1660d5c45ce"
     },
     "evaluate": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/evaluate/SKILL.md",
-      "computedHash": "d591656a905791da7fb05b716adfff3ef7306f671db43c708fd0707a49fec368"
+      "computedHash": ""
     },
     "explain-interface": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/explain-interface/SKILL.md",
-      "computedHash": "c15f9e3e5844fe4e70e2ea3251665d84fbdeff899bdc9a839cb88f9bdb5dfc65"
+      "computedHash": "b55813058b37c1a5e6a6f5ace14fcbd00d7841228f4a54d3294880fcd22a9e15"
     },
     "fortify": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/fortify/SKILL.md",
-      "computedHash": "2cb02bc82f3603342c1ba7dd6fd2fbc64a0d59a854543d4f18b698dd1a8a66b0"
+      "computedHash": ""
     },
     "impeccable": {
       "source": "pbakaus/impeccable",
       "sourceType": "github",
       "skillPath": ".agents/skills/impeccable/SKILL.md",
-      "computedHash": "1ca45e029a1fbccc426c44e87cd090eb4e6df548f9aa700475a95ca7b432183a"
+      "computedHash": ""
     },
     "include": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/include/SKILL.md",
-      "computedHash": "1816528ca59e2c300b8cd18a71972f1242a393b65ec6d5c2ff3f6fc15dad82fe"
+      "computedHash": ""
     },
     "intent": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/intent/SKILL.md",
-      "computedHash": "a40dd39e7614cff9c30f7dbc9c73b21293f069d7233044c94ed0aad878f85172"
+      "computedHash": ""
     },
     "interface-review": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/interface-review/SKILL.md",
-      "computedHash": "3b04fd6eb5fef3b49c76b6af2b0bb542bbadcdbd88beed7ca11ab54d5a207750"
+      "computedHash": "635ca1213ec840ddbe45d21463f8122dad06cd92643610e09a0304bf2563388a"
     },
     "investigate": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/investigate/SKILL.md",
-      "computedHash": "4845a6310c4186b35b83b3c75a8fad8a39971e09f3d55a5859670e0885c3dde2"
+      "computedHash": ""
     },
     "journey": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/journey/SKILL.md",
-      "computedHash": "511bd1c566fa63a352c4c48a921f3847a92677f96964715eaec8e7a17faacc0e"
+      "computedHash": ""
     },
     "localize": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/localize/SKILL.md",
-      "computedHash": "965353884c2d8ff354ff465775ef851ffcb598c12a755e767e4cc00a7438b2fc"
+      "computedHash": ""
+    },
+    "make-font": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "9ecc8c909b172fe528e5ce9ce5258bd97a599a69035db1532bdbaa90ce334b26",
+      "wellKnownDigest": "sha256:a718a47b43aca673b08b7456f8f4caf378ef87c58986a565561880a6e46b0d81"
     },
     "measure": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/measure/SKILL.md",
-      "computedHash": "da9e56f9fa3db6831488f081f8b2ec87dbc0621ac46dc0522d2aabf1a01b5b8c"
+      "computedHash": ""
+    },
+    "migrate-design-system": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "b8d87e04df10fed46d0079a253799cf10bef82261099661df89b9c3a47cbf96a",
+      "wellKnownDigest": "sha256:cbf4b27491c8f06058def0e4f2b86c4a53b01edef15f68d0f000377101e8608a"
     },
     "organize": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/organize/SKILL.md",
-      "computedHash": "664f5105ffc2edbdce6646bf2f5be2bc2e40f7db230e7b9e832789422227e7a8"
+      "computedHash": ""
     },
     "philosopher": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/philosopher/SKILL.md",
-      "computedHash": "c5a23e67b6d9620560e51342f22e98b69c0a20f5ecb8b9790c3a516f580d79c9"
+      "computedHash": ""
     },
     "present": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/present/SKILL.md",
-      "computedHash": "be646aa242f5a888164280f01ec161e518a02a0908abfc897875a33cd4000970"
+      "computedHash": ""
     },
     "specify": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/specify/SKILL.md",
-      "computedHash": "64bd3d280a15311b8924fcfd77ca3e1dea210f8f401942816868feddcd1e5a8e"
+      "computedHash": ""
     },
     "state-machine": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/state-machine/SKILL.md",
-      "computedHash": "d73a22b82d0bff03c2a069406c849cb261975f175f8f8018f5afdf686923e72b"
+      "computedHash": "3d4ef971a1182c890c65c13d7aeaae100f286d708fdd72fb74e9d68d52f5c75f"
     },
     "storytelling": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/storytelling/SKILL.md",
-      "computedHash": "3b3bb5d69d8156c680ae410dcbbebb29fd1a147e743f150f260ff9af1d75ad09"
+      "computedHash": ""
     },
     "strategize": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/strategize/SKILL.md",
-      "computedHash": "971ae16101288bb3c994c442565bc90a6a6f94d0d3107fa9f95f270e5ee21dc7"
+      "computedHash": ""
     },
     "teardown": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/teardown/SKILL.md",
-      "computedHash": "6d593a47c2e69f5e8f8e0e77bff93244d0a94d1d3c271d861ad3f2e3e67a835e"
+      "computedHash": "b9bb6a0549041d1d8c9f421acf83f0c3ba3f8063022d9dada140ed1b3e084626"
+    },
+    "token-mapping": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "5b4efbdc1aa8e7ec903afbf8da4fb4db0e7c9bfa9db6b417c153ee46cf8d5ed7",
+      "wellKnownDigest": "sha256:6886cad4fe8fe1a7b706e28dd12105390a78460a38852b118084f42cbfc453e9"
     },
     "transpose": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/transpose/SKILL.md",
-      "computedHash": "f771e6c5eb0c11b3dcd7a3a4a72a7e2c1bb9387c160f231e8b9a8f7bb587c3a9"
+      "computedHash": ""
+    },
+    "ui-review": {
+      "source": "design.how",
+      "sourceUrl": "https://design.how",
+      "sourceType": "well-known",
+      "computedHash": "16106d08018859dade85074982e831a11807352dfff74af72edeb6fe8df2f339",
+      "wellKnownDigest": "sha256:4c1c697ecde90b2b3463905237f910a577c25bbaf8064535066c07ab01638bf1"
     },
     "variant": {
       "source": "jakubkrehel/skills",
       "sourceType": "github",
       "skillPath": "skills/variant/SKILL.md",
-      "computedHash": "c783573ebf39b02ed2dc393cc7fe3de0a2fafc5d10a9a3c76a8461889beb7c2d"
+      "computedHash": "3f761b70ef27b2c7e19451c00f5d70877ac9d296967b1363c97254f747ac23dc"
     },
     "wireframe": {
       "source": "ghaida/intent",
       "sourceType": "github",
       "skillPath": "skills/wireframe/SKILL.md",
-      "computedHash": "1c339804999dfa060332ed7035ab8a4e57c3ef3126af2995bdd4a3f833b5b0ba"
+      "computedHash": ""
     }
   }
 }

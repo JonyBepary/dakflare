@@ -1,6 +1,6 @@
 ---
 name: dakflare-flows
-description: Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, flows heal, extraction drift.
+description: "Author, validate, debug or heal a DakFlare flow: the nine-node graph (Trigger, Extract, Set var, Condition, Switch, Delay, Webhook, Send SMS, Stop) that answers inbound SMS. Use when a reply did not fire, a graph fails validation, an extraction stopped matching, or a flow needs writing or changing. Triggers: auto reply, sms rule, flow graph, extract pattern, switch branch, why did the reply not send, workflow json, flows apply, flows heal, extraction drift."
 ---
 
 # DakFlare: flows

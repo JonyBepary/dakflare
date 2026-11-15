@@ -1,6 +1,6 @@
 ---
 name: dakflare-provision
-description: Install, configure or repair a DakFlare deployment: a Worker on Cloudflare, a D1 database, and one paired Android handset. Use when setting up DakFlare for the first time, when `dakflare doctor` reports a failure, when a secret or binding is missing, or when a device needs pairing or revoking. Triggers: install dakflare, set up the gateway, doctor fails, missing secret, pair a phone, revoke a device, deploy the worker.
+description: "Install, configure or repair a DakFlare deployment: a Worker on Cloudflare, a D1 database, and one paired Android handset. Use when setting up DakFlare for the first time, when `dakflare doctor` reports a failure, when a secret or binding is missing, or when a device needs pairing or revoking. Triggers: install dakflare, set up the gateway, doctor fails, missing secret, pair a phone, revoke a device, deploy the worker."
 ---
 
 # DakFlare: provisioning and repair

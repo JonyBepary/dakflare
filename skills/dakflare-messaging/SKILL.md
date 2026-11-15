@@ -1,6 +1,6 @@
 ---
 name: dakflare-messaging
-description: Send an SMS through a DakFlare deployment, follow it to the radio, and read what happened. Use when a task needs to send a text, check whether one was delivered, read inbound messages, or retry a send safely. Triggers: send sms, text message, delivery status, did it arrive, retry the send, idempotency key, inbound messages.
+description: "Send an SMS through a DakFlare deployment, follow it to the radio, and read what happened. Use when a task needs to send a text, check whether one was delivered, read inbound messages, or retry a send safely. Triggers: send sms, text message, delivery status, did it arrive, retry the send, idempotency key, inbound messages."
 ---
 
 # DakFlare: sending and checking a message

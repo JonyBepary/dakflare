@@ -1,6 +1,6 @@
 ---
 name: dakflare-agents
-description: Give an AI agent a bounded, time-boxed way to operate a DakFlare deployment: mint an agent token, approve a request, read the grant table, connect over MCP, and trace what an id became. Use when an agent needs to send SMS, when a send is refused for lack of a grant, when a token must be revoked, or when an approval round needs completing. Triggers: agent token, approval request, authority grant, dakflare mcp, agent quota, paused_hitl_approval, trace an id, revoke a token.
+description: "Give an AI agent a bounded, time-boxed way to operate a DakFlare deployment: mint an agent token, approve a request, read the grant table, connect over MCP, and trace what an id became. Use when an agent needs to send SMS, when a send is refused for lack of a grant, when a token must be revoked, or when an approval round needs completing. Triggers: agent token, approval request, authority grant, dakflare mcp, agent quota, paused_hitl_approval, trace an id, revoke a token."
 ---
 
 # DakFlare: letting an agent act
