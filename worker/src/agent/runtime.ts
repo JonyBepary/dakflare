@@ -22,6 +22,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
+import { Scheduler } from "agents/schedules";
 import { Sessions } from "agents/sessions";
 import { State } from "agents/state";
 import { Streams, type StreamJson, type StreamWriter } from "agents/streams";
@@ -130,6 +131,98 @@ interface AssistantConnection extends WebSocket {
   state: unknown;
 }
 
+/**
+ * The documented cadence of the `Agent` class's keep-alive heartbeat. A DO is
+ * evicted after roughly 70–140 s idle; a turn takes 10–25 s, so one 30 s wake-up
+ * during the model call is enough to keep the instance resident.
+ */
+export const TURN_HEARTBEAT_SECONDS = 30;
+
+/** The slice of `Scheduler` the heartbeat uses; the real class satisfies it. */
+export interface HeartbeatScheduler {
+  every(
+    intervalSeconds: number,
+    callback: "keepalive",
+    payload?: undefined,
+    options?: { idempotent?: boolean }
+  ): Promise<{ id: string }>;
+  cancel(id: string): Promise<boolean>;
+}
+
+/**
+ * Holds the Durable Object awake while any turn is in flight.
+ *
+ * Job key: ONE interval job for every turn. The installed Scheduler's `every()`
+ * is idempotent by default for recurrent schedules (`ScheduleOptions.idempotent`
+ * defaults to true for interval/cron) and deduplicates on type, callback,
+ * owner, payload and interval. So the first turn arms `keepalive` at 30 s with
+ * no payload, later turns call the same `every` and receive the same job, and
+ * cancellation is decided by a counter: the last turn out cancels the one job.
+ *
+ * The counter is INSTANCE memory. Eviction takes it with the object, and a turn
+ * that died with the object cannot resume: this makes eviction during a live
+ * turn less likely, it does not make the turn durable.
+ */
+export class TurnHeartbeat {
+  #turnsInFlight = 0;
+  #jobId: string | null = null;
+  /** Serialises arm/cancel so a turn starting as the last one ends cannot race. */
+  #chain: Promise<void> = Promise.resolve();
+  readonly #scheduler: HeartbeatScheduler;
+
+  constructor(scheduler: HeartbeatScheduler) {
+    this.#scheduler = scheduler;
+  }
+
+  /** `true` while the interval job is armed. */
+  get armed(): boolean {
+    return this.#jobId !== null;
+  }
+
+  /** How many turns currently hold the heartbeat. */
+  get turnsInFlight(): number {
+    return this.#turnsInFlight;
+  }
+
+  /** Run one turn, armed from start to end — including a throw. */
+  async run<T>(turn: () => Promise<T>): Promise<T> {
+    this.#turnsInFlight += 1;
+    await this.#queue(async () => {
+      if (this.#jobId !== null) return;
+      // `idempotent` is the documented default for an interval; passing it
+      // makes the one-job choice explicit rather than incidental.
+      const schedule = await this.#scheduler.every(TURN_HEARTBEAT_SECONDS, "keepalive", undefined, {
+        idempotent: true,
+      });
+      this.#jobId = schedule.id;
+    });
+    try {
+      return await turn();
+    } finally {
+      this.#turnsInFlight = Math.max(0, this.#turnsInFlight - 1);
+      const stillActive = this.#turnsInFlight;
+      await this.#queue(async () => {
+        if (stillActive > 0) return;
+        const id = this.#jobId;
+        this.#jobId = null;
+        if (id !== null) await this.#scheduler.cancel(id);
+      });
+    }
+  }
+
+  /**
+   * Heartbeat storage is best effort: a failure to arm must not fail the turn,
+   * and a failure to cancel leaves one job that the next turn reuses.
+   */
+  #queue(task: () => Promise<void>): Promise<void> {
+    const next = this.#chain.then(task, task).catch((error: unknown) => {
+      console.warn(`[agent] keepalive failed: ${String(error).slice(0, 200)}`);
+    });
+    this.#chain = next;
+    return next;
+  }
+}
+
 export class AssistantAgent extends DurableObject<Env> {
   /** `true` when the stored schema is newer than this code (a rollback). */
   #schemaAhead = false;
@@ -204,11 +297,29 @@ export class AssistantAgent extends DurableObject<Env> {
   readonly sessions = new Sessions();
   readonly streams = new Streams();
 
+  /**
+   * The keep-alive schedule. The callback runs inside the Lifecycle host
+   * boundary and touches nothing: an interval schedule re-arms itself, and the
+   * only effect wanted is that the object's alarm loop keeps running while a
+   * turn is in flight.
+   */
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      keepalive: () => {
+        // Intentionally empty: the recurring schedule is the wake-up.
+      },
+    },
+  });
+
+  /** Arms `scheduler` while a turn runs; see `TurnHeartbeat` for the key choice. */
+  readonly turns = new TurnHeartbeat(this.scheduler);
+
   readonly lifecycle = Lifecycle.install(this)
     .use(this.state)
     .use(this.sockets)
     .use(this.sessions)
-    .use(this.streams);
+    .use(this.streams)
+    .use(this.scheduler);
 
   readonly #journal = new Journal({
     sql: this.ctx.storage.sql as unknown as JournalSql,
@@ -288,8 +399,22 @@ export class AssistantAgent extends DurableObject<Env> {
     return Response.json({ error: "agent_upgrade_required" }, { status: 426 });
   }
 
-  /** Close every socket whose session or autonomy window has passed. */
+  /**
+   * The physical alarm. Lifecycle owns the job queue behind it, so the host's
+   * override must delegate rather than replace it: `installHandlers` skips a
+   * name the host already defines, and a host `alarm()` that did not call
+   * `lifecycle.alarm()` would store Scheduler jobs — the heartbeat included —
+   * and never dispatch them.
+   */
   override async alarm(): Promise<void> {
+    await this.lifecycle.alarm();
+  }
+
+  /**
+   * Lifecycle's host hook, run after due jobs. Close every socket whose session
+   * or autonomy window has passed.
+   */
+  async onAlarm(): Promise<void> {
     const autonomy = await readAutonomyStatus(this.env);
     const grantExpiresAt = autonomy.enabled ? autonomy.expires_at ?? Infinity : autonomy.expires_at ?? Date.now();
     const now = Date.now();
@@ -402,17 +527,33 @@ export class AssistantAgent extends DurableObject<Env> {
     const sessionId = connection.id;
     await this.#ask(connection, state, sessionId, messageText.trim(), idempotencyKey);
 
-    const after = await readAutonomyStatus(this.env);
-    const nextExpiry = Math.min(
-      state.sessionExpiresAt,
-      after.expires_at ?? Infinity
-    );
-    if (Number.isFinite(nextExpiry)) {
-      try {
-        await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, nextExpiry));
-      } catch {
-        // The alarm is a convenience; the per-frame check is the guarantee.
-      }
+    await this.#armExpiryAlarm();
+  }
+
+  /**
+   * Re-arm the socket-expiry alarm at the earliest session/autonomy deadline.
+   *
+   * Lifecycle owns the physical alarm for its job queue. While the heartbeat is
+   * armed the interval job must own that alarm, so an expiry write here would
+   * delay the 30 s wake-up; the last turn to finish calls this again with the
+   * heartbeat down. The per-frame check remains the guarantee either way.
+   */
+  async #armExpiryAlarm(): Promise<void> {
+    if (this.turns.armed) return;
+    const connections = [...this.sockets.getConnections()];
+    if (connections.length === 0) return;
+    let earliest = Infinity;
+    for (const connection of connections) {
+      const state = connection.state as AssistantConnectionState | null;
+      earliest = Math.min(earliest, state?.sessionExpiresAt ?? Infinity);
+    }
+    const autonomy = await readAutonomyStatus(this.env);
+    earliest = Math.min(earliest, autonomy.expires_at ?? Infinity);
+    if (!Number.isFinite(earliest)) return;
+    try {
+      await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, earliest));
+    } catch {
+      // The alarm is a convenience; the per-frame check is the guarantee.
     }
   }
 
@@ -575,50 +716,54 @@ export class AssistantAgent extends DurableObject<Env> {
     }
 
     const tools = buildAgentTools();
-    const result = await runTurn(
-      this.env,
-      state.actor,
-      sessionId,
-      message,
-      tools,
-      {
-        model: resolved.adapter,
-        journal: this.#journal,
-        budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
-        autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
-        idempotencyKey,
-        history,
-        onEvent: send,
-      }
-    );
+    // Armed for the model call and everything after it, and disarmed by
+    // `run` on success, refusal and throw alike.
+    await this.turns.run(async () => {
+      const result = await runTurn(
+        this.env,
+        state.actor,
+        sessionId,
+        message,
+        tools,
+        {
+          model: resolved.adapter,
+          journal: this.#journal,
+          budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
+          autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
+          idempotencyKey,
+          history,
+          onEvent: send,
+        }
+      );
 
-    if (writer !== null) {
+      if (writer !== null) {
+        try {
+          if (errorRef.current !== null) writer.error(errorRef.current.message);
+          else writer.close();
+        } catch {
+          // Closing a settled stream is safe; a race here has no side effect.
+        }
+      }
+
       try {
-        if (errorRef.current !== null) writer.error(errorRef.current.message);
-        else writer.close();
+        await appendTurnMessages(session, idempotencyKey, history.slice(before));
+        if (result.stopped === "answer" && result.answer !== "") {
+          await recordTurnAnswer(session, idempotencyKey, result.answer);
+        }
       } catch {
-        // Closing a settled stream is safe; a race here has no side effect.
+        // A lost transcript row costs context, not the journal.
       }
-    }
 
-    try {
-      await appendTurnMessages(session, idempotencyKey, history.slice(before));
-      if (result.stopped === "answer" && result.answer !== "") {
-        await recordTurnAnswer(session, idempotencyKey, result.answer);
+      if (result.stopped === "turn_cap") {
+        try {
+          connection.send(JSON.stringify({ type: "turn_cap", turns: result.turns }));
+        } catch {
+          // closed
+        }
       }
-    } catch {
-      // A lost transcript row costs context, not the journal.
-    }
 
-    if (result.stopped === "turn_cap") {
-      try {
-        connection.send(JSON.stringify({ type: "turn_cap", turns: result.turns }));
-      } catch {
-        // closed
-      }
-    }
-
-    logTurn(errorRef.current !== null ? `error:${errorRef.current.reason}` : result.stopped);
+      logTurn(errorRef.current !== null ? `error:${errorRef.current.reason}` : result.stopped);
+    });
   }
 
 
@@ -715,74 +860,78 @@ export class AssistantAgent extends DurableObject<Env> {
       return { ok: false, reason: resolved.reason, message: resolved.message };
     }
 
-    const result = await runTurn(
-      this.env,
-      actor,
-      journalSessionId,
-      trimmed,
-      buildAgentTools(),
-      {
-        model: resolved.adapter,
-        journal: this.#journal,
-        budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
-        autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
-        idempotencyKey,
-        history,
-        onEvent: (frame) => {
-          frames += 1;
-          if (writer !== null) {
-            try {
-              writer.append(frame as unknown as StreamJson);
-            } catch {
-              // A settled stream is presentation only; the journal is intact.
+    // The machine path holds the object awake the same way the socket path
+    // does: one counter, one interval job, disarmed even when the turn throws.
+    return this.turns.run(async () => {
+      const result = await runTurn(
+        this.env,
+        actor,
+        journalSessionId,
+        trimmed,
+        buildAgentTools(),
+        {
+          model: resolved.adapter,
+          journal: this.#journal,
+          budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
+          autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
+          idempotencyKey,
+          history,
+          onEvent: (frame) => {
+            frames += 1;
+            if (writer !== null) {
+              try {
+                writer.append(frame as unknown as StreamJson);
+              } catch {
+                // A settled stream is presentation only; the journal is intact.
+              }
             }
-          }
-          if (frame.type === "answer") answer = frame.text;
-          else if (frame.type === "tool") calls.push(frame);
-          else if (frame.type === "error") {
-            failureRef.current = { reason: frame.reason, message: frame.message };
-          }
-        },
-      }
-    );
+            if (frame.type === "answer") answer = frame.text;
+            else if (frame.type === "tool") calls.push(frame);
+            else if (frame.type === "error") {
+              failureRef.current = { reason: frame.reason, message: frame.message };
+            }
+          },
+        }
+      );
 
-    if (writer !== null) {
+      if (writer !== null) {
+        try {
+          if (failureRef.current !== null) writer.error(failureRef.current.message);
+          else writer.close();
+        } catch {
+          // closing a settled stream is safe
+        }
+      }
+
       try {
-        if (failureRef.current !== null) writer.error(failureRef.current.message);
-        else writer.close();
+        await appendTurnMessages(session, idempotencyKey, history.slice(before));
+        if (answer !== "") {
+          await recordTurnAnswer(session, idempotencyKey, answer);
+        }
       } catch {
-        // closing a settled stream is safe
+        // a lost transcript costs context, not the turn
       }
-    }
 
-    try {
-      await appendTurnMessages(session, idempotencyKey, history.slice(before));
-      if (answer !== "") {
-        await recordTurnAnswer(session, idempotencyKey, answer);
+      if (failureRef.current !== null) {
+        // A provider or parse failure is a refusal with a reason, never an empty
+        // "answer" the operator has to interpret.
+        logTurn(`error:${failureRef.current.reason}`);
+        return {
+          ok: false as const,
+          reason: failureRef.current.reason,
+          message: failureRef.current.message,
+        };
       }
-    } catch {
-      // a lost transcript costs context, not the turn
-    }
-
-    if (failureRef.current !== null) {
-      // A provider or parse failure is a refusal with a reason, never an empty
-      // "answer" the operator has to interpret.
-      logTurn(`error:${failureRef.current.reason}`);
+      if (answer === "") answer = result.answer ?? "";
+      logTurn(result.stopped);
       return {
-        ok: false,
-        reason: failureRef.current.reason,
-        message: failureRef.current.message,
+        ok: true as const,
+        answer,
+        calls,
+        tokens: null,
+        took_ms: Date.now() - started,
       };
-    }
-    if (answer === "") answer = result.answer ?? "";
-    logTurn(result.stopped);
-    return {
-      ok: true,
-      answer,
-      calls,
-      tokens: null,
-      took_ms: Date.now() - started,
-    };
+    });
   }
 
   /* ─────────────────────────── schema ledger ─────────────────────────── */

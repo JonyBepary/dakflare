@@ -64,6 +64,14 @@ packages and React. Its authorization also defaults to allow-all per turn, which
 opposite of what this gateway needs. The `Agent` base class would add `runFiber`, `keepAlive`
 and `queue`; those are the next step, not this one.
 
+We are a bare Durable Object plus `Lifecycle`, the same shape as the SDK's Pi example
+(`examples/next/harnesses/pi/src/server.ts`). Ours adds three things no example carries: the
+grant model, the fail-closed journal and the versioned schema. The `Agent` class would add
+`keepAlive`, `runFiber`, `queue` and `@callable`; until that migration is worth doing, the
+`Scheduler` capability with a 30 s `keepalive` interval armed for the duration of a turn is
+the smallest stand-in for `keepAlive`. It lowers the chance that a 10–25 s model call is
+evicted with the object; it does not survive an eviction and does not resume a turn.
+
 ## Authority
 
 The rule stays meaningful only if the human decision names the effect. Turning autonomy on
