@@ -237,7 +237,8 @@ Four routes give an agent the reading an operator does by eye, behind the same g
 | `POST /v1/agent/diagnose` | `messages:read` | one of six root causes with a character offset and a highlight |
 | `POST /v1/agent/synthesize` | `flows:write` | faithfulness score, approval verdict, `apply_token` |
 
-The model is Cloudflare Clef, asked as one batch of typed questions (`noul`, `choice`, `score`).
+The backend is whatever `ai_settings.provider` selects — Workers AI (Clef) or an OpenAI-compatible
+gateway serving `/systemone` — asked as one batch of typed questions (`noul`, `choice`, `score`).
 When it is unreachable the routes return less and say so; they never invent a classification, and
 `synthesize` returns `503` rather than minting authority without a verdict. `docs/AGENT_SURFACE.md`
 has the request and response shapes, the thresholds and the error codes.
@@ -436,8 +437,6 @@ Known gaps:
 - **Signal** and the Android notification bridge are not implemented.
 - **Plugin registry and WASM sandbox** are not implemented; the tables exist.
 - **R2 media** is declared and unread by any route; Workers AI is read by the agent routes only.
-- **`jev`** is opt-in through `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`; without both it reports
-  `provider_unavailable`. Its wire shape is our assumption, isolated in one adapter.
 - **Agent telemetry in the console** answers one question at a time; no transcript, filter or
   export.
 - **The palette composer** stages insertions only; moves and renames arrive from a staged patch.

@@ -131,20 +131,46 @@ each with a machine-readable reason that becomes the `503` body.
 
 ## The provider this deployment uses
 
-Token Lab (`https://api.tokenlab.amd.com/v1`) serves both halves:
+One settings row governs both roles. Token Lab (`https://api.tokenlab.amd.com/v1`) answers
+them today:
 
 - **chat** through the ordinary `openai-compatible` adapter, model
   `DeepSeek-V4.1-Flash`, with `GET /v1/admin/ai/models` and `dakflare ai models`
   listing the ten ids the gateway publishes;
-- **System One** through `POST /v1/systemone` with model `Clef`, which answers the
-  same typed questions the Workers AI binding does. `SYSTEM1_PROVIDER` decides:
-  `workers-ai`, `tokenlab`, or the shipped default `auto`, meaning "Token Lab when
-  this deployment holds `TOKENLAB_API_KEY`, Workers AI otherwise". `jev` still always
-  goes to TypeSafe, and `POST /v1/admin/ai/system1/test` runs one fixed decision
-  (choice, noul, score) so the typed path can be exercised on a deployment.
+- **System One** through `POST /v1/systemone` with model `Clef`, which answers the same
+  typed questions the Workers AI binding does.
 
-Two secrets, both set with `cf workers secrets update … --type secret_text`:
-`AI_CHAT_API_KEY` for chat, `TOKENLAB_API_KEY` for System One.
+`GET /v1/admin/ai/settings` returns the effective values for both roles, so a field the row
+leaves empty arrives already resolved to the chat value:
+
+```json
+{ "provider": "openai-compatible", "model": "DeepSeek-V4.1-Flash",
+  "baseUrl": "https://api.tokenlab.amd.com/v1",
+  "system1": { "model": "Clef", "provider": "openai-compatible",
+               "baseUrl": "https://api.tokenlab.amd.com/v1" },
+  "apiKeyConfigured": true,
+  "keySource": { "chat": "AI_CHAT_API_KEY", "system1": "TOKENLAB_API_KEY" },
+  "hint": "Key configured. Requests go to https://api.tokenlab.amd.com/v1.",
+  "budget": { "day": "2026-11-15", "used": 12, "limit": 20000 } }
+```
+
+Keys resolve **per role**, because a key issued by one gateway must never travel to another:
+chat uses `AI_PROVIDER_API_KEY` then `AI_CHAT_API_KEY`; System One uses
+`AI_PROVIDER_API_KEY` then `TOKENLAB_API_KEY`. A single `AI_PROVIDER_API_KEY` serves both,
+which is what a deployment with one vendor wants; `keySource` says which secret actually
+answered, so the console never claims "configured" on the strength of a variable the role does
+not read. Set either with `cf workers secrets update <NAME> --type secret_text`.
+
+The provider is stored, not configured by env. `SYSTEM1_PROVIDER`, `SYSTEM1_DEFAULT_MODEL`
+and the TypeSafe `jev` adapter are gone: env is only the fallback when no row exists, and a
+D1 fault on a serving path degrades to that fallback instead of failing the request.
+
+## Deploy order
+
+Apply `0010_unified_ai_provider.sql` **before** the Worker that reads `system1_model` and
+`system1_base_url`: the code selects both columns, so a code-first deploy makes the settings
+read fail (every AI call then falls back to the env defaults, and GET reports the fallback as
+though it were configured).
 
 ## In the console
 

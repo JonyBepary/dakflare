@@ -17,7 +17,7 @@ Three rules hold everywhere below:
 2. A read is a read. A write needs a token, and a consequential write needs a live grant.
 3. When a model is unreachable, the endpoint says so and returns less. It does not guess.
 
-## System 1: Clef decision models
+## System 1: typed decisions, one provider at a time
 
 `worker/src/lib/system1.ts` is a client for Cloudflare's [Clef](https://developers.cloudflare.com/workers-ai/models/clef/)
 decision models, verified live on 2026-11-15 against `@cf/cloudflare/clef-flash` and
@@ -47,17 +47,24 @@ Invariants the client enforces, because each one is a silent wrong answer when s
 - choice criteria are rewritten to snake_case and always gain an `other` option;
 - duplicate criteria, single-option choices and score questions without two levels throw
   before the network call;
-- thresholds are per model, so `clef-flash` at 0.90 is not `clef` at 0.85.
+- one threshold set for every caller: auto-route 0.90, injection block 0.70. There is no tie-break
+  threshold any more, because nothing implements a tie-break: the number was aspirational.
 
-Thresholds (`SYSTEM1_THRESHOLDS`): auto-route 0.90 / 0.85, tie-break 0.70 / 0.65, injection
-block 0.70. `SYSTEM1_DEFAULT_MODEL` selects the default and is declared in all five config
-files so `check-config` stays green.
+Thresholds (`SYSTEM1_THRESHOLDS`) used to be per alias, which stopped being honest once a
+single wire model answered all three: Token Lab serves `Clef` for `clef`, `clef-flash` and
+`clef-omni`. One set — the strictest of the old values — is applied to all of them, and the
+local alias is kept apart from the wire name so a stored `Clef` cannot index a table that has
+no such key.
 
-`jev` (TypeSafe) is an opt-in adapter: with `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY` set it
-posts the same typed questions to `{base}/v1/decide` and normalises the answers through the same
-path, and `AskResult.provider` names whichever backend answered. With either value missing it
-reports `provider_unavailable` rather than falling back to Clef. The assumed wire shape is
-isolated in one function so a different real shape changes one place.
+There are two backends, chosen in settings, not by an env var:
+
+- **Workers AI** (`clef`, `clef-flash`, `clef-omni`), verified live on 2026-11-15, no key;
+- **an OpenAI-compatible gateway** that serves `POST {base}/systemone` with model `Clef`,
+  verified live against Token Lab the same day.
+
+`SYSTEM1_PROVIDER`, `SYSTEM1_DEFAULT_MODEL` and the TypeSafe `jev` adapter are gone. `ask`
+takes a resolved config — provider, wire model, base URL, key — so nothing inside it reads the
+environment, and `AskResult.provider` names the backend that actually answered.
 
 ## Endpoints
 
@@ -186,5 +193,5 @@ Read `ASSISTANT.md` for the routes, the budget and the proposal lifecycle.
 - It does not apply anything from `synthesize`. A human approves, then an apply spends.
 - It does not act on a stale read: a diagnosis is a snapshot, and a grant is the only thing
   that authorises a change.
-- `jev` needs both TypeSafe values before it can answer; the contract is our assumption about
-  their wire shape, isolated in one function.
+- It does not guess a provider: the settings row decides, and a missing key or a refused base
+  URL is an error with a reason rather than a fallback to a different vendor.
