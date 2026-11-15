@@ -227,10 +227,15 @@ async function main() {
     AI_CHAT_BASE_URL: "https://env.example/v1",
   });
   check(
-    "no row: without TOKENLAB_* System One follows chat",
-    noRowNoTokenlab.system1Model === "env-chat" &&
+    "no row: without TOKENLAB_* System One takes the provider's decision model",
+    noRowNoTokenlab.system1Model === "Clef" &&
       noRowNoTokenlab.system1BaseUrl === "https://env.example/v1",
     JSON.stringify({ model: noRowNoTokenlab.system1Model, base: noRowNoTokenlab.system1BaseUrl })
+  );
+  check(
+    "the chat model is never inherited as the decision model",
+    noRowNoTokenlab.system1Model !== "env-chat",
+    noRowNoTokenlab.system1Model
   );
 
   /* ── settings: the row wins ────────────────────────────────────────── */
@@ -247,15 +252,15 @@ async function main() {
     JSON.stringify({ model: rowWins.system1Model, base: rowWins.system1BaseUrl })
   );
 
-  /* ── settings: NULL columns fall back to chat ─────────────────────── */
+  /* ── settings: NULL base inherits chat; NULL model is the decision default ── */
   const nullColumns = await readSettings({
     DB: dbWith(rowOf()),
     TOKENLAB_BASE_URL: "https://tokenlab.example/v1",
     TOKENLAB_SYSTEM1_MODEL: "EnvModel",
   });
   check(
-    "NULL system1 columns fall back to the chat model/base",
-    nullColumns.system1Model === "chat-model" &&
+    "NULL system1 columns: base inherits chat, model is the decision default",
+    nullColumns.system1Model === "Clef" &&
       nullColumns.system1BaseUrl === "https://chat.example/v1",
     JSON.stringify({ model: nullColumns.system1Model, base: nullColumns.system1BaseUrl })
   );

@@ -747,7 +747,7 @@ const COMMAND_SPECS = {
       model: 'the chat model id',
       models: 'ai models: [{id, owned_by?}] with source static|provider',
       base_url: 'https URL, or null for workers-ai',
-      system1: '{provider, model, base_url, inherits_model, inherits_base}',
+      system1: '{provider, model, base_url, inherits_base}',
       api_key_configured: 'whether both roles have a key on the Worker',
       key_source: '{chat, system1}: the secret name that answered each role, or none',
       answers: 'ai test --system-one: {id: {type, choice?, probability, noul?, score?, legend?}}',
@@ -6236,7 +6236,6 @@ function aiSettingsView(data) {
           provider: rawSystem1.provider ?? provider,
           model: system1Model,
           base_url: system1BaseUrl,
-          inherits_model: system1Model === model,
           // workers-ai has no origin at all, so "inherits the base" has no
           // meaning there; null says that instead of claiming either way.
           inherits_base:
@@ -6269,10 +6268,7 @@ function printAiSettings(view) {
     out(muted('  system one    not reported by this Worker; deploy the unified settings route'));
   } else {
     const system1 = view.system1;
-    out(
-      `  system one    ${system1.model ?? 'unknown'}` +
-        (system1.inherits_model ? ' (inherits the chat model)' : '')
-    );
+    out(`  system one    ${system1.model ?? 'unknown'}`);
     if (view.provider === 'openai-compatible') {
       out(
         `  system1 base  ${system1.base_url ?? '—'}` +

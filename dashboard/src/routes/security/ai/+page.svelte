@@ -113,7 +113,6 @@
 	 * operator's to set, and is not sent: the checkbox is the choice, so nobody
 	 * has to guess what an empty field means.
 	 */
-	let s1InheritModel = $state(true);
 	let s1InheritBase = $state(true);
 
 	let saving = $state(false);
@@ -143,7 +142,7 @@
 	const chatBase = $derived(baseUrl.trim());
 
 	/** System One as the form would send it, resolved the way the gateway resolves it. */
-	const s1EffectiveModel = $derived(s1InheritModel ? chatModel : s1Model.trim());
+	const s1EffectiveModel = $derived(s1Model.trim());
 	const s1EffectiveBase = $derived(
 		s1InheritBase || provider !== 'openai-compatible' ? chatBase : s1BaseUrl.trim()
 	);
@@ -411,14 +410,12 @@
 		model = next.model;
 		baseUrl = next.baseUrl;
 
-		// "Own or inherited" is read from the document's effective values: it has
-		// no flag to read, and two equal values route the same way whichever route
-		// the row took to get there. An own model identical to the chat model
-		// therefore comes back as inherited, which is what saving it again writes.
+		// The System One model is its own field, never the chat model: a gateway
+		// decides with a different model than it chats with (Token Lab decides
+		// with Clef and chats as DeepSeek), so the document's effective value is
+		// what this field shows and what Save writes back.
 		const stored = next.system1;
-		const ownModel = stored !== null && stored.model !== next.model;
-		s1InheritModel = !ownModel;
-		s1Model = stored !== null && ownModel ? stored.model : '';
+		s1Model = stored !== null ? stored.model : '';
 
 		const ownBase =
 			next.provider === 'openai-compatible' &&
@@ -482,10 +479,9 @@
 		// System One, same rule: an own value has to be a value, and an inherited
 		// one is not sent at all — the Worker reads an omitted member as "clear
 		// this column", which is exactly what inheriting means.
-		const ownModel = !s1InheritModel;
 		const nextS1Model = s1Model.trim();
-		if (ownModel && nextS1Model === '') {
-			fieldError = "Give System One its own model, or tick Use the chat model.";
+		if (nextS1Model === '') {
+			fieldError = 'Give System One the model its provider decides with.';
 			return;
 		}
 		const ownBase = provider === 'openai-compatible' && !s1InheritBase;
@@ -499,8 +495,7 @@
 			return;
 		}
 
-		const system1: AiSystem1Input = {};
-		if (ownModel) system1.model = nextS1Model;
+		const system1: AiSystem1Input = { model: nextS1Model };
 		if (ownBase) system1.baseUrl = nextS1Base;
 
 		fieldError = null;
@@ -786,35 +781,20 @@
 
 						<div class="s1-grid">
 							<div class="field">
-								<label class="check s1-check" for="ai-s1-inherit">
-									<input
-										id="ai-s1-inherit"
-										type="checkbox"
-										bind:checked={s1InheritModel}
-										aria-describedby="ai-s1-model-hint"
-									/>
-									<span>Use the chat model</span>
-								</label>
 								<label class="label" for="ai-s1-model">Model</label>
 								<input
 									id="ai-s1-model"
 									class="input input-mono"
-									value={s1InheritModel ? chatModel : s1Model}
-									oninput={(event) => (s1Model = event.currentTarget.value)}
-									placeholder="clef-flash"
-									readonly={s1InheritModel}
+									bind:value={s1Model}
+									placeholder={provider === 'workers-ai' ? 'clef' : 'Clef'}
 									autocomplete="off"
 									autocapitalize="off"
 									spellcheck="false"
 									aria-describedby="ai-s1-model-hint"
 								/>
 								<p class="hint" id="ai-s1-model-hint">
-									{#if s1InheritModel}
-										Inherited from chat: <span class="mono">{chatModel || 'not set yet'}</span>. Nothing is
-										saved for this role.
-									{:else}
-										System One's own model name. Saving it leaves the chat model alone.
-									{/if}
+									The model the provider decides with. It does not follow the chat model: a gateway
+									usually serves its decision model under a different name than the one it chats with.
 								</p>
 							</div>
 
@@ -1378,13 +1358,7 @@
 		font-size: var(--df-p-text-sm);
 	}
 
-	/* An inherited field shows the chat value and takes no typing: the well
-	   behind it is the page saying "this one is not yours to edit". */
-	.s1 input[readonly] {
-		background: var(--df-surface-well);
-		color: var(--df-text-secondary);
-	}
-
+	
 	/* While a save or a probe is in flight the group is disabled; a field that
 	   still looks editable invites a click that does nothing. */
 	.s1 .input:disabled {

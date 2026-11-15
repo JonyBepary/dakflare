@@ -132,6 +132,19 @@ export interface System1Config {
  * and passes it. That keeps "which secret answered" a single decision made where
  * the response reports it.
  */
+/**
+ * The model a provider decides with when the row names none.
+ *
+ * NOT the chat model: a gateway's chat namespace and its decision namespace are
+ * different (Token Lab calls the decision model `Clef` and its chat models
+ * DeepSeek/Gemma/Qwen), so inheriting the chat name asked for a model the
+ * decision endpoint does not serve and failed with provider_unavailable.
+ */
+const SYSTEM1_DECISION_MODEL: Record<string, string> = {
+  "workers-ai": "clef",
+  "openai-compatible": "Clef",
+};
+
 export function system1Config(
   settings: System1Settings,
   apiKey: string | null,
@@ -139,7 +152,10 @@ export function system1Config(
 ): System1Config {
   return {
     provider: settings.provider,
-    model: settings.system1Model ?? settings.model,
+    model:
+      settings.system1Model ??
+      SYSTEM1_DECISION_MODEL[settings.provider] ??
+      settings.model,
     // The row's own origin, else the chat origin it falls back to. A stored
     // value that failed validation is refused outright: falling back there
     // would send the System One key to an origin nobody chose.

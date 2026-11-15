@@ -140,8 +140,12 @@ them today:
 - **System One** through `POST /v1/systemone` with model `Clef`, which answers the same
   typed questions the Workers AI binding does.
 
-`GET /v1/admin/ai/settings` returns the effective values for both roles, so a field the row
-leaves empty arrives already resolved to the chat value:
+`GET /v1/admin/ai/settings` returns the effective values for both roles. An empty
+`system1_model` resolves to the provider's **decision** model, not to the chat model — a
+gateway decides with a different name than it chats with (Token Lab decides with `Clef` and
+chats as `DeepSeek-V4.1-Flash`), and inheriting the chat name asked the decision endpoint for
+a model it does not serve. An empty `system1_base_url` does inherit the chat base, because the
+origin is usually the same host:
 
 ```json
 { "provider": "openai-compatible", "model": "DeepSeek-V4.1-Flash",

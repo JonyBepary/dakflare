@@ -186,7 +186,9 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
     typeof env.TOKENLAB_BASE_URL === "string"
       ? stripTrailingSlash(env.TOKENLAB_BASE_URL.trim())
       : "";
-  let system1Model: string | null = model;
+  // The effective model follows the provider's decision default, not the chat
+  // model: see SYSTEM1_DEFAULT_WIRE_MODEL.
+  let system1Model: string | null = provider === "openai-compatible" ? "Clef" : "clef";
   let system1BaseUrl: string | null = null;
   let system1BaseUrlError: string | undefined;
   if (provider === "openai-compatible") {
@@ -253,13 +255,16 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
     }
   }
 
-  // System One: its own values when the row carries them, the chat values
-  // otherwise (the NULL meaning documented in migration 0010). A workers-ai row
-  // has no origin at all, so a stale column cannot be used as one.
+  // System One: its own origin when the row carries one, the chat origin
+  // otherwise. The MODEL does not inherit: a gateway's decision namespace is not
+  // its chat namespace (Token Lab decides with "Clef" while chatting as
+  // DeepSeek), so a NULL column means the provider's decision default.
   const system1Model =
     typeof row.system1_model === "string" && row.system1_model.trim() !== ""
       ? row.system1_model.trim()
-      : model;
+      : provider === "openai-compatible"
+        ? "Clef"
+        : "clef";
 
   let system1BaseUrl: string | null = null;
   let system1BaseUrlError: string | undefined;

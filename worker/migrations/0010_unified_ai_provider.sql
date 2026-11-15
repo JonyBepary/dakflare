@@ -17,7 +17,7 @@
 -- ---------------------------------------------------------------------------
 -- system1_model — the System One model name.
 --
--- NULL means "use the chat model" (`model` above), so a deployment that never
+-- NULL means "the provider's decision model" (`model` above), so a deployment that never
 -- touches System One needs no second value. A row with its own value wins over
 -- both that fallback and the TOKENLAB_SYSTEM1_MODEL env default.
 ALTER TABLE ai_settings ADD COLUMN system1_model TEXT;
