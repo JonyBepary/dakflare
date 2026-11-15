@@ -82,6 +82,42 @@ the hand-rolled `Scheduler` heartbeat) and as a `runFiber`. The fiber row record
 interrupted turn for `onFiberRecovered`, but it never resumes or replays one: replay
 safety is the journal's `tool_calls` row, which refuses a second effect for the same turn.
 
+## The model contract is native tool calling
+
+A turn used to be one JSON envelope: `{"answer": …, "calls": […]}`. That contract was the
+cause of three of this pass's defects — a twenty-second silence before any output, a turn lost
+to one malformed brace, and a panel that printed raw JSON when the envelope did not parse. Tools
+are now native function calls and prose streams as it is written.
+
+- The adapter sends `tools` + `tool_choice: "auto"`; with streaming on it parses SSE into
+  `token` events and indexed `tool_calls` fragments. A provider that ignores `stream`, or
+  streams something unusable, is answered with one non-streaming request rather than a failed
+  turn.
+- The loop executes calls through the unchanged journal and `authorizeAct` path, appends the
+  assistant message (with its tool calls) and one `tool` message per call, then continues. Caps
+  are unchanged: four calls a turn, six turns a conversation.
+- Tool arguments arrive as a JSON string from the provider. Unparseable arguments become a
+  `bad_arguments` tool result the model can see, never a thrown turn.
+
+Three facts about the deployed gateway, each of which cost a debugging round and is now handled:
+
+1. **SSE events are separated by newlines, not blank lines.** Splitting on `\n\n` parsed zero
+   events from a stream that was entirely valid.
+2. **`usage: null` arrives on every chunk.** A guard that only checked `undefined` made each
+   event throw, which surfaced to the operator as "the provider streamed no content".
+3. **Reasoning models stream `reasoning`/`reasoning_content` before any answer.** The text is
+   counted, not shown, and an empty reply is diagnosed as "the budget went to thinking" instead
+   of a mystery.
+
+A transcript is training data. The envelope-era replies were being replayed from Sessions and
+taught the model to answer in JSON again after the loop moved on, so the conversation id is
+versioned (`conversation:v2:<actor>`) and the old rows are retired rather than sanitised. Bump
+that version whenever the message contract changes shape.
+
+The chat model is a per-deployment choice (`dakflare ai configure --model …`). This deployment
+uses `Gemma-4-31B-IT`: the DeepSeek reasoning models answered "at capacity" often enough that a
+turn failed more than it succeeded, and their reasoning budget competed with the answer.
+
 ## Authority
 
 The rule stays meaningful only if the human decision names the effect. Turning autonomy on
