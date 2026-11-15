@@ -124,6 +124,12 @@ MESSAGE_RETENTION_DAYS = "90"
 # Read per request in src/lib/system1.ts; an unsupported value falls back to
 # clef-flash rather than failing the route.
 SYSTEM1_DEFAULT_MODEL = "clef-flash"
+# Which backend answers clef*: workers-ai (default) | tokenlab. `jev` always
+# goes to TypeSafe. TOKENLAB_API_KEY is a Worker secret, never a var:
+#   wrangler secret put TOKENLAB_API_KEY
+SYSTEM1_PROVIDER = "auto"
+TOKENLAB_BASE_URL = "https://api.tokenlab.amd.com/v1"
+TOKENLAB_SYSTEM1_MODEL = "Clef"
 # Console assistant (AI chat). AI_CHAT_API_KEY is a Worker secret, never a var.
 AI_CHAT_PROVIDER = "workers-ai"
 AI_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"

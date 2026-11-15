@@ -52,10 +52,21 @@ export const SYSTEM1_THRESHOLDS: Record<System1Model, System1Thresholds> = {
 export interface System1Env {
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   SYSTEM1_DEFAULT_MODEL?: string;
+  /** Which backend answers `clef*`: `workers-ai` (default) | `tokenlab`. */
+  SYSTEM1_PROVIDER?: string;
   /** TypeSafe Jev, an external provider. Absent or empty keeps `jev` unavailable. */
   TYPESAFE_BASE_URL?: string;
   /** Bearer token for TypeSafe. Absent or empty keeps `jev` unavailable. */
   TYPESAFE_API_KEY?: string;
+  /**
+   * Token Lab's System 1 origin (`…/v1`). Absent falls back to the documented
+   * default when `SYSTEM1_PROVIDER` is `tokenlab`; empty is a config gap.
+   */
+  TOKENLAB_BASE_URL?: string;
+  /** Bearer token for Token Lab. Absent or empty keeps `tokenlab` unavailable. */
+  TOKENLAB_API_KEY?: string;
+  /** Model name Token Lab is asked for, for every `clef*` request. Default `Clef`. */
+  TOKENLAB_SYSTEM1_MODEL?: string;
 }
 
 export interface NoulQuestion {
@@ -97,8 +108,11 @@ export interface AskResult {
   model: System1Model;
   answers: Record<string, Answer>;
   usage?: { input_tokens?: number; output_tokens?: number };
-  /** Which backend handled the attempt: Cloudflare Clef or the TypeSafe Jev adapter. */
-  provider?: "clef" | "typesafe";
+  /**
+   * Which backend handled the attempt: Cloudflare Clef, the TypeSafe Jev
+   * adapter, or the Token Lab adapter.
+   */
+  provider?: "clef" | "typesafe" | "tokenlab";
   /** 429 only: the provider's `retry-after`, passed through untouched. */
   retryAfter?: string;
   reason?: "no_ai_binding" | "provider_unavailable" | "invalid_question" | "unparseable";
@@ -177,6 +191,24 @@ export function buildClefRequest(
   };
 }
 
+/**
+ * A score's legend, from either shape a provider returns: Clef sends an array,
+ * Token Lab sends an index-keyed object (`{"0":"Low","1":"Medium"}`). One
+ * normaliser still reads both, so no caller has to know which provider it got.
+ */
+function readLegend(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) return raw as string[];
+  if (raw === null || typeof raw !== "object") return undefined;
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0) return undefined;
+  if (!entries.every(([key, value]) => /^\d+$/.test(key) && typeof value === "string")) {
+    return undefined;
+  }
+  return entries
+    .sort((left, right) => Number(left[0]) - Number(right[0]))
+    .map(([, value]) => value as string);
+}
+
 function normalise(id: string, raw: unknown): Answer | null {
   const record = (raw ?? {}) as Record<string, unknown>;
   const type = record.type;
@@ -202,7 +234,7 @@ function normalise(id: string, raw: unknown): Answer | null {
       probability: top,
       confidence: typeof record.confidence === "number" ? record.confidence : top,
       score,
-      legend: Array.isArray(record.legend) ? (record.legend as string[]) : undefined,
+      legend: readLegend(record.legend),
       probabilities,
     };
   }
@@ -210,12 +242,15 @@ function normalise(id: string, raw: unknown): Answer | null {
 }
 
 // ---------------------------------------------------------------------------
-// TypeSafe Jev adapter
+// Remote adapters — TypeSafe Jev and Token Lab
 // ---------------------------------------------------------------------------
 /**
- * Contract assumed for TypeSafe's Jev — our reading of their wire format, not a
- * shape verified against a live endpoint. It lives in this one section so that
- * a different real shape costs one function, not a rewrite of every caller:
+ * Both remote providers take the same abstract request Clef takes and return
+ * the same `answers` envelope, so they share one call path and one validator.
+ * `askRemote` is the only place that speaks HTTP; the two config helpers below
+ * are the only place that reads env.
+ *
+ * TypeSafe Jev — the contract our adapter assumes:
  *
  *   POST {TYPESAFE_BASE_URL}/v1/decide
  *   authorization: Bearer {TYPESAFE_API_KEY}
@@ -223,17 +258,30 @@ function normalise(id: string, raw: unknown): Answer | null {
  *
  *   { model: "jev", state, questions }        // questions as Clef defines them
  *
+ * Token Lab System One — verified live on 2026-11-15 (HTTP 200):
+ *
+ *   POST {TOKENLAB_BASE_URL}/v1/systemone
+ *   authorization: Bearer {TOKENLAB_API_KEY}
+ *   content-type: application/json
+ *
+ *   { model: "Clef", state, questions }
+ *
  *   200 { answers: { id: { type, choice?, probabilities?, confidence?,
- *                          noul?, score?, legend? } } }
+ *                          noul?, score?, legend? } }, usage, model }
  *
  * The state and questions are the same abstract shape Clef takes, and the
- * answers go through the same `normalise`, so callers cannot tell the two
- * providers apart except by `AskResult.provider`. Both env values are required;
- * with either missing, `jev` reports `provider_unavailable` rather than falling
- * back to Clef behind the caller's back.
+ * answers go through the same `normalise`, so callers cannot tell the providers
+ * apart except by `AskResult.provider`. Every credential is required; with one
+ * missing the model reports `provider_unavailable` rather than falling back to
+ * Clef or Workers AI behind the caller's back.
  */
 export const TYPESAFE_TIMEOUT_MS = 5_000;
 export const TYPESAFE_DECIDE_PATH = "/v1/decide";
+
+export const TOKENLAB_TIMEOUT_MS = 5_000;
+export const TOKENLAB_SYSTEMONE_PATH = "/v1/systemone";
+export const TOKENLAB_DEFAULT_BASE_URL = "https://api.tokenlab.amd.com/v1";
+export const TOKENLAB_DEFAULT_MODEL = "Clef";
 
 export interface TypesafeConfig {
   baseUrl: string;
@@ -249,10 +297,48 @@ export function typesafeConfig(env: System1Env): TypesafeConfig | null {
   return { baseUrl, apiKey };
 }
 
+export interface TokenLabConfig {
+  baseUrl: string;
+  apiKey: string;
+  /** The model name Token Lab is asked for, not the local `clef*` alias. */
+  model: string;
+}
+
+export function tokenlabConfig(env: System1Env): TokenLabConfig | null {
+  // The documented default applies ONLY to a deployment that selected Token
+  // Lab: another provider must not silently gain a Token Lab origin. An
+  // explicitly empty value stays empty (a config gap), so clearing the var by
+  // hand is not silently "fixed" into a different host.
+  const baseUrl =
+    env.TOKENLAB_BASE_URL === undefined
+      ? env.SYSTEM1_PROVIDER?.trim() === "tokenlab"
+        ? TOKENLAB_DEFAULT_BASE_URL
+        : ""
+      : env.TOKENLAB_BASE_URL.trim().replace(/\/+$/, "");
+  const apiKey = env.TOKENLAB_API_KEY?.trim();
+  if (!baseUrl || !apiKey) return null;
+  return {
+    baseUrl,
+    apiKey,
+    model: env.TOKENLAB_SYSTEM1_MODEL?.trim() || TOKENLAB_DEFAULT_MODEL,
+  };
+}
+
+/** The provider-specific half of a remote call; everything else is shared. */
+interface RemoteConfig {
+  provider: "typesafe" | "tokenlab";
+  baseUrl: string;
+  apiKey: string;
+  path: string;
+  timeoutMs: number;
+  /** The model id this module reports back; callers key thresholds by it. */
+  resultModel: System1Model;
+}
+
 /** Reject when `signal` aborts, even if `fetch` itself ignores the signal. */
-function rejectOnAbort(signal: AbortSignal): Promise<never> {
+function rejectOnAbort(signal: AbortSignal, provider: string): Promise<never> {
   return new Promise<never>((_, reject) => {
-    const fail = () => reject(new Error("system1: typesafe request timed out"));
+    const fail = () => reject(new Error(`system1: ${provider} request timed out`));
     if (signal.aborted) {
       fail();
       return;
@@ -261,39 +347,61 @@ function rejectOnAbort(signal: AbortSignal): Promise<never> {
   });
 }
 
-async function askTypesafe(
-  env: System1Env,
-  state: string | Record<string, unknown>,
-  questions: Record<string, ClefQuestion>
-): Promise<AskResult> {
-  const model: System1Model = "jev";
-  const unavailable: AskResult = { ok: false, model, answers: {}, provider: "typesafe", reason: "provider_unavailable" };
+/**
+ * Token Lab documents its base as `https://api.tokenlab.amd.com/v1`, while a
+ * configured base is often just the origin. Both are legitimate, so a base that
+ * already ends in `/v1` is not given a second one. Every other base is used
+ * verbatim, which is what `{base}/v1/systemone` means for an origin.
+ */
+function remoteUrl(baseUrl: string, path: string): string {
+  if (baseUrl.endsWith("/v1") && path.startsWith("/v1/")) {
+    return `${baseUrl}${path.slice("/v1".length)}`;
+  }
+  return `${baseUrl}${path}`;
+}
 
-  const config = typesafeConfig(env);
-  if (!config) return unavailable;
+/**
+ * POST one batch of typed questions to a remote provider and normalise the
+ * `answers` envelope. `model` is the wire model name; `config.resultModel` is
+ * what the caller asked for and what comes back in `AskResult.model`.
+ */
+async function askRemote(
+  config: RemoteConfig,
+  state: string | Record<string, unknown>,
+  questions: Record<string, ClefQuestion>,
+  model: string
+): Promise<AskResult> {
+  const { provider, resultModel } = config;
+  const unavailable: AskResult = {
+    ok: false,
+    model: resultModel,
+    answers: {},
+    provider,
+    reason: "provider_unavailable",
+  };
 
   let body: ReturnType<typeof buildClefRequest>;
   try {
     // Clone the record: buildClefRequest normalises choice criteria in place.
-    body = buildClefRequest(state, { ...questions }, "jev");
+    body = buildClefRequest(state, { ...questions }, resultModel);
   } catch {
-    return { ok: false, model, answers: {}, provider: "typesafe", reason: "invalid_question" };
+    return { ok: false, model: resultModel, answers: {}, provider, reason: "invalid_question" };
   }
 
   let response: Response;
   try {
-    const signal = AbortSignal.timeout(TYPESAFE_TIMEOUT_MS);
+    const signal = AbortSignal.timeout(config.timeoutMs);
     response = await Promise.race([
-      fetch(`${config.baseUrl}${TYPESAFE_DECIDE_PATH}`, {
+      fetch(remoteUrl(config.baseUrl, config.path), {
         method: "POST",
         headers: {
           authorization: `Bearer ${config.apiKey}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ model: "jev", state: body.state, questions: body.questions }),
+        body: JSON.stringify({ model, state: body.state, questions: body.questions }),
         signal,
       }),
-      rejectOnAbort(signal),
+      rejectOnAbort(signal, provider),
     ]);
   } catch {
     return unavailable;
@@ -310,13 +418,16 @@ async function askTypesafe(
   try {
     raw = await response.json();
   } catch {
-    return { ok: false, model, answers: {}, provider: "typesafe", reason: "unparseable" };
+    return { ok: false, model: resultModel, answers: {}, provider, reason: "unparseable" };
   }
 
-  const answersEnvelope = (raw ?? {}) as { answers?: unknown };
+  const answersEnvelope = (raw ?? {}) as {
+    answers?: unknown;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
   const incoming = answersEnvelope.answers;
   if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
-    return { ok: false, model, answers: {}, provider: "typesafe", reason: "unparseable" };
+    return { ok: false, model: resultModel, answers: {}, provider, reason: "unparseable" };
   }
 
   const answers: Record<string, Answer> = {};
@@ -325,7 +436,72 @@ async function askTypesafe(
     if (answer) answers[id] = answer;
   }
   const ok = Object.keys(answers).length > 0;
-  return { ok, model, answers, provider: "typesafe", reason: ok ? undefined : "unparseable" };
+  const usage =
+    answersEnvelope.usage !== null && typeof answersEnvelope.usage === "object"
+      ? answersEnvelope.usage
+      : undefined;
+  return {
+    ok,
+    model: resultModel,
+    answers,
+    provider,
+    ...(usage === undefined ? {} : { usage }),
+    reason: ok ? undefined : "unparseable",
+  };
+}
+
+async function askTypesafe(
+  env: System1Env,
+  state: string | Record<string, unknown>,
+  questions: Record<string, ClefQuestion>
+): Promise<AskResult> {
+  const config = typesafeConfig(env);
+  if (!config) {
+    return { ok: false, model: "jev", answers: {}, provider: "typesafe", reason: "provider_unavailable" };
+  }
+  return askRemote(
+    {
+      provider: "typesafe",
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      path: TYPESAFE_DECIDE_PATH,
+      timeoutMs: TYPESAFE_TIMEOUT_MS,
+      resultModel: "jev",
+    },
+    state,
+    questions,
+    "jev"
+  );
+}
+
+/**
+ * Ask Token Lab for one batch. `requested` is the local `clef*` alias the
+ * caller used; it stays the result's model so local thresholds remain keyed by
+ * the model the caller asked for, while the wire model comes from env.
+ */
+export async function askTokenLab(
+  env: System1Env,
+  state: string | Record<string, unknown>,
+  questions: Record<string, ClefQuestion>,
+  requested: System1Model
+): Promise<AskResult> {
+  const config = tokenlabConfig(env);
+  if (!config) {
+    return { ok: false, model: requested, answers: {}, provider: "tokenlab", reason: "provider_unavailable" };
+  }
+  return askRemote(
+    {
+      provider: "tokenlab",
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      path: TOKENLAB_SYSTEMONE_PATH,
+      timeoutMs: TOKENLAB_TIMEOUT_MS,
+      resultModel: requested,
+    },
+    state,
+    questions,
+    config.model
+  );
 }
 
 export async function ask(
@@ -334,7 +510,21 @@ export async function ask(
   questions: Record<string, ClefQuestion>,
   model: System1Model = defaultModel(env)
 ): Promise<AskResult> {
+  // `jev` has exactly one provider. `clef*` uses Workers AI unless the
+  // deployment selected Token Lab; the requested alias is passed through so
+  // thresholds and the response stay keyed by what the caller asked for.
+  //
+  // `auto` (the shipped default) means "Token Lab if this deployment holds its
+  // key, Workers AI otherwise", mirroring how `jev` is opt-in by its own env.
+  // It is not a silent fallback: an explicit `tokenlab` with no key is an
+  // error, and an explicit `workers-ai` never reads the Token Lab values.
   if (model === "jev") return askTypesafe(env, state, questions);
+  const selected = env.SYSTEM1_PROVIDER?.trim() || "auto";
+  const useTokenLab =
+    selected === "tokenlab" || (selected === "auto" && tokenlabConfig(env) !== null);
+  if (useTokenLab) {
+    return askTokenLab(env, state, questions, model);
+  }
   if (!env.AI?.run) return { ok: false, model, answers: {}, provider: "clef", reason: "no_ai_binding" };
 
   let body: ReturnType<typeof buildClefRequest>;

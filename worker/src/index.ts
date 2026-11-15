@@ -26,6 +26,7 @@ import {
   handleAiTest,
   handleAssistantChat,
   handleAssistantProposalAccept,
+  handleSystem1Test,
 } from "./routes/assistant";
 import {
   handleDeviceFlows,
@@ -131,9 +132,27 @@ export interface Env {
   AI?: Ai;
   /** System 1 default model: clef-flash (default) | clef | jev. */
   SYSTEM1_DEFAULT_MODEL?: string;
+  /**
+   * Which backend answers `clef*`: `workers-ai` (default) | `tokenlab`.
+   * `jev` always goes to TypeSafe regardless of this value.
+   */
+  SYSTEM1_PROVIDER?: string;
   /** TypeSafe Jev, opt-in: both must be set for the jev provider to answer. */
   TYPESAFE_BASE_URL?: string;
   TYPESAFE_API_KEY?: string;
+  /**
+   * Token Lab's System 1 origin. An absent value falls back to the documented
+   * default only when SYSTEM1_PROVIDER is `tokenlab`; an empty value is a
+   * configuration gap and answers provider_unavailable.
+   */
+  TOKENLAB_BASE_URL?: string;
+  /**
+   * Bearer key for Token Lab. A Worker secret, never `[vars]`: absent makes
+   * `clef*` answer provider_unavailable when Token Lab is selected.
+   */
+  TOKENLAB_API_KEY?: string;
+  /** Token Lab's model name for `clef*` requests. Default `Clef`. */
+  TOKENLAB_SYSTEM1_MODEL?: string;
   /**
    * Console assistant (AI chat) defaults. The provider/model/base URL can also be
    * overridden per deployment in D1 (`ai_settings`); these env values are what a
@@ -1184,6 +1203,15 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     if (method === "POST" && pathname === "/v1/admin/ai/test") {
       return withAdminAccess(req, env, "write", "test AI provider", (_actor) =>
         handleAiTest(env)
+      );
+    }
+    // System 1 provider probe. The action string is deliberately absent from
+    // SCOPE_FOR_ACTION, so an agent token is refused with 403 before the
+    // handler runs: this route spends a provider call and is for a human
+    // debugging a deployment's model wiring.
+    if (method === "POST" && pathname === "/v1/admin/ai/system1/test") {
+      return withAdminAccess(req, env, "write", "test System 1 provider", (_actor) =>
+        handleSystem1Test(req, env)
       );
     }
     if (method === "POST" && pathname === "/v1/admin/assistant/chat") {

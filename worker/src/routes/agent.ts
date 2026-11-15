@@ -83,15 +83,28 @@ async function readValidated<T>(req: Request, schema: z.ZodType<T>): Promise<Val
 }
 
 /** The System1 binding surface, without leaking `Ai`'s overloads into routes. */
-function system1Env(env: Env): System1Env {
-  const { SYSTEM1_DEFAULT_MODEL, TYPESAFE_BASE_URL, TYPESAFE_API_KEY } = env as {
+export function system1Env(env: Env): System1Env {
+  const {
+    SYSTEM1_DEFAULT_MODEL,
+    SYSTEM1_PROVIDER,
+    TYPESAFE_BASE_URL,
+    TYPESAFE_API_KEY,
+    TOKENLAB_BASE_URL,
+    TOKENLAB_API_KEY,
+    TOKENLAB_SYSTEM1_MODEL,
+  } = env as {
     SYSTEM1_DEFAULT_MODEL?: string;
+    SYSTEM1_PROVIDER?: string;
     TYPESAFE_BASE_URL?: string;
     TYPESAFE_API_KEY?: string;
+    TOKENLAB_BASE_URL?: string;
+    TOKENLAB_API_KEY?: string;
+    TOKENLAB_SYSTEM1_MODEL?: string;
   };
   return {
     AI: env.AI,
     ...(typeof SYSTEM1_DEFAULT_MODEL === "string" ? { SYSTEM1_DEFAULT_MODEL } : {}),
+    ...(typeof SYSTEM1_PROVIDER === "string" ? { SYSTEM1_PROVIDER } : {}),
     // Jev is opt-in: both values must be present or ask() reports
     // provider_unavailable rather than falling back to Clef.
     ...(typeof TYPESAFE_BASE_URL === "string" && TYPESAFE_BASE_URL.trim()
@@ -99,6 +112,16 @@ function system1Env(env: Env): System1Env {
       : {}),
     ...(typeof TYPESAFE_API_KEY === "string" && TYPESAFE_API_KEY.trim()
       ? { TYPESAFE_API_KEY }
+      : {}),
+    // Token Lab is selected by SYSTEM1_PROVIDER and needs its own credentials.
+    // The base URL is passed even when empty: empty is a configuration gap the
+    // adapter reports, not a licence to substitute the documented default.
+    ...(typeof TOKENLAB_BASE_URL === "string" ? { TOKENLAB_BASE_URL } : {}),
+    ...(typeof TOKENLAB_API_KEY === "string" && TOKENLAB_API_KEY.trim()
+      ? { TOKENLAB_API_KEY }
+      : {}),
+    ...(typeof TOKENLAB_SYSTEM1_MODEL === "string" && TOKENLAB_SYSTEM1_MODEL.trim()
+      ? { TOKENLAB_SYSTEM1_MODEL }
       : {}),
   };
 }

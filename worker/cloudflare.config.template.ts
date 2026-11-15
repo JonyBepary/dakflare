@@ -74,6 +74,12 @@ export default defineConfig({
 			GOOGLE_TOKEN_URL: bindings.text("https://oauth2.googleapis.com/token"),
 			MESSAGE_RETENTION_DAYS: bindings.text("90"),
 			SYSTEM1_DEFAULT_MODEL: bindings.text("clef-flash"),
+			// Which backend answers clef*: workers-ai (default) | tokenlab.
+			// `jev` always goes to TypeSafe. TOKENLAB_API_KEY is a Worker secret
+			// (`wrangler secret put`), never a var or a D1 row.
+			SYSTEM1_PROVIDER: bindings.text("auto"),
+			TOKENLAB_BASE_URL: bindings.text("https://api.tokenlab.amd.com/v1"),
+			TOKENLAB_SYSTEM1_MODEL: bindings.text("Clef"),
 			// Console assistant (AI chat). AI_CHAT_API_KEY is a Worker secret and is
 			// never a var or a D1 row; it is set with `wrangler secret put`.
 			AI_CHAT_PROVIDER: bindings.text("workers-ai"),

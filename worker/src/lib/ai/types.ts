@@ -68,16 +68,21 @@ export interface ChatAdapter {
 /** Why an adapter could not answer. The routes turn these into one 503 shape. */
 export type ChatFailureReason =
   | "provider_unavailable"
+  | "provider_rate_limited"
+  | "provider_auth"
   | "unparseable"
   | "timeout";
 
 export class ChatAdapterError extends Error {
   readonly reason: ChatFailureReason;
+  /** A provider's `Retry-After`, when it sent one. Advisory, never a promise. */
+  readonly retryAfter?: string;
 
-  constructor(reason: ChatFailureReason, message: string) {
+  constructor(reason: ChatFailureReason, message: string, retryAfter?: string) {
     super(message);
     this.name = "ChatAdapterError";
     this.reason = reason;
+    if (retryAfter !== undefined) this.retryAfter = retryAfter;
   }
 }
 

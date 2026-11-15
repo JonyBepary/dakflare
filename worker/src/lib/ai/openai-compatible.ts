@@ -60,6 +60,35 @@ function extractContent(value: unknown): string | null {
   return parts.length === 0 ? null : parts.join("");
 }
 
+/**
+ * The provider's own error sentence, when it sent one.
+ *
+ * Bounded and shape-guarded: `{ error: { message } }`, `{ message }`, or
+ * `{ error: "text" }`. Everything else is dropped, so a provider that echoes
+ * the request body cannot put the prompt (or a key) into our error path.
+ */
+async function readProviderMessage(response: Response): Promise<string | null> {
+  try {
+    const text = await response.text();
+    if (text === "" || text.length > 8_000) return null;
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object") return null;
+    const record = parsed as Record<string, unknown>;
+    const inner = record.error;
+    const message =
+      typeof record.message === "string"
+        ? record.message
+        : inner !== null && typeof inner === "object"
+          ? (inner as { message?: unknown }).message
+          : inner;
+    if (typeof message !== "string") return null;
+    const trimmed = message.trim();
+    return trimmed === "" ? null : trimmed.slice(0, 200);
+  } catch {
+    return null;
+  }
+}
+
 export function createOpenAiCompatibleAdapter(
   options: OpenAiCompatibleOptions
 ): ChatAdapter {
@@ -108,10 +137,29 @@ export function createOpenAiCompatibleAdapter(
       }
 
       if (!response.ok) {
-        // Status only: never the body, which can quote the prompt.
+        // The status decides the reason, and the provider's own sentence is
+        // worth showing: "Invalid API key" and "quota exceeded" are two
+        // different operator actions. Only `error.message` is read, never the
+        // raw body and never a header, so nothing can quote the prompt or the
+        // key back at us.
+        const detail = await readProviderMessage(response);
+        const retryAfter = response.headers.get("retry-after");
+        if (response.status === 429) {
+          throw new ChatAdapterError(
+            "provider_rate_limited",
+            detail ?? "the provider is rate limiting this key",
+            retryAfter ?? undefined
+          );
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw new ChatAdapterError(
+            "provider_auth",
+            detail ?? `the provider refused the key (HTTP ${response.status})`
+          );
+        }
         throw new ChatAdapterError(
           "provider_unavailable",
-          `the provider answered ${response.status}`
+          detail ?? `the provider answered ${response.status}`
         );
       }
 

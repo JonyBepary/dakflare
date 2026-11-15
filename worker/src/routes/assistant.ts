@@ -33,6 +33,8 @@ import { writeAudit } from "../audit";
 import { readJsonBoundedResult } from "../lib/body";
 import { err } from "../lib/errors";
 import { handleRulesPost } from "./rules";
+import { system1Env } from "./agent";
+import { ask, defaultModel, type ClefQuestion, type System1Model } from "../lib/system1";
 import { resolveAdapter } from "../lib/ai/registry";
 import {
   addTokens,
@@ -92,8 +94,20 @@ function logAssistant(
  * `routes/agent.ts`'s `ai_unavailable`. The reason is machine-readable; the
  * message is what an operator can act on.
  */
-function aiUnavailable(reason: string, message: string): Response {
-  return Response.json({ error: "ai_unavailable", message, reason }, { status: 503 });
+function aiUnavailable(
+  reason: string,
+  message: string,
+  retryAfter?: string
+): Response {
+  return Response.json(
+    {
+      error: "ai_unavailable",
+      message,
+      reason,
+      ...(retryAfter === undefined ? {} : { retry_after: retryAfter }),
+    },
+    { status: 503 }
+  );
 }
 
 /**
@@ -286,6 +300,99 @@ export async function handleAiTest(env: Env): Promise<Response> {
     // depend on the network.
     return aiUnavailable(reason, message);
   }
+}
+
+/* ─────────────────────── 2b. System 1 provider test ─────────────────────── */
+
+/** The four ids `ask()` accepts; the alias, not the wire model name. */
+const SYSTEM1_TEST_MODELS = ["clef", "clef-flash", "clef-omni", "jev"] as const;
+
+const SYSTEM1_TEST_MODEL_SET: ReadonlySet<string> = new Set(SYSTEM1_TEST_MODELS);
+
+/** One fixed, harmless ticket: same questions for every provider. */
+const SYSTEM1_TEST_STATE = {
+  ticket: "Customer cannot log in after resetting the password; error 403 on every attempt.",
+};
+
+const SYSTEM1_TEST_QUESTIONS: Record<string, ClefQuestion> = {
+  team: {
+    type: "choice",
+    instructions: "Which team should take this support ticket? Choose the single best team.",
+    criteria: {
+      Billing: "Invoices, charges, refunds or payment methods",
+      Accounts: "Sign-in, passwords, profiles or permissions",
+      Networking: "Connectivity, DNS, latency or packet loss",
+    },
+  },
+  urgent: {
+    type: "noul",
+    instructions:
+      "Does this ticket need a human today, before any automation handles it?",
+  },
+  severity: {
+    type: "score",
+    instructions: "How severe is the customer impact?",
+    criteria: ["Low", "Medium", "High"],
+  },
+};
+
+/**
+ * `POST /v1/admin/ai/system1/test` — one tiny fixed decision, through `ask()`.
+ *
+ * It exercises the SAME selection path production uses, so the reported
+ * `provider` is what a real triage call would use. Nothing is charged to the
+ * chat token budget: a System 1 call is a prefill batch, not a chat completion,
+ * and capping it would make the probe disagree with the thing it probes.
+ */
+export async function handleSystem1Test(req: Request, env: Env): Promise<Response> {
+  // A separate key from the chat probe, so a burst here cannot exhaust the
+  // allowance the settings page's test needs.
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: "ai:system1:test" });
+    if (!success) return err("rate_limited", 429);
+  }
+
+  // The body is optional: `{}` means "the deployment's default model".
+  const parsed = await readJsonBoundedResult(req, ASSISTANT_BODY_BYTES);
+  if (!parsed.ok) return err(parsed.reason);
+
+  const rawModel = parsed.value.model;
+  if (
+    rawModel !== undefined &&
+    (typeof rawModel !== "string" || !SYSTEM1_TEST_MODEL_SET.has(rawModel))
+  ) {
+    return badRequest(`model must be one of ${SYSTEM1_TEST_MODELS.join(", ")}`);
+  }
+  const model = rawModel as System1Model | undefined;
+
+  const started = Date.now();
+  const result = await ask(system1Env(env), SYSTEM1_TEST_STATE, SYSTEM1_TEST_QUESTIONS, model);
+  const tookMs = Date.now() - started;
+
+  if (!result.ok) {
+    const reason = result.reason ?? "provider_unavailable";
+    logAssistant("system1.test.failed", {
+      reason,
+      provider: result.provider ?? "clef",
+      model: result.model,
+      took_ms: tookMs,
+    });
+    return aiUnavailable(reason, "the System 1 provider did not return an answer", result.retryAfter);
+  }
+
+  logAssistant("system1.test", {
+    provider: result.provider ?? "clef",
+    model: result.model,
+    took_ms: tookMs,
+  });
+
+  return Response.json({
+    ok: true,
+    provider: result.provider ?? "clef",
+    model: result.model,
+    took_ms: tookMs,
+    answers: result.answers,
+  });
 }
 
 /* ─────────────────────────────── 3. chat ─────────────────────────────── */
@@ -1238,8 +1345,9 @@ export async function handleAssistantChat(
     const reason = error instanceof ChatAdapterError ? error.reason : "provider_unavailable";
     const detail =
       error instanceof ChatAdapterError ? error.message : "the provider call failed";
+    const retryAfter = error instanceof ChatAdapterError ? error.retryAfter : undefined;
     logAssistant("chat.failed", { reason, provider: settings.provider });
-    return aiUnavailable(reason, detail);
+    return aiUnavailable(reason, detail, retryAfter);
   }
 
   // Charged from the provider's own count where it gave one; a provider that
