@@ -122,10 +122,21 @@ export async function handleDeviceApprovalApprove(
 
   const decided = await decideApproval(env, rawId, "approve", {
     by: `device:${deviceId}`,
+    // The handset signed this request; it is the machine credential the
+    // operator holds, not an agent token. `assertHuman` allows it for exactly
+    // that reason, and refuses a caller with `role: "agent"`.
+    actor: { userId: null, label: `device:${deviceId}`, role: "machine", canGrantOwner: false },
     durationS,
   });
   if (!decided.ok) {
-    const status = decided.error === "not_found" ? 404 : decided.error === "not_pending" ? 409 : 400;
+    const status =
+      decided.error === "permission"
+        ? 403
+        : decided.error === "not_found"
+          ? 404
+          : decided.error === "not_pending"
+            ? 409
+            : 400;
     return Response.json({ error: decided.error, message: decided.message }, { status });
   }
 
@@ -179,9 +190,19 @@ export async function handleDeviceApprovalReject(
     );
   }
 
-  const decided = await decideApproval(env, rawId, "reject", { by: `device:${deviceId}` });
+  const decided = await decideApproval(env, rawId, "reject", {
+    by: `device:${deviceId}`,
+    actor: { userId: null, label: `device:${deviceId}`, role: "machine", canGrantOwner: false },
+  });
   if (!decided.ok) {
-    const status = decided.error === "not_found" ? 404 : decided.error === "not_pending" ? 409 : 400;
+    const status =
+      decided.error === "permission"
+        ? 403
+        : decided.error === "not_found"
+          ? 404
+          : decided.error === "not_pending"
+            ? 409
+            : 400;
     return Response.json({ error: decided.error, message: decided.message }, { status });
   }
 

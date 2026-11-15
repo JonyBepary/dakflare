@@ -116,10 +116,18 @@ export async function handleApprovalApprove(
 
   const decided = await decideApproval(env, id, "approve", {
     by: actor.label,
+    actor,
     durationS,
   });
   if (!decided.ok) {
-    const status = decided.error === "not_found" ? 404 : decided.error === "not_pending" ? 409 : 400;
+    const status =
+      decided.error === "permission"
+        ? 403
+        : decided.error === "not_found"
+          ? 404
+          : decided.error === "not_pending"
+            ? 409
+            : 400;
     return Response.json(
       {
         error: decided.error,
@@ -170,9 +178,16 @@ export async function handleApprovalReject(
   id: string,
   actor: AdminActor
 ): Promise<Response> {
-  const decided = await decideApproval(env, id, "reject", { by: actor.label });
+  const decided = await decideApproval(env, id, "reject", { by: actor.label, actor });
   if (!decided.ok) {
-    const status = decided.error === "not_found" ? 404 : decided.error === "not_pending" ? 409 : 400;
+    const status =
+      decided.error === "permission"
+        ? 403
+        : decided.error === "not_found"
+          ? 404
+          : decided.error === "not_pending"
+            ? 409
+            : 400;
     return Response.json(
       {
         error: decided.error,

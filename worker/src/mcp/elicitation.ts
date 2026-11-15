@@ -342,6 +342,13 @@ export function createElicitationDriver(env: Env, actor: AdminActor): Elicitatio
         scope: rule.scope,
         target,
         grantedBy: actor.label,
+        // The TOTP just proved a person answered this call. `role: "machine"`
+        // is the "admin token" side of `assertHuman`, which exists to refuse an
+        // agent approving itself without that proof.
+        actor:
+          actor.userId !== null
+            ? actor
+            : { userId: null, label: actor.label, role: "machine", canGrantOwner: false },
         durationS: clamped.seconds,
       });
       if (!created.ok) {

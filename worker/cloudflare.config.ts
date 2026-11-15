@@ -56,6 +56,8 @@ export default defineConfig({
 			AuthGuard: exports.durableObject({ storage: "sqlite" }),
 			// The single globally named authority-grant expiry timer (v6.1 P0).
 			AuthorityGuard: exports.durableObject({ storage: "sqlite" }),
+			// The agent runtime (pass 3, stage A): one pinned `assistant` instance.
+			AssistantAgent: exports.durableObject({ storage: "sqlite" }),
 			// Multi-step durable flow execution (v7.0).
 			FlowExecutionWorkflow: exports.workflow({ name: "flow-execution-workflow" }),
 		},
@@ -104,6 +106,9 @@ export default defineConfig({
 			AI_CHAT_BASE_URL: bindings.text(""),
 			AI_DAILY_TOKEN_BUDGET: bindings.text("20000"),
 			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
+			// Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless
+			// console assistant is unaffected.
+			AGENT_RUNTIME: bindings.text("off"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/JonyBepary/dakflare"),
 
@@ -144,6 +149,10 @@ export default defineConfig({
 			AUTHORITY_GUARD: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "AuthorityGuard",
+			}),
+			ASSISTANT: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "AssistantAgent",
 			}),
 
 			// ── rate limiting (hardening S3) ────────────────────────────────────

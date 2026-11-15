@@ -40,6 +40,13 @@ class_name = "AuthGuard"
 name = "AUTHORITY_GUARD"
 class_name = "AuthorityGuard"
 
+# The fourth Durable Object: the agent runtime (pass 3, stage A). One instance,
+# whose name is pinned server-side as `assistant`; `/agents/*` is rewritten to it
+# and `AGENT_RUNTIME=off` answers 503 without touching the object.
+[[durable_objects.bindings]]
+name = "ASSISTANT"
+class_name = "AssistantAgent"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceGateway"]
@@ -55,6 +62,13 @@ new_sqlite_classes = ["AuthGuard"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["AuthorityGuard"]
+
+# Pass 3 stage A: the agent runtime. A new tag because v3 is already applied
+# wherever this config has run. wrangler.toml declares the same class through
+# `[exports.AssistantAgent]` instead of an ordered tag.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["AssistantAgent"]
 
 # remote = true -> the real preview database, while the Worker and DO run locally.
 [[d1_databases]]
@@ -128,6 +142,9 @@ namespace_id = "1007"
 simple = { limit = 20, period = 60 }
 
 [vars]
+# Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
+# assistant is unaffected. Flip to "on" only after a ticket smoke test.
+AGENT_RUNTIME = "off"
 # `AUTH_MODE` is retired: one gate, two credentials (Better Auth session, or
 # ADMIN_TOKEN plus X-Dakflare-Client: cli). A leftover `AUTH_MODE` here was read
 # by nothing and only made this file disagree with the other two.

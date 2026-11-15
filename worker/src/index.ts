@@ -68,6 +68,16 @@ import {
 } from "./routes/device-approvals";
 import { handleStreamableMcp } from "./mcp/http";
 import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
+import { routeAgentRequest } from "agents/routing";
+import { AssistantAgent } from "./agent/runtime";
+import {
+  ASSISTANT_OBJECT_NAME,
+  assertAssistantRoute,
+  checkUpgradeRequest,
+  redeemTicket,
+  ticketRefusal,
+} from "./lib/agent-runtime";
+import { handleAgentRuntimeRead, handleAgentTicketMint } from "./routes/agent-runtime";
 import {
   handleAgentDiagnose,
   handleAgentSynthesize,
@@ -106,7 +116,7 @@ import { err } from "./lib/errors";
 import { readJsonBoundedResult } from "./lib/body";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
-export { DeviceGateway, AuthGuard, AuthorityGuard };
+export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -120,6 +130,18 @@ export interface Env {
    * limiter then falls back to its isolate counters (see lib/auth-limits.ts).
    */
   AUTH_GUARD?: DurableObjectNamespace<AuthGuard>;
+  /**
+   * The fourth Durable Object: one pinned instance (`assistant`) holding the
+   * agent runtime. Optional so a deployment whose config predates pass 3 still
+   * type-checks; `/agents/*` answers 503 until `AGENT_RUNTIME` is `on`.
+   */
+  ASSISTANT?: DurableObjectNamespace<AssistantAgent>;
+  /**
+   * `on` enables the agent runtime's WebSocket surface; anything else (including
+   * absent) makes `/agents/*` answer `503 {error:"agent_runtime_off"}` while the
+   * stateless console assistant keeps working. Read per request.
+   */
+  AGENT_RUNTIME?: string;
   /**
    * One globally named object owning the authority-grant expiry timers. Optional
    * for the same reason as AUTH_GUARD: D1 refuses an expired grant with or
@@ -522,6 +544,7 @@ function actorFromUser(user: AuthUser): AdminActor {
     label: user.email,
     role: user.role,
     canGrantOwner: user.role === "owner",
+    sessionId: user.sessionId,
   };
 }
 
@@ -736,6 +759,67 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
   const url = new URL(req.url);
     const { pathname } = url;
     const method = req.method.toUpperCase();
+
+    /* ---- agent runtime (pass 3, stage A) ------------------------------ */
+    // Matched BEFORE everything else. `routeAgentRequest` maps every Durable
+    // Object binding, so three things happen here in order:
+    //
+    //   1. the kill switch answers 503 without touching the object;
+    //   2. the path is REWRITTEN to the one pinned name. The router resolves the
+    //      object id from the path before any hook runs, so trusting a caller's
+    //      name would mint unbounded objects;
+    //   3. the gate refuses a non-ASSISTANT class, checks Upgrade/Origin, spends
+    //      a ticket bound to the session, and forwards the actor header.
+    if (pathname === "/agents" || pathname.startsWith("/agents/")) {
+      if (env.AGENT_RUNTIME !== "on") {
+        return Response.json({ error: "agent_runtime_off" }, { status: 503 });
+      }
+
+      const pinned = new URL(req.url);
+      pinned.pathname = `/agents/${ASSISTANT_OBJECT_NAME}/${ASSISTANT_OBJECT_NAME}`;
+      const routedRequest = new Request(pinned.toString(), req);
+
+      const gate = async (
+        request: Request,
+        route: { className: string }
+      ): Promise<Response | Request | void> => {
+        const denied = assertAssistantRoute(route);
+        if (denied !== null) return denied;
+
+        const checked = checkUpgradeRequest(request, env);
+        if (!checked.ok) return checked.response;
+
+        // The session is resolved BEFORE the ticket is spent because the ticket
+        // is bound to the session id. A stolen ticket is then refused as
+        // `wrong_session` instead of burning the owner's upgrade.
+        const guard = await requireRole(request, env, "write", {
+          action: "connect to the agent runtime",
+        });
+        if (!guard.ok) return guard.response;
+
+        const redeemed = await redeemTicket(
+          env,
+          checked.ticket,
+          guard.user.sessionId,
+          ASSISTANT_OBJECT_NAME
+        );
+        if (!redeemed.ok) return ticketRefusal(redeemed.reason);
+
+        // Never trust a client-supplied identity header: delete it, then set the
+        // value this Worker just proved.
+        const headers = new Headers(request.headers);
+        headers.delete("x-dakflare-actor");
+        headers.set("x-dakflare-actor", guard.user.id);
+        headers.set("x-dakflare-actor-role", guard.user.role);
+        return new Request(request, { headers });
+      };
+
+      const routed = await routeAgentRequest(routedRequest, env, {
+        onBeforeRequest: gate,
+        onBeforeConnect: gate,
+      });
+      return routed ?? Response.json({ error: "not_found" }, { status: 404 });
+    }
 
     /* ---- public bootstrapping ----------------------------------------- */
     // AGPL-3.0 §13 source offer. Public by design: it must be reachable by anyone the
@@ -1045,6 +1129,19 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       return withAdminAccess(req, env, "write", "synthesize agent patches", (_actor) =>
         handleAgentSynthesize(req, env)
       );
+    }
+
+    /* ---- agent runtime control (pass 3, stage A) ----------------------- */
+    // The ticket action is deliberately absent from SCOPE_FOR_ACTION, so an
+    // agent token is refused before the handler runs. The GET resolves through
+    // `runAsAgent`, the same function a future tool path must call.
+    if (method === "POST" && pathname === "/v1/admin/agent/ticket") {
+      return withAdminAccess(req, env, "write", "mint agent runtime tickets", (actor) =>
+        handleAgentTicketMint(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/agent/runtime") {
+      return handleAgentRuntimeRead(req, env);
     }
 
     /* ---- agent control plane (v6.1 P0) --------------------------------- */

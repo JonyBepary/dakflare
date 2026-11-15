@@ -154,7 +154,165 @@ function workflowNames(file) {
   return names;
 }
 
+/**
+ * Durable Object classes per carrier, and the binding→class map.
+ *
+ * The previous check compared binding NAMES only, so `DEVICE` could point at a
+ * different class in two files and nothing noticed. Two carriers express the
+ * class two ways:
+ *
+ *   TOML    `[[durable_objects.bindings]] name/class_name` and `[exports.X]`
+ *   cf/TS   `NAME: bindings.durableObject({ exportName: "X" })` and `X: exports.durableObject(...)`
+ *
+ * `exports` is the current Wrangler lifecycle syntax; `[[migrations]]` is the
+ * older ordered history that `wrangler.account.toml` still carries. They are
+ * different representations of the same set, so the class SET is comparable
+ * across all of them even where the tag history is not.
+ */
+function durableObjects(file) {
+  if (!fs.existsSync(file)) return { bindings: {}, classes: [], tags: [], migrationClasses: [] };
+  const text = fs.readFileSync(file, "utf8");
+  const bindings = {};
+  const classes = new Set();
+  const tags = [];
+  const migrationClasses = new Set();
+
+  let section = null;
+  let exportName = null;
+  let migration = null;
+  let pendingBinding = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const header = /^\[\[?([^\]]+)\]\]?$/.exec(line);
+    if (header) {
+      section = header[1].trim();
+      exportName = section.startsWith("exports.") ? section.slice("exports.".length) : null;
+      migration = section === "migrations" ? { tag: null } : null;
+      pendingBinding = null;
+      if (migration !== null) tags.push(migration);
+      continue;
+    }
+    if (section === "durable_objects.bindings") {
+      const m = /^(name|class_name)\s*=\s*"([^"]+)"/.exec(line);
+      if (m) {
+        if (m[1] === "name") {
+          pendingBinding = m[2];
+        } else {
+          classes.add(m[2]);
+          if (pendingBinding !== null) bindings[pendingBinding] = m[2];
+          pendingBinding = null;
+        }
+      }
+    }
+    if (exportName !== null && /^type\s*=\s*"durable-object"/.test(line)) {
+      classes.add(exportName);
+    }
+    if (migration !== null) {
+      const tag = /^tag\s*=\s*"([^"]+)"/.exec(line);
+      if (tag) migration.tag = tag[1];
+      const created = /^new_sqlite_classes\s*=\s*\[([^\]]*)\]/.exec(line);
+      if (created) {
+        for (const cls of created[1].matchAll(/"([^"]+)"/g)) migrationClasses.add(cls[1]);
+      }
+    }
+  }
+
+  // TypeScript carriers.
+  for (const m of text.matchAll(/^\s{2,}([A-Za-z][A-Za-z0-9_]*):\s*exports\.durableObject\(/gm)) {
+    classes.add(m[1]);
+  }
+  for (const m of text.matchAll(
+    /^\s{2,}([A-Z][A-Z0-9_]*):\s*bindings\.durableObject\(\{([\s\S]*?)\}\)/gm
+  )) {
+    const target = /exportName:\s*"([^"]+)"/.exec(m[2]);
+    if (target) bindings[m[1]] = target[1];
+  }
+
+  return {
+    bindings,
+    classes: [...classes].sort(),
+    tags: tags.map((entry) => entry.tag).filter((tag) => tag !== null),
+    migrationClasses: [...migrationClasses].sort(),
+  };
+}
+
+function compareObjectSets(label, files) {
+  const problems = [];
+  const [first, ...rest] = files;
+  for (const other of rest) {
+    const a = JSON.stringify(first.objects.classes);
+    const b = JSON.stringify(other.objects.classes);
+    if (a !== b) problem(`durable object classes: ${first.name}=${a} ${other.name}=${b}`);
+    const ab = JSON.stringify(first.objects.bindings);
+    const bb = JSON.stringify(other.objects.bindings);
+    if (ab !== bb) problem(`durable object binding→class: ${first.name}=${ab} ${other.name}=${bb}`);
+  }
+  return problems;
+
+  function problem(message) {
+    problems.push(`${label}: ${message}`);
+  }
+}
+
+const AGENT_RUNTIME_DEFAULT = "off";
+
 const ROOT = path.join(HERE, "..");
+
+const CARRIERS = [
+  ["wrangler.toml", "wrangler.toml"],
+  ["wrangler.account.toml", "wrangler.account.toml"],
+  ["wrangler.template.toml", "wrangler.template.toml"],
+  ["cloudflare.config.ts", "cloudflare.config.ts"],
+  ["cloudflare.config.template.ts", "cloudflare.config.template.ts"],
+].map(([name, file]) => ({ name, objects: durableObjects(path.join(ROOT, file)) }));
+
+const objectIssues = compareObjectSets("durable objects", CARRIERS);
+
+// A class that a carrier exports but its migration history never created is a
+// deploy that fails (or silently reuses another class's namespace). Only the
+// account lane declares ordered tags, so this is checked only there.
+const accountObjects = CARRIERS.find((carrier) => carrier.name === "wrangler.account.toml").objects;
+const localObjects = CARRIERS.find((carrier) => carrier.name === "wrangler.toml").objects;
+for (const cls of accountObjects.classes) {
+  if (!accountObjects.migrationClasses.includes(cls)) {
+    objectIssues.push(
+      `wrangler.account.toml exports ${cls} but no [[migrations]] new_sqlite_classes creates it`
+    );
+  }
+}
+for (const cls of accountObjects.migrationClasses) {
+  if (!accountObjects.classes.includes(cls)) {
+    objectIssues.push(
+      `wrangler.account.toml migration creates ${cls} but no binding/export declares it`
+    );
+  }
+}
+
+/**
+ * Agents can be enabled by a deploy that forgot one carrier. Compare the
+ * default, which must be `off` everywhere: the runtime is opt-in.
+ */
+const runtimeDefaults = [];
+for (const [file, text] of CARRIERS.map((carrier) => [
+  carrier.name,
+  fs.readFileSync(path.join(ROOT, carrier.name), "utf8"),
+])) {
+  const toml = /^AGENT_RUNTIME\s*=\s*"([^"]*)"/m.exec(text);
+  const ts = /AGENT_RUNTIME:\s*bindings\.text\("([^"]*)"\)/m.exec(text);
+  const value = toml?.[1] ?? ts?.[1];
+  if (value === undefined) {
+    objectIssues.push(`${file}: no AGENT_RUNTIME var`);
+  } else {
+    runtimeDefaults.push(value);
+  }
+}
+if (new Set(runtimeDefaults).size > 1) {
+  objectIssues.push(`AGENT_RUNTIME defaults disagree: ${runtimeDefaults.join(", ")}`);
+} else if (runtimeDefaults[0] !== AGENT_RUNTIME_DEFAULT) {
+  objectIssues.push(`AGENT_RUNTIME default is "${runtimeDefaults[0]}", expected "${AGENT_RUNTIME_DEFAULT}"`);
+}
+
 const local = bindingNames(path.join(ROOT, "wrangler.toml"));
 const account = bindingNames(path.join(ROOT, "wrangler.account.toml"));
 
@@ -242,11 +400,18 @@ if (accountWorkflows.size > 0) {
   }
 }
 
-if (diffs.length || cfDrift.length || templateDrift.length || exportIssues.length) {
+if (
+  diffs.length ||
+  cfDrift.length ||
+  templateDrift.length ||
+  exportIssues.length ||
+  objectIssues.length
+) {
   console.error("config drift detected:");
   for (const problem of exportIssues) {
     console.error(`  - ${problem}`);
   }
+  for (const problem of objectIssues) console.error(`  - ${problem}`);
   for (const d of diffs) console.error(`  - wrangler.toml vs wrangler.account.toml — ${d}`);
   for (const d of cfDrift) console.error(`  - wrangler.toml vs cloudflare.config.ts — ${d}`);
   for (const d of templateDrift) console.error(`  - template config drift — ${d}`);
@@ -256,4 +421,14 @@ console.log(
   `config in sync: ${local.bindings.length} bindings, ${local.ratelimits.length} limiters, ${local.vars.length} vars` +
   (cfNames ? `, cloudflare.config.ts ${cfNames.length} bindings` : "") +
   (cfTemplateNames ? `, templates verified` : "")
+);
+console.log(
+  `durable objects: ${localObjects.classes.length} classes [${localObjects.classes.join(", ")}] ` +
+  `compared across ${CARRIERS.length} carriers (bindings and class names)`
+);
+console.log(
+  `migration tags: wrangler.account.toml [${accountObjects.tags.join(", ")}] creates ` +
+  `[${accountObjects.migrationClasses.join(", ")}] — only that carrier declares [[migrations]]; ` +
+  `wrangler.toml, wrangler.template.toml and both cloudflare.config*.ts use [exports], ` +
+  `which has no ordered tag, so tag order is NOT comparable outside the account lane (class sets are)`
 );

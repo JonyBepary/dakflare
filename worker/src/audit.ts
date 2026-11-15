@@ -36,6 +36,12 @@ export interface AdminActor extends AuditActor {
   agentDeviceId?: string | null;
   /** What the token may attempt. Read by the MCP tool registry. */
   agentScopes?: string[];
+  /**
+   * The Better Auth session row, when the credential was a session cookie. A
+   * short-lived agent-runtime ticket is bound to it, so a ticket minted for one
+   * session cannot be spent from another.
+   */
+  sessionId?: string;
 }
 
 export interface AuditEvent {

@@ -59,6 +59,13 @@ class_name = "AuthGuard"
 name = "AUTHORITY_GUARD"
 class_name = "AuthorityGuard"
 
+# The fourth Durable Object: the agent runtime (pass 3, stage A). One instance,
+# whose name is pinned server-side as `assistant`; `/agents/*` is rewritten to it
+# and `AGENT_RUNTIME=off` answers 503 without touching the object.
+[[durable_objects.bindings]]
+name = "ASSISTANT"
+class_name = "AssistantAgent"
+
 [exports.DeviceGateway]
 type = "durable-object"
 storage = "sqlite"
@@ -68,6 +75,10 @@ type = "durable-object"
 storage = "sqlite"
 
 [exports.AuthorityGuard]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AssistantAgent]
 type = "durable-object"
 storage = "sqlite"
 
@@ -180,6 +191,9 @@ namespace_id = "1007"
 simple = { limit = 20, period = 60 }
 
 [vars]
+# Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
+# assistant is unaffected. Flip to "on" only after a ticket smoke test.
+AGENT_RUNTIME = "off"
 # Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path

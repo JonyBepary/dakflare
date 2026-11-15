@@ -22,7 +22,10 @@
  */
 
 import type { Env } from "../index";
-import { GRANT_LADDER_S, SCOPE_CAPS, NEVER_GRANTABLE, isTokenScope } from "./agent-scopes";
+import type { AdminActor } from "../audit";
+import { GRANT_LADDER_S, SCOPE_CAPS, NEVER_GRANTABLE, isTokenScope, scopeForAction } from "./agent-scopes";
+import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./agent-tokens";
+import { requireRole, type Permission } from "../auth/guard";
 
 /** How long an unanswered request stays actionable. */
 export const APPROVAL_TTL_MS = 15 * 60_000;
@@ -94,6 +97,175 @@ interface ApprovalRow {
   decided_by: string | null;
   decided_at: number | null;
   grant_id: string | null;
+}
+
+/* ─────────────────────────── the human guard ─────────────────────────── */
+
+export type HumanCheck = { ok: true } | { ok: false; response: Response };
+
+/**
+ * A grant is a human decision. `createGrant` and `decideApproval` are the two
+ * functions a Durable Object would import if it wanted to approve itself, so
+ * both call this first.
+ *
+ * Allowed: a Better Auth session (owner/admin/member) and the ADMIN_TOKEN
+ * machine credential, which a person holds. Refused: an agent token (`role:
+ * "agent"`), and anything without an actor at all. The refusal uses a stable
+ * `permission` code so a caller can tell it apart from a bad target.
+ *
+ * The device-approval route is the one caller that does not carry a session:
+ * the handset signs each request, and `handleDeviceApprovalApprove` passes the
+ * handset as the machine credential it is. MCP elicitation passes a machine
+ * actor only after `verifyDeploymentTotp` proved a human answered.
+ */
+export function assertHuman(actor: AdminActor | null | undefined): HumanCheck {
+  if (actor === null || actor === undefined) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "permission",
+          message: "a grant needs a human decision; no actor was supplied",
+        },
+        { status: 403 }
+      ),
+    };
+  }
+  if (actor.role === "agent" || actor.agentTokenId !== undefined) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "permission",
+          message: "an agent credential cannot mint or decide a grant for itself",
+        },
+        { status: 403 }
+      ),
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * The one credential resolution an agent-facing path uses.
+ *
+ * The HTTP upgrade gate calls this; a future tool path must call the same
+ * function, so neither can skip the scope check, the per-token limiter or
+ * `recordTokenUse`. Three credentials are accepted, in the same order as
+ * `withAdminAccess` in the entry point:
+ *
+ *   `dkf_agt_…` bearer  → agent token, refused if the action has no scope
+ *   `X-Dakflare-Client: cli` + ADMIN_TOKEN → the machine credential
+ *   a session cookie    → a human session, resolved through `requireRole`
+ *
+ * `action` is the route action string used everywhere else; an action absent
+ * from `SCOPE_FOR_ACTION` is invisible to an agent token, which is the safe
+ * default for the runtime control plane.
+ */
+export async function runAsAgent(
+  req: Request,
+  env: Env,
+  action: string,
+  handler: (actor: AdminActor) => Promise<Response>,
+  permission: Permission = "write"
+): Promise<Response> {
+  const bearer = readBearer(req);
+
+  if (looksLikeAgentToken(bearer)) {
+    const token = await resolveAgentToken(env, bearer as string);
+    if (token === null) return agentUnauthorized();
+
+    const scope = scopeForAction(action);
+    if (scope === null) {
+      return Response.json(
+        { error: "forbidden", message: `an agent token cannot ${action}` },
+        { status: 403 }
+      );
+    }
+    if (!token.scopes.includes(scope)) {
+      return Response.json(
+        {
+          error: "forbidden",
+          message: `this agent token lacks the ${scope} scope needed to ${action}`,
+          scope,
+        },
+        { status: 403 }
+      );
+    }
+
+    if (env.ADMIN_LIMITER) {
+      const { success } = await env.ADMIN_LIMITER.limit({ key: `agent:${token.id}` });
+      if (!success) {
+        return Response.json({ error: "rate_limited" }, { status: 429 });
+      }
+    }
+    await recordTokenUse(env, token.id);
+
+    return handler({
+      userId: null,
+      label: `agent:${token.name}`,
+      role: "agent",
+      canGrantOwner: false,
+      agentTokenId: token.id,
+      agentDeviceId: token.device_id,
+      agentScopes: token.scopes,
+    });
+  }
+
+  if (req.headers.get("X-Dakflare-Client") === "cli") {
+    if (!(await adminTokenMatches(req, env))) return agentUnauthorized();
+    if (env.ADMIN_LIMITER) {
+      const { success } = await env.ADMIN_LIMITER.limit({ key: "admin" });
+      if (!success) return Response.json({ error: "rate_limited" }, { status: 429 });
+    }
+    return handler({
+      userId: null,
+      label: "admin-token",
+      role: "machine",
+      canGrantOwner: true,
+    });
+  }
+
+  const guard = await requireRole(req, env, permission, { action });
+  if (!guard.ok) return guard.response;
+  return handler({
+    userId: guard.user.id,
+    label: guard.user.email,
+    role: guard.user.role,
+    canGrantOwner: guard.user.role === "owner",
+    sessionId: guard.user.sessionId,
+  });
+}
+
+function agentUnauthorized(): Response {
+  return Response.json({ error: "unauthorized" }, { status: 401 });
+}
+
+function readBearer(req: Request): string | null {
+  const header = req.headers.get("Authorization");
+  if (header === null) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match === null ? null : match[1];
+}
+
+/** Constant-time ADMIN_TOKEN comparison; a missing token fails closed. */
+async function adminTokenMatches(req: Request, env: Env): Promise<boolean> {
+  const expected = env.ADMIN_TOKEN;
+  if (expected === undefined || expected === "") return false;
+  const header = req.headers.get("Authorization");
+  if (header === null) return false;
+
+  const encoder = new TextEncoder();
+  const [provided, wanted] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(header)),
+    crypto.subtle.digest("SHA-256", encoder.encode(`Bearer ${expected}`)),
+  ]);
+  const a = new Uint8Array(provided);
+  const b = new Uint8Array(wanted);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 /* ─────────────────────────────── targets ─────────────────────────────── */
@@ -309,6 +481,8 @@ export interface CreateGrantInput {
   scope: string;
   target: GrantTarget;
   grantedBy: string;
+  /** Who decided. Required: `assertHuman` refuses an agent credential. */
+  actor: AdminActor;
   /** Already clamped by `clampGrantDuration`; this does not clamp again. */
   durationS: number;
   approvalRequestId?: string | null;
@@ -317,7 +491,11 @@ export interface CreateGrantInput {
 
 export type CreateGrantResult =
   | { ok: true; grant: GrantRecord }
-  | { ok: false; error: "unknown_scope" | "not_grantable" | "bad_target"; message: string };
+  | {
+      ok: false;
+      error: "unknown_scope" | "not_grantable" | "bad_target" | "permission";
+      message: string;
+    };
 
 /**
  * Create a grant, superseding any live one for the same (token, scope, target).
@@ -328,6 +506,14 @@ export type CreateGrantResult =
  * one that counts rather than producing a constraint error mid-approval.
  */
 export async function createGrant(env: Env, input: CreateGrantInput): Promise<CreateGrantResult> {
+  const human = assertHuman(input.actor);
+  if (!human.ok) {
+    return {
+      ok: false,
+      error: "permission",
+      message: "an agent credential cannot mint a grant; a human decision was required",
+    };
+  }
   const never = NEVER_GRANTABLE[input.scope];
   if (never !== undefined) {
     return { ok: false, error: "not_grantable", message: `${input.scope}: ${never}` };
@@ -699,7 +885,13 @@ export type DecisionResult =
   | { ok: true; approval: ApprovalRecord; grant: GrantRecord | null; clamped: ClampedDuration | null }
   | {
       ok: false;
-      error: "not_found" | "not_pending" | "expired" | "bad_target" | "not_grantable";
+      error:
+        | "not_found"
+        | "not_pending"
+        | "expired"
+        | "bad_target"
+        | "not_grantable"
+        | "permission";
       message: string;
       /** Set on a lost race: who decided it, and when. */
       decided_by?: string | null;
@@ -716,8 +908,16 @@ export async function decideApproval(
   env: Env,
   id: string,
   decision: "approve" | "reject",
-  options: { by: string; durationS?: number; now?: number }
+  options: { by: string; actor: AdminActor; durationS?: number; now?: number }
 ): Promise<DecisionResult> {
+  const human = assertHuman(options.actor);
+  if (!human.ok) {
+    return {
+      ok: false,
+      error: "permission",
+      message: "an agent credential cannot decide an approval; a human decision was required",
+    };
+  }
   const now = options.now ?? Date.now();
   const approval = await getApproval(env, id);
   if (approval === null) {
