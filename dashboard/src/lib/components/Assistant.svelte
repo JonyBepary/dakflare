@@ -3,25 +3,39 @@
 	 * The floating assistant.
 	 *
 	 * One button, bottom-right, above every page of the console; one panel that is
-	 * not a modal and not a route. It asks `POST /v1/admin/assistant/chat` about
-	 * the page the operator is standing on, prints the answer, and renders the
-	 * proposals as cards. There is no transcript: closing the panel drops the
-	 * question, the answer and every proposal, and nothing is written to storage.
+	 * not a modal and not a route. It asks about the page the operator is standing
+	 * on, prints the answer, and renders the proposals as cards.
 	 *
-	 * What it deliberately does not do:
+	 * Two paths, and the deployment decides which one:
 	 *
-	 *  - No streaming animation and no typing indicator. A call either answered or
-	 *    it did not, and the panel says which.
-	 *  - No invented state. Each failure is one line from `failureLine()`, with the
-	 *    gateway's own detail under it only when the gateway sent one.
+	 *  - **Stateless, and this is the default.** `POST /v1/admin/assistant/chat`
+	 *    answers with one document: an answer, or plain text, or a refusal. Every
+	 *    deployment behaves like this until someone turns the agent runtime on, and
+	 *    nothing on this panel says anything about a runtime that is off.
+	 *  - **Live.** `GET /v1/admin/agent/runtime` said `enabled: true`, so the panel
+	 *    holds an `AgentLink` (`$lib/agent-socket`): a ticket, then a WebSocket. The
+	 *    answer streams in, each tool run is one line, and a turn that was cut off
+	 *    says so. Proposals are the same cards either way.
+	 *
+	 * Five rules this panel keeps, on both paths:
+	 *
+	 *  - No invented state. Each failure is one line from `failureLine()` or
+	 *    `agentTroubleLine()`, with the gateway's own detail under it only when the
+	 *    gateway sent one.
+	 *  - A refusal never replaces the model's words. A turn refused after the model
+	 *    had written three sentences shows both, in the order they happened.
+	 *  - A tool is a name and a verdict. Its output is dropped in the socket module
+	 *    and there is no template here that could print it.
 	 *  - No accept on `stage_workflow_patch`. That kind belongs to the workflow
 	 *    editor's ghost banner; this panel only hands the patch over when an editor
 	 *    is mounted, and explains the way there when it is not.
+	 *  - A retry after a lost link reuses the turn's idempotency key, so a question
+	 *    that did reach the runtime is not asked twice.
 	 *
 	 * The button is fixed, so `+layout.svelte` gives the main region a floor under
 	 * it: at 390px the page's last row must never end behind this control.
 	 */
-	import { tick } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import { page } from '$app/state';
 	import {
 		acceptProposal,
@@ -32,8 +46,24 @@
 		workflowPatchSinkReady,
 		type AssistantContext,
 		type ChatOutcome,
+		type Failure,
 		type Proposal
 	} from '$lib/assistant';
+	import {
+		AgentLink,
+		agentLinkLabel,
+		agentRefusalLine,
+		agentTroubleLine,
+		applyAgentFrame,
+		beginTurn,
+		newIdempotencyKey,
+		readAgentRuntime,
+		type AgentEvent,
+		type AgentFrame,
+		type AgentLinkState,
+		type AgentTrouble,
+		type AgentTurn
+	} from '$lib/agent-socket';
 	import { announce } from '$lib/announce.svelte';
 	import { BASE, ROUTES } from '$lib/paths';
 	import AssistantProposalCard, { type ProposalResult } from './AssistantProposalCard.svelte';
@@ -45,12 +75,36 @@
 	const inputId = `assistant-question-${uid}`;
 	const contextId = `assistant-context-${uid}`;
 
+	/** The refusal reasons this panel has a sentence for; an unknown one prints its token. */
+	const NAMED_REFUSALS = new Set([
+		'grant_expired',
+		'cap_reached',
+		'turn_cap',
+		'origin_refused',
+		'agent_origin_untrusted',
+		'agent_origin_missing',
+		'agent_runtime_off',
+		'session_expired'
+	]);
+
 	let open = $state(false);
 	let question = $state('');
 	/** The question the current answer belongs to, so Try again repeats that one. */
 	let asked = $state('');
 	let asking = $state(false);
 	let outcome = $state<ChatOutcome | null>(null);
+
+	/** `unknown` until the runtime read answers; `off` never opens a socket. */
+	let runtime = $state<'unknown' | 'on' | 'off'>('unknown');
+	let linkState = $state<AgentLinkState>('idle');
+	let trouble = $state<AgentTrouble | null>(null);
+	/** The object's own name, from the `ready` frame. Shown as a title, not a claim. */
+	let agentName = $state<string | null>(null);
+	let turn = $state<AgentTurn | null>(null);
+	/** One question held while the link is being opened. */
+	let queued = $state<{ question: string; key: string } | null>(null);
+	/** The link dropped while this turn was in flight. It survives the reconnect. */
+	let lost = $state(false);
 
 	let acceptingId = $state<string | null>(null);
 	let results = $state<Record<string, ProposalResult>>({});
@@ -69,6 +123,9 @@
 
 	/** Drops an answer that arrives after the panel was closed or re-asked. */
 	let sequence = 0;
+
+	/** The live link. Not reactive: its events are mirrored into the state above. */
+	let agent: AgentLink | null = null;
 
 	/**
 	 * Where the operator is. The chat endpoint takes the route and, on the editor,
@@ -91,6 +148,17 @@
 	});
 
 	const canAsk = $derived(!asking && question.trim() !== '');
+	const live = $derived(runtime === 'on');
+	const linkWord = $derived(agentLinkLabel(linkState));
+	const unfinished = $derived(turn !== null && turn.status === 'streaming');
+	/**
+	 * A turn whose answer stopped arriving.
+	 *
+	 * `lost` is a fact about this turn, not about the link: a reconnect clears
+	 * `trouble`, and the point of this line is that the frames that were coming
+	 * before the drop are not coming back.
+	 */
+	const cutOff = $derived(turn !== null && turn.status === 'streaming' && lost);
 
 	// The sink appears and disappears with the editor, which is a different
 	// component on a different route. Nothing else would tell this panel.
@@ -99,6 +167,12 @@
 		void route;
 		void outcome;
 		stageReady = workflowPatchSinkReady();
+	});
+
+	onDestroy(() => {
+		sequence += 1;
+		agent?.close();
+		agent = null;
 	});
 
 	async function toggle(): Promise<void> {
@@ -111,6 +185,138 @@
 		stageReady = workflowPatchSinkReady();
 		await tick();
 		field?.focus();
+		void startLive();
+	}
+
+	/**
+	 * Ask the runtime whether this deployment has one, and open a link when it does.
+	 *
+	 * A read that fails is not a reason to try the socket: the stateless path is
+	 * the default and it works, so `off` is the honest answer to both.
+	 */
+	async function startLive(): Promise<void> {
+		const id = sequence;
+		const read = await readAgentRuntime();
+		if (!open || id !== sequence) return;
+
+		if (read.status !== 'ok' || !read.runtime.enabled) {
+			runtime = 'off';
+			return;
+		}
+
+		runtime = 'on';
+		agent?.close();
+		agent = new AgentLink({ onEvent: handleAgentEvent });
+		await agent.connect();
+	}
+
+	function handleAgentEvent(event: AgentEvent): void {
+		if (!open) return;
+
+		if (event.kind === 'link') {
+			const wasOpen = linkState === 'open';
+			linkState = event.state;
+			trouble = event.trouble;
+
+			// The socket dropped with a turn in flight. The turn stays where it is, and
+			// the panel stops saying it is asking: it is waiting for the operator's
+			// next move, which is Try again with the same key.
+			if (wasOpen && event.state !== 'open' && turn !== null && turn.status === 'streaming') {
+				lost = true;
+				asking = false;
+				queued = null;
+			}
+
+			if (event.state === 'open') {
+				sendQueued();
+				return;
+			}
+
+			if (event.state !== 'closed') return;
+
+			// The link is final. A question that was never asked is no longer being
+			// asked; a question that was answered keeps its answer.
+			asking = false;
+
+			if (event.trouble?.reason === 'agent_runtime_off') {
+				// The runtime went off between the read and the ticket: the stateless
+				// path is the honest fallback, and it is the same question.
+				const holding = queued;
+				queued = null;
+				runtime = 'off';
+				agent?.close();
+				agent = null;
+				turn = null;
+				if (holding !== null) {
+					asking = true;
+					void askStateless(holding.question);
+				}
+			}
+			return;
+		}
+
+		onFrame(event.frame);
+	}
+
+	/** One frame, folded into the turn it belongs to. */
+	function onFrame(frame: AgentFrame): void {
+		if (frame.type === 'ready') {
+			agentName = frame.name !== '' ? frame.name : null;
+			return;
+		}
+
+		const current = turn;
+		// Nothing to attach a frame to: this panel did not ask the question it
+		// answers. Rendering it would invent a conversation.
+		if (current === null) return;
+
+		turn = applyAgentFrame(current, frame);
+
+		if (frame.type === 'answer') {
+			asking = false;
+			queued = null;
+			const count = turn?.proposals.length ?? 0;
+			const calls = frame.calls;
+			announce(
+				calls > 0
+					? `The assistant answered, after ${calls} ${calls === 1 ? 'tool run' : 'tool runs'}.`
+					: count === 0
+						? 'The assistant answered.'
+						: `The assistant answered, with ${count} ${count === 1 ? 'proposal' : 'proposals'}.`
+			);
+			return;
+		}
+
+		if (frame.type === 'error') {
+			asking = false;
+			queued = null;
+			announce(agentRefusalLine(frame.reason));
+		}
+	}
+
+	function sendQueued(): void {
+		const holding = queued;
+		queued = null;
+		if (holding === null) return;
+
+		if (agent === null) {
+			queued = holding;
+			return;
+		}
+
+		const sent = agent.ask(holding.question, holding.key);
+		if (sent.status === 'waiting') {
+			// It closed between the event and the send. The next `open` gets it.
+			queued = holding;
+			return;
+		}
+		if (sent.status === 'refused') {
+			asking = false;
+			turn = null;
+			const failure: Failure = { kind: 'refused', message: sent.message };
+			outcome = { status: 'failed', failure };
+			announce(sent.message);
+		}
 	}
 
 	function close(): void {
@@ -122,7 +328,15 @@
 		asking = false;
 		acceptingId = null;
 		results = {};
+		turn = null;
+		queued = null;
+		lost = false;
+		trouble = null;
+		linkState = 'idle';
+		agentName = null;
 		sequence += 1;
+		agent?.close();
+		agent = null;
 		launcher?.focus();
 	}
 
@@ -133,7 +347,13 @@
 		close();
 	}
 
-	async function runAsk(text: string): Promise<void> {
+	/**
+	 * Ask one question, on whichever path this deployment has.
+	 *
+	 * `reuseKey` is a retry's key: the same question, the same turn, so a runtime
+	 * that did receive the first attempt answers instead of running a second one.
+	 */
+	function runAsk(text: string, reuseKey?: string): void {
 		const next = text.trim();
 		if (next === '' || asking) return;
 
@@ -141,10 +361,21 @@
 		asked = next;
 		asking = true;
 		outcome = null;
+		turn = null;
+		queued = null;
+		lost = false;
 		results = {};
 
+		if (runtime === 'on') {
+			void askLive(next, reuseKey);
+			return;
+		}
+		void askStateless(next);
+	}
+
+	async function askStateless(text: string): Promise<void> {
 		const id = ++sequence;
-		const result = await askAssistant({ message: next, context });
+		const result = await askAssistant({ message: text, context });
 		if (id !== sequence) return;
 
 		outcome = result;
@@ -159,6 +390,19 @@
 		} else if (result.status === 'failed') {
 			announce(failureLine(result.failure));
 		}
+	}
+
+	async function askLive(text: string, reuseKey?: string): Promise<void> {
+		const key = reuseKey ?? newIdempotencyKey();
+		turn = beginTurn(text, key);
+		queued = { question: text, key };
+
+		if (agent === null) agent = new AgentLink({ onEvent: handleAgentEvent });
+		if (agent.state === 'open') {
+			sendQueued();
+			return;
+		}
+		await agent.connect();
 	}
 
 	function submit(event: SubmitEvent): void {
@@ -229,6 +473,20 @@
 		}
 		return payload;
 	}
+
+	/** A refusal is the operator's problem only when it is about them or the origin. */
+	function refusalTone(reason: string): 'warn' | 'danger' {
+		return reason === 'grant_expired' || reason === 'cap_reached' || reason === 'turn_cap'
+			? 'warn'
+			: 'danger';
+	}
+
+	/** The line under a partial answer, in the link's own words. */
+	function linkWaitingLine(): string {
+		if (linkState === 'retrying') return 'The link dropped. Reconnecting…';
+		if (linkState === 'open') return 'The model is writing…';
+		return 'Connecting to the agent…';
+	}
 </script>
 
 <svelte:window onkeydown={onkeydown} />
@@ -242,7 +500,20 @@
 	>
 		<header class="panel-head">
 			<div class="head-copy">
-				<p class="panel-title">Assistant</p>
+				<div class="title-row">
+					<p class="panel-title">Assistant</p>
+					{#if live && linkWord !== ''}
+						<!-- The one factual marker of the live path: a word, not a badge. It
+						     is absent entirely when the runtime is off, which is the default. -->
+						<span
+							class="link-chip mono"
+							data-state={linkState}
+							title={agentName === null ? undefined : `agent ${agentName}`}
+						>
+							{linkWord}
+						</span>
+					{/if}
+				</div>
 				<p class="context mono" id={contextId}>{contextLabel}</p>
 			</div>
 			<button type="button" class="close" onclick={close} aria-label="Close the assistant">
@@ -271,7 +542,95 @@
 		</form>
 
 		<div class="body" aria-busy={asking}>
-			{#if asking}
+			{#if live && (asking || turn !== null)}
+				<!-- The live path. Nothing here is drawn from a frame this turn does not
+				     have: the text is what arrived, the tools are what ran, the refusal
+				     is what the gateway said. -->
+				{#if turn !== null}
+					{#if turn.text !== ''}
+						<p class="answer">
+							{turn.text}{#if unfinished && trouble === null}<span class="caret" aria-hidden="true"
+								></span>{/if}
+						</p>
+					{/if}
+
+					{#if turn.tools.length > 0}
+						<ul class="tools" aria-label="Tool runs">
+							{#each turn.tools as call, index (index)}
+								<li class="tool" class:refused={!call.ok}>
+									<span class="tool-head">
+										<span class="mono tool-name">{call.tool}</span>
+										<span class="tool-verdict">{call.ok ? 'ran' : 'refused'}</span>
+									</span>
+									{#if call.reason !== null && call.reason !== ''}
+										<!-- The gateway's own reason. A refusal with no reason prints
+										     none, rather than a sentence this console invented. -->
+										<span class="tool-reason">{call.reason}</span>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+
+					{#if cutOff}
+						<p class="state" data-tone="warn">
+							The link closed before the answer finished. Nothing after this point arrived.
+						</p>
+					{/if}
+
+					{#if turn.refusal !== null}
+						<p class="state" data-tone={refusalTone(turn.refusal.reason)}>
+							{agentRefusalLine(turn.refusal.reason)}
+							{#if !NAMED_REFUSALS.has(turn.refusal.reason)}
+								<span class="mono">reason {turn.refusal.reason}</span>
+							{/if}
+						</p>
+						{#if turn.refusal.message !== ''}
+							<p class="detail mono">{turn.refusal.message}</p>
+						{/if}
+					{/if}
+
+					{#if unfinished && !lost && trouble !== null && linkState === 'closed'}
+						<p class="state" data-tone={trouble.retryable ? 'warn' : 'danger'}>
+							{agentTroubleLine(trouble)}
+						</p>
+						{#if trouble.detail !== null}
+							<p class="detail mono">{trouble.detail}</p>
+						{/if}
+					{/if}
+
+					{#if unfinished && !lost && trouble === null && turn.text === '' && turn.tools.length === 0 && turn.refusal === null}
+						<p class="state waiting"><Spinner /> {linkWaitingLine()}</p>
+					{/if}
+
+					{#if cutOff || (unfinished && linkState === 'closed' && trouble !== null && turn.refusal === null)}
+						<div class="retry">
+							<!-- The same key, so a turn the runtime already started is not started
+							     again: this asks for its answer, not for a second attempt. -->
+							<button type="button" class="btn btn-sm" onclick={() => runAsk(asked, turn?.key)}>
+								<Icon name="refresh" size={13} /> Try again
+							</button>
+						</div>
+					{/if}
+
+					{#if turn.proposals.length > 0}
+						<ul class="proposals">
+							{#each turn.proposals as proposal (proposal.id)}
+								<AssistantProposalCard
+									{proposal}
+									result={results[proposal.id] ?? null}
+									accepting={acceptingId === proposal.id}
+									{stageReady}
+									onaccept={() => void accept(proposal)}
+									onstage={() => stage(proposal)}
+								/>
+							{/each}
+						</ul>
+					{/if}
+				{:else}
+					<p class="state waiting"><Spinner /> Asking the assistant…</p>
+				{/if}
+			{:else if asking}
 				<p class="state waiting"><Spinner /> Asking the assistant…</p>
 			{:else if outcome === null}
 				<p class="state quiet">
@@ -292,7 +651,7 @@
 					<p class="detail mono">day {outcome.failure.day}</p>
 				{/if}
 				<div class="retry">
-					<button type="button" class="btn btn-sm" onclick={() => void runAsk(asked)}>
+					<button type="button" class="btn btn-sm" onclick={() => runAsk(asked)}>
 						<Icon name="refresh" size={13} /> Try again
 					</button>
 				</div>
@@ -328,7 +687,13 @@
 		</div>
 
 		<footer class="panel-foot">
-			<span class="foot-note">Nothing here is saved.</span>
+			<span class="foot-note">
+				{#if live}
+					Live agent · it can act only while an autonomy window is open.
+				{:else}
+					Nothing here is saved.
+				{/if}
+			</span>
 		</footer>
 	</section>
 {/if}
@@ -428,11 +793,44 @@
 		min-width: 0;
 	}
 
+	.title-row {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
 	.panel-title {
 		font-family: var(--df-font-display);
 		font-size: var(--df-p-text-sm);
 		font-weight: 700;
 		letter-spacing: -0.01em;
+	}
+
+	/* A word, not a badge: 9.5px mono on a hairline, and the ink says which state. */
+	.link-chip {
+		padding: 0 4px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+		color: var(--df-text-meta);
+		font-size: 9.5px;
+		letter-spacing: 0.08em;
+		line-height: 1.5;
+		text-transform: uppercase;
+	}
+
+	.link-chip[data-state='open'] {
+		color: var(--df-state-ok-ink);
+	}
+
+	.link-chip[data-state='ticket'],
+	.link-chip[data-state='connecting'],
+	.link-chip[data-state='retrying'] {
+		color: var(--df-state-warn-ink);
+	}
+
+	.link-chip[data-state='closed'] {
+		color: var(--df-state-danger-ink);
 	}
 
 	.context {
@@ -538,6 +936,86 @@
 		font-size: var(--df-p-text-sm);
 		line-height: 1.55;
 		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	/* One thin block, blinking: the only motion the panel adds, and it disappears
+	   the moment the answer is complete or the motion is unwelcome. */
+	.caret {
+		display: inline-block;
+		width: 2px;
+		height: 1em;
+		margin-left: 2px;
+		vertical-align: -0.15em;
+		background: var(--df-accent-text);
+		animation: caret-blink 1s steps(2, start) infinite;
+	}
+
+	@keyframes caret-blink {
+		50% {
+			opacity: 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.caret {
+			animation: none;
+		}
+	}
+
+	/* One run per row: the name, the verdict, and the gateway's reason under it
+	   when it gave one. A tool's output is deliberately not part of this shape. */
+	.tools {
+		display: flex;
+		flex-direction: column;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	.tool {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+		padding: 5px 9px;
+	}
+
+	.tool + .tool {
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.tool-head {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		flex-wrap: wrap;
+		min-width: 0;
+	}
+
+	.tool-name {
+		min-width: 0;
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-xs);
+		overflow-wrap: anywhere;
+	}
+
+	.tool-verdict {
+		flex: none;
+		color: var(--df-state-ok-ink);
+		font-size: var(--df-p-text-2xs);
+	}
+
+	.tool.refused .tool-verdict {
+		color: var(--df-state-warn-ink);
+	}
+
+	.tool-reason {
+		color: var(--df-text-meta);
+		font-size: 11px;
+		line-height: 1.45;
 		overflow-wrap: anywhere;
 	}
 

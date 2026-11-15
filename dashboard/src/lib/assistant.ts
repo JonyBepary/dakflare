@@ -428,33 +428,45 @@ async function call(path: string, init: RequestInit = {}): Promise<Raw> {
 
 /** Every non-answer collapses into one of six honest states. */
 function failureFrom(raw: Raw): Failure {
-	if (raw.status === 0) return { kind: 'offline' };
-	if (raw.status === 401) {
+	return failureFromAnswer(raw.status, raw.json);
+}
+
+/**
+ * The same collapse, from a status and a parsed body.
+ *
+ * Exported so the agent runtime's routes (`agent-socket.ts`) answer a refusal the
+ * way the assistant's routes do. One mapping, one set of sentences: a console
+ * where two modules disagree about what a 403 means is a console that can only be
+ * debugged by reading both.
+ */
+export function failureFromAnswer(status: number, json: unknown): Failure {
+	if (status === 0) return { kind: 'offline' };
+	if (status === 401) {
 		return { kind: 'refused', message: 'Your session expired. Sign in again, then ask once more.' };
 	}
-	if (raw.status === 403) {
+	if (status === 403) {
 		return {
 			kind: 'refused',
-			message: serverMessage(raw.json) ?? 'This account may not use the assistant.'
+			message: serverMessage(json) ?? 'This account may not use the assistant.'
 		};
 	}
-	if (raw.status === 429) {
+	if (status === 429) {
 		// Two different 429s come out of this Worker: a spent daily allowance
 		// (`budget_exhausted`, with the numbers) and the admin rate limiter in
 		// front of the test call. They need different sentences.
-		const code = isRecord(raw.json) && typeof raw.json.error === 'string' ? raw.json.error : null;
+		const code = isRecord(json) && typeof json.error === 'string' ? json.error : null;
 		if (code === 'rate_limited') return { kind: 'rate-limited' };
-		return { kind: 'exhausted', ...readBudget(raw.json) };
+		return { kind: 'exhausted', ...readBudget(json) };
 	}
-	if (raw.status === 404 || raw.status === 405 || raw.status === 501) {
-		return { kind: 'unavailable', detail: serverMessage(raw.json) };
+	if (status === 404 || status === 405 || status === 501) {
+		return { kind: 'unavailable', detail: serverMessage(json) };
 	}
-	if (raw.status === 503) return { kind: 'unavailable', detail: serverMessage(raw.json) };
-	if (raw.status >= 500) return { kind: 'error', status: raw.status };
-	const message = serverMessage(raw.json);
+	if (status === 503) return { kind: 'unavailable', detail: serverMessage(json) };
+	if (status >= 500) return { kind: 'error', status };
+	const message = serverMessage(json);
 	return {
 		kind: 'refused',
-		message: message ?? `The gateway refused that request (${raw.status}).`
+		message: message ?? `The gateway refused that request (${status}).`
 	};
 }
 

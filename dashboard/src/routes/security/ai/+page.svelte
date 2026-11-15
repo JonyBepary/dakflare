@@ -1,12 +1,18 @@
 <script lang="ts">
 	/**
 	 * AI settings — which provider answers the assistant, which model routes for
-	 * it, which secret answers each of those two roles, and how much of today's
-	 * allowance is gone.
+	 * it, which secret answers each of those two roles, how much of today's
+	 * allowance is gone, and whether the agent may act without an Accept.
 	 *
 	 * One provider, two roles: chat (the reply) and System One (the routing
 	 * decision made before a reply exists). Both are configured here, and both
 	 * are deliberately quiet about secrets.
+	 *
+	 * The Autonomy card is the one control here that can end with an SMS leaving
+	 * the handset without a human pressing Accept. It is off by default, it states
+	 * the consequence in one sentence in both states, and opening a window takes
+	 * two deliberate steps: an acknowledgement, then a button that names the window
+	 * and the caps it would open. Revoking says what it stops.
 	 *
 	 * Three things this page refuses to do, because each one would be a lie the
 	 * operator cannot see:
@@ -49,11 +55,24 @@
 	} from '$lib/assistant';
 	import { session } from '$lib/session.svelte';
 	import { ROUTES } from '$lib/paths';
+	import {
+		AUTONOMY_WINDOWS,
+		openAutonomy,
+		readAgentRuntime,
+		readAutonomy,
+		revokeAutonomy,
+		windowLabel,
+		type AgentAutonomy,
+		type AgentRuntime
+	} from '$lib/agent-socket';
+	import { announce } from '$lib/announce.svelte';
+	import { formatCount } from '$lib/format';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	const CHAT_KEY_COMMAND =
@@ -135,7 +154,77 @@
 	let modelsLoading = $state(false);
 	let picked = $state<string | null>(null);
 
+	/* ------------------------------------------------------------- autonomy */
+
+	/**
+	 * The runtime and the window are two reads, and they answer two different
+	 * questions: whether an agent exists on this deployment, and whether it may act
+	 * right now. Neither is inferred from the other, which is why the block can say
+	 * "off" (a window is closed) and "off" (there is no runtime) in different words.
+	 */
+	let runtime = $state<AgentRuntime | null>(null);
+	let runtimeFailure = $state<Failure | null>(null);
+	let autonomy = $state<AgentAutonomy | null>(null);
+	let autonomyFailure = $state<Failure | null>(null);
+	let autonomyLoading = $state(true);
+	let autonomyBusy = $state<'opening' | 'revoking' | null>(null);
+	let autonomyError = $state<string | null>(null);
+
+	/** The deliberate second step: nothing is minted until this is ticked. */
+	let autonomyAck = $state(false);
+	let autonomyMinutes = $state(60);
+	/** Caps as typed. Strings, so an empty field is an empty field and not a zero. */
+	let autonomySms = $state('25');
+	let autonomyWrites = $state('5');
+
 	const allowed = $derived(session.canViewSecurity);
+
+	const runtimeOn = $derived(runtime?.enabled === true);
+	const autonomyOpen = $derived(autonomy?.enabled === true);
+
+	/**
+	 * Why the form is inert. `null` when it is not.
+	 *
+	 * A gateway with no runtime route and a gateway whose runtime is off both mean
+	 * "a window would do nothing", and they are said in different words: the first
+	 * is an older deployment, the second is a decision an operator made.
+	 */
+	const autonomyBlocked = $derived.by((): string | null => {
+		if (runtime === null) {
+			return runtimeFailure?.kind === 'unavailable'
+				? 'This gateway reports no agent runtime, so a window would have nothing to act with.'
+				: 'This page could not read the agent runtime, so it will not open a window it cannot describe.';
+		}
+		if (!runtimeOn) return 'The agent runtime is off, so a window would have nothing to act with.';
+		return null;
+	});
+
+	/** A window is a spend, not a setting: it needs the runtime and both caps. */
+	const autonomyCapsValid = $derived.by(() => {
+		const sms = autonomySms.trim();
+		const writes = autonomyWrites.trim();
+		return /^\d+$/.test(sms) && /^\d+$/.test(writes);
+	});
+
+	const canOpenWindow = $derived(
+		autonomy !== null && !autonomy.enabled && autonomyBlocked === null && autonomyBusy === null
+	);
+
+	/** A cap that is already spent is a fact worth saying before the next act fails. */
+	const smsCapSpent = $derived(
+		autonomyOpen &&
+			autonomy !== null &&
+			autonomy.caps.sms !== null &&
+			autonomy.usage.sms !== null &&
+			autonomy.usage.sms >= autonomy.caps.sms
+	);
+	const writeCapSpent = $derived(
+		autonomyOpen &&
+			autonomy !== null &&
+			autonomy.caps.writes !== null &&
+			autonomy.usage.writes !== null &&
+			autonomy.usage.writes >= autonomy.caps.writes
+	);
 
 	/** The chat values as the form would send them, which an inherited field shows. */
 	const chatModel = $derived(model.trim());
@@ -397,6 +486,92 @@
 			loadFailure = result.failure;
 		}
 		loading = false;
+		// The window is a different document from the model settings, so it is read
+		// by its own call and fails on its own terms.
+		void loadAgent();
+	}
+
+	/**
+	 * `GET /v1/admin/agent/runtime` and `GET /v1/admin/agent/autonomy`, together.
+	 *
+	 * Two independent reads: one says whether an agent exists here, the other says
+	 * whether it may act. A failure in either is reported as itself, never as "off",
+	 * because "off" is a fact only the gateway can state.
+	 */
+	async function loadAgent(): Promise<void> {
+		autonomyLoading = true;
+		autonomyError = null;
+		const [runtimeRead, autonomyRead] = await Promise.all([readAgentRuntime(), readAutonomy()]);
+
+		if (runtimeRead.status === 'ok') {
+			runtime = runtimeRead.runtime;
+			runtimeFailure = null;
+		} else {
+			runtime = null;
+			runtimeFailure = runtimeRead.failure;
+		}
+
+		if (autonomyRead.status === 'ok') {
+			autonomy = autonomyRead.autonomy;
+			autonomyFailure = null;
+		} else {
+			autonomy = null;
+			autonomyFailure = autonomyRead.failure;
+		}
+		autonomyLoading = false;
+	}
+
+	/**
+	 * Open a window. Two deliberate steps stand in front of this: the checkbox, and
+	 * a button whose label names the length of the window it opens.
+	 */
+	async function openWindow(): Promise<void> {
+		if (autonomyBusy !== null || !autonomyAck || !canOpenWindow) return;
+
+		const sms = Number(autonomySms.trim());
+		const writes = Number(autonomyWrites.trim());
+		if (!Number.isInteger(sms) || sms < 0 || !Number.isInteger(writes) || writes < 0) {
+			autonomyError = 'Both caps are whole numbers, zero or more. A window with no cap is not a cap.';
+			return;
+		}
+
+		autonomyError = null;
+		autonomyBusy = 'opening';
+		const result = await openAutonomy({
+			smsCap: sms,
+			writeCap: writes,
+			minutes: autonomyMinutes
+		});
+		autonomyBusy = null;
+
+		if (result.status === 'failed') {
+			autonomyFailure = result.failure;
+			return;
+		}
+		autonomyFailure = null;
+		autonomyAck = false;
+		// The route may answer with the window or with nothing; a read is cheaper
+		// than a page that shows a window it guessed.
+		if (result.autonomy !== null) autonomy = result.autonomy;
+		else await loadAgent();
+		announce('An autonomy window is open. The assistant can act without an Accept until it closes.');
+	}
+
+	/** Revoke, and say what that stops. */
+	async function revoke(): Promise<void> {
+		if (autonomyBusy !== null) return;
+		autonomyBusy = 'revoking';
+		const result = await revokeAutonomy();
+		autonomyBusy = null;
+
+		if (result.status === 'failed') {
+			autonomyFailure = result.failure;
+			return;
+		}
+		autonomyFailure = null;
+		if (result.autonomy !== null) autonomy = result.autonomy;
+		else await loadAgent();
+		announce('The autonomy window is revoked. Any agent session it opened is stopped.');
 	}
 
 	function applySettings(next: AiSettings): void {
@@ -592,7 +767,7 @@
 	<PageHeader
 		eyebrow="Security"
 		title="AI assistant"
-		description="Which model answers the assistant, which one decides the route before it answers, which secret answers each role, and what is left of today's allowance. No key is shown here, because none is here: they live in the Worker as secrets."
+		description="Which model answers the assistant, which one decides the route before it answers, which secret answers each role, what is left of today's allowance, and whether the agent may act on its own. No key is shown here, because none is here: they live in the Worker as secrets."
 	>
 		{#if allowed && !loading}
 			<button type="button" class="btn" onclick={() => void load()} disabled={busy}>
@@ -1187,6 +1362,249 @@
 					</p>
 				{/if}
 			</section>
+
+			<!-- Autonomy: the one control here that can end with something happening
+			     without a human pressing Accept. It says that in full, it is off by
+			     default, and opening a window takes two deliberate steps. -->
+			<section class="card span-12" aria-labelledby="autonomy-title">
+				<header class="card-head autonomy-head">
+					<h2 id="autonomy-title" class="card-title">Autonomy</h2>
+					{#if autonomy === null}
+						<span class="chip" data-tone="muted">{autonomyLoading ? 'reading' : 'not reported'}</span>
+					{:else if autonomy.enabled}
+						<span class="chip" data-tone="warn">open</span>
+					{:else}
+						<span class="chip" data-tone="muted">off</span>
+					{/if}
+					<span class="autonomy-runtime mono">
+						runtime {runtimeOn ? 'on' : runtime === null ? '—' : 'off'}{#if runtime !== null && runtime.pinnedName !== null}· {runtime.pinnedName}{/if}{#if runtime !== null && runtime.schemaVersion !== null}· schema {runtime.schemaVersion}{/if}
+					</span>
+				</header>
+
+				{#if autonomy === null}
+					{#if autonomyLoading}
+						<p class="state-line" data-tone="muted" role="status">Reading the autonomy window.</p>
+					{:else}
+						<p
+							class="state-line"
+							data-tone={autonomyFailure === null || autonomyFailure.kind === 'unavailable'
+								? 'muted'
+								: failureTone(autonomyFailure)}
+						>
+							{#if autonomyFailure === null}
+								The gateway did not report an autonomy window, so this page will not describe one.
+							{:else if autonomyFailure.kind === 'unavailable'}
+								This gateway has no autonomy route, so no window can be opened or read here. The
+								assistant still proposes, and every write still waits for an Accept.
+							{:else}
+								{failureLine(autonomyFailure)}
+							{/if}
+						</p>
+						<p class="hint autonomy-gap">
+							Nothing is opened from an unknown window: its caps and its end time are the server's to
+							state, and a page that guessed them would be describing a promise nobody made.
+						</p>
+						<button type="button" class="btn btn-sm autonomy-again" onclick={() => void loadAgent()}>
+							<Icon name="refresh" size={13} /> Read it again
+						</button>
+					{/if}
+				{:else}
+					<!-- The consequence, in one sentence, in both states. Off is not
+					     described as safe: it is described as what it is. -->
+					<p class="autonomy-consequence" data-state={autonomy.enabled ? 'open' : 'off'}>
+						{#if autonomy.enabled}
+							Open. The assistant can act without an Accept: it may send SMS and write to this
+							deployment on its own until the window closes or a cap is reached.
+						{:else}
+							Off. Opening a window lets the assistant act without an Accept: it may send SMS and
+							write to this deployment on its own until the window closes or a cap is reached.
+						{/if}
+					</p>
+
+					<dl class="autonomy-facts">
+						<div class="autonomy-fact">
+							<dt>Closes</dt>
+							<dd>
+								{#if autonomy.enabled}
+									<RelativeTime value={autonomy.expiresAt} fallback="no end time reported" />
+								{:else}
+									closed
+								{/if}
+							</dd>
+						</div>
+						<div class="autonomy-fact">
+							<dt>SMS today</dt>
+							<dd class="mono">
+								{autonomy.usage.sms ?? '—'}{#if autonomy.enabled && autonomy.caps.sms !== null}
+									/ {autonomy.caps.sms}{/if}
+							</dd>
+						</div>
+						<div class="autonomy-fact">
+							<dt>Writes today</dt>
+							<dd class="mono">
+								{autonomy.usage.writes ?? '—'}{#if autonomy.enabled && autonomy.caps.writes !== null}
+									/ {autonomy.caps.writes}{/if}
+							</dd>
+						</div>
+						<div class="autonomy-fact">
+							<dt>Tokens today</dt>
+							<dd class="mono">{formatCount(autonomy.usage.tokens)}</dd>
+						</div>
+						<div class="autonomy-fact">
+							<dt>Day</dt>
+							<dd class="mono">{autonomy.usage.day ?? 'not reported'}</dd>
+						</div>
+					</dl>
+
+					{#if smsCapSpent || writeCapSpent}
+						<p class="state-line autonomy-gap" data-tone="warn">
+							{#if smsCapSpent && writeCapSpent}
+								Both caps are spent. The assistant is back to proposing until the window closes.
+							{:else if smsCapSpent}
+								The SMS cap is spent. The assistant cannot send again until the window closes.
+							{:else}
+								The write cap is spent. The assistant cannot write again until the window closes.
+							{/if}
+						</p>
+					{/if}
+
+					{#if !autonomy.enabled}
+						<form
+							class="autonomy-form"
+							onsubmit={(event) => {
+								event.preventDefault();
+								void openWindow();
+							}}
+							novalidate
+						>
+							<div class="autonomy-fields">
+								<div class="field">
+									<label class="label" for="autonomy-window">Window</label>
+									<select
+										id="autonomy-window"
+										class="input"
+										bind:value={autonomyMinutes}
+										disabled={!canOpenWindow}
+									>
+										{#each AUTONOMY_WINDOWS as entry (entry.minutes)}
+											<option value={entry.minutes}>{entry.label}</option>
+										{/each}
+									</select>
+									<p class="hint">
+										It starts when you press the button and closes on its own. Nothing renews it.
+									</p>
+								</div>
+
+								<div class="field">
+									<label class="label" for="autonomy-sms">SMS cap</label>
+									<input
+										id="autonomy-sms"
+										class="input input-mono"
+										inputmode="numeric"
+										autocomplete="off"
+										bind:value={autonomySms}
+										disabled={!canOpenWindow}
+										aria-describedby="autonomy-sms-hint"
+									/>
+									<p class="hint" id="autonomy-sms-hint">
+										Messages the agent may send in this window.
+									</p>
+								</div>
+
+								<div class="field">
+									<label class="label" for="autonomy-writes">Write cap</label>
+									<input
+										id="autonomy-writes"
+										class="input input-mono"
+										inputmode="numeric"
+										autocomplete="off"
+										bind:value={autonomyWrites}
+										disabled={!canOpenWindow}
+										aria-describedby="autonomy-writes-hint"
+									/>
+									<p class="hint" id="autonomy-writes-hint">
+										Rules and other writes it may make in this window.
+									</p>
+								</div>
+							</div>
+
+							<!-- The second step. The first is this box; the button below does
+							     nothing until it is ticked. -->
+							<label class="check autonomy-ack" for="autonomy-ack">
+								<input
+									id="autonomy-ack"
+									type="checkbox"
+									bind:checked={autonomyAck}
+									disabled={!canOpenWindow}
+								/>
+								<span>
+									I understand that while this window is open the assistant acts on its own: it can
+									send SMS and write to this deployment without an Accept from me.
+								</span>
+							</label>
+
+							{#if autonomyBlocked !== null}
+								<p class="hint autonomy-blocked">{autonomyBlocked}</p>
+							{/if}
+							{#if autonomyError !== null}
+								<p class="field-error" role="alert">{autonomyError}</p>
+							{/if}
+							{#if autonomyFailure !== null}
+								<p class="state-line" data-tone={failureTone(autonomyFailure)}>
+									{failureLine(autonomyFailure)}
+								</p>
+							{/if}
+
+							<div class="autonomy-actions">
+								<!-- Not the page's coral action: Save above is. A control that mints
+								     a grant should not be the loudest thing on the page. -->
+								<button
+									type="submit"
+									class="btn"
+									disabled={!autonomyAck || !canOpenWindow || !autonomyCapsValid}
+									aria-busy={autonomyBusy === 'opening'}
+								>
+									{#if autonomyBusy === 'opening'}<Spinner />{:else}<Icon name="zap" size={14} />{/if}
+									{autonomyBusy === 'opening'
+										? 'Opening'
+										: `Open a ${windowLabel(autonomyMinutes)} window`}
+								</button>
+								<p class="hint" aria-live="polite">
+									{#if !autonomyCapsValid}
+										Both caps are needed: they are what bounds the window.
+									{:else}
+										This opens a {windowLabel(autonomyMinutes)} window allowing
+										<span class="mono">{autonomySms.trim()}</span> SMS and
+										<span class="mono">{autonomyWrites.trim()}</span> writes, with no Accept in between.
+									{/if}
+								</p>
+							</div>
+						</form>
+					{:else}
+						<div class="autonomy-actions autonomy-revoke">
+							<button
+								type="button"
+								class="btn btn-danger btn-sm"
+								onclick={() => void revoke()}
+								disabled={autonomyBusy !== null}
+								aria-busy={autonomyBusy === 'revoking'}
+							>
+								{#if autonomyBusy === 'revoking'}<Spinner />{:else}<Icon name="stop" size={13} />{/if}
+								{autonomyBusy === 'revoking' ? 'Revoking' : 'Revoke the window'}
+							</button>
+							<p class="hint">
+								Revoke stops the window now and closes any agent session it opened. What the agent
+								already did stays done; nothing is undone.
+							</p>
+						</div>
+						{#if autonomyFailure !== null}
+							<p class="state-line" data-tone={failureTone(autonomyFailure)}>
+								{failureLine(autonomyFailure)}
+							</p>
+						{/if}
+					{/if}
+				{/if}
+			</section>
 		</div>
 	{/if}
 </div>
@@ -1731,9 +2149,138 @@
 		font-size: var(--df-p-text-xs);
 	}
 
+	/* ---------- autonomy ---------- */
+
+	/* The runtime's state is a fact about the deployment, so it sits on the card's
+	   own head, quiet, and wraps under the title on a phone. */
+	.autonomy-head {
+		flex-wrap: wrap;
+	}
+
+	.autonomy-runtime {
+		margin-left: auto;
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.02em;
+		overflow-wrap: anywhere;
+	}
+
+	/* The sentence that must never be softened: what an open window means. */
+	.autonomy-consequence {
+		max-width: 74ch;
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-base);
+		line-height: 1.55;
+	}
+
+	.autonomy-consequence[data-state='open'] {
+		color: var(--df-state-warn-ink);
+	}
+
+	/* The window, the caps and today's count, as rows: a readout, not a form. */
+	.autonomy-facts {
+		display: flex;
+		flex-direction: column;
+		max-width: 620px;
+		margin: var(--df-p-space-3) 0 0;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	.autonomy-fact {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		min-width: 0;
+		padding: 6px 10px;
+	}
+
+	.autonomy-fact + .autonomy-fact {
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.autonomy-fact dt {
+		flex: none;
+		min-width: 92px;
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+	}
+
+	.autonomy-fact dd {
+		min-width: 0;
+		margin: 0;
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
+		overflow-wrap: anywhere;
+	}
+
+	.autonomy-form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-3);
+		max-width: 620px;
+		margin-top: var(--df-p-space-4);
+		padding-top: var(--df-p-space-3);
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.autonomy-fields {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+		gap: var(--df-p-space-3) var(--df-p-space-4);
+	}
+
+	/* The deliberate step reads as one sentence in a box, not as a checkbox with a
+	   label: it is the thing being agreed to. */
+	.autonomy-ack {
+		max-width: 72ch;
+		padding: 9px 11px;
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+	}
+
+	.autonomy-blocked {
+		color: var(--df-state-warn-ink);
+	}
+
+	.autonomy-actions {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+	}
+
+	.autonomy-actions .hint {
+		max-width: 70ch;
+	}
+
+	.autonomy-revoke {
+		margin-top: var(--df-p-space-4);
+		padding-top: var(--df-p-space-3);
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.autonomy-gap {
+		margin-top: var(--df-p-space-3);
+		max-width: 74ch;
+	}
+
+	.autonomy-again {
+		margin-top: var(--df-p-space-3);
+	}
+
 	@media (max-width: 720px) {
 		.budget-value {
 			font-size: 26px;
+		}
+
+		.autonomy-runtime {
+			margin-left: 0;
+			flex-basis: 100%;
 		}
 	}
 </style>
