@@ -12,6 +12,7 @@
 	import { consoleCounts } from '$lib/console-counts.svelte';
 	import Brand from '$lib/components/Brand.svelte';
 	import AlertBanner from '$lib/components/AlertBanner.svelte';
+	import Assistant from '$lib/components/Assistant.svelte';
 	import Icon, { type IconName } from '$lib/components/Icon.svelte';
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -26,6 +27,8 @@
 		label: string;
 		icon: IconName;
 		match?: string[];
+		/** Only this exact path is current. `match` is a prefix list by default. */
+		exact?: boolean;
 		count?: CountKey;
 		countWord?: string;
 	};
@@ -66,7 +69,10 @@
 					countWord: 'waiting'
 				},
 				{ href: ROUTES.audit, label: 'Audit log', icon: 'history' },
-				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield' }
+				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield', exact: true },
+				// Sits under Sign-in because a model key is a credential: the same
+				// section answers "who can spend this gateway".
+				{ href: ROUTES.ai, label: 'AI assistant', icon: 'sparkles' }
 			]
 		}
 	];
@@ -101,6 +107,7 @@
 	);
 
 	function isActive(item: NavItem): boolean {
+		if (item.exact === true) return page.url.pathname === item.href;
 		if (item.href === ROUTES.overview) {
 			return (
 				page.url.pathname === item.href ||
@@ -390,6 +397,10 @@
 			</main>
 		</div>
 	</div>
+
+	<!-- One floating control, outside the scroll: the panel is a sibling of the
+	     shell so its fixed position is measured against the window, not a card. -->
+	<Assistant />
 {/if}
 
 <style>
@@ -444,6 +455,15 @@
 
 	#main:focus {
 		outline: none;
+	}
+
+	/* The assistant's button is fixed to the bottom-right corner, over the page.
+	   The content column keeps a floor taller than that button, so the last row
+	   of every page ends above it — at 390px as much as at 1280px. Without this
+	   the button covers the final row of a card, which is where a table's last
+	   action lives. */
+	.main {
+		padding-bottom: calc(var(--df-p-space-8) + 52px);
 	}
 
 	/* The role word reads as a value, not as a sentence: mono, lower case,

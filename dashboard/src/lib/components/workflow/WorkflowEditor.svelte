@@ -40,11 +40,16 @@
 	import UnsupportedNode from '$lib/components/workflow/UnsupportedNode.svelte';
 	import WebhookNode from '$lib/components/workflow/WebhookNode.svelte';
 	import StepFinder, { type AgentProposal } from '$lib/components/workflow/StepFinder.svelte';
-	import { visibleTitle } from '$lib/components/workflow/agent-patch';
-import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/components/workflow/agent-patch';
+	import {
+		visibleTitle,
+		patchFitsFlow,
+		type PatchEntry,
+		type PatchProblems
+	} from '$lib/components/workflow/agent-patch';
 	import { percent, type AgentJudgement } from '$lib/components/workflow/agent';
 	import { WORKFLOW_GHOST, type GhostKind, type WorkflowGhostUi } from '$lib/components/workflow/ghost';
 	import { registerWorkflowTools } from '$lib/components/workflow/webmcp';
+	import { registerWorkflowPatchSink } from '$lib/assistant';
 
 	import { ApiError, describeError, getWorkflow, readWorkflowIssues, saveWorkflow } from '$lib/api';
 	import { ROUTES } from '$lib/paths';
@@ -914,7 +919,7 @@ import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/compone
 		// WebMCP is an enhancement: with no API in this browser the call registers
 		// nothing, and the cleanup that comes back is a no-op. The tools read this
 		// editor through closures, so they always describe the flow on screen.
-		return registerWorkflowTools({
+		const unregisterTools = registerWorkflowTools({
 			getFlowAst() {
 				return {
 					flow_id: workflowId,
@@ -927,6 +932,28 @@ import { patchFitsFlow, type PatchEntry, type PatchProblems } from '$lib/compone
 			},
 			stagePatch: stageExternalPatch
 		});
+
+		// The console assistant lives in the shell and outlives this page, so it can
+		// only hand a patch over while an editor is mounted. This is that handover;
+		// the patch still waits for the banner's own Accept. `stageExternalPatch`
+		// answers with counts the WebMCP tool uses; the assistant needs the verdict.
+		const releasePatchSink = registerWorkflowPatchSink((input) => {
+			// A patch proposed for another flow is refused here rather than staged:
+			// the structural check alone cannot tell two similar flows apart.
+			if (typeof input.flowId === 'string' && input.flowId !== workflowId) {
+				return {
+					ok: false,
+					message: `That patch was written for flow ${input.flowId}, and this editor has ${workflowId} open.`
+				};
+			}
+			const result = stageExternalPatch(input);
+			return { ok: result.ok, message: result.message };
+		});
+
+		return () => {
+			releasePatchSink();
+			unregisterTools();
+		};
 	});
 
 	/** A fresh draft: the new-workflow state, also used when the address loses its id. */

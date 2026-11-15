@@ -32,7 +32,10 @@ export const ROUTES = {
 	approvals: resolve('/approvals'),
 	// Owner/admin only as well: the account's factors are managed next to the
 	// log that records their use.
-	security: resolve('/security')
+	security: resolve('/security'),
+	// The AI connector's settings live under Security: they decide who can spend
+	// the operator's model budget, which is a security question, not a fleet one.
+	ai: resolve('/security/ai')
 } as const;
 
 export const BASE = ROUTES.overview.replace(/\/$/, '');

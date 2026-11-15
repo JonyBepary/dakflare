@@ -18,7 +18,7 @@
 		type PasswordFailure,
 		type PasswordMode
 	} from '$lib/password';
-	import { ROUTES } from '$lib/paths';
+	import { ROUTES, BASE } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import {
 		beginEnrolment,
@@ -195,6 +195,14 @@
 		probe?.kind === 'unavailable' ? unsupported[probe.reason] : null
 	);
 	const probeError = $derived(probe?.kind === 'error' ? probe.message : null);
+
+	/**
+	 * The assistant's settings are a deployment fact, not an account factor: they
+	 * answer for every session that can see this screen, including the admin
+	 * token, which has no account at all. The route lives beside this page rather
+	 * than in `ROUTES`, which is out of scope for this pass.
+	 */
+	const aiHref = `${BASE}/security/ai`;
 
 	onMount(() => {
 		void load();
@@ -653,6 +661,28 @@
 			</button>
 		{/if}
 	</PageHeader>
+
+	<!-- The assistant is the one setting here that is not a sign-in factor, and it
+	     is the one an owner needs when the console says 503. It gets its own page
+	     so the factor list keeps its numbering; this row is the way in. -->
+	{#if session.canViewSecurity}
+		<section class="card ai-entry" aria-labelledby="ai-entry-title">
+			<div class="ai-entry-copy">
+				<span class="step-mark mono" aria-hidden="true">AI</span>
+				<div>
+					<h2 id="ai-entry-title">Assistant and model</h2>
+					<p class="ai-entry-lede">
+						Which provider answers the console's assistant, whether this gateway holds a chat key,
+						and what is left of today's allowance. The key itself is a Worker secret, so it is a
+						deployment step rather than a field.
+					</p>
+				</div>
+			</div>
+			<a class="btn btn-sm" href={aiHref}>
+				AI settings <Icon name="arrow-up-right" size={13} />
+			</a>
+		</section>
+	{/if}
 
 	{#if !allowed}
 		<section class="card">
@@ -1624,6 +1654,38 @@
 <style>
 	.page-note {
 		margin-bottom: var(--s-4);
+	}
+
+	/* A way in, not a factor: one row above the numbered cards, sharing their
+	   left edge through the same mono mark. */
+	.ai-entry {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--s-4);
+		flex-wrap: wrap;
+		margin-bottom: var(--s-4);
+	}
+
+	.ai-entry-copy {
+		display: flex;
+		gap: var(--s-3);
+		min-width: 0;
+	}
+
+	.ai-entry h2 {
+		font-family: var(--df-font-display);
+		font-size: var(--text-md);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.ai-entry-lede {
+		margin-top: 3px;
+		max-width: 62ch;
+		color: var(--ink-3);
+		font-size: var(--text-sm);
+		line-height: 1.5;
 	}
 
 	.factor-card + .factor-card {
