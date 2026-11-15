@@ -191,6 +191,70 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
       },
     },
     {
+      name: "message_timeline",
+      description:
+        "Read one conversation with one peer, oldest first, so a thread can be explained from its messages rather than guessed. Returns {peer, count, messages}, where each message has its ISO arrival time, direction, a body preview capped at 120 characters, reply state and channel. Filters by the exact peer and an optional recent-hours window; limit is 1-50 (default 20). Bodies are never logged.",
+      kind: "read",
+      parameters: {
+        type: "object",
+        required: ["peer"],
+        properties: {
+          peer: { type: "string", description: "Exact peer number or handle; required" },
+          limit: { type: "number", description: "1-50, default 20; oldest rows in the window" },
+          since_hours: {
+            type: "number",
+            description: "Only messages newer than this many hours (max 720)",
+          },
+        },
+        additionalProperties: false,
+      },
+      async execute(input, ctx) {
+        const peer = stringField(input, "peer");
+        if (peer === "") {
+          return { ok: false, reason: "bad_request", message: "peer is required" };
+        }
+        const clauses = ["peer = ?"];
+        const binds: unknown[] = [peer];
+        const hours = numberField(input, "since_hours");
+        if (hours !== null && hours > 0) {
+          clauses.push("received_at >= ?");
+          binds.push(Date.now() - Math.min(24 * 30, hours) * 3_600_000);
+        }
+        const limitRaw = numberField(input, "limit");
+        const limit = Math.max(1, Math.min(50, limitRaw === null ? 20 : Math.trunc(limitRaw)));
+
+        const rows = await ctx.env.DB.prepare(
+          `SELECT peer, direction, body, received_at, reply_state, channel
+             FROM messages
+            WHERE ${clauses.join(" AND ")}
+            ORDER BY received_at ASC
+            LIMIT ?`
+        )
+          .bind(...binds, limit)
+          .all<{
+            peer: string;
+            direction: string;
+            body: string;
+            received_at: number;
+            reply_state: string | null;
+            channel: string | null;
+          }>();
+
+        const messages = (rows.results ?? []).map((row) => ({
+          at: new Date(Number(row.received_at)).toISOString(),
+          direction: row.direction,
+          preview: row.body.length > 120 ? row.body.slice(0, 120) : row.body,
+          state: row.reply_state,
+          channel: row.channel,
+        }));
+        return {
+          ok: true,
+          output: JSON.stringify({ peer, count: messages.length, messages }),
+          data: { peer, count: messages.length },
+        };
+      },
+    },
+    {
       name: "diagnose",
       description:
         "Diagnose one failure into a root-cause card. Accepts a message id; the message body is never echoed.",
@@ -236,6 +300,68 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
           return { ok: false, reason: "bad_request", message: "flow_id is required" };
         }
         return fromResponse(await handleWorkflowGet(ctx.env, flowId));
+      },
+    },
+    {
+      name: "flow_runs",
+      description:
+        "Read recent workflow runs, newest first, to put history beside diagnose and flow_ast. Returns {count, runs}. This schema has no run-id, status, started_at/finished_at, failed_step or error column: a run is keyed by (device_id, local_id, flow_id, flow_version), its status is `outcome`, and its time is `created_at` (ISO in the result). Optional flow_id and status filters; status matches the `outcome` column. Limit is 1-20 (default 10).",
+      kind: "read",
+      parameters: {
+        type: "object",
+        properties: {
+          flow_id: { type: "string", description: "Only runs of this workflow" },
+          status: { type: "string", description: "Only runs whose outcome equals this value" },
+          limit: { type: "number", description: "1-20, default 10" },
+        },
+        additionalProperties: false,
+      },
+      async execute(input, ctx) {
+        const clauses: string[] = [];
+        const binds: unknown[] = [];
+        const flowId = stringField(input, "flow_id");
+        if (flowId !== "") {
+          clauses.push("flow_id = ?");
+          binds.push(flowId);
+        }
+        const status = stringField(input, "status");
+        if (status !== "") {
+          clauses.push("outcome = ?");
+          binds.push(status);
+        }
+        const limitRaw = numberField(input, "limit");
+        const limit = Math.max(1, Math.min(20, limitRaw === null ? 10 : Math.trunc(limitRaw)));
+        const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+
+        const rows = await ctx.env.DB.prepare(
+          `SELECT device_id, local_id, flow_id, flow_version, outcome, created_at
+             FROM flow_runs ${where}
+            ORDER BY created_at DESC
+            LIMIT ?`
+        )
+          .bind(...binds, limit)
+          .all<{
+            device_id: string;
+            local_id: string;
+            flow_id: string;
+            flow_version: number;
+            outcome: string;
+            created_at: number;
+          }>();
+
+        const runs = (rows.results ?? []).map((row) => ({
+          device_id: row.device_id,
+          local_id: row.local_id,
+          flow_id: row.flow_id,
+          flow_version: Number(row.flow_version),
+          outcome: row.outcome,
+          created_at: new Date(Number(row.created_at)).toISOString(),
+        }));
+        return {
+          ok: true,
+          output: JSON.stringify({ count: runs.length, runs }),
+          data: { count: runs.length },
+        };
       },
     },
   ];
