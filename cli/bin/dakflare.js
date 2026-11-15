@@ -264,6 +264,25 @@ const ERROR_RULES = {
 
   network: { exit: 75, category: 'temporary', retryable: true },
 
+  // The console assistant's provider is a precondition, not a network fault:
+  // without a key or a binding no request can succeed, and repeating it changes
+  // nothing until the operator stores the secret. The budget is a conflict: the
+  // request was understood and refused, and it resets at UTC midnight.
+  ai_key_missing: {
+    exit: 6,
+    category: 'precondition',
+    remediation: aiKeyCommand(),
+    fix: 'store the AI provider key as a Worker secret, then retry',
+  },
+  ai_precondition: { exit: 6, category: 'precondition' },
+  ai_unavailable: { exit: 75, category: 'temporary', retryable: true },
+  budget_exhausted: {
+    exit: 5,
+    category: 'conflict',
+    fix: "the daily AI token budget is spent; it resets at UTC midnight",
+  },
+  bad_request: { exit: 2, category: 'usage' },
+
   internal: { exit: 1, category: 'internal' },
   bad_response: { exit: 1, category: 'internal' },
   cancelled: { exit: 1, category: 'internal' },
@@ -694,6 +713,38 @@ const COMMAND_SPECS = {
     },
     examples: ['dakflare key fingerprint', 'dakflare key fingerprint --json'],
   },
+  ai: {
+    summary: 'Read or change the console AI provider, and probe it (providers|configure|test)',
+    effect: 'mutating',
+    usage:
+      'dakflare ai providers [--json] | ai configure --provider <workers-ai|openai-compatible> [--model <id>] [--base-url <url>] [--dry-run] [--json] | ai test [--json]',
+    flags: {
+      provider: { type: 'string', note: 'configure: workers-ai or openai-compatible' },
+      model: {
+        type: 'string',
+        note: 'configure: model id; omitted uses the provider default',
+      },
+      'base-url': {
+        type: 'string',
+        note: 'configure: required for openai-compatible; https, or http on localhost',
+      },
+      'dry-run': { type: 'boolean', note: 'configure: print the request; change nothing' },
+    },
+    response: {
+      provider: 'workers-ai|openai-compatible',
+      model: 'the model id',
+      base_url: 'https URL, or null for workers-ai',
+      api_key_configured: 'whether AI_CHAT_API_KEY is set on the Worker',
+      budget: '{day, used, limit}',
+    },
+    examples: [
+      'dakflare ai providers',
+      'dakflare ai providers --agent',
+      'dakflare ai configure --provider workers-ai',
+      'dakflare ai configure --provider openai-compatible --model gpt-4o-mini --base-url https://api.openai.com/v1 --dry-run',
+      'dakflare ai test --json',
+    ],
+  },
 };
 
 /**
@@ -844,6 +895,10 @@ const VALUE_FLAGS = new Set([
   'totp',
   'diff-summary',
   'corpus-report',
+  'provider',
+  'model',
+  'base-url',
+  'api-key',
 ]);
 
 function parseArgv(argv) {
@@ -4480,9 +4535,9 @@ function synthesisRequest(flags, intent, flowId) {
 }
 
 /** Print the request `--dry-run` would have sent, and send nothing. */
-function printDryRun(pathname, body) {
+function printDryRun(pathname, body, method = 'POST') {
   out(muted('  --dry-run: nothing was sent'));
-  out(`  POST ${pathname}`);
+  out(`  ${method} ${pathname}`);
   out(
     JSON.stringify(body, null, 2)
       .split('\n')
@@ -6084,6 +6139,289 @@ async function commandAudit(argv) {
   }
 }
 
+/* ───────────────────────────── AI assistant ───────────────────────────── */
+
+/**
+ * The Worker's own defaults, copied so a configure without --model can still
+ * send the non-empty model the settings route requires. Keep these in step with
+ * `worker/src/lib/ai/settings.ts`; a model id is not something to guess.
+ */
+const AI_DEFAULT_MODELS = {
+  'workers-ai': '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  'openai-compatible': 'gpt-4o-mini',
+};
+
+const AI_PROVIDERS = Object.keys(AI_DEFAULT_MODELS);
+
+/**
+ * The worker name a secret write needs. The CLI does not deploy, so it only
+ * knows one when the operator names it; otherwise the documented default is
+ * the honest answer.
+ */
+function aiWorkerName() {
+  const configured = process.env.DAKFLARE_WORKER_NAME;
+  if (typeof configured === 'string' && configured.trim() !== '') return configured.trim();
+  return 'dakflare-worker';
+}
+
+function aiKeyCommand() {
+  return `wrangler secret put AI_CHAT_API_KEY --name ${aiWorkerName()}`;
+}
+
+function aiKeyMissingMessage() {
+  return `AI_CHAT_API_KEY is not configured on the Worker. Set it with: ${aiKeyCommand()}`;
+}
+
+/** The settings view, in the CLI's snake_case vocabulary. */
+function aiSettingsView(data) {
+  const budget = data?.budget ?? {};
+  return {
+    provider: data?.provider ?? null,
+    model: data?.model ?? null,
+    base_url: data?.baseUrl ?? null,
+    api_key_configured: data?.apiKeyConfigured === true,
+    ...(typeof data?.hint === 'string' ? { hint: data.hint } : {}),
+    budget: {
+      day: budget.day ?? null,
+      used: Number(budget.used ?? 0),
+      limit: Number(budget.limit ?? 0),
+    },
+  };
+}
+
+/** True when the active provider cannot answer until the secret exists. */
+function aiNeedsKey(view) {
+  return view.provider === 'openai-compatible' && view.api_key_configured !== true;
+}
+
+function printAiSettings(view) {
+  out(`  provider     ${view.provider ?? 'unknown'}`);
+  out(`  model        ${view.model ?? 'unknown'}`);
+  out(`  base_url     ${view.base_url ?? '—'}`);
+  out(`  api key      ${view.api_key_configured ? 'configured' : 'not configured'}`);
+  out(
+    `  budget       ${view.budget.used}/${view.budget.limit} tokens` +
+      (view.budget.day ? ` (${view.budget.day})` : '')
+  );
+  if (typeof view.hint === 'string' && view.hint !== '') out(muted(`  hint         ${view.hint}`));
+}
+
+/** Validate a base URL the same way `worker/src/lib/ai/settings.ts` does. */
+function aiBaseUrl(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw usage('--base-url is required for openai-compatible');
+  }
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    throw usage('--base-url must be an absolute URL');
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw usage('--base-url must not carry credentials');
+  }
+  const loopback =
+    parsed.hostname === 'localhost' ||
+    parsed.hostname === '127.0.0.1' ||
+    parsed.hostname === '[::1]' ||
+    parsed.hostname === '::1';
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw usage('--base-url must be https, or http on localhost');
+  }
+  if (parsed.search !== '' || parsed.hash !== '') {
+    throw usage('--base-url must not carry a query or fragment');
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+/**
+ * Map one AI route refusal onto the CLI's exit codes. The status alone is not
+ * enough: a 503 is a precondition when the key or binding is missing and a
+ * temporary provider failure otherwise, and those must not read the same.
+ */
+function aiFailure(what, result) {
+  const code = apiErrorBody(result.data, result.status);
+  const message =
+    typeof result.data?.message === 'string'
+      ? result.data.message
+      : `${what} failed: ${code} (HTTP ${result.status})`;
+
+  if (result.status === 401 || result.status === 403) {
+    return new CliError(message, 4, {
+      error: result.status === 403 ? 'forbidden' : 'unauthorized',
+      status: result.status,
+    });
+  }
+  if (result.status === 429 && code === 'budget_exhausted') {
+    const used = Number(result.data?.used ?? 0);
+    const limit = Number(result.data?.limit ?? 0);
+    return new CliError(
+      `the daily AI token budget is exhausted: ${used}/${limit}. It resets at UTC midnight.`,
+      5,
+      { error: 'budget_exhausted', used, limit },
+    );
+  }
+  if (result.status === 503 && code === 'ai_unavailable') {
+    const reason = typeof result.data?.reason === 'string' ? result.data.reason : 'provider_unavailable';
+    if (reason === 'missing_key') {
+      return new CliError(aiKeyMissingMessage(), 6, {
+        error: 'ai_key_missing',
+        reason,
+        remediation: aiKeyCommand(),
+      });
+    }
+    if (reason === 'missing_binding' || reason === 'missing_base_url' || reason === 'unsupported_provider') {
+      return new CliError(message, 6, { error: 'ai_precondition', reason });
+    }
+    return new CliError(message, 75, { error: 'ai_unavailable', reason, status: result.status });
+  }
+  if (result.status === 400) {
+    return new CliError(message, 2, { error: 'bad_request', status: 400 });
+  }
+  return requestFailure(what, result);
+}
+
+/** `dakflare ai providers` — what is configured, and what the budget has left. */
+async function commandAiProviders(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('ai');
+  assertCommandFlags(flags, 'ai');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'GET', '/v1/admin/ai/settings');
+  if (result.status !== 200) throw aiFailure('read AI settings', result);
+  const view = aiSettingsView(result.data);
+
+  if (MODE.json) emitJson({ ok: true, ...view }, MODE);
+  else {
+    out('AI settings');
+    printAiSettings(view);
+  }
+
+  if (aiNeedsKey(view)) {
+    err(aiKeyMissingMessage());
+    return exitCodeFor('ai_key_missing');
+  }
+  return 0;
+}
+
+/** `dakflare ai configure` — write the singleton settings row. */
+async function commandAiConfigure(argv) {
+  const { flags } = parseArgv(argv);
+
+  // Refused before the flag contract: the value must never reach argv, a shell
+  // history or this process's argument list.
+  if (flags['api-key'] !== undefined) {
+    throw usage(
+      '--api-key is refused: the key belongs in a Worker secret, never on the command line. ' +
+        `Set it with: ${aiKeyCommand()}`,
+    );
+  }
+  if (flags.help) return printHelp('ai');
+  assertCommandFlags(flags, 'ai');
+
+  const provider = stringFlag(flags, 'provider');
+  if (!provider) throw usage('--provider is required (workers-ai or openai-compatible)');
+  if (!AI_PROVIDERS.includes(provider)) {
+    throw usage(`--provider must be one of ${AI_PROVIDERS.join(', ')}`);
+  }
+
+  const requestedModel = stringFlag(flags, 'model');
+  const model = requestedModel ?? AI_DEFAULT_MODELS[provider];
+  if (model.trim() === '') throw usage('--model needs a value');
+  if (model.length > 200) throw usage('--model must be at most 200 characters');
+
+  const rawBaseUrl = stringFlag(flags, 'base-url');
+  let baseUrl = null;
+  if (provider === 'openai-compatible') {
+    baseUrl = aiBaseUrl(rawBaseUrl);
+  } else if (rawBaseUrl !== undefined) {
+    throw usage('--base-url is not used by workers-ai');
+  }
+
+  const body = { provider, model, baseUrl };
+  const pathname = '/v1/admin/ai/settings';
+  const method = 'PUT';
+
+  if (flags['dry-run'] === true) {
+    if (MODE.json) {
+      emitJson(
+        { ok: true, dry_run: true, request: { method, path: pathname, body } },
+        MODE,
+      );
+      return 0;
+    }
+    printDryRun(pathname, body, method);
+    return 0;
+  }
+
+  const cfg = requireConfig();
+  const result = await api(cfg, method, pathname, body);
+  if (result.status !== 200) throw aiFailure('write AI settings', result);
+  const view = aiSettingsView(result.data);
+
+  if (MODE.json) emitJson({ ok: true, ...view }, MODE);
+  else {
+    out('AI settings updated');
+    printAiSettings(view);
+  }
+
+  if (aiNeedsKey(view)) {
+    err(aiKeyMissingMessage());
+    return exitCodeFor('ai_key_missing');
+  }
+  return 0;
+}
+
+/** `dakflare ai test` — one tiny provider call. */
+async function commandAiTest(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('ai');
+  assertCommandFlags(flags, 'ai');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'POST', '/v1/admin/ai/test');
+  if (result.status !== 200) throw aiFailure('test the AI provider', result);
+
+  const view = {
+    ok: true,
+    provider: result.data?.provider ?? null,
+    model: result.data?.model ?? null,
+    took_ms: Number(result.data?.took_ms ?? 0),
+    sample: typeof result.data?.sample === 'string' ? result.data.sample : null,
+  };
+
+  if (MODE.json) {
+    emitJson(view, MODE);
+    return 0;
+  }
+  out(`${ok('AI test ok')} (${view.provider ?? 'unknown'})`);
+  out(`  model        ${view.model ?? 'unknown'}`);
+  out(`  took         ${view.took_ms} ms`);
+  if (view.sample !== null) out(`  sample       ${JSON.stringify(view.sample)}`);
+  return 0;
+}
+
+/** Subcommand dispatch, mirroring `auth`, `flow` and `rules`. */
+async function commandAi(argv) {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === '--help' || sub === '-h') return printHelp('ai');
+  // Refuse the key no matter where it appears, before any subcommand parses it.
+  const { flags: aiFlags } = parseArgv(argv);
+  if (aiFlags['api-key'] !== undefined) {
+    throw usage(
+      '--api-key is refused: the key belongs in a Worker secret, never on the command line. ' +
+        `Set it with: ${aiKeyCommand()}`,
+    );
+  }
+  if (sub === 'providers') return commandAiProviders(rest);
+  if (sub === 'configure') return commandAiConfigure(rest);
+  if (sub === 'test') return commandAiTest(rest);
+  err(`dakflare: unknown ai subcommand "${sub}"`);
+  err('try `dakflare ai --help`');
+  return 2;
+}
+
 /* ───────────────────────────── key fingerprint ───────────────────────────── */
 
 function expandHome(value) {
@@ -6214,6 +6552,7 @@ Usage: dakflare <command> [options]
   examples      real invocations for one command
   audit         tail the audit log (phase 2; says so when the endpoint is absent)
   key           signing-key helpers: \`key fingerprint\`
+  ai            \`ai providers\`, \`ai configure\` and \`ai test\` for the console assistant
   ask           ask for a flow patch; prints the score and the ag1_ handle
   fix           the root-cause card for one flow failure
   flow          \`flow test\` (local corpus) and \`flow apply\` (spend a handle)
@@ -6574,6 +6913,33 @@ ${KEYSTORE_PROPS}; it is never printed.
   --alias <name>   key alias (default: dakflare)
 
 Requires keytool (JDK). This only reads the key; it never changes it.`,
+
+  ai: `Usage: dakflare ai <providers|configure|test> [options]
+
+  providers                       read the active provider, model, base URL,
+                                  whether AI_CHAT_API_KEY is set, and today's budget
+  configure --provider <kind> [--model <id>] [--base-url <url>] [--dry-run]
+                                  write the singleton AI settings row
+  test                            one tiny provider call; prints ok, provider,
+                                  model, took_ms and a sample
+
+Providers: workers-ai (the Worker's AI binding, no key) and
+openai-compatible (any /chat/completions endpoint, reached with AI_CHAT_API_KEY).
+
+--provider is required. --model is optional and falls back to the provider's
+default. --base-url is required for openai-compatible and must be https, or
+http on localhost; it is refused for workers-ai. --dry-run prints the PUT
+request and sends nothing.
+
+The API key is never accepted here: it belongs in a Worker secret, set with
+\`wrangler secret put AI_CHAT_API_KEY --name <worker>\` (the CLI names
+dakflare-worker unless DAKFLARE_WORKER_NAME says otherwise). If that secret is
+missing for openai-compatible, the command prints that exact remediation and
+exits 6, because it is a precondition rather than a network failure.
+
+Exit: 0 ok · 2 usage or refused --api-key · 4 permission · 5 daily budget
+exhausted (prints used/limit) · 6 missing key or binding · 75 provider
+unreachable`,
 };
 
 function printHelp(topic = 'root') {
@@ -6610,6 +6976,7 @@ const COMMANDS = {
   dlq: commandDlq,
   ws: commandWs,
   key: commandKey,
+  ai: commandAi,
 };
 
 async function main() {
