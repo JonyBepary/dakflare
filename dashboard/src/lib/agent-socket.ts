@@ -13,19 +13,26 @@
  *   POST /v1/admin/agent/ticket   201 { ticket, expires_at }   single use, 60 s
  *   wss://<host>/agents/assistant/assistant?ticket=<ticket>
  *     → { type:"ready",  name }
- *     → { type:"token",  text }                     while the model writes
+ *     → { type:"turn",   streamId, idempotencyKey, conversationId }  first frame of a turn
+ *     → { type:"status", phase }     "thinking" | "tool:<name>" | "answering"
+ *     → { type:"token",  text }                     only from a server that streams text
  *     → { type:"tool",   name, ok, output }         after a tool runs
  *     → { type:"calls",  calls:[{tool, ok, reason?}] }   when a turn used tools
  *     → { type:"answer", text, calls }              at the end
  *     → { type:"error",  reason, message }          when the turn was refused
  *     ← { type:"ask", message, idempotencyKey }
+ *     ← { type:"resume", streamId, from }           replay from a sequence, then tail
+ *
+ *   GET /agents/assistant/assistant/streams/<streamId>?from=<seq>
+ *     text/event-stream: one frame per `data:` line with its sequence in `id:`,
+ *     ending in `event: done` (or `event: timeout` while the turn is still live)
  *
  *   GET    /v1/admin/agent/runtime   { enabled, schemaVersion, sessions, pinnedName }
  *   GET    /v1/admin/agent/autonomy  { enabled, expiresAt, caps:{sms,writes}, usage:{day,tokens,writes,sms} }
  *   POST   /v1/admin/agent/autonomy  { smsCap?, writeCap?, minutes? }
  *   DELETE /v1/admin/agent/autonomy  revoke, and stop every open session
  *
- * Five things shape the code below, because each one is a place a console can
+ * Six things shape the code below, because each one is a place a console can
  * lie about what it knows:
  *
  *  1. **The ticket is where a refusal is diagnosable.** A browser hides the HTTP
@@ -44,13 +51,27 @@
  *  4. **A reconnect re-fetches a ticket.** A ticket is single use and lives 60 s;
  *     reconnecting with the old one is a guaranteed refusal. Retries are
  *     exponential, capped, and stop dead on a terminal refusal.
- *  5. **Nothing throws.** Every entry point answers with an outcome, for the same
+ *  5. **A dropped turn is asked for, not given up on.** Every frame of a turn is
+ *     in a durable stream, so a close mid-turn is a lost *presentation*, not a
+ *     lost answer. The panel sends `resume` with the last sequence it applied;
+ *     when the socket will not come back, `readTurnStream` reads the same stream
+ *     over SSE. Both paths feed `applyAgentFrame`, and its sequence rule is what
+ *     stops the answer being rendered twice.
+ *  6. **Nothing throws.** Every entry point answers with an outcome, for the same
  *     reason `assistant.ts` does: a failure is something the panel prints, not an
  *     exception that blanks it.
  *
  * What this module does not do: it does not judge a turn. Frames are passed to
  * `applyAgentFrame`, which is pure, so the panel's rendering is decided by data
  * the gateway sent and not by the order a screenshot happened to catch.
+ *
+ * Sequences. The stream's own numbering is what `from` addresses, and the `turn`
+ * frame is the turn's first streamed frame, so a client that counts turn frames
+ * from it addresses the same sequence the server stores. A frame that carries
+ * `seq` (or an SSE `id:`) is trusted over the count. Terminal frames are the
+ * exception to the sequence rule: an `answer` is refused on the turn's state,
+ * never on a number, because a numbering mismatch must not be able to drop — or
+ * double — the one frame the operator is waiting for.
  */
 
 import { failureFromAnswer, type Failure, type Proposal } from './assistant';
@@ -64,10 +85,16 @@ const AUTONOMY_PATH = '/v1/admin/agent/autonomy';
 /** The object name is pinned server-side; the path repeats it and chooses nothing. */
 const SOCKET_PATH = '/agents/assistant/assistant';
 
+/** The same turn, read over HTTP when the socket will not stay up. */
+const STREAM_PATH = `${SOCKET_PATH}/streams`;
+
 /** The Worker's routing marker for cookie-authenticated calls. Not a secret. */
 const ADMIN_HEADER = 'X-Admin-Session';
 
 const REQUEST_TIMEOUT_MS = 15_000;
+
+/** A stream read may span a slow turn; it is not a request that answers once. */
+const STREAM_TIMEOUT_MS = 60_000;
 
 /** The panel's field stops at 500 characters; the contract names no larger limit. */
 export const MAX_QUESTION = 500;
@@ -86,14 +113,31 @@ export interface AgentToolCall {
  * One server frame. `tool.output` is absent on purpose: see the header. `answer`
  * carries `proposals` only when the gateway sends them — the stage-A contract
  * names none, and an answer without them is a complete answer.
+ *
+ * `seq` is the frame's position in the turn's durable stream, when the server
+ * states it. It is optional because the socket contract does not require it and
+ * a count from the `turn` frame addresses the same stream.
  */
-export type AgentFrame =
-	| { type: 'ready'; name: string }
-	| { type: 'token'; text: string }
-	| { type: 'tool'; name: string; ok: boolean }
-	| { type: 'answer'; text: string; calls: number; proposals: Proposal[] }
-	| { type: 'calls'; calls: AgentToolCall[] }
-	| { type: 'error'; reason: string; message: string };
+interface Sequenced {
+	seq?: number;
+}
+
+export type AgentFrame = Sequenced &
+	(
+		| { type: 'ready'; name: string }
+		| {
+				type: 'turn';
+				streamId: string;
+				idempotencyKey: string | null;
+				conversationId: string | null;
+		  }
+		| { type: 'status'; phase: string }
+		| { type: 'token'; text: string }
+		| { type: 'tool'; name: string; ok: boolean }
+		| { type: 'answer'; text: string; calls: number; proposals: Proposal[] }
+		| { type: 'calls'; calls: AgentToolCall[] }
+		| { type: 'error'; reason: string; message: string }
+	);
 
 /* --------------------------------------------------------------- reading */
 
@@ -107,6 +151,12 @@ function readString(value: unknown): string | null {
 
 function readFinite(value: unknown): number | null {
 	return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** A sequence is a non-negative integer; anything else is not one the stream could hold. */
+function readSeq(value: unknown): number | undefined {
+	const seq = readFinite(value);
+	return seq === null || !Number.isInteger(seq) || seq < 0 ? undefined : seq;
 }
 
 /**
@@ -173,19 +223,40 @@ function readToolCalls(value: unknown): AgentToolCall[] | null {
  */
 export function readAgentFrame(raw: unknown): AgentFrame | null {
 	if (!isRecord(raw)) return null;
+	const seq = readSeq(raw.seq);
 	switch (raw.type) {
 		case 'ready':
-			return { type: 'ready', name: readString(raw.name) ?? '' };
+			return { type: 'ready', name: readString(raw.name) ?? '', seq };
+		case 'turn': {
+			// The announcement is what makes a turn resumable, so a frame without a
+			// stream id is not one this console can use.
+			const streamId = readString(raw.streamId);
+			if (streamId === null) return null;
+			return {
+				type: 'turn',
+				streamId,
+				idempotencyKey: readString(raw.idempotencyKey),
+				conversationId: readString(raw.conversationId),
+				seq
+			};
+		}
+		case 'status': {
+			// The phase is the server's token. It is not validated against the three the
+			// contract names: an unknown phase is printed as work in progress, which is
+			// still true, rather than dropped into a panel that looks stuck.
+			const phase = readString(raw.phase);
+			return phase === null ? null : { type: 'status', phase, seq };
+		}
 		case 'token':
 			// An empty token is legal and prints nothing.
-			return typeof raw.text === 'string' ? { type: 'token', text: raw.text } : null;
+			return typeof raw.text === 'string' ? { type: 'token', text: raw.text, seq } : null;
 		case 'tool': {
 			// `name` is the contract; `tool` is the same member under the spelling the
 			// runtime's own loop uses. Either way the rest of the frame is untouched,
 			// and `output` is read to nothing on purpose.
 			const name = readString(raw.name) ?? readString(raw.tool);
 			if (name === null || typeof raw.ok !== 'boolean') return null;
-			return { type: 'tool', name, ok: raw.ok };
+			return { type: 'tool', name, ok: raw.ok, seq };
 		}
 		case 'answer':
 			if (typeof raw.text !== 'string') return null;
@@ -193,17 +264,21 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				type: 'answer',
 				text: raw.text,
 				calls: readFinite(raw.calls) ?? 0,
-				proposals: readProposals(raw.proposals)
+				proposals: readProposals(raw.proposals),
+				seq
 			};
 		case 'calls': {
 			const calls = readToolCalls(raw.calls);
-			return calls === null ? null : { type: 'calls', calls };
+			return calls === null ? null : { type: 'calls', calls, seq };
 		}
 		case 'error':
 			return {
 				type: 'error',
-				reason: readString(raw.reason) ?? 'unspecified',
-				message: readString(raw.message) ?? ''
+				// `error` is the spelling the resume path uses for `stream_not_found`;
+				// `reason` is the turn's own. Both are the gateway's token, not ours.
+				reason: readString(raw.reason) ?? readString(raw.error) ?? 'unspecified',
+				message: readString(raw.message) ?? '',
+				seq
 			};
 		default:
 			return null;
@@ -258,6 +333,14 @@ export interface AgentTurn {
 	refusal: { reason: string; message: string } | null;
 	proposals: Proposal[];
 	status: 'streaming' | 'answered' | 'refused';
+	/** The durable stream the turn lives in, from its `turn` frame. `null` until announced. */
+	streamId: string | null;
+	/** The conversation the server filed the turn under, when it said. */
+	conversationId: string | null;
+	/** The last sequence applied. `-1` before the first frame. */
+	seq: number;
+	/** The server's latest progress phase, cleared by a terminal frame. */
+	phase: string | null;
 }
 
 export function beginTurn(question: string, key: string): AgentTurn {
@@ -269,43 +352,114 @@ export function beginTurn(question: string, key: string): AgentTurn {
 		calls: null,
 		refusal: null,
 		proposals: [],
-		status: 'streaming'
+		status: 'streaming',
+		streamId: null,
+		conversationId: null,
+		seq: -1,
+		phase: null
 	};
+}
+
+/** What one frame did: the turn it produced, and whether it was new. */
+export interface AgentFrameResult {
+	turn: AgentTurn;
+	/** Applied and not seen before. A panel announces only these. */
+	fresh: boolean;
+	/** The sequence the frame occupies; the turn's own when it was dropped. */
+	seq: number;
 }
 
 /**
  * One frame, applied to one turn. Pure, so the panel holds no frame logic.
  *
- * The `calls` frame is the turn's own summary and it is the only frame that names
- * a `reason`, so when it arrives it replaces the running list: the same runs, in
- * order, now with the gateway's verdict. An answer keeps the streamed text when it
- * arrives empty, because a final frame that says nothing is not a retraction.
+ * `at` is the frame's sequence when the caller knows it (the SSE `id:`, or a
+ * server-sent `seq`); otherwise the turn counts its own frames from the `turn`
+ * announcement. Three rules decide what a resumed stream can and cannot do:
+ *
+ *  - A terminal frame is folded in only while the turn is streaming. That is what
+ *    keeps a replayed `answer` from being rendered twice, and it is deliberately
+ *    independent of the sequence number.
+ *  - Any other frame whose sequence was already applied is dropped. A replay,
+ *    whether it repeats one frame or a hundred, changes nothing.
+ *  - A `turn` frame is idempotent: it names the stream and the key the server
+ *    used, and both only ever get more specific.
  */
-export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame): AgentTurn {
+export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame, at?: number): AgentFrameResult {
+	if (frame.type === 'ready') return { turn, fresh: false, seq: turn.seq };
+
+	const terminal = frame.type === 'answer' || frame.type === 'error';
+	if (terminal && turn.status !== 'streaming') {
+		return { turn, fresh: false, seq: turn.seq };
+	}
+	if (!terminal && turn.status !== 'streaming' && frame.type !== 'turn') {
+		return { turn, fresh: false, seq: turn.seq };
+	}
+
+	const seq = at ?? frame.seq ?? turn.seq + 1;
+	if (!terminal && seq <= turn.seq) return { turn, fresh: false, seq: turn.seq };
+
 	switch (frame.type) {
+		case 'turn':
+			return {
+				turn: {
+					...turn,
+					streamId: frame.streamId,
+					// The server names the key it ran the turn under. A retry must use that
+					// one, not the one this panel happened to mint.
+					key: frame.idempotencyKey ?? turn.key,
+					conversationId: frame.conversationId ?? turn.conversationId,
+					seq
+				},
+				fresh: true,
+				seq
+			};
+		case 'status':
+			return { turn: { ...turn, phase: frame.phase, seq }, fresh: true, seq };
 		case 'token':
-			return { ...turn, text: turn.text + frame.text };
+			return { turn: { ...turn, text: turn.text + frame.text, seq }, fresh: true, seq };
 		case 'tool':
-			return { ...turn, tools: [...turn.tools, { tool: frame.name, ok: frame.ok, reason: null }] };
+			return {
+				turn: {
+					...turn,
+					tools: [...turn.tools, { tool: frame.name, ok: frame.ok, reason: null }],
+					seq
+				},
+				fresh: true,
+				seq
+			};
 		case 'calls':
 			// An empty list is not a summary of anything; the running list stands.
-			return frame.calls.length === 0 ? turn : { ...turn, tools: frame.calls };
+			return {
+				turn: frame.calls.length === 0 ? { ...turn, seq } : { ...turn, tools: frame.calls, seq },
+				fresh: frame.calls.length > 0,
+				seq
+			};
 		case 'answer':
 			return {
-				...turn,
-				text: frame.text !== '' ? frame.text : turn.text,
-				calls: frame.calls,
-				proposals: frame.proposals,
-				status: 'answered'
+				turn: {
+					...turn,
+					text: frame.text !== '' ? frame.text : turn.text,
+					calls: frame.calls,
+					proposals: frame.proposals,
+					phase: null,
+					status: 'answered',
+					seq
+				},
+				fresh: true,
+				seq
 			};
 		case 'error':
 			return {
-				...turn,
-				refusal: { reason: frame.reason, message: frame.message },
-				status: 'refused'
+				turn: {
+					...turn,
+					refusal: { reason: frame.reason, message: frame.message },
+					phase: null,
+					status: 'refused',
+					seq
+				},
+				fresh: true,
+				seq
 			};
-		case 'ready':
-			return turn;
 	}
 }
 
@@ -325,6 +479,8 @@ export interface AgentTrouble {
 	reason: string | null;
 	/** The gateway's own sentence, when it sent one. */
 	detail: string | null;
+	/** The close code, when a socket closed. `null` for a refusal before one existed. */
+	code: number | null;
 	retryable: boolean;
 	/** How many attempts have failed so far. */
 	attempt: number;
@@ -349,6 +505,11 @@ export type AgentSendOutcome =
 	/** The link is not open; nothing was sent. */
 	| { status: 'waiting'; message: string }
 	| { status: 'refused'; message: string };
+
+export type AgentResumeOutcome =
+	| { status: 'sent' }
+	/** The link is not open; the resume frame was not sent. */
+	| { status: 'waiting'; message: string };
 
 type TicketOutcome =
 	| { status: 'ok'; ticket: string }
@@ -452,6 +613,29 @@ export class AgentLink {
 		return { status: 'sent', key };
 	}
 
+	/**
+	 * Ask for the rest of a turn.
+	 *
+	 * `from` is the first sequence the panel does not have: the server replays the
+	 * stream from there and then tails the live turn. A closed socket answers
+	 * `waiting` rather than throwing — the caller decides whether to wait for the
+	 * next open or read the stream over HTTP instead.
+	 */
+	resume(streamId: string, from: number): AgentResumeOutcome {
+		const socket = this.#socket;
+		if (socket === null || socket.readyState !== openState()) {
+			return { status: 'waiting', message: 'The agent link is not open, so the turn was not resumed.' };
+		}
+		try {
+			socket.send(
+				JSON.stringify({ type: 'resume', streamId, from: Math.max(0, Math.floor(from)) })
+			);
+		} catch {
+			return { status: 'waiting', message: 'The link closed while the turn was being resumed.' };
+		}
+		return { status: 'sent' };
+	}
+
 	/** Close the socket and stop retrying. Safe to call twice. */
 	close(): void {
 		this.#stopped = true;
@@ -526,6 +710,7 @@ export class AgentLink {
 					stage: 'ticket',
 					reason: null,
 					detail: null,
+					code: null,
 					retryable: true
 				}
 			};
@@ -541,6 +726,7 @@ export class AgentLink {
 						stage: 'ticket',
 						reason: 'unreadable',
 						detail: serverMessage(body),
+						code: null,
 						retryable: false
 					}
 				};
@@ -554,17 +740,17 @@ export class AgentLink {
 		// 503 `agent_runtime_off` is the deployment's answer, not a fault: the panel
 		// falls back to the stateless path and says nothing alarming.
 		if (response.status === 503 && reason === 'agent_runtime_off') {
-			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, retryable: false } };
+			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, code: null, retryable: false } };
 		}
 		if (response.status === 401 || response.status === 403) {
-			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, retryable: false } };
+			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, code: null, retryable: false } };
 		}
 		// A route that is not there will not be there on the second attempt either.
 		if (response.status === 404 || response.status === 405 || response.status === 501) {
-			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, retryable: false } };
+			return { status: 'failed', trouble: { stage: 'ticket', reason, detail, code: null, retryable: false } };
 		}
 		// A limiter or a 5xx can clear; the backoff is the honest answer.
-		return { status: 'failed', trouble: { stage: 'ticket', reason, detail, retryable: true } };
+		return { status: 'failed', trouble: { stage: 'ticket', reason, detail, code: null, retryable: true } };
 	}
 
 	#openSocket(ticket: string): void {
@@ -573,6 +759,7 @@ export class AgentLink {
 				stage: 'upgrade',
 				reason: null,
 				detail: 'this browser has no WebSocket',
+				code: null,
 				retryable: false
 			});
 			return;
@@ -585,7 +772,7 @@ export class AgentLink {
 			const build = this.#options.socketUrl ?? agentSocketUrl;
 			socket = new WebSocket(build(ticket));
 		} catch {
-			this.#fail({ stage: 'upgrade', reason: null, detail: null, retryable: true });
+			this.#fail({ stage: 'upgrade', reason: null, detail: null, code: null, retryable: true });
 			return;
 		}
 
@@ -643,20 +830,188 @@ export class AgentLink {
 /** A close event, in the console's terms. `opened` is whether this socket ever did. */
 function closeTrouble(event: CloseEvent, opened: boolean): Omit<AgentTrouble, 'attempt'> {
 	const reason = readString(event.reason);
-	const detail = event.code > 0 ? `close ${event.code}` : null;
+	const code = event.code > 0 ? event.code : null;
+	const detail = code === null ? null : `close ${code}`;
 
 	// The two reasons the Worker closes with that a retry cannot fix.
 	if (reason === 'agent_schema_ahead' || reason === 'agent_runtime_off') {
-		return { stage: 'upgrade', reason, detail, retryable: false };
+		return { stage: 'upgrade', reason, detail, code, retryable: false };
 	}
 
-	return { stage: opened ? 'socket' : 'upgrade', reason, detail, retryable: true };
+	return { stage: opened ? 'socket' : 'upgrade', reason, detail, code, retryable: true };
 }
 
 function parseFrame(data: unknown): AgentFrame | null {
 	if (typeof data !== 'string') return null;
 	try {
 		return readAgentFrame(JSON.parse(data));
+	} catch {
+		return null;
+	}
+}
+
+/* -------------------------------------------------------- the same turn, over HTTP */
+
+/** The SSE read of one turn's stream, addressed from the first sequence still wanted. */
+export function agentStreamPath(streamId: string, from: number): string {
+	return `${STREAM_PATH}/${encodeURIComponent(streamId)}?from=${Math.max(0, Math.floor(from))}`;
+}
+
+export interface TurnStreamOptions {
+	streamId: string;
+	/** The first sequence the caller does not have. */
+	from: number;
+	/** Each frame, with its SSE `id:` when the stream numbered it. */
+	onFrame: (frame: AgentFrame, seq?: number) => void;
+	/** Aborted when the panel closes or the turn is answered elsewhere. */
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}
+
+export type TurnStreamOutcome =
+	/** `event: done`: the stream settled. The answer either arrived or never existed. */
+	| { status: 'done' }
+	/** `event: timeout`: the turn is still live and the server stopped tailing. */
+	| { status: 'timeout' }
+	| { status: 'failed'; reason: string | null; message: string | null };
+
+/**
+ * Read one turn's durable stream over HTTP, for the case where the socket will
+ * not stay open.
+ *
+ * `fetch` rather than `EventSource` on purpose: EventSource cannot send the
+ * console's admin marker header, and its automatic reconnect would re-read a turn
+ * the panel is already holding. The parser below is the SSE shape the endpoint
+ * writes: `id:`, `data:`, named control events, blank-line separated, comments
+ * ignored.
+ */
+export async function readTurnStream(options: TurnStreamOptions): Promise<TurnStreamOutcome> {
+	const controller = new AbortController();
+	const relay = () => controller.abort();
+	options.signal?.addEventListener('abort', relay, { once: true });
+	const timer = setTimeout(
+		() => controller.abort(),
+		options.timeoutMs ?? STREAM_TIMEOUT_MS
+	);
+
+	const finish = () => {
+		clearTimeout(timer);
+		options.signal?.removeEventListener('abort', relay);
+	};
+
+	let response: Response;
+	try {
+		response = await fetch(agentStreamPath(options.streamId, options.from), {
+			headers: {
+				Accept: 'text/event-stream',
+				[ADMIN_HEADER]: '1'
+			},
+			credentials: 'same-origin',
+			signal: controller.signal
+		});
+	} catch {
+		finish();
+		return { status: 'failed', reason: null, message: null };
+	}
+
+	if (!response.ok || response.body === null) {
+		// The route's own refusal, when it sent one: `stream_not_found`, a missing
+		// identity, a deployment where the runtime went off.
+		const body = await readBody(response);
+		finish();
+		return {
+			status: 'failed',
+			reason: isRecord(body) ? (readString(body.error) ?? readString(body.reason)) : null,
+			message: serverMessage(body)
+		};
+	}
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+
+			for (;;) {
+				const cut = blockEnd(buffer);
+				if (cut === null) break;
+				const block = buffer.slice(0, cut.at);
+				buffer = buffer.slice(cut.next);
+				const control = readStreamBlock(block, options.onFrame);
+				if (control !== null) {
+					finish();
+					return control;
+				}
+			}
+		}
+		finish();
+		// A connection that ends without `done` is not a turn that finished.
+		return { status: 'failed', reason: null, message: null };
+	} catch {
+		finish();
+		return { status: 'failed', reason: null, message: null };
+	}
+}
+
+/** Where the next complete SSE block ends, and where the one after it starts. */
+function blockEnd(buffer: string): { at: number; next: number } | null {
+	const plain = buffer.indexOf('\n\n');
+	const crlf = buffer.indexOf('\r\n\r\n');
+	if (plain < 0 && crlf < 0) return null;
+	if (crlf >= 0 && (plain < 0 || crlf < plain)) return { at: crlf, next: crlf + 4 };
+	return { at: plain, next: plain + 2 };
+}
+
+/** One block: a frame to pass on, a control answer, or nothing worth printing. */
+function readStreamBlock(
+	block: string,
+	onFrame: (frame: AgentFrame, seq?: number) => void
+): TurnStreamOutcome | null {
+	let event = '';
+	let id: number | undefined;
+	const data: string[] = [];
+
+	for (const line of block.split(/\r?\n/)) {
+		if (line === '' || line.startsWith(':')) continue;
+		const colon = line.indexOf(':');
+		const field = colon < 0 ? line : line.slice(0, colon);
+		let value = colon < 0 ? '' : line.slice(colon + 1);
+		if (value.startsWith(' ')) value = value.slice(1);
+		if (field === 'event') event = value;
+		else if (field === 'data') data.push(value);
+		else if (field === 'id') id = readSeq(value);
+	}
+
+	if (event === 'done') return { status: 'done' };
+	if (event === 'timeout') return { status: 'timeout' };
+	if (event === 'error') {
+		const reason = readJsonReason(data.join('\n'));
+		return { status: 'failed', reason, message: null };
+	}
+	if (data.length === 0) return null;
+
+	let raw: unknown;
+	try {
+		raw = JSON.parse(data.join('\n'));
+	} catch {
+		return null;
+	}
+	const frame = readAgentFrame(raw);
+	// An unknown frame is skipped, never turned into one: the stream is numbered,
+	// so the next frame still lands where it belongs.
+	if (frame !== null) onFrame(frame, id);
+	return null;
+}
+
+/** The `reason` an `event: error` block carries, when it carries one. */
+function readJsonReason(data: string): string | null {
+	if (data === '') return null;
+	try {
+		const body: unknown = JSON.parse(data);
+		return isRecord(body) ? (readString(body.reason) ?? readString(body.error)) : null;
 	} catch {
 		return null;
 	}
@@ -701,6 +1056,57 @@ export function agentTroubleLine(trouble: AgentTrouble): string {
 				? 'The agent link was refused before it opened.'
 				: 'The agent link closed.';
 	}
+}
+
+/**
+ * What the server says it is doing, in this console's words.
+ *
+ * The phase tokens are the contract's: `thinking`, `answering`, and `tool:<name>`
+ * for a run in progress. The tool sentences are the operator's phrasing of what
+ * that tool does, and an unknown name keeps its own token rather than being
+ * rounded to something this console guessed.
+ */
+export function agentPhaseLine(phase: string): string {
+	if (phase === 'thinking') return 'Reading this deployment';
+	if (phase === 'answering') return 'Writing the answer';
+	if (phase.startsWith('tool:')) {
+		const tool = phase.slice(5);
+		switch (tool) {
+			case 'fleet_health':
+				return 'Reading the fleet';
+			case 'telemetry':
+				return 'Running telemetry';
+			case 'search_messages':
+				return 'Reading the messages';
+			case 'diagnose':
+				return 'Checking the device';
+			case 'flow_ast':
+				return 'Reading the flow';
+			case 'create_rule':
+				return 'Drafting a rule';
+			case 'create_template':
+				return 'Drafting a template';
+			case 'stage_workflow_patch':
+				return 'Staging the patch';
+			default:
+				return `Running ${tool}`;
+		}
+	}
+	return 'Working';
+}
+
+/**
+ * The close, as a diagnostic line: `link closed (1006)`, plus the server's reason
+ * when it gave one.
+ *
+ * It is a fact, not a verdict: no close at this stage is evidence against the
+ * gateway, and a reconnect in progress has not failed, so the panel prints this
+ * next to the turn rather than printing a sentence that blames anything.
+ */
+export function agentCloseNote(trouble: AgentTrouble): string | null {
+	if (trouble.stage === 'ticket') return null;
+	const head = trouble.code === null ? 'link closed' : `link closed (${trouble.code})`;
+	return trouble.reason === null ? head : `${head} · ${trouble.reason}`;
 }
 
 /**

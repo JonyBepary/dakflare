@@ -15,7 +15,8 @@
 	 *  - **Live.** `GET /v1/admin/agent/runtime` said `enabled: true`, so the panel
 	 *    holds an `AgentLink` (`$lib/agent-socket`): a ticket, then a WebSocket. The
 	 *    answer streams in, each tool run is one line, and a turn that was cut off
-	 *    says so. Proposals are the same cards either way.
+	 *    is asked for again rather than abandoned: its frames live in a durable
+	 *    stream, so a dropped socket is a lost connection, not a lost answer.
 	 *
 	 * Five rules this panel keeps, on both paths:
 	 *
@@ -30,7 +31,9 @@
 	 *    editor's ghost banner; this panel only hands the patch over when an editor
 	 *    is mounted, and explains the way there when it is not.
 	 *  - A retry after a lost link reuses the turn's idempotency key, so a question
-	 *    that did reach the runtime is not asked twice.
+	 *    that did reach the runtime is not asked twice. The same rule makes a
+	 *    resume safe: the turn is picked up where its sequence stopped, and the
+	 *    answer is folded in once.
 	 *
 	 * The button is fixed, so `+layout.svelte` gives the main region a floor under
 	 * it: at 390px the page's last row must never end behind this control.
@@ -51,13 +54,16 @@
 	} from '$lib/assistant';
 	import {
 		AgentLink,
+		agentCloseNote,
 		agentLinkLabel,
+		agentPhaseLine,
 		agentRefusalLine,
 		agentTroubleLine,
 		applyAgentFrame,
 		beginTurn,
 		newIdempotencyKey,
 		readAgentRuntime,
+		readTurnStream,
 		type AgentEvent,
 		type AgentFrame,
 		type AgentLinkState,
@@ -74,6 +80,33 @@
 	const panelId = `assistant-panel-${uid}`;
 	const inputId = `assistant-question-${uid}`;
 	const contextId = `assistant-context-${uid}`;
+
+	/**
+	 * A turn whose socket went away, and what this panel is doing about it.
+	 *
+	 * The durable stream means a dropped link is not the end of the answer, so the
+	 * panel only says a turn was lost after it has actually tried to pick it up.
+	 */
+	type Recovery = { kind: 'resuming'; via: 'socket' | 'sse' } | { kind: 'lost' };
+
+	/**
+	 * Three fresh tickets and three sockets inside about a second, or the durable
+	 * stream is the better path. A ticket is cheap and single use, so a reconnect
+	 * is worth a few tries; it is not worth a minute of a blank panel.
+	 */
+	const LINK_ATTEMPTS = 3;
+	const LINK_BACKOFF_MS = 300;
+
+	/** One SSE read that times out may simply have been tailing a slow turn. */
+	const STREAM_ATTEMPTS = 2;
+
+	/** Frame types that are the resume refusing, not the turn: read the stream instead. */
+	const RESUME_REFUSALS = new Set([
+		'stream_not_found',
+		'bad_request',
+		'agent_identity_missing',
+		'unauthorised'
+	]);
 
 	/** The refusal reasons this panel has a sentence for; an unknown one prints its token. */
 	const NAMED_REFUSALS = new Set([
@@ -103,8 +136,17 @@
 	let turn = $state<AgentTurn | null>(null);
 	/** One question held while the link is being opened. */
 	let queued = $state<{ question: string; key: string } | null>(null);
-	/** The link dropped while this turn was in flight. It survives the reconnect. */
-	let lost = $state(false);
+
+	/**
+	 * What happened to a turn whose link went away.
+	 *
+	 * `resuming` is the panel still working on the answer — `via` says whether it
+	 * is on a fresh socket or reading the durable stream over HTTP. `lost` is the
+	 * honest end of that road, and it is only ever reached after an attempt.
+	 */
+	let recovery = $state<Recovery | null>(null);
+	/** The close, as a diagnostic line: `link closed (1006)`, while it matters. */
+	let closeNote = $state<string | null>(null);
 
 	let acceptingId = $state<string | null>(null);
 	let results = $state<Record<string, ProposalResult>>({});
@@ -126,6 +168,11 @@
 
 	/** The live link. Not reactive: its events are mirrored into the state above. */
 	let agent: AgentLink | null = null;
+
+	/** The in-flight SSE read, when the socket would not come back. */
+	let stream: AbortController | null = null;
+	/** A resume that this number no longer matches is stale and changes nothing. */
+	let resumeToken = 0;
 
 	/**
 	 * Where the operator is. The chat endpoint takes the route and, on the editor,
@@ -154,11 +201,12 @@
 	/**
 	 * A turn whose answer stopped arriving.
 	 *
-	 * `lost` is a fact about this turn, not about the link: a reconnect clears
+	 * `recovery` is a fact about this turn, not about the link: a reconnect clears
 	 * `trouble`, and the point of this line is that the frames that were coming
-	 * before the drop are not coming back.
+	 * before the drop are not coming back on their own.
 	 */
-	const cutOff = $derived(turn !== null && turn.status === 'streaming' && lost);
+	const resuming = $derived(recovery?.kind === 'resuming');
+	const cutOff = $derived(unfinished && recovery?.kind === 'lost');
 
 	// The sink appears and disappears with the editor, which is a different
 	// component on a different route. Nothing else would tell this panel.
@@ -171,6 +219,10 @@
 
 	onDestroy(() => {
 		sequence += 1;
+		// A read that is still tailing must not write into a panel that is gone.
+		resumeToken += 1;
+		stream?.abort();
+		stream = null;
 		agent?.close();
 		agent = null;
 	});
@@ -186,6 +238,15 @@
 		await tick();
 		field?.focus();
 		void startLive();
+	}
+
+	/** One link, tuned for a panel: a few quick reconnects, then the stream. */
+	function newLink(): AgentLink {
+		return new AgentLink({
+			onEvent: handleAgentEvent,
+			maxAttempts: LINK_ATTEMPTS,
+			baseDelayMs: LINK_BACKOFF_MS
+		});
 	}
 
 	/**
@@ -205,61 +266,161 @@
 		}
 
 		runtime = 'on';
-		agent?.close();
-		agent = new AgentLink({ onEvent: handleAgentEvent });
+		// The panel may have asked before this read resolved, and that ask already
+		// made a link. Reuse it: closing it here would drop a turn that had started.
+		if (agent === null) agent = newLink();
 		await agent.connect();
 	}
 
 	function handleAgentEvent(event: AgentEvent): void {
 		if (!open) return;
-
 		if (event.kind === 'link') {
-			const wasOpen = linkState === 'open';
-			linkState = event.state;
-			trouble = event.trouble;
-
-			// The socket dropped with a turn in flight. The turn stays where it is, and
-			// the panel stops saying it is asking: it is waiting for the operator's
-			// next move, which is Try again with the same key.
-			if (wasOpen && event.state !== 'open' && turn !== null && turn.status === 'streaming') {
-				lost = true;
-				asking = false;
-				queued = null;
-			}
-
-			if (event.state === 'open') {
-				sendQueued();
-				return;
-			}
-
-			if (event.state !== 'closed') return;
-
-			// The link is final. A question that was never asked is no longer being
-			// asked; a question that was answered keeps its answer.
-			asking = false;
-
-			if (event.trouble?.reason === 'agent_runtime_off') {
-				// The runtime went off between the read and the ticket: the stateless
-				// path is the honest fallback, and it is the same question.
-				const holding = queued;
-				queued = null;
-				runtime = 'off';
-				agent?.close();
-				agent = null;
-				turn = null;
-				if (holding !== null) {
-					asking = true;
-					void askStateless(holding.question);
-				}
-			}
+			onLink(event.state, event.trouble);
 			return;
 		}
-
 		onFrame(event.frame);
 	}
 
+	/**
+	 * The link moved. Most of this is the state above; the part that matters here
+	 * is a turn in flight, because a close then is a transport problem the durable
+	 * stream can answer.
+	 */
+	function onLink(state: AgentLinkState, next: AgentTrouble | null): void {
+		const wasOpen = linkState === 'open';
+		linkState = state;
+		trouble = next;
+
+		if (state === 'open') {
+			// A reconnect during a resume is not a new question: ask for the rest of
+			// the turn from where its frames stopped.
+			if (recovery?.kind === 'resuming' && recovery.via === 'socket') {
+				resumeOnSocket();
+				return;
+			}
+			sendQueued();
+			return;
+		}
+
+		const streaming = turn !== null && turn.status === 'streaming';
+		if (wasOpen && streaming && turn !== null) {
+			// The link dropped with a turn in flight. Keep the turn: it is in a
+			// durable stream, so what is at stake is the connection, not the answer.
+			queued = null;
+			asking = false;
+			closeNote = next === null ? null : agentCloseNote(next);
+			if (turn.streamId === null) {
+				// No stream was ever named, so there is nothing to ask for. This is the
+				// one close after which the text that arrived is all there will be.
+				recovery = { kind: 'lost' };
+			} else {
+				recovery = { kind: 'resuming', via: 'socket' };
+				asking = true;
+			}
+		}
+
+		if (state !== 'closed') return;
+
+		// Final: no further attempt is coming.
+		if (turn !== null && turn.status === 'streaming') {
+			if (turn.streamId !== null) {
+				void resumeViaStream();
+				return;
+			}
+			asking = false;
+			// Nothing arrived at all: the refusal is the story, and the line below it
+			// stays the gateway's own.
+			if (turn.text !== '' || turn.tools.length > 0) recovery = { kind: 'lost' };
+			return;
+		}
+
+		asking = false;
+
+		if (next?.reason === 'agent_runtime_off') {
+			// The runtime went off between the read and the ticket: the stateless
+			// path is the honest fallback, and it is the same question.
+			const holding = queued;
+			queued = null;
+			runtime = 'off';
+			agent?.close();
+			agent = null;
+			turn = null;
+			if (holding !== null) {
+				asking = true;
+				void askStateless(holding.question);
+			}
+		}
+	}
+
+	/** Send the resume frame for the current turn, when a socket just came back. */
+	function resumeOnSocket(): void {
+		const current = turn;
+		if (current === null || current.streamId === null) return;
+		if (agent === null) {
+			void resumeViaStream();
+			return;
+		}
+		const sent = agent.resume(current.streamId, current.seq + 1);
+		if (sent.status === 'waiting') {
+			// It closed between the open event and the send. The link's own retry opens
+			// another socket, and that open sends this again.
+			return;
+		}
+	}
+
+	/**
+	 * Read the turn's durable stream over HTTP.
+	 *
+	 * This is the last attempt, not a first choice: the socket carries live frames,
+	 * and the stream is here for the case where a browser will not keep a socket
+	 * open. A `timeout` event means the turn is still live and the server stopped
+	 * tailing, so one more read from where it stopped is worth making.
+	 */
+	async function resumeViaStream(): Promise<void> {
+		const current = turn;
+		if (current === null || current.streamId === null) return;
+
+		const token = ++resumeToken;
+		const streamId = current.streamId;
+		recovery = { kind: 'resuming', via: 'sse' };
+		asking = true;
+
+		for (let attempt = 0; attempt < STREAM_ATTEMPTS; attempt += 1) {
+			const controller = new AbortController();
+			stream = controller;
+			const from = (turn?.seq ?? 0) + 1;
+			const result = await readTurnStream({
+				streamId,
+				from,
+				signal: controller.signal,
+				onFrame: (frame, seq) => onFrame(frame, seq)
+			});
+			if (stream === controller) stream = null;
+
+			if (token !== resumeToken || !open) return;
+			if (turn === null || turn.status !== 'streaming') return;
+			if (result.status === 'timeout') continue;
+			break;
+		}
+
+		if (token !== resumeToken || !open) return;
+		if (turn !== null && turn.status === 'streaming') {
+			recovery = { kind: 'lost' };
+			asking = false;
+		}
+	}
+
+	/** Stop any in-flight stream read and forget the recovery it belonged to. */
+	function resetRecovery(): void {
+		resumeToken += 1;
+		stream?.abort();
+		stream = null;
+		recovery = null;
+		closeNote = null;
+	}
+
 	/** One frame, folded into the turn it belongs to. */
-	function onFrame(frame: AgentFrame): void {
+	function onFrame(frame: AgentFrame, seq?: number): void {
 		if (frame.type === 'ready') {
 			agentName = frame.name !== '' ? frame.name : null;
 			return;
@@ -270,11 +431,21 @@
 		// answers. Rendering it would invent a conversation.
 		if (current === null) return;
 
-		turn = applyAgentFrame(current, frame);
+		// The socket refused the *resume*, not the turn: the stream is still there,
+		// and asking for it over HTTP is the same request the socket failed to serve.
+		if (frame.type === 'error' && resuming && RESUME_REFUSALS.has(frame.reason)) {
+			void resumeViaStream();
+			return;
+		}
+
+		const result = applyAgentFrame(current, frame, seq);
+		turn = result.turn;
+		if (!result.fresh) return;
 
 		if (frame.type === 'answer') {
 			asking = false;
 			queued = null;
+			resetRecovery();
 			const count = turn?.proposals.length ?? 0;
 			const calls = frame.calls;
 			announce(
@@ -290,6 +461,7 @@
 		if (frame.type === 'error') {
 			asking = false;
 			queued = null;
+			resetRecovery();
 			announce(agentRefusalLine(frame.reason));
 		}
 	}
@@ -330,7 +502,7 @@
 		results = {};
 		turn = null;
 		queued = null;
-		lost = false;
+		resetRecovery();
 		trouble = null;
 		linkState = 'idle';
 		agentName = null;
@@ -363,7 +535,7 @@
 		outcome = null;
 		turn = null;
 		queued = null;
-		lost = false;
+		resetRecovery();
 		results = {};
 
 		if (runtime === 'on') {
@@ -397,7 +569,7 @@
 		turn = beginTurn(text, key);
 		queued = { question: text, key };
 
-		if (agent === null) agent = new AgentLink({ onEvent: handleAgentEvent });
+		if (agent === null) agent = newLink();
 		if (agent.state === 'open') {
 			sendQueued();
 			return;
@@ -481,11 +653,35 @@
 			: 'danger';
 	}
 
-	/** The line under a partial answer, in the link's own words. */
-	function linkWaitingLine(): string {
-		if (linkState === 'retrying') return 'The link dropped. Reconnecting…';
-		if (linkState === 'open') return 'The model is writing…';
-		return 'Connecting to the agent…';
+	/** The one line under a turn that has not produced an answer yet. */
+	function waitingLine(): string {
+		if (recovery?.kind === 'resuming') {
+			return recovery.via === 'sse'
+				? 'The link did not come back. Reading the rest of the turn from where it stopped…'
+				: 'The link dropped. Asking the agent for the rest of the turn…';
+		}
+		if (linkState === 'retrying' || linkState === 'ticket' || linkState === 'connecting') {
+			return 'Connecting to the agent…';
+		}
+		// The turn was announced, so the gateway has the question even though it has
+		// not said what it is doing yet. This is the sentence a 25-second turn needs.
+		if (turn !== null && turn.streamId !== null) {
+			return 'The agent has the question and is working on it…';
+		}
+		return 'The model is writing…';
+	}
+
+	/**
+	 * The line under a turn that stopped arriving.
+	 *
+	 * Two facts, and the difference is whether there was a stream to ask again: a
+	 * turn that was never announced cannot be resumed, and saying so is not the
+	 * same sentence as a resume that was tried and did not reach the answer.
+	 */
+	function lostLine(): string {
+		return turn?.streamId != null
+			? 'The link closed and the answer could not be picked up again. Nothing after this point arrived.'
+			: 'The link closed before the answer finished. Nothing after this point arrived.';
 	}
 </script>
 
@@ -547,9 +743,18 @@
 				     have: the text is what arrived, the tools are what ran, the refusal
 				     is what the gateway said. -->
 				{#if turn !== null}
+					{#if turn.phase !== null && unfinished && recovery === null}
+						<!-- One quiet line, the server's own progress. No invented tokens: the
+						     panel says what is happening without pretending to write. Once a
+						     turn is being recovered, the recovery line owns this space. -->
+						<p class="state quiet phase"><Spinner /> {agentPhaseLine(turn.phase)}</p>
+					{/if}
+
 					{#if turn.text !== ''}
 						<p class="answer">
-							{turn.text}{#if unfinished && trouble === null}<span class="caret" aria-hidden="true"
+							{turn.text}{#if unfinished && recovery === null && trouble === null}<span
+									class="caret"
+									aria-hidden="true"
 								></span>{/if}
 						</p>
 					{/if}
@@ -572,10 +777,18 @@
 						</ul>
 					{/if}
 
-					{#if cutOff}
-						<p class="state" data-tone="warn">
-							The link closed before the answer finished. Nothing after this point arrived.
-						</p>
+					{#if resuming}
+						<!-- The turn is still being recovered, so it is not lost: what is on
+						     screen is the connection that went away, not a verdict on the agent. -->
+						<p class="state waiting"><Spinner /> {waitingLine()}</p>
+						{#if closeNote !== null}
+							<p class="detail mono">{closeNote}</p>
+						{/if}
+					{:else if cutOff}
+						<p class="state" data-tone="warn">{lostLine()}</p>
+						{#if closeNote !== null}
+							<p class="detail mono">{closeNote}</p>
+						{/if}
 					{/if}
 
 					{#if turn.refusal !== null}
@@ -590,7 +803,7 @@
 						{/if}
 					{/if}
 
-					{#if unfinished && !lost && trouble !== null && linkState === 'closed'}
+					{#if unfinished && recovery === null && trouble !== null && linkState === 'closed'}
 						<p class="state" data-tone={trouble.retryable ? 'warn' : 'danger'}>
 							{agentTroubleLine(trouble)}
 						</p>
@@ -599,8 +812,8 @@
 						{/if}
 					{/if}
 
-					{#if unfinished && !lost && trouble === null && turn.text === '' && turn.tools.length === 0 && turn.refusal === null}
-						<p class="state waiting"><Spinner /> {linkWaitingLine()}</p>
+					{#if unfinished && recovery === null && trouble === null && turn.phase === null && turn.text === '' && turn.tools.length === 0 && turn.refusal === null}
+						<p class="state waiting"><Spinner /> {waitingLine()}</p>
 					{/if}
 
 					{#if cutOff || (unfinished && linkState === 'closed' && trouble !== null && turn.refusal === null)}
@@ -912,6 +1125,16 @@
 		align-items: center;
 		gap: 7px;
 		color: var(--df-text-secondary);
+	}
+
+	/* The server's own progress, one line: a small moving mark for liveness and
+	   the phase in the console's quiet ink. It never grows into a transcript. */
+	.state.phase {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
 	}
 
 	.state[data-tone='danger'] {
