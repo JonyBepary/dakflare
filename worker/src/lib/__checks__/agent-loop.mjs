@@ -39,7 +39,7 @@ function resolveExtensionless(specifier, context, nextResolve) {
 
 registerHooks({ resolve: resolveExtensionless });
 
-const { runTurn } = await import("../../agent/loop.ts");
+const { runTurn, parseEnvelope } = await import("../../agent/loop.ts");
 const { Journal } = await import("../../agent/journal.ts");
 const { createActTools } = await import("../../agent/act.ts");
 
@@ -54,6 +54,24 @@ function check(label, condition, detail = "") {
     failures.push(`${label}${detail === "" ? "" : ` — ${detail}`}`);
     console.log(`FAIL  ${label}${detail === "" ? "" : ` — ${detail}`}`);
   }
+}
+
+{
+  // Both shapes were seen live: a reply wrapped in a JSON string, and a reply
+  // cut off by the output cap. Neither should reach the panel as raw JSON.
+  const doubleEncoded = JSON.stringify(
+    JSON.stringify({
+      answer: "Checking telemetry.",
+      calls: [{ tool: "telemetry", input: { question: "Did any financial SMS go through?" } }],
+    })
+  );
+  const unwrapped = parseEnvelope(doubleEncoded);
+  check("a double-encoded envelope is unwrapped", unwrapped.answer === "Checking telemetry.");
+  check("its calls survive", unwrapped.calls.length === 1 && unwrapped.calls[0].tool === "telemetry");
+
+  const truncated = '{"answer": "yes", "calls": [{"tool": "fleet_health", "input": {}}]';
+  const repaired = parseEnvelope(truncated);
+  check("a truncated envelope is repaired", repaired.answer === "yes" && repaired.calls.length === 1);
 }
 
 /* ── an in-memory journal with the same statements as the DO ──────────── */

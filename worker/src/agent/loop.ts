@@ -97,11 +97,56 @@ export function parseEnvelope(text: string): {
 } {
   const trimmed = text.trim();
   const unfenced = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const start = unfenced.indexOf("{");
-  const end = unfenced.lastIndexOf("}");
-  if (start !== -1 && end > start) {
+
+  /** One JSON object, from a span of text, or null. */
+  const objectFrom = (source: string): Record<string, unknown> | null => {
+    const start = source.indexOf("{");
+    const end = source.lastIndexOf("}");
+    if (start === -1) return null;
+    const candidates: string[] = [];
+    if (end > start) candidates.push(source.slice(start, end + 1));
+    // A reply cut off by the output cap loses its final closer; close the open
+    // brackets rather than discarding an otherwise usable envelope.
+    const span = source.slice(start);
+    candidates.push(span);
+    candidates.push(closeOpenBrackets(span) ?? "");
+    for (const candidate of candidates) {
+      if (candidate === "") continue;
+      try {
+        const parsed: unknown = JSON.parse(candidate);
+        // A model that stringifies its own envelope is real: one live reply was
+        // the JSON text wrapped in a JSON string. Unwrap once.
+        if (typeof parsed === "string") {
+          const inner: unknown = JSON.parse(parsed);
+          const asRecord = asObject(inner);
+          if (asRecord !== null) return asRecord;
+          continue;
+        }
+        const asRecord = asObject(parsed);
+        if (asRecord !== null) return asRecord;
+      } catch {
+        // next candidate
+      }
+    }
+    return null;
+  };
+
+  // A reply that is itself a JSON string ("{\"answer\": …}") cannot be sliced
+  // into an object: the braces are inside the string. Parse the whole text
+  // first, unwrap one string level, and only then fall back to a span.
+  const wholeText = ((): Record<string, unknown> | null => {
     try {
-      const parsed = asObject(JSON.parse(unfenced.slice(start, end + 1)));
+      let value: unknown = JSON.parse(unfenced);
+      if (typeof value === "string") value = JSON.parse(value);
+      return asObject(value);
+    } catch {
+      return null;
+    }
+  })();
+
+  {
+    {
+      const parsed = wholeText ?? objectFrom(unfenced);
       if (parsed !== null) {
         const answer = typeof parsed.answer === "string" ? parsed.answer : "";
         const rawCalls = Array.isArray(parsed.calls) ? parsed.calls : [];
@@ -113,11 +158,38 @@ export function parseEnvelope(text: string): {
         }
         return { answer, calls };
       }
-    } catch {
-      // fall through to the prose answer
     }
   }
   return { answer: trimmed, calls: [] };
+}
+
+/**
+ * Append the closers a truncated JSON object is missing.
+ *
+ * String-aware, so a brace inside a message body does not confuse it; null when
+ * the text is not an object, when a closer has no opener, or when it was already
+ * balanced.
+ */
+function closeOpenBrackets(text: string): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") stack.push("}");
+    else if (char === "[") stack.push("]");
+    else if (char === "}" || char === "]") {
+      if (stack.pop() !== char) return null;
+    }
+  }
+  if (inString || stack.length === 0) return null;
+  return text + stack.reverse().join("");
 }
 
 function buildSystemPrompt(tools: AgentTool[], autonomy?: string): string {
@@ -208,27 +280,64 @@ export async function runTurn(
         // one-shot chat; the adapter's 20 s default is not a model failure.
         timeoutMs: AGENT_MODEL_TIMEOUT_MS,
       });
-    } catch (error) {
-      // A transport failure is not an answer. The caller reports it as a
-      // refusal with a reason, and nothing downstream mistakes it for prose.
-      opts.onEvent?.({
-        type: "error",
-        reason: error instanceof Error ? error.name : "model_error",
-        message: String(error).slice(0, 200),
-      });
-      return { answer: "", turns, calls: executed, stopped: "aborted" };
+    } catch (first) {
+      // A provider that is momentarily at capacity is not a failed turn. One
+      // retry after a short pause covers the "at capacity" answers seen live,
+      // and an auth or format error still fails immediately.
+      const reason = first instanceof Error && "reason" in first ? String(first.reason) : "";
+      const retryable = reason === "provider_rate_limited" || reason === "provider_unavailable";
+      if (retryable) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        try {
+          result = await opts.model.chat(messages, {
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            timeoutMs: AGENT_MODEL_TIMEOUT_MS,
+          });
+        } catch (second) {
+          opts.onEvent?.({
+            type: "error",
+            reason: second instanceof Error && "reason" in second ? String(second.reason) : "model_error",
+            message: String(second).slice(0, 200),
+          });
+          return { answer: "", turns, calls: executed, stopped: "aborted" };
+        }
+      } else {
+        opts.onEvent?.({
+          type: "error",
+          reason: first instanceof Error ? first.name : "model_error",
+          message: String(first).slice(0, 200),
+        });
+        return { answer: "", turns, calls: executed, stopped: "aborted" };
+      }
     }
+
     turns += 1;
 
     // Charged per model call, before the reply is interpreted. The counter is
     // the agent's, not the console chat budget.
     await opts.budget.chargeTokens(billed(result, promptText));
 
-    if (result.text !== "") emit({ type: "token", text: result.text });
-
+    // Deliberately no token frame for the raw reply: it is the JSON envelope the
+    // model was asked for, and streaming it printed {"answer": …} into the panel.
+    // Progress is told by the tool frames and the final answer instead.
     const envelope = parseEnvelope(result.text);
     history.push({ role: "assistant", content: result.text });
     opts.journal.finishTurn(sessionId, turn);
+
+    // A reply that still looks like an envelope after parsing did not parse:
+    // report the shape rather than showing the operator raw JSON.
+    if (
+      envelope.calls.length === 0 &&
+      envelope.answer.trim() === "" &&
+      /^\s*\{?\s*"answer"\s*:/.test(result.text)
+    ) {
+      opts.onEvent?.({
+        type: "error",
+        reason: "unparseable_reply",
+        message: "the model's reply was not a readable envelope: " + result.text.slice(0, 240),
+      });
+      return { answer: "", turns, calls: executed, stopped: "aborted" };
+    }
 
     if (envelope.calls.length === 0) {
       const answer = envelope.answer || result.text;

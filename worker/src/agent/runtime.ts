@@ -446,6 +446,9 @@ export class AssistantAgent extends DurableObject<Env> {
     const started = Date.now();
     const calls: unknown[] = [];
     let answer = "";
+    // A holder, not a bare `let`: TypeScript's flow analysis does not see an
+    // assignment made inside a callback, and narrows a reassigned `let` to null.
+    const failureRef: { current: { reason: string; message: string } | null } = { current: null };
 
     const history: Array<{ role: "user" | "assistant"; content: string }> = [];
     try {
@@ -487,6 +490,9 @@ export class AssistantAgent extends DurableObject<Env> {
         onEvent: (frame) => {
           if (frame.type === "answer") answer = frame.text;
           else if (frame.type === "tool") calls.push(frame);
+          else if (frame.type === "error") {
+            failureRef.current = { reason: frame.reason, message: frame.message };
+          }
         },
       }
     );
@@ -506,6 +512,15 @@ export class AssistantAgent extends DurableObject<Env> {
       }
     }
 
+    if (failureRef.current !== null) {
+      // A provider or parse failure is a refusal with a reason, never an empty
+      // "answer" the operator has to interpret.
+      return {
+        ok: false,
+        reason: failureRef.current.reason,
+        message: failureRef.current.message,
+      };
+    }
     if (answer === "") answer = result.answer ?? "";
     return {
       ok: true,

@@ -59,6 +59,11 @@ function stringField(input: Record<string, unknown>, key: string): string {
   return typeof input[key] === "string" ? (input[key] as string) : "";
 }
 
+function numberField(input: Record<string, unknown>, key: string): number | null {
+  const value = input[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 /** The three handler calls an act needs, wired to the real routes. */
 export function realActDispatch(): ActDispatch {
   return {
@@ -109,6 +114,80 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
         return fromResponse(
           await handleAgentTelemetry(jsonRequest("/v1/agent/telemetry", "POST", { question }), ctx.env)
         );
+      },
+    },
+    {
+      name: "search_messages",
+      description:
+        "Read recent messages from the fleet's delivery record, newest first: direction, peer, a short body preview, when it arrived and its reply/delivery state. Use it to answer questions like 'did any financial SMS go out'. Bodies are truncated to 80 characters and never logged.",
+      kind: "read",
+      parameters: {
+        type: "object",
+        properties: {
+          contains: { type: "string", description: "Case-insensitive text the body should contain" },
+          direction: { type: "string", enum: ["in", "out"] },
+          peer: { type: "string", description: "Exact peer number" },
+          since_hours: { type: "number", description: "Only messages newer than this many hours" },
+          limit: { type: "number", description: "1-20, default 10" },
+        },
+        additionalProperties: false,
+      },
+      async execute(input, ctx) {
+        const clauses: string[] = [];
+        const binds: unknown[] = [];
+        const direction = stringField(input, "direction");
+        if (direction === "in" || direction === "out") {
+          clauses.push("direction = ?");
+          binds.push(direction);
+        }
+        const peer = stringField(input, "peer");
+        if (peer !== "") {
+          clauses.push("peer = ?");
+          binds.push(peer);
+        }
+        const contains = stringField(input, "contains");
+        if (contains !== "") {
+          clauses.push("body LIKE ? ESCAPE '\\'");
+          binds.push("%" + contains.replace(/[%_\\]/g, (c) => "\\" + c) + "%");
+        }
+        const hours = numberField(input, "since_hours");
+        if (hours !== null && hours > 0) {
+          clauses.push("received_at >= ?");
+          binds.push(Date.now() - Math.min(24 * 30, hours) * 3_600_000);
+        }
+        const limitRaw = numberField(input, "limit");
+        const limit = Math.max(1, Math.min(20, limitRaw === null ? 10 : Math.trunc(limitRaw)));
+        const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+
+        const rows = await ctx.env.DB.prepare(
+          `SELECT id, direction, peer, body, received_at, reply_state
+             FROM messages ${where}
+            ORDER BY received_at DESC
+            LIMIT ?`
+        )
+          .bind(...binds, limit)
+          .all<{
+            id: string;
+            direction: string;
+            peer: string;
+            body: string;
+            received_at: number;
+            reply_state: string | null;
+          }>();
+
+        const messages = (rows.results ?? []).map((row) => ({
+          id: row.id,
+          direction: row.direction,
+          peer: row.peer,
+          preview: row.body.length > 80 ? row.body.slice(0, 80) + "…" : row.body,
+          at: new Date(Number(row.received_at)).toISOString(),
+          state: row.reply_state,
+        }));
+        return {
+          ok: true,
+          output: JSON.stringify({ count: messages.length, messages }),
+          data: { count: messages.length },
+        };
       },
     },
     {
