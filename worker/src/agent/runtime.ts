@@ -1,9 +1,11 @@
 /**
  * The assistant Durable Object — pass 3, stages A–C.
  *
- * The shell (schema ledger, pinned name, one `WebSockets` capability) is stage
- * A. Stage B adds the turn loop with an injectable adapter; stage C adds the
- * act tools, the call journal and the autonomy gate.
+ * The actor-facing runtime is one `Agent<Env, AssistantState>`: the SDK owns
+ * the Lifecycle/State/WebSockets shell, `keepAlive` while a model call is in
+ * flight, and the optional `runFiber`/`queue`/`@callable` surface. This file
+ * keeps the bespoke pieces that have no SDK equivalent: the versioned ledger,
+ * the grant gate, the fail-closed journal, and the turn frames.
  *
  * The object is still ONE pinned instance (`assistant`), but a "session" is a
  * connection: the journal's turn cap is per connection, and the socket closes at
@@ -20,13 +22,16 @@
  * touched; the stateless assistant keeps working either way.
  */
 
-import { DurableObject } from "cloudflare:workers";
-import { Lifecycle } from "agents/lifecycle";
-import { Scheduler } from "agents/schedules";
+import {
+  Agent,
+  type Connection,
+  type ConnectionContext,
+  type FiberContext,
+  type FiberRecoveryContext,
+  type WSMessage,
+} from "agents";
 import { Sessions } from "agents/sessions";
-import { State } from "agents/state";
 import { Streams, type StreamJson, type StreamWriter } from "agents/streams";
-import { WebSockets } from "agents/websockets";
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import {
@@ -125,201 +130,72 @@ interface StoredVersionRow extends Record<string, SqlStorageValue> {
   version: number;
 }
 
-/** The connection fields the runtime reads; `Connection` extends `WebSocket`. */
-interface AssistantConnection extends WebSocket {
-  id: string;
-  state: unknown;
-}
-
 /**
- * The documented cadence of the `Agent` class's keep-alive heartbeat. A DO is
- * evicted after roughly 70–140 s idle; a turn takes 10–25 s, so one 30 s wake-up
- * during the model call is enough to keep the instance resident.
+ * The cadence of the SDK's `keepAlive()` heartbeat. A DO is evicted after
+ * roughly 70–140 s idle; a turn takes 10–25 s, so one 30 s wake-up during the
+ * model call is enough to keep the instance resident.
  */
 export const TURN_HEARTBEAT_SECONDS = 30;
 
-/** The slice of `Scheduler` the heartbeat uses; the real class satisfies it. */
-export interface HeartbeatScheduler {
-  every(
-    intervalSeconds: number,
-    callback: "keepalive",
-    payload?: undefined,
-    options?: { idempotent?: boolean }
-  ): Promise<{ id: string }>;
-  cancel(id: string): Promise<boolean>;
-}
-
 /**
- * Holds the Durable Object awake while any turn is in flight.
+ * The acting agent, on the SDK's `Agent` base class.
  *
- * Job key: ONE interval job for every turn. The installed Scheduler's `every()`
- * is idempotent by default for recurrent schedules (`ScheduleOptions.idempotent`
- * defaults to true for interval/cron) and deduplicates on type, callback,
- * owner, payload and interval. So the first turn arms `keepalive` at 30 s with
- * no payload, later turns call the same `every` and receive the same job, and
- * cancellation is decided by a counter: the last turn out cancels the one job.
+ * `Agent` owns the same Lifecycle + State + WebSockets wiring we hand-rolled,
+ * and adds `keepAlive`/`keepAliveWhile`, `runFiber`, `queue` and `@callable`.
+ * The hooks below replace the manual capability handlers:
  *
- * The counter is INSTANCE memory. Eviction takes it with the object, and a turn
- * that died with the object cannot resume: this makes eviction during a live
- * turn less likely, it does not make the turn durable.
+ *   onStart    the schema ledger, then publish it to State
+ *   onRequest  status, kill switch and the SSE stream read
+ *   onConnect  the bespoke `ready` frame after identity is proved
+ *   onMessage  the `ask` / `resume` frames
+ *   onClose    one structured close log line
+ *   onAlarm    close sockets past their session or grant deadline
+ *
+ * Two schema owners share this object and do not overlap:
+ *
+ *   `Agent._ensureSchema()` (constructor, synchronous) owns every `cf_agents_*`
+ *   table and its KV schema gate. The SDK may add columns or bump its own
+ *   version; we never read or write that gate.
+ *
+ *   Our `MIGRATIONS` + `schema_version` row own `agent_turns`, `tool_calls`,
+ *   `agent_messages` and `schema_version`. We refuse to serve when the stored
+ *   row is NEWER than `AGENT_SCHEMA_VERSION` (a rollback): that refusal is
+ *   authoritative for our tables, independently of the SDK's gate. The two
+ *   gates may legitimately disagree during a rollback, so `#schemaAhead` is
+ *   checked on every path rather than inferred from the SDK.
  */
-export class TurnHeartbeat {
-  #turnsInFlight = 0;
-  #jobId: string | null = null;
-  /** Serialises arm/cancel so a turn starting as the last one ends cannot race. */
-  #chain: Promise<void> = Promise.resolve();
-  readonly #scheduler: HeartbeatScheduler;
-
-  constructor(scheduler: HeartbeatScheduler) {
-    this.#scheduler = scheduler;
-  }
-
-  /** `true` while the interval job is armed. */
-  get armed(): boolean {
-    return this.#jobId !== null;
-  }
-
-  /** How many turns currently hold the heartbeat. */
-  get turnsInFlight(): number {
-    return this.#turnsInFlight;
-  }
-
-  /** Run one turn, armed from start to end — including a throw. */
-  async run<T>(turn: () => Promise<T>): Promise<T> {
-    this.#turnsInFlight += 1;
-    await this.#queue(async () => {
-      if (this.#jobId !== null) return;
-      // `idempotent` is the documented default for an interval; passing it
-      // makes the one-job choice explicit rather than incidental.
-      const schedule = await this.#scheduler.every(TURN_HEARTBEAT_SECONDS, "keepalive", undefined, {
-        idempotent: true,
-      });
-      this.#jobId = schedule.id;
-    });
-    try {
-      return await turn();
-    } finally {
-      this.#turnsInFlight = Math.max(0, this.#turnsInFlight - 1);
-      const stillActive = this.#turnsInFlight;
-      await this.#queue(async () => {
-        if (stillActive > 0) return;
-        const id = this.#jobId;
-        this.#jobId = null;
-        if (id !== null) await this.#scheduler.cancel(id);
-      });
-    }
-  }
-
+export class AssistantAgent extends Agent<Env, AssistantState> {
   /**
-   * Heartbeat storage is best effort: a failure to arm must not fail the turn,
-   * and a failure to cancel leaves one job that the next turn reuses.
+   * Our client speaks a bespoke JSON protocol, so the SDK must not put
+   * `cf_agent_identity`, `cf_agent_state` or `cf_agent_mcp_servers` frames on
+   * the wire. `shouldSendProtocolMessages()` below is the per-connection
+   * switch that suppresses all three; `sendIdentityOnConnect` is also off so a
+   * future subclass cannot accidentally turn identity back on. `keepAlive`
+   * uses the documented 30 s cadence our heartbeat check asserts.
    */
-  #queue(task: () => Promise<void>): Promise<void> {
-    const next = this.#chain.then(task, task).catch((error: unknown) => {
-      console.warn(`[agent] keepalive failed: ${String(error).slice(0, 200)}`);
-    });
-    this.#chain = next;
-    return next;
-  }
-}
+  static override options = {
+    sendIdentityOnConnect: false,
+    keepAliveIntervalMs: TURN_HEARTBEAT_SECONDS * 1_000,
+  };
 
-export class AssistantAgent extends DurableObject<Env> {
-  /** `true` when the stored schema is newer than this code (a rollback). */
+  /** `true` when our stored schema is newer than this code (a rollback). */
   #schemaAhead = false;
 
-  readonly state = new State<AssistantState>({
-    initialState: { schemaVersion: AGENT_SCHEMA_VERSION, lastSeenAt: null },
-  });
-
-  readonly sockets = new WebSockets({
-    handlers: {
-      onConnect: (connection, context) => {
-        if (this.#schemaAhead) {
-          connection.close(1011, "agent_schema_ahead");
-          return;
-        }
-        const request = context.request;
-        const userId = request.headers.get("x-dakflare-actor");
-        const role = request.headers.get("x-dakflare-actor-role");
-        if (userId === null || userId === "" || role === null || role === "") {
-          connection.close(1008, "agent_identity_missing");
-          return;
-        }
-        const actor: AdminActor = {
-          userId,
-          label: userId,
-          role: role as AdminActor["role"],
-          canGrantOwner: role === "owner",
-        };
-        connection.setState({
-          actor,
-          sessionExpiresAt: Date.now() + AGENT_SESSION_TTL_MS,
-        } satisfies AssistantConnectionState);
-
-        connection.send(
-          JSON.stringify({
-            type: "ready",
-            name: this.ctx.id.name ?? ASSISTANT_OBJECT_NAME,
-            session_expires_at: Date.now() + AGENT_SESSION_TTL_MS,
-            conversation: conversationIdFor(actor.label),
-          })
-        );
-        this.state.set({ schemaVersion: AGENT_SCHEMA_VERSION, lastSeenAt: Date.now() });
-      },
-      onMessage: (connection, message) => {
-        void this.#handleFrame(connection, message);
-        return true;
-      },
-      onClose: (connection, code, reason) => {
-        // The platform's close code is the only server-side reason a "link
-        // closed" report can be matched against later. Record it, with the
-        // actor, before the connection state is forgotten.
-        const state = connection.state as AssistantConnectionState | null;
-        console.log(
-          `[agent] socket_close ${JSON.stringify({
-            actor: state?.actor.label ?? null,
-            code,
-            reason,
-          })}`
-        );
-      },
-    },
-  });
+  override initialState: AssistantState = {
+    schemaVersion: AGENT_SCHEMA_VERSION,
+    lastSeenAt: null,
+  };
 
   /**
    * Durable conversation history and durable turn output.
    *
    * Both capabilities create their own `cf_agents_*` tables at Lifecycle
-   * startup, so they add no step to this object's migration ledger. The
-   * conversation id is per operator (`conversation:<label>`), not per socket:
-   * a reconnect, the CLI and the panel share one memory.
+   * startup, so they add no step to our migration ledger. The conversation id
+   * is per operator (`conversation:<label>`), not per socket: a reconnect, the
+   * CLI and the panel share one memory.
    */
   readonly sessions = new Sessions();
   readonly streams = new Streams();
-
-  /**
-   * The keep-alive schedule. The callback runs inside the Lifecycle host
-   * boundary and touches nothing: an interval schedule re-arms itself, and the
-   * only effect wanted is that the object's alarm loop keeps running while a
-   * turn is in flight.
-   */
-  readonly scheduler = new Scheduler({
-    callbacks: {
-      keepalive: () => {
-        // Intentionally empty: the recurring schedule is the wake-up.
-      },
-    },
-  });
-
-  /** Arms `scheduler` while a turn runs; see `TurnHeartbeat` for the key choice. */
-  readonly turns = new TurnHeartbeat(this.scheduler);
-
-  readonly lifecycle = Lifecycle.install(this)
-    .use(this.state)
-    .use(this.sockets)
-    .use(this.sessions)
-    .use(this.streams)
-    .use(this.scheduler);
 
   readonly #journal = new Journal({
     sql: this.ctx.storage.sql as unknown as JournalSql,
@@ -328,28 +204,99 @@ export class AssistantAgent extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Startup work runs behind the input gate: a request that arrives during
-    // the migration waits for it rather than seeing a table that does not exist.
-    ctx.blockConcurrencyWhile(async () => {
-      this.#migrate();
+    // `super()` has already run the SDK's `_ensureSchema()` and installed its
+    // Lifecycle capabilities. Ours are added before Lifecycle starts, so the
+    // host-level `onStart` below is still the first thing to run.
+    this.lifecycle.use(this.sessions).use(this.streams);
+  }
+
+  /**
+   * Our client never expects SDK protocol frames. Returning false here makes
+   * the base class mark the connection no-protocol before its own `onConnect`
+   * wrapper, so identity, state sync and MCP lists are suppressed both on
+   * connect and in later broadcasts (including the MCP broadcast in onStart).
+   */
+  override shouldSendProtocolMessages(
+    _connection: Connection,
+    _context: ConnectionContext
+  ): boolean {
+    return false;
+  }
+
+  /**
+   * Lifecycle host hook. The SDK's own schema is already ensured in `super()`;
+   * this migrates OUR ledger before `onRequest`/`onConnect` can be reached
+   * (Lifecycle awaits onStart at its first entry point), then publishes the
+   * ledger version to State.
+   */
+  override onStart(): void {
+    this.#migrate();
+    if (this.#schemaAhead) return;
+    this.setState({
+      schemaVersion: AGENT_SCHEMA_VERSION,
+      lastSeenAt: this.state.lastSeenAt ?? null,
     });
   }
 
-  /** Lifecycle host hook: the SQL ledger is migrated, publish it to `State`. */
-  onStart(): void {
-    if (this.#schemaAhead) return;
-    const current = this.state.get();
-    this.state.set({
-      schemaVersion: AGENT_SCHEMA_VERSION,
-      lastSeenAt: current?.lastSeenAt ?? null,
-    });
+  /* ───────────────────────────── WebSocket hooks ──────────────────────── */
+
+  override async onConnect(connection: Connection, context: ConnectionContext): Promise<void> {
+    if (this.#schemaAhead) {
+      connection.close(1011, "agent_schema_ahead");
+      return;
+    }
+    const request = context.request;
+    const userId = request.headers.get("x-dakflare-actor");
+    const actorRole = request.headers.get("x-dakflare-actor-role");
+    if (userId === null || userId === "" || actorRole === null || actorRole === "") {
+      connection.close(1008, "agent_identity_missing");
+      return;
+    }
+    const actor: AdminActor = {
+      userId,
+      label: userId,
+      role: actorRole as AdminActor["role"],
+      canGrantOwner: actorRole === "owner",
+    };
+    connection.setState({
+      actor,
+      sessionExpiresAt: Date.now() + AGENT_SESSION_TTL_MS,
+    } satisfies AssistantConnectionState);
+
+    connection.send(
+      JSON.stringify({
+        type: "ready",
+        name: this.ctx.id.name ?? ASSISTANT_OBJECT_NAME,
+        session_expires_at: Date.now() + AGENT_SESSION_TTL_MS,
+        conversation: conversationIdFor(actor.label),
+      })
+    );
+    this.setState({ schemaVersion: AGENT_SCHEMA_VERSION, lastSeenAt: Date.now() });
+  }
+
+  override onMessage(connection: Connection, message: WSMessage): void {
+    void this.#handleFrame(connection, message);
+  }
+
+  override onClose(connection: Connection, code: number, reason: string): void {
+    // The platform's close code is the only server-side reason a "link closed"
+    // report can be matched against later. Record it, with the actor, before
+    // the connection state is forgotten.
+    const state = connection.state as AssistantConnectionState | null;
+    console.log(
+      `[agent] socket_close ${JSON.stringify({
+        actor: state?.actor.label ?? null,
+        code,
+        reason,
+      })}`
+    );
   }
 
   /**
    * HTTP surface: the status probe, and the kill switch's "stop the object's
    * sessions" arm. `/agents/*` itself only carries upgrades.
    */
-  async onRequest(request: Request): Promise<Response> {
+  override async onRequest(request: Request): Promise<Response> {
     if (this.#schemaAhead) {
       return Response.json(
         { error: "agent_schema_ahead", code: AGENT_SCHEMA_VERSION },
@@ -363,12 +310,12 @@ export class AssistantAgent extends DurableObject<Env> {
         name: this.ctx.id.name ?? ASSISTANT_OBJECT_NAME,
         schemaVersion: stored ?? AGENT_SCHEMA_VERSION,
         codeVersion: AGENT_SCHEMA_VERSION,
-        connections: [...this.sockets.getConnections()].length,
+        connections: [...this.getConnections()].length,
       });
     }
     if (path.endsWith("/__runtime/kill")) {
       let closed = 0;
-      for (const connection of this.sockets.getConnections()) {
+      for (const connection of this.getConnections()) {
         try {
           connection.close(1001, "agent_revoked");
           closed += 1;
@@ -400,25 +347,21 @@ export class AssistantAgent extends DurableObject<Env> {
   }
 
   /**
-   * The physical alarm. Lifecycle owns the job queue behind it, so the host's
-   * override must delegate rather than replace it: `installHandlers` skips a
-   * name the host already defines, and a host `alarm()` that did not call
-   * `lifecycle.alarm()` would store Scheduler jobs — the heartbeat included —
-   * and never dispatch them.
+   * Agent host hook, run after Lifecycle's due jobs and before its
+   * housekeeping. Close every socket whose session or autonomy window has
+   * passed. `Agent.alarm()` owns the physical alarm now (it also handles
+   * pending destroy), so this subclass must not override `alarm()`.
    */
-  override async alarm(): Promise<void> {
-    await this.lifecycle.alarm();
-  }
-
-  /**
-   * Lifecycle's host hook, run after due jobs. Close every socket whose session
-   * or autonomy window has passed.
-   */
-  async onAlarm(): Promise<void> {
+  override async onAlarm(): Promise<void> {
     const autonomy = await readAutonomyStatus(this.env);
-    const grantExpiresAt = autonomy.enabled ? autonomy.expires_at ?? Infinity : autonomy.expires_at ?? Date.now();
+    // Mirror the per-frame check: an autonomy row's expiry closes the socket;
+    // autonomy merely being OFF (no row) has no grant deadline, so it must not
+    // close an otherwise valid session. The old `Date.now()` fallback only
+    // stayed invisible because nothing scheduled an alarm while autonomy was
+    // off; `Agent`'s housekeeping alarm now does.
+    const grantExpiresAt = autonomy.expires_at ?? Infinity;
     const now = Date.now();
-    for (const connection of this.sockets.getConnections()) {
+    for (const connection of this.getConnections()) {
       const state = connection.state as AssistantConnectionState | null;
       const sessionExpiresAt = state?.sessionExpiresAt ?? now;
       const earliest = Math.min(sessionExpiresAt, grantExpiresAt);
@@ -437,7 +380,7 @@ export class AssistantAgent extends DurableObject<Env> {
 
   /* ─────────────────────────────── frames ─────────────────────────────── */
 
-  async #handleFrame(connection: AssistantConnection, message: unknown): Promise<void> {
+  async #handleFrame(connection: Connection, message: WSMessage | unknown): Promise<void> {
     if (this.#schemaAhead) {
       connection.close(1011, "agent_schema_ahead");
       return;
@@ -530,17 +473,65 @@ export class AssistantAgent extends DurableObject<Env> {
     await this.#armExpiryAlarm();
   }
 
+  /* ─────────────────────────── turn execution ────────────────────────── */
+
+  /**
+   * Run one model turn as a durable fiber, with the heartbeat held.
+   *
+   * `runFiber` records a `cf_agents_runs` row before the first model call and
+   * deletes it when the turn settles. A turn interrupted by eviction therefore
+   * leaves a marker that `onFiberRecovered` below sees; the snapshot is the
+   * last frame's phase, for the log and for the operator. `keepAliveWhile` is
+   * what keeps the object resident; the fiber's own keepAlive ref is a second
+   * holder of the same heartbeat, not a second heartbeat.
+   *
+   * The fiber is NOT the thing that makes a replay safe. If this turn is ever
+   * retried with the same idempotency key, the journal's `tool_calls` row is
+   * what refuses a second effect: `runTurn` derives each call id from the turn
+   * and returns the recorded result. Recovery deliberately does not re-run the
+   * turn, so it cannot replay an act at all.
+   */
+  async #runTurnFiber<T>(
+    name: string,
+    turn: (fiber: FiberContext) => Promise<T>
+  ): Promise<T> {
+    return this.keepAliveWhile(() => this.runFiber(name, turn));
+  }
+
+  /**
+   * A turn interrupted by eviction. The client resumes from the durable stream
+   * (or sends the turn again); this hook only records what was left behind.
+   * It never re-invokes the turn: replay safety lives in the journal, and an
+   * automatic re-run would be a second model call for an effect that may
+   * already be recorded.
+   */
+  override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
+    const snapshot =
+      ctx.snapshot !== null && typeof ctx.snapshot === "object"
+        ? (ctx.snapshot as { turn?: unknown; phase?: unknown })
+        : null;
+    console.warn(
+      `[agent] turn_interrupted ${JSON.stringify({
+        fiber: ctx.id,
+        name: ctx.name,
+        turn: typeof snapshot?.turn === "string" ? snapshot.turn : null,
+        phase: typeof snapshot?.phase === "string" ? snapshot.phase : null,
+        created_at: ctx.createdAt,
+      })}`
+    );
+  }
+
   /**
    * Re-arm the socket-expiry alarm at the earliest session/autonomy deadline.
    *
-   * Lifecycle owns the physical alarm for its job queue. While the heartbeat is
-   * armed the interval job must own that alarm, so an expiry write here would
-   * delay the 30 s wake-up; the last turn to finish calls this again with the
-   * heartbeat down. The per-frame check remains the guarantee either way.
+   * `Agent` owns the physical alarm for its Lifecycle job queue, so this is a
+   * "never delay it" write: while `keepAlive` is armed its 30 s wake-up must
+   * not be pushed out, and an existing sooner alarm is left alone. The
+   * per-frame check remains the guarantee either way.
    */
   async #armExpiryAlarm(): Promise<void> {
-    if (this.turns.armed) return;
-    const connections = [...this.sockets.getConnections()];
+    if (this._keepAliveRefs > 0) return;
+    const connections = [...this.getConnections()];
     if (connections.length === 0) return;
     let earliest = Infinity;
     for (const connection of connections) {
@@ -550,8 +541,11 @@ export class AssistantAgent extends DurableObject<Env> {
     const autonomy = await readAutonomyStatus(this.env);
     earliest = Math.min(earliest, autonomy.expires_at ?? Infinity);
     if (!Number.isFinite(earliest)) return;
+    const target = Math.max(Date.now() + 1_000, earliest);
     try {
-      await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, earliest));
+      const existing = await this.ctx.storage.getAlarm();
+      if (existing !== null && existing <= target) return;
+      await this.ctx.storage.setAlarm(target);
     } catch {
       // The alarm is a convenience; the per-frame check is the guarantee.
     }
@@ -559,7 +553,7 @@ export class AssistantAgent extends DurableObject<Env> {
 
   /** Replay a durable stream from `from`, then tail it while it is live. */
   async #replayStream(
-    connection: AssistantConnection,
+    connection: Connection,
     streamId: string,
     from: number
   ): Promise<void> {
@@ -606,7 +600,7 @@ export class AssistantAgent extends DurableObject<Env> {
   }
 
   async #ask(
-    connection: AssistantConnection,
+    connection: Connection,
     state: AssistantConnectionState,
     sessionId: string,
     message: string,
@@ -716,9 +710,14 @@ export class AssistantAgent extends DurableObject<Env> {
     }
 
     const tools = buildAgentTools();
-    // Armed for the model call and everything after it, and disarmed by
-    // `run` on success, refusal and throw alike.
-    await this.turns.run(async () => {
+    // `keepAliveWhile` inside `#runTurnFiber` is the SDK's ref-counted
+    // heartbeat: it caps the next alarm at `keepAliveIntervalMs` (30 s) for the
+    // duration of the model call and the effects after it, and disposes on
+    // success, refusal and throw. It is in-memory, exactly like the counter it
+    // replaced: it lowers the chance of eviction during a live turn, it does
+    // not make the turn durable — the fiber row and the journal do.
+    await this.#runTurnFiber(`turn:${idempotencyKey}`, async (fiber) => {
+      fiber.stash({ turn: idempotencyKey, phase: "model" });
       const result = await runTurn(
         this.env,
         state.actor,
@@ -732,7 +731,10 @@ export class AssistantAgent extends DurableObject<Env> {
           autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
           idempotencyKey,
           history,
-          onEvent: send,
+          onEvent: (frame) => {
+            send(frame);
+            fiber.stash({ turn: idempotencyKey, phase: frame.type });
+          },
         }
       );
 
@@ -762,6 +764,7 @@ export class AssistantAgent extends DurableObject<Env> {
         }
       }
 
+      fiber.stash({ turn: idempotencyKey, phase: "settled" });
       logTurn(errorRef.current !== null ? `error:${errorRef.current.reason}` : result.stopped);
     });
   }
@@ -861,8 +864,11 @@ export class AssistantAgent extends DurableObject<Env> {
     }
 
     // The machine path holds the object awake the same way the socket path
-    // does: one counter, one interval job, disarmed even when the turn throws.
-    return this.turns.run(async () => {
+    // does: one ref-counted heartbeat, disposed even when the turn throws. It
+    // is also a durable fiber for the same reason: an interrupted machine turn
+    // leaves a marker for `onFiberRecovered` instead of vanishing.
+    return this.#runTurnFiber(`turn:${idempotencyKey}`, async (fiber) => {
+      fiber.stash({ turn: idempotencyKey, phase: "model" });
       const result = await runTurn(
         this.env,
         actor,
@@ -878,6 +884,7 @@ export class AssistantAgent extends DurableObject<Env> {
           history,
           onEvent: (frame) => {
             frames += 1;
+            fiber.stash({ turn: idempotencyKey, phase: frame.type });
             if (writer !== null) {
               try {
                 writer.append(frame as unknown as StreamJson);
@@ -923,6 +930,7 @@ export class AssistantAgent extends DurableObject<Env> {
         };
       }
       if (answer === "") answer = result.answer ?? "";
+      fiber.stash({ turn: idempotencyKey, phase: "settled" });
       logTurn(result.stopped);
       return {
         ok: true as const,

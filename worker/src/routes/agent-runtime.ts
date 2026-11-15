@@ -142,6 +142,9 @@ export async function handleAutonomyRead(req: Request, env: Env): Promise<Respon
       const grants = await listGrants(env, { tokenId: AUTONOMY_TOKEN_ID, liveOnly: true });
       return Response.json({
         ...status,
+        // Whose window this is. A session that did not open it is refused at act
+        // time; the console needs the same fact to say so before anyone tries.
+        mine: (status.actor ?? null) === null || status.actor === actor.label,
         grants: grants.map((grant) => ({
           id: grant.id,
           scope: grant.scope,

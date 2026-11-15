@@ -485,6 +485,8 @@ export interface AutonomyStatus {
   write_cap: number;
   expires_at: number | null;
   updated_by: string | null;
+  /** The operator the window belongs to; null for a row that predates 0014. */
+  actor?: string | null;
   usage: UsageRow & { day: string };
 }
 
@@ -519,6 +521,7 @@ export async function readAutonomyStatus(
     write_cap: Number(row?.write_cap ?? 0),
     expires_at: row === null ? null : Number(row.expires_at),
     updated_by: row?.updated_by ?? null,
+    actor: typeof row?.actor === "string" ? row.actor : null,
     usage: {
       day,
       tokens: Number(usage?.tokens ?? 0),

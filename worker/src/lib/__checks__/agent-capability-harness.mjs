@@ -7,8 +7,9 @@
  * exercise the published Sessions/Streams implementation rather than a second
  * mock of it.
  *
- * Not a Workers runtime: alarms and sockets are inert. Neither capability
- * needs them for the properties these checks assert.
+ * Not a Workers runtime: sockets are inert and alarms are recorded, not
+ * delivered. Neither capability needs delivery for the properties these checks
+ * assert; `agent-heartbeat.mjs` only reads the alarm the SDK schedules.
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -22,12 +23,15 @@ const DURABLE_OBJECT_STUB =
     "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }\n" +
       "export class WorkerEntrypoint {}\n" +
       "export class WorkflowEntrypoint {}\n" +
-      "export class RpcTarget {}\n"
+      "export class RpcTarget {}\n" +
+      "export class EmailMessage {}\n" +
+      "export class WebSocketPair { constructor() { return [{}, {}]; } }\n" +
+      "const exportsObject = {}; export { exportsObject as exports };\n"
   );
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "cloudflare:workers") {
+    if (specifier === "cloudflare:workers" || specifier === "cloudflare:email") {
       return { url: DURABLE_OBJECT_STUB, shortCircuit: true };
     }
     return nextResolve(specifier, context, nextResolve);
@@ -54,6 +58,7 @@ export async function createCapabilityHost() {
   const { Lifecycle } = await import("agents/lifecycle");
   const db = new DatabaseSync(":memory:");
   const kv = new Map();
+  let alarm = null;
 
   const sql = {
     exec(query, ...params) {
@@ -73,6 +78,15 @@ export async function createCapabilityHost() {
       kv.set(key, value);
     },
     delete: async (key) => kv.delete(key),
+    // The synchronous KV view the Agent base class reads its own schema gate
+    // from during construction.
+    kv: {
+      get: (key) => kv.get(key),
+      put: (key, value) => {
+        kv.set(key, value);
+      },
+      delete: (key) => kv.delete(key),
+    },
     blockConcurrencyWhile: async (fn) => await fn(),
     transactionSync: (fn) => {
       db.exec("BEGIN");
@@ -85,19 +99,25 @@ export async function createCapabilityHost() {
         throw error;
       }
     },
-    setAlarm: async () => {},
-    deleteAlarm: async () => {},
-    getAlarm: async () => null,
+    setAlarm: async (time) => {
+      alarm = Number(time);
+    },
+    deleteAlarm: async () => {
+      alarm = null;
+    },
+    getAlarm: async () => alarm,
+    waitUntil: () => {},
   };
 
   class HarnessHost {}
   const host = new HarnessHost();
   host.ctx = {
-    id: { name: "assistant" },
+    id: { name: "assistant", toString: () => "assistant-id" },
     storage,
     acceptWebSocket() {},
     getWebSockets: () => [],
     blockConcurrencyWhile: storage.blockConcurrencyWhile,
+    waitUntil: () => {},
   };
 
   return { db, kv, storage, ctx: host.ctx, lifecycle: Lifecycle.install(host) };

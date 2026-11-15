@@ -61,16 +61,26 @@ capabilities. Nothing was added to `package.json`: `agents@0.33.0` already expor
 Deliberately not adopted: `@cloudflare/think` bundles sessions, streams, approvals and a
 per-turn authorization model, but it is experimental and pulls `ai@7`, the `@ai-sdk/*`
 packages and React. Its authorization also defaults to allow-all per turn, which is the
-opposite of what this gateway needs. The `Agent` base class would add `runFiber`, `keepAlive`
-and `queue`; those are the next step, not this one.
+opposite of what this gateway needs.
 
-We are a bare Durable Object plus `Lifecycle`, the same shape as the SDK's Pi example
-(`examples/next/harnesses/pi/src/server.ts`). Ours adds three things no example carries: the
-grant model, the fail-closed journal and the versioned schema. The `Agent` class would add
-`keepAlive`, `runFiber`, `queue` and `@callable`; until that migration is worth doing, the
-`Scheduler` capability with a 30 s `keepalive` interval armed for the duration of a turn is
-the smallest stand-in for `keepAlive`. It lowers the chance that a 10–25 s model call is
-evicted with the object; it does not survive an eviction and does not resume a turn.
+The object now extends the SDK's `Agent` base class. That adds `keepAlive`, `runFiber`,
+`queue` and `@callable` without changing the bespoke contract: the pinned name, the grant
+model, the fail-closed journal, the versioned schema and the turn frames stay ours. Two
+rules keep the migration honest:
+
+- **Two schema owners, disjoint tables.** `Agent._ensureSchema()` owns every
+  `cf_agents_*` table and its KV gate; our `MIGRATIONS` + `AGENT_SCHEMA_VERSION` row own
+  `agent_turns`, `tool_calls`, `agent_messages` and `schema_version`. Our refusal wins for
+  our tables when a stored version is newer than the code (a rollback), independently of
+  the SDK's gate.
+- **No SDK protocol frames on our wire.** `shouldSendProtocolMessages()` returns false, so
+  identity, state sync and MCP frames are never sent; the client continues to speak its
+  bespoke JSON protocol starting with `ready`.
+
+A turn runs under `keepAliveWhile` (the SDK's ref-counted 30 s alarm cap, which replaced
+the hand-rolled `Scheduler` heartbeat) and as a `runFiber`. The fiber row records an
+interrupted turn for `onFiberRecovered`, but it never resumes or replays one: replay
+safety is the journal's `tool_calls` row, which refuses a second effect for the same turn.
 
 ## Authority
 
