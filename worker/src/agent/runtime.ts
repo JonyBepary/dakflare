@@ -11,19 +11,34 @@
  * A long-lived socket therefore cannot outlive the grant that lets it act — and
  * every act re-checks the grant at call time anyway.
  *
+ * Conversation is a different axis: it is per operator
+ * (`conversation:<actor label>`), shared by every socket and by `say()`, and
+ * stored by the Sessions capability. Reconnecting no longer starts a blank
+ * transcript, and the CLI and the panel read the same memory.
+ *
  * `AGENT_RUNTIME=off` is enforced at the edge (`index.ts`) before this object is
  * touched; the stateless assistant keeps working either way.
  */
 
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
+import { Sessions } from "agents/sessions";
 import { State } from "agents/state";
+import { Streams, sseResponse, type StreamJson, type StreamWriter } from "agents/streams";
 import { WebSockets } from "agents/websockets";
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import { ASSISTANT_OBJECT_NAME } from "../lib/agent-runtime";
 import { readSettingsOrEnv } from "../lib/ai/settings";
 import { resolveAdapter } from "../lib/ai/registry";
+import {
+  appendTurnMessages,
+  conversationIdFor,
+  readHistoryNewestFirst,
+  readTurnAnswer,
+  recordTurnAnswer,
+  toChatHistory,
+} from "./conversation";
 import { Journal, type JournalSql } from "./journal";
 import type { AgentActor } from "./types";
 import { runTurn, type RunFrame } from "./loop";
@@ -46,6 +61,10 @@ const MIGRATIONS: readonly string[] = [
      updated_at INTEGER NOT NULL
    )`,
   // Version 2 — the turn journal and the conversation.
+  // `agent_messages` is kept (the brief asks for it unreferenced) so a
+  // rollback does not lose a running object's transcript. The runtime now
+  // reads and writes `cf_agents_session_*` through the Sessions capability;
+  // migration 0014_agent_drop_messages.sql (next pass) drops this table.
   `CREATE TABLE IF NOT EXISTS agent_turns (
      session    TEXT NOT NULL,
      turn       INTEGER NOT NULL,
@@ -98,11 +117,6 @@ interface StoredVersionRow extends Record<string, SqlStorageValue> {
   version: number;
 }
 
-interface MessageRow extends Record<string, SqlStorageValue> {
-  role: string;
-  content: string;
-}
-
 /** The connection fields the runtime reads; `Connection` extends `WebSocket`. */
 interface AssistantConnection extends WebSocket {
   id: string;
@@ -147,6 +161,7 @@ export class AssistantAgent extends DurableObject<Env> {
             type: "ready",
             name: this.ctx.id.name ?? ASSISTANT_OBJECT_NAME,
             session_expires_at: Date.now() + AGENT_SESSION_TTL_MS,
+            conversation: conversationIdFor(actor.label),
           })
         );
         this.state.set({ schemaVersion: AGENT_SCHEMA_VERSION, lastSeenAt: Date.now() });
@@ -158,7 +173,22 @@ export class AssistantAgent extends DurableObject<Env> {
     },
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.state).use(this.sockets);
+  /**
+   * Durable conversation history and durable turn output.
+   *
+   * Both capabilities create their own `cf_agents_*` tables at Lifecycle
+   * startup, so they add no step to this object's migration ledger. The
+   * conversation id is per operator (`conversation:<label>`), not per socket:
+   * a reconnect, the CLI and the panel share one memory.
+   */
+  readonly sessions = new Sessions();
+  readonly streams = new Streams();
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.state)
+    .use(this.sockets)
+    .use(this.sessions)
+    .use(this.streams);
 
   readonly #journal = new Journal({
     sql: this.ctx.storage.sql as unknown as JournalSql,
@@ -216,6 +246,24 @@ export class AssistantAgent extends DurableObject<Env> {
         }
       }
       return Response.json({ ok: true, closed });
+    }
+    // A reloaded page cannot hold a socket open across the reload. The same
+    // durable stream is served as SSE, resuming from `?from=` (or the
+    // EventSource `Last-Event-ID`). The stream id is namespaced by the turn
+    // key; ownership is checked against the actor the edge authenticated, so
+    // one operator cannot read another's stream.
+    const streamMatch = /\/streams\/([^/]+)$/.exec(path);
+    if (request.method === "GET" && streamMatch !== null) {
+      const streamId = decodeURIComponent(streamMatch[1]);
+      const actorLabel = request.headers.get("x-dakflare-actor");
+      if (actorLabel === null || actorLabel === "") {
+        return Response.json({ error: "agent_identity_missing" }, { status: 401 });
+      }
+      const status = await this.streams.status(streamId);
+      if (status === null || status.tag !== conversationIdFor(actorLabel)) {
+        return Response.json({ error: "stream_not_found" }, { status: 404 });
+      }
+      return sseResponse(this.streams, streamId, { request });
     }
     return Response.json({ error: "agent_upgrade_required" }, { status: 426 });
   }
@@ -275,7 +323,7 @@ export class AssistantAgent extends DurableObject<Env> {
       return;
     }
 
-    if (payload.type !== "ask") {
+    if (payload.type !== "ask" && payload.type !== "resume") {
       connection.send(JSON.stringify({ type: "unsupported" }));
       return;
     }
@@ -283,6 +331,27 @@ export class AssistantAgent extends DurableObject<Env> {
     const state = connection.state as AssistantConnectionState | null;
     if (state === null || state.actor === undefined) {
       connection.close(1008, "agent_identity_missing");
+      return;
+    }
+
+    if (payload.type === "resume") {
+      const streamId = typeof payload.streamId === "string" ? payload.streamId : "";
+      const rawFrom = payload.from;
+      const from =
+        typeof rawFrom === "number" && Number.isInteger(rawFrom) && rawFrom >= 0 ? rawFrom : 0;
+      if (streamId === "") {
+        connection.send(JSON.stringify({ type: "error", error: "bad_request", message: "streamId is required" }));
+        return;
+      }
+      const status = await this.streams.status(streamId);
+      if (status === null || status.tag !== conversationIdFor(state.actor.label)) {
+        connection.send(JSON.stringify({ type: "error", error: "stream_not_found" }));
+        return;
+      }
+      // Tailing a live stream is allowed; it ends when the stream settles or
+      // the client goes away. Run it beside the frame handler so another ask
+      // on the same socket is not blocked behind a long replay.
+      void this.#replayStream(connection, streamId, from);
       return;
     }
 
@@ -327,6 +396,25 @@ export class AssistantAgent extends DurableObject<Env> {
     }
   }
 
+  /** Replay a durable stream from `from`, then tail it while it is live. */
+  async #replayStream(
+    connection: AssistantConnection,
+    streamId: string,
+    from: number
+  ): Promise<void> {
+    try {
+      for await (const chunk of this.streams.read(streamId, { from })) {
+        try {
+          connection.send(JSON.stringify(chunk.chunk));
+        } catch {
+          return; // The socket went away; stop tailing.
+        }
+      }
+    } catch {
+      // A stream deleted during replay ends the tail; the client can resume again.
+    }
+  }
+
   async #ask(
     connection: AssistantConnection,
     state: AssistantConnectionState,
@@ -334,44 +422,77 @@ export class AssistantAgent extends DurableObject<Env> {
     message: string,
     idempotencyKey: string
   ): Promise<void> {
-    const send = (frame: RunFrame): void => {
+    // A turn retried with the same key answers from storage: the model is not
+    // called twice and no message is appended twice.
+    const conversationId = conversationIdFor(state.actor.label);
+    const session = this.sessions.session(conversationId);
+    const replayedAnswer = await readTurnAnswer(session, idempotencyKey);
+    if (replayedAnswer !== null) {
+      try {
+        connection.send(JSON.stringify({ type: "answer", text: replayedAnswer }));
+      } catch {
+        // The replayed answer is durable; a closed socket can resume.
+      }
+      return;
+    }
+
+    const { messages: newestFirst } = await readHistoryNewestFirst(session);
+    const history = toChatHistory(newestFirst);
+    const before = history.length;
+
+    // Every turn owns one durable stream keyed by its server-held idempotency
+    // key. A frame is appended before it is sent, so a dropped socket loses
+    // presentation, not the reply the journal records.
+    const streamId = streamIdFor(idempotencyKey);
+    let writer: StreamWriter | null = null;
+    try {
+      writer = await this.streams.open(streamId, {
+        tag: conversationId,
+        metadata: { turn: idempotencyKey, actor: state.actor.label },
+      });
+    } catch {
+      // A settled stream from a completed turn has nothing to append to.
+      // The answer marker above is the replay path; resume still reads chunks.
+    }
+
+    const errorRef: { current: { reason: string; message: string } | null } = { current: null };
+    const sendRaw = (frame: unknown): void => {
       try {
         connection.send(JSON.stringify(frame));
       } catch {
-        // The socket closed mid-turn; the journal still records what happened.
+        // The socket closed mid-turn; the journal and stream still record it.
+      }
+      if (writer !== null) {
+        try {
+          writer.append(frame as StreamJson);
+        } catch {
+          // A stream settled underneath the writer: presentation only.
+        }
       }
     };
-
-    let history: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
-    try {
-      const rows = this.ctx.storage.sql
-        .exec<MessageRow>(
-          `SELECT role, content FROM agent_messages WHERE session = ? ORDER BY id ASC LIMIT 60`,
-          sessionId
-        )
-        .toArray();
-      history = rows
-        .filter((row) => row.role === "user" || row.role === "assistant")
-        .map((row) => ({
-          role: row.role as "user" | "assistant",
-          content: row.content,
-        }));
-    } catch {
-      history = [];
-    }
-    const before = history.length;
+    const send = (frame: RunFrame): void => {
+      if (frame.type === "error") {
+        errorRef.current = { reason: frame.reason, message: frame.message };
+      }
+      sendRaw(frame);
+    };
 
     const settings = await readSettingsOrEnv(this.env);
     const resolved = resolveAdapter(this.env, settings);
     if (!resolved.ok) {
-      connection.send(
-        JSON.stringify({
-          type: "error",
-          error: "ai_unavailable",
-          reason: resolved.reason,
-          message: resolved.message,
-        })
-      );
+      sendRaw({
+        type: "error",
+        error: "ai_unavailable",
+        reason: resolved.reason,
+        message: resolved.message,
+      });
+      if (writer !== null) {
+        try {
+          writer.error(resolved.reason);
+        } catch {
+          // already settled
+        }
+      }
       return;
     }
 
@@ -393,19 +514,22 @@ export class AssistantAgent extends DurableObject<Env> {
       }
     );
 
-    const now = Date.now();
-    for (const entry of history.slice(before)) {
+    if (writer !== null) {
       try {
-        this.ctx.storage.sql.exec(
-          `INSERT INTO agent_messages (session, role, content, created_at) VALUES (?, ?, ?, ?)`,
-          sessionId,
-          entry.role,
-          entry.content,
-          now
-        );
+        if (errorRef.current !== null) writer.error(errorRef.current.message);
+        else writer.close();
       } catch {
-        // A lost transcript row costs context, not the journal.
+        // Closing a settled stream is safe; a race here has no side effect.
       }
+    }
+
+    try {
+      await appendTurnMessages(session, idempotencyKey, history.slice(before));
+      if (result.stopped === "answer" && result.answer !== "") {
+        await recordTurnAnswer(session, idempotencyKey, result.answer);
+      }
+    } catch {
+      // A lost transcript row costs context, not the journal.
     }
 
     if (result.stopped === "turn_cap") {
@@ -439,10 +563,35 @@ export class AssistantAgent extends DurableObject<Env> {
     const trimmed = message.trim();
     if (trimmed === "") return { ok: false, reason: "bad_request", message: "message is empty" };
 
-    // One session per call. The machine path is for a single turn, and reusing a
-    // session made the model read its own earlier refusals back as the current
-    // state ("repeating the request doesn't create a grant").
-    const sessionId = "http:" + actor.label + ":" + crypto.randomUUID();
+    // The machine path shares `conversation:<label>` with the socket path: a
+    // CLI turn and a panel turn are one memory, not one memory per transport.
+    const conversationId = conversationIdFor(actor.label);
+    const session = this.sessions.session(conversationId);
+    const idempotencyKey = "http:" + crypto.randomUUID();
+    // The journal's turn cap is per call on the machine path; only the
+    // transcript is shared with the socket path.
+    const journalSessionId = "http:" + crypto.randomUUID();
+
+    const replayedAnswer = await readTurnAnswer(session, idempotencyKey);
+    if (replayedAnswer !== null) {
+      return { ok: true, answer: replayedAnswer, calls: [], tokens: null, took_ms: 0 };
+    }
+
+    const { messages: newestFirst } = await readHistoryNewestFirst(session);
+    const history = toChatHistory(newestFirst);
+    const before = history.length;
+
+    const streamId = streamIdFor(idempotencyKey);
+    let writer: StreamWriter | null = null;
+    try {
+      writer = await this.streams.open(streamId, {
+        tag: conversationId,
+        metadata: { turn: idempotencyKey, actor: actor.label },
+      });
+    } catch {
+      // A settled stream from a completed turn; the answer marker is the replay.
+    }
+
     const started = Date.now();
     const calls: unknown[] = [];
     let answer = "";
@@ -450,34 +599,23 @@ export class AssistantAgent extends DurableObject<Env> {
     // assignment made inside a callback, and narrows a reassigned `let` to null.
     const failureRef: { current: { reason: string; message: string } | null } = { current: null };
 
-    const history: Array<{ role: "user" | "assistant"; content: string }> = [];
-    try {
-      const rows = this.ctx.storage.sql
-        .exec<{ role: string; content: string }>(
-          `SELECT role, content FROM agent_messages WHERE session = ? ORDER BY id ASC LIMIT 60`,
-          sessionId
-        )
-        .toArray();
-      for (const row of rows) {
-        if (row.role === "user" || row.role === "assistant") {
-          history.push({ role: row.role, content: row.content });
-        }
-      }
-    } catch {
-      // a lost transcript costs context, not the turn
-    }
-    const before = history.length;
-
     const settings = await readSettingsOrEnv(this.env);
     const resolved = resolveAdapter(this.env, settings);
     if (!resolved.ok) {
+      if (writer !== null) {
+        try {
+          writer.error(resolved.reason);
+        } catch {
+          // already settled
+        }
+      }
       return { ok: false, reason: resolved.reason, message: resolved.message };
     }
 
     const result = await runTurn(
       this.env,
       actor,
-      sessionId,
+      journalSessionId,
       trimmed,
       buildAgentTools(),
       {
@@ -485,9 +623,16 @@ export class AssistantAgent extends DurableObject<Env> {
         journal: this.#journal,
         budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
         autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
-        idempotencyKey: "http:" + crypto.randomUUID(),
+        idempotencyKey,
         history,
         onEvent: (frame) => {
+          if (writer !== null) {
+            try {
+              writer.append(frame as unknown as StreamJson);
+            } catch {
+              // A settled stream is presentation only; the journal is intact.
+            }
+          }
           if (frame.type === "answer") answer = frame.text;
           else if (frame.type === "tool") calls.push(frame);
           else if (frame.type === "error") {
@@ -497,19 +642,22 @@ export class AssistantAgent extends DurableObject<Env> {
       }
     );
 
-    const now = Date.now();
-    for (const entry of history.slice(before)) {
+    if (writer !== null) {
       try {
-        this.ctx.storage.sql.exec(
-          `INSERT INTO agent_messages (session, role, content, created_at) VALUES (?, ?, ?, ?)`,
-          sessionId,
-          entry.role,
-          entry.content,
-          now
-        );
+        if (failureRef.current !== null) writer.error(failureRef.current.message);
+        else writer.close();
       } catch {
-        // ignore
+        // closing a settled stream is safe
       }
+    }
+
+    try {
+      await appendTurnMessages(session, idempotencyKey, history.slice(before));
+      if (answer !== "") {
+        await recordTurnAnswer(session, idempotencyKey, answer);
+      }
+    } catch {
+      // a lost transcript costs context, not the turn
     }
 
     if (failureRef.current !== null) {
@@ -595,4 +743,17 @@ function fnv1a(text: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16);
+}
+
+/**
+ * The durable stream id for one turn.
+ *
+ * Keyed by the server-held turn key, as the brief requires. Streams caps an id
+ * at 256 characters, so a caller-supplied key that is too long is folded to a
+ * stable short form; the tag (the conversation) still carries ownership.
+ */
+function streamIdFor(idempotencyKey: string): string {
+  const direct = `turn:${idempotencyKey}`;
+  if (direct.length <= 256) return direct;
+  return `turn:folded:${idempotencyKey.length}:${fnv1a(idempotencyKey)}`;
 }

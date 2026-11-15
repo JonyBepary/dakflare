@@ -31,7 +31,6 @@ export interface ModelAdapter {
 }
 
 export type RunFrame =
-  | { type: "token"; text: string }
   | { type: "answer"; text: string }
   | { type: "tool"; tool: string; ok: boolean; result: ToolResult }
   | { type: "calls"; calls: Array<{ tool: string; input: Record<string, unknown> }> }
@@ -243,10 +242,17 @@ export async function runTurn(
     }
   };
 
+  /**
+   * The adapter is not streaming, so there are no real tokens to emit.
+   *
+   * This used to slice the finished answer into 48-character `token` frames.
+   * That looked like a stream but was a re-broadcast of a reply the journal
+   * already recorded as complete: a socket that dropped halfway lost a reply
+   * the server considered done. The honest frame is the answer once; durable
+   * progress belongs to the Streams capability in `runtime.ts`, which is where
+   * a streaming adapter would append incremental frames if one arrives.
+   */
   const emitAnswer = (text: string): void => {
-    for (let at = 0; at < text.length; at += 48) {
-      emit({ type: "token", text: text.slice(at, at + 48) });
-    }
     emit({ type: "answer", text });
   };
 

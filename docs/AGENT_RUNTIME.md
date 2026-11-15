@@ -41,6 +41,29 @@ runtime on behaves exactly as it does today.
    `AGENT_RUNTIME=off` routes `/agents/*` to `503` while the stateless assistant keeps
    working.
 
+## Memory and streaming are the SDK's, not ours
+
+A doc study of the Agents SDK found we had adopted its shell (Lifecycle, State, WebSockets)
+and hand-rolled the two pieces under it that matter most, so both are now the documented
+capabilities. Nothing was added to `package.json`: `agents@0.33.0` already exports them.
+
+- **`agents/sessions`** holds the conversation. It is keyed by the operator
+  (`conversation:<actor>`), not by the socket, so a reconnect is the same conversation and the
+  panel and the CLI share one memory. Appends are idempotent on a turn-derived message id, so a
+  retried turn does not duplicate, and history is hydrated to a 32 KiB budget by bytes rather
+  than rows. Branching, compaction and full-text search come with it and are unused so far.
+- **`agents/streams`** holds each turn. Every frame is appended to a durable chunk log keyed by
+  the turn's idempotency key, so a client can resume: send `{type:"resume", streamId, from}` on
+  the socket, or `GET /agents/assistant/assistant/streams/<id>?from=<seq>` for an SSE replay
+  after a reload. The old "stream" sliced a finished answer into 48-character pieces, which
+  looked live, resumed from nothing, and was removed.
+
+Deliberately not adopted: `@cloudflare/think` bundles sessions, streams, approvals and a
+per-turn authorization model, but it is experimental and pulls `ai@7`, the `@ai-sdk/*`
+packages and React. Its authorization also defaults to allow-all per turn, which is the
+opposite of what this gateway needs. The `Agent` base class would add `runFiber`, `keepAlive`
+and `queue`; those are the next step, not this one.
+
 ## Authority
 
 The rule stays meaningful only if the human decision names the effect. Turning autonomy on

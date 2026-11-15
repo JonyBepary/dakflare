@@ -74,6 +74,7 @@ import {
   ASSISTANT_OBJECT_NAME,
   assertAssistantRoute,
   checkUpgradeRequest,
+  isTrustedOrigin,
   redeemTicket,
   ticketRefusal,
 } from "./lib/agent-runtime";
@@ -777,7 +778,15 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       }
 
       const pinned = new URL(req.url);
-      pinned.pathname = `/agents/${ASSISTANT_OBJECT_NAME}/${ASSISTANT_OBJECT_NAME}`;
+      // A durable stream is read over HTTP (SSE), so its `/streams/<id>`
+      // suffix has to survive the rewrite to the pinned object. The first two
+      // segments are still replaced with the pinned name, so a caller cannot
+      // mint a second object.
+      const streamSuffix = /^\/agents\/[^/]+\/[^/]+(\/streams\/[^/]+)$/.exec(pathname);
+      pinned.pathname =
+        streamSuffix !== null
+          ? `/agents/${ASSISTANT_OBJECT_NAME}/${ASSISTANT_OBJECT_NAME}${streamSuffix[1]}`
+          : `/agents/${ASSISTANT_OBJECT_NAME}/${ASSISTANT_OBJECT_NAME}`;
       const routedRequest = new Request(pinned.toString(), req);
 
       const gate = async (
@@ -786,6 +795,40 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       ): Promise<Response | Request | void> => {
         const denied = assertAssistantRoute(route);
         if (denied !== null) return denied;
+
+        // The SSE endpoint is a read: no ticket (there is no upgrade to fail
+        // visibly) but the same Origin rule and the same admin session. The
+        // WebSocket gate below is untouched.
+        const requestPath = new URL(request.url).pathname;
+        const streamRead =
+          request.method === "GET" &&
+          (request.headers.get("Upgrade") ?? "").toLowerCase() !== "websocket" &&
+          /\/streams\/[^/]+$/.test(requestPath);
+        if (streamRead) {
+          const origin = isTrustedOrigin(request, env);
+          if (!origin.ok) return Response.json({ error: `agent_${origin.reason}` }, { status: 403 });
+          const headers = new Headers(request.headers);
+          if (request.headers.get("X-Dakflare-Client") === "cli") {
+            const authorized = await withAdmin(
+              request,
+              env,
+              async () => new Response(null, { status: 204 })
+            );
+            if (!authorized.ok) return authorized;
+            headers.delete("x-dakflare-actor");
+            headers.set("x-dakflare-actor", machineActor().label);
+            headers.set("x-dakflare-actor-role", machineActor().role);
+            return new Request(request, { headers });
+          }
+          const guard = await requireRole(request, env, "write", {
+            action: "resume an agent stream",
+          });
+          if (!guard.ok) return guard.response;
+          headers.delete("x-dakflare-actor");
+          headers.set("x-dakflare-actor", guard.user.id);
+          headers.set("x-dakflare-actor-role", guard.user.role);
+          return new Request(request, { headers });
+        }
 
         const checked = checkUpgradeRequest(request, env);
         if (!checked.ok) return checked.response;
