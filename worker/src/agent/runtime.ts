@@ -24,11 +24,18 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Sessions } from "agents/sessions";
 import { State } from "agents/state";
-import { Streams, sseResponse, type StreamJson, type StreamWriter } from "agents/streams";
+import { Streams, type StreamJson, type StreamWriter } from "agents/streams";
 import { WebSockets } from "agents/websockets";
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
-import { ASSISTANT_OBJECT_NAME } from "../lib/agent-runtime";
+import {
+  ASSISTANT_OBJECT_NAME,
+  STREAM_IDLE_TIMEOUT_MS,
+  shortHash,
+  streamIdFor,
+  streamSseResponse,
+  turnFrame,
+} from "../lib/agent-runtime";
 import { readSettingsOrEnv } from "../lib/ai/settings";
 import { resolveAdapter } from "../lib/ai/registry";
 import {
@@ -170,6 +177,19 @@ export class AssistantAgent extends DurableObject<Env> {
         void this.#handleFrame(connection, message);
         return true;
       },
+      onClose: (connection, code, reason) => {
+        // The platform's close code is the only server-side reason a "link
+        // closed" report can be matched against later. Record it, with the
+        // actor, before the connection state is forgotten.
+        const state = connection.state as AssistantConnectionState | null;
+        console.log(
+          `[agent] socket_close ${JSON.stringify({
+            actor: state?.actor.label ?? null,
+            code,
+            reason,
+          })}`
+        );
+      },
     },
   });
 
@@ -263,7 +283,7 @@ export class AssistantAgent extends DurableObject<Env> {
       if (status === null || status.tag !== conversationIdFor(actorLabel)) {
         return Response.json({ error: "stream_not_found" }, { status: 404 });
       }
-      return sseResponse(this.streams, streamId, { request });
+      return streamSseResponse(this.streams, streamId, request);
     }
     return Response.json({ error: "agent_upgrade_required" }, { status: 426 });
   }
@@ -377,7 +397,7 @@ export class AssistantAgent extends DurableObject<Env> {
     const idempotencyKey =
       typeof payload.idempotencyKey === "string" && payload.idempotencyKey !== ""
         ? payload.idempotencyKey
-        : `${connection.id}:${fnv1a(messageText)}`;
+        : `${connection.id}:${shortHash(messageText)}`;
 
     const sessionId = connection.id;
     await this.#ask(connection, state, sessionId, messageText.trim(), idempotencyKey);
@@ -402,16 +422,45 @@ export class AssistantAgent extends DurableObject<Env> {
     streamId: string,
     from: number
   ): Promise<void> {
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stop = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    // The same bounded idle wait as SSE: a resumed socket cannot sit on an
+    // abandoned stream forever.
+    const arm = (): void => {
+      stop();
+      timer = setTimeout(() => {
+        try {
+          connection.send(JSON.stringify({ type: "timeout" }));
+        } catch {
+          // closed; the client can resume again
+        }
+        stop();
+        abort.abort();
+      }, STREAM_IDLE_TIMEOUT_MS);
+    };
+    arm();
     try {
-      for await (const chunk of this.streams.read(streamId, { from })) {
+      for await (const chunk of this.streams.read(streamId, { from, signal: abort.signal })) {
         try {
           connection.send(JSON.stringify(chunk.chunk));
         } catch {
-          return; // The socket went away; stop tailing.
+          // The socket went away; stop tailing. The stream itself is not
+          // settled here — only the turn that owns it may close it.
+          return;
         }
+        arm();
       }
     } catch {
-      // A stream deleted during replay ends the tail; the client can resume again.
+      // A stream deleted during replay, or the idle timeout, ends the tail;
+      // the client can resume again.
+    } finally {
+      stop();
     }
   }
 
@@ -422,17 +471,40 @@ export class AssistantAgent extends DurableObject<Env> {
     message: string,
     idempotencyKey: string
   ): Promise<void> {
+    const started = Date.now();
+    let frames = 0;
     // A turn retried with the same key answers from storage: the model is not
     // called twice and no message is appended twice.
     const conversationId = conversationIdFor(state.actor.label);
+    const streamId = streamIdFor(idempotencyKey);
     const session = this.sessions.session(conversationId);
+
+    // One line per finished turn, through the path the runtime already logs
+    // on: the next "the link closed" report has a server-side duration to
+    // compare against the socket's close code.
+    const logTurn = (outcome: string): void => {
+      console.log(
+        `[agent] turn ${JSON.stringify({
+          turn: idempotencyKey,
+          actor: state.actor.label,
+          took_ms: Date.now() - started,
+          frames,
+          outcome,
+        })}`
+      );
+    };
+
     const replayedAnswer = await readTurnAnswer(session, idempotencyKey);
     if (replayedAnswer !== null) {
+      // Announce first even on a replay: the stream id is deterministic, so
+      // the client can still resume the turn that produced this answer.
       try {
+        connection.send(JSON.stringify(turnFrame(idempotencyKey, conversationId)));
         connection.send(JSON.stringify({ type: "answer", text: replayedAnswer }));
       } catch {
         // The replayed answer is durable; a closed socket can resume.
       }
+      logTurn("replayed");
       return;
     }
 
@@ -443,7 +515,6 @@ export class AssistantAgent extends DurableObject<Env> {
     // Every turn owns one durable stream keyed by its server-held idempotency
     // key. A frame is appended before it is sent, so a dropped socket loses
     // presentation, not the reply the journal records.
-    const streamId = streamIdFor(idempotencyKey);
     let writer: StreamWriter | null = null;
     try {
       writer = await this.streams.open(streamId, {
@@ -457,6 +528,7 @@ export class AssistantAgent extends DurableObject<Env> {
 
     const errorRef: { current: { reason: string; message: string } | null } = { current: null };
     const sendRaw = (frame: unknown): void => {
+      frames += 1;
       try {
         connection.send(JSON.stringify(frame));
       } catch {
@@ -477,6 +549,11 @@ export class AssistantAgent extends DurableObject<Env> {
       sendRaw(frame);
     };
 
+    // The turn's first frame names the durable stream before the model is
+    // called, so a socket that closes during the wait can resume it instead of
+    // printing "the link closed before the answer finished".
+    sendRaw(turnFrame(idempotencyKey, conversationId));
+
     const settings = await readSettingsOrEnv(this.env);
     const resolved = resolveAdapter(this.env, settings);
     if (!resolved.ok) {
@@ -493,6 +570,7 @@ export class AssistantAgent extends DurableObject<Env> {
           // already settled
         }
       }
+      logTurn(`error:${resolved.reason}`);
       return;
     }
 
@@ -539,6 +617,8 @@ export class AssistantAgent extends DurableObject<Env> {
         // closed
       }
     }
+
+    logTurn(errorRef.current !== null ? `error:${errorRef.current.reason}` : result.stopped);
   }
 
 
@@ -595,6 +675,28 @@ export class AssistantAgent extends DurableObject<Env> {
     const started = Date.now();
     const calls: unknown[] = [];
     let answer = "";
+    let frames = 0;
+    const logTurn = (outcome: string): void => {
+      console.log(
+        `[agent] turn ${JSON.stringify({
+          turn: idempotencyKey,
+          actor: actor.label,
+          took_ms: Date.now() - started,
+          frames,
+          outcome,
+        })}`
+      );
+    };
+    // The HTTP turn's stream announces itself like a socket turn does, so an
+    // SSE consumer of a machine turn can resume it from seq 0.
+    if (writer !== null) {
+      try {
+        writer.append(turnFrame(idempotencyKey, conversationId) as unknown as StreamJson);
+        frames += 1;
+      } catch {
+        // A settled stream is presentation only.
+      }
+    }
     // A holder, not a bare `let`: TypeScript's flow analysis does not see an
     // assignment made inside a callback, and narrows a reassigned `let` to null.
     const failureRef: { current: { reason: string; message: string } | null } = { current: null };
@@ -609,6 +711,7 @@ export class AssistantAgent extends DurableObject<Env> {
           // already settled
         }
       }
+      logTurn(`error:${resolved.reason}`);
       return { ok: false, reason: resolved.reason, message: resolved.message };
     }
 
@@ -626,6 +729,7 @@ export class AssistantAgent extends DurableObject<Env> {
         idempotencyKey,
         history,
         onEvent: (frame) => {
+          frames += 1;
           if (writer !== null) {
             try {
               writer.append(frame as unknown as StreamJson);
@@ -663,6 +767,7 @@ export class AssistantAgent extends DurableObject<Env> {
     if (failureRef.current !== null) {
       // A provider or parse failure is a refusal with a reason, never an empty
       // "answer" the operator has to interpret.
+      logTurn(`error:${failureRef.current.reason}`);
       return {
         ok: false,
         reason: failureRef.current.reason,
@@ -670,6 +775,7 @@ export class AssistantAgent extends DurableObject<Env> {
       };
     }
     if (answer === "") answer = result.answer ?? "";
+    logTurn(result.stopped);
     return {
       ok: true,
       answer,
@@ -735,25 +841,4 @@ export class AssistantAgent extends DurableObject<Env> {
   }
 }
 
-/** A tiny non-cryptographic hash for an ask without an idempotency key. */
-function fnv1a(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < text.length; index++) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16);
-}
 
-/**
- * The durable stream id for one turn.
- *
- * Keyed by the server-held turn key, as the brief requires. Streams caps an id
- * at 256 characters, so a caller-supplied key that is too long is folded to a
- * stable short form; the tag (the conversation) still carries ownership.
- */
-function streamIdFor(idempotencyKey: string): string {
-  const direct = `turn:${idempotencyKey}`;
-  if (direct.length <= 256) return direct;
-  return `turn:folded:${idempotencyKey.length}:${fnv1a(idempotencyKey)}`;
-}

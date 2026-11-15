@@ -32,6 +32,7 @@ export interface ModelAdapter {
 
 export type RunFrame =
   | { type: "answer"; text: string }
+  | { type: "status"; phase: string }
   | { type: "tool"; tool: string; ok: boolean; result: ToolResult }
   | { type: "calls"; calls: Array<{ tool: string; input: Record<string, unknown> }> }
   | { type: "error"; reason: string; message: string };
@@ -47,6 +48,12 @@ export interface RunTurnOptions {
   history?: ChatMessage[];
   maxCalls?: number;
   maxTurns?: number;
+  /**
+   * How often a `waiting` status is emitted while a model call is in flight.
+   * Defaults to 10 s: a silent WebSocket is dropped by idle proxies and some
+   * browsers well before a slow reasoning turn returns.
+   */
+  heartbeatMs?: number;
   onEvent?: (frame: RunFrame) => void;
   /**
    * What the model may do this turn, in the gateway's own words: whether
@@ -73,6 +80,12 @@ const DEFAULT_MAX_TURNS = 6;
 const MAX_OUTPUT_TOKENS = 2_048;
 /** A turn may take longer than a one-shot chat; the loop is the patient path. */
 const AGENT_MODEL_TIMEOUT_MS = 60_000;
+/**
+ * A model call can think for most of a minute. A socket that says nothing for
+ * that long is dropped by idle proxies and some browsers, and the panel shows
+ * a stalled link. This is the default cadence of the `waiting` status frame.
+ */
+export const WAITING_HEARTBEAT_MS = 10_000;
 
 function estimateTokens(text: string): number {
   return text === "" ? 0 : Math.ceil(text.length / 3);
@@ -253,6 +266,9 @@ export async function runTurn(
    * a streaming adapter would append incremental frames if one arrives.
    */
   const emitAnswer = (text: string): void => {
+    // The client shows "answering" while the final text is on its way. It is
+    // presentation only: the answer frame is what carries the result.
+    emit({ type: "status", phase: "answering" });
     emit({ type: "answer", text });
   };
 
@@ -279,6 +295,17 @@ export async function runTurn(
     const promptText = messages.map((entry) => entry.content).join("\n");
 
     let result: { text: string; tokensIn?: number; tokensOut?: number };
+    // Announced before the wait, so a 25 s model call shows as work rather
+    // than a stalled link.
+    emit({ type: "status", phase: "thinking" });
+    // The model is not streaming, so silence is indistinguishable from a dead
+    // socket. A bounded heartbeat keeps both alive without pretending to be
+    // progress. It covers the retry below as well and is cleared however the
+    // call ends.
+    const heartbeat = setInterval(
+      () => emit({ type: "status", phase: "waiting" }),
+      Math.max(1, opts.heartbeatMs ?? WAITING_HEARTBEAT_MS)
+    );
     try {
       result = await opts.model.chat(messages, {
         maxOutputTokens: MAX_OUTPUT_TOKENS,
@@ -315,6 +342,8 @@ export async function runTurn(
         });
         return { answer: "", turns, calls: executed, stopped: "aborted" };
       }
+    } finally {
+      clearInterval(heartbeat);
     }
 
     turns += 1;
@@ -369,6 +398,7 @@ export async function runTurn(
 
     for (let index = 0; index < batch.length; index++) {
       const call = batch[index];
+      emit({ type: "status", phase: `tool:${call.tool}` });
       const tool = toolsByName.get(call.tool);
       if (tool === undefined) {
         const refusal: ToolResult = {
