@@ -14,11 +14,12 @@
 	 *    nothing on this panel says anything about a runtime that is off.
 	 *  - **Live.** `GET /v1/admin/agent/runtime` said `enabled: true`, so the panel
 	 *    holds an `AgentLink` (`$lib/agent-socket`): a ticket, then a WebSocket. The
-	 *    answer streams in, each tool run is one line, and a turn that was cut off
-	 *    is asked for again rather than abandoned: its frames live in a durable
-	 *    stream, so a dropped socket is a lost connection, not a lost answer.
+	 *    answer streams in, the steps that ran are drawn as a timeline under it, and
+	 *    a turn that was cut off is asked for again rather than abandoned: its frames
+	 *    live in a durable stream, so a dropped socket is a lost connection, not a
+	 *    lost answer.
 	 *
-	 * Five rules this panel keeps, on both paths:
+	 * Seven rules this panel keeps, on both paths:
 	 *
 	 *  - No invented state. Each failure is one line from `failureLine()` or
 	 *    `agentTroubleLine()`, with the gateway's own detail under it only when the
@@ -27,6 +28,12 @@
 	 *    had written three sentences shows both, in the order they happened.
 	 *  - A tool is a name and a verdict. Its output is dropped in the socket module
 	 *    and there is no template here that could print it.
+	 *  - A step exists because a `tool` frame settled it. The plan line counts the
+	 *    batch the gateway announced in `calls`; the timeline is what already ran.
+	 *    Neither is filled in from what this panel expected to happen next.
+	 *  - One run is a note, several are a timeline: a lone successful read stays a
+	 *    single quiet line, and the rail only appears when there is more than one
+	 *    step or one of them did not succeed.
 	 *  - No accept on `stage_workflow_patch`. That kind belongs to the workflow
 	 *    editor's ghost banner; this panel only hands the patch over when an editor
 	 *    is mounted, and explains the way there when it is not.
@@ -58,6 +65,8 @@
 		agentLinkLabel,
 		agentPhaseLine,
 		agentRefusalLine,
+		agentStepElapsed,
+		agentStepLine,
 		agentTroubleLine,
 		applyAgentFrame,
 		beginTurn,
@@ -208,6 +217,26 @@
 	const resuming = $derived(recovery?.kind === 'resuming');
 	const cutOff = $derived(unfinished && recovery?.kind === 'lost');
 
+	/**
+	 * The timeline, as the turn holds it.
+	 *
+	 * `steps` is what settled, and nothing else: a row appears when a `tool` frame
+	 * says a run happened. `pending` is the batch the gateway announced and has not
+	 * finished, which is what the plan line counts. The two are different facts and
+	 * are kept apart on purpose — queuing a call is not doing it.
+	 */
+	const steps = $derived(turn?.steps ?? []);
+	const pending = $derived(turn?.queue.length ?? 0);
+	/** The plan line's place, only while a step is actually queued. */
+	const planStep = $derived(steps.length + 1);
+	const planTotal = $derived(steps.length + pending);
+
+	/**
+	 * One quiet line or a timeline. A single successful read is a note, not work to
+	 * audit; two steps, or any step that did not succeed, is the rail.
+	 */
+	const timeline = $derived(steps.length >= 2 || steps.some((step) => step.verdict !== 'ok'));
+
 	// The sink appears and disappears with the editor, which is a different
 	// component on a different route. Nothing else would tell this panel.
 	$effect(() => {
@@ -330,7 +359,7 @@
 			asking = false;
 			// Nothing arrived at all: the refusal is the story, and the line below it
 			// stays the gateway's own.
-			if (turn.text !== '' || turn.tools.length > 0) recovery = { kind: 'lost' };
+			if (turn.text !== '' || turn.steps.length > 0) recovery = { kind: 'lost' };
 			return;
 		}
 
@@ -447,7 +476,10 @@
 			queued = null;
 			resetRecovery();
 			const count = turn?.proposals.length ?? 0;
-			const calls = frame.calls;
+			// The answer frame's own count when it sent one, otherwise the steps that
+			// settled: a five-step turn is five tool runs whether or not the last
+			// frame repeated the number.
+			const calls = Math.max(frame.calls, turn?.steps.length ?? 0);
 			announce(
 				calls > 0
 					? `The assistant answered, after ${calls} ${calls === 1 ? 'tool run' : 'tool runs'}.`
@@ -683,6 +715,23 @@
 			? 'The link closed and the answer could not be picked up again. Nothing after this point arrived.'
 			: 'The link closed before the answer finished. Nothing after this point arrived.';
 	}
+
+	/**
+	 * The time between the step before this one and this one.
+	 *
+	 * It comes from the frames' own stamps, never from this browser's clock: a
+	 * resume replays an hour-old turn in a second, and a clock here would date the
+	 * work to when the socket happened to deliver it. `null` when either frame
+	 * carried no stamp, so an unstamped turn shows no time rather than a guess.
+	 */
+	function gapBefore(index: number): string | null {
+		if (index === 0) return null;
+		const before = steps[index - 1]?.settledAt;
+		const at = steps[index]?.settledAt;
+		if (before === null || before === undefined || at === null || at === undefined) return null;
+		if (at < before) return null;
+		return agentStepElapsed(at - before);
+	}
 </script>
 
 <svelte:window onkeydown={onkeydown} />
@@ -740,14 +789,20 @@
 		<div class="body" aria-busy={asking}>
 			{#if live && (asking || turn !== null)}
 				<!-- The live path. Nothing here is drawn from a frame this turn does not
-				     have: the text is what arrived, the tools are what ran, the refusal
-				     is what the gateway said. -->
+				     have: the text is what arrived, the steps are what settled, the
+				     refusal is what the gateway said. -->
 				{#if turn !== null}
 					{#if turn.phase !== null && unfinished && recovery === null}
 						<!-- One quiet line, the server's own progress. No invented tokens: the
-						     panel says what is happening without pretending to write. Once a
-						     turn is being recovered, the recovery line owns this space. -->
-						<p class="state quiet phase"><Spinner /> {agentPhaseLine(turn.phase)}</p>
+						     panel says what is happening without pretending to write. The
+						     counter is the batch the gateway announced, so it can never
+						     point at a step the server did not name. Once a turn is being
+						     recovered, the recovery line owns this space. -->
+						<p class="state quiet phase">
+							<Spinner /> {agentPhaseLine(turn.phase)}{#if pending > 0 && planTotal > 1}<span
+									class="phase-count"
+								>· step {planStep} of {planTotal}</span>{/if}
+						</p>
 					{/if}
 
 					{#if turn.text !== ''}
@@ -759,22 +814,43 @@
 						</p>
 					{/if}
 
-					{#if turn.tools.length > 0}
-						<ul class="tools" aria-label="Tool runs">
-							{#each turn.tools as call, index (index)}
-								<li class="tool" class:refused={!call.ok}>
-									<span class="tool-head">
-										<span class="mono tool-name">{call.tool}</span>
-										<span class="tool-verdict">{call.ok ? 'ran' : 'refused'}</span>
+					{#if steps.length === 1 && !timeline}
+						<!-- One read is a note, not a timeline: no rail, no chip, no header. -->
+						<p class="step-one">
+							<span class="mono step-tool">{steps[0].tool}</span>
+							<span>{agentStepLine(steps[0].tool)}</span>
+						</p>
+					{:else if timeline}
+						<!-- The timeline. One row per settled step, in the order the gateway
+						     ran them, with the reason on the row rather than behind a tooltip:
+						     a refusal is the row an operator came here to read. -->
+						<ol class="steps" aria-label="What the agent did">
+							{#each steps as step, index (step.seq)}
+								{@const gap = gapBefore(index)}
+								<li class="step" data-verdict={step.verdict}>
+									<span class="step-mark" aria-hidden="true"></span>
+									<span class="step-main">
+										<span class="step-head">
+											<span class="step-say">{agentStepLine(step.tool, step.verdict)}</span>
+											{#if gap !== null}
+												<span class="step-gap mono">+{gap}</span>
+											{/if}
+											<span class="step-chip" data-verdict={step.verdict}>{step.verdict}</span>
+										</span>
+										<span class="step-tool mono">{step.tool}</span>
+										{#if step.reason !== null && step.reason !== ''}
+											<!-- The gateway's own words, verbatim. A step with no reason
+											     prints none rather than a sentence this console wrote. -->
+											<span class="step-reason">
+												{#if step.code !== null && step.code !== ''}<span class="mono step-code"
+														>{step.code}</span
+													><span class="step-sep">{' · '}</span>{/if}{step.reason}
+											</span>
+										{/if}
 									</span>
-									{#if call.reason !== null && call.reason !== ''}
-										<!-- The gateway's own reason. A refusal with no reason prints
-										     none, rather than a sentence this console invented. -->
-										<span class="tool-reason">{call.reason}</span>
-									{/if}
 								</li>
 							{/each}
-						</ul>
+						</ol>
 					{/if}
 
 					{#if resuming}
@@ -812,7 +888,7 @@
 						{/if}
 					{/if}
 
-					{#if unfinished && recovery === null && trouble === null && turn.phase === null && turn.text === '' && turn.tools.length === 0 && turn.refusal === null}
+					{#if unfinished && recovery === null && trouble === null && turn.phase === null && turn.text === '' && steps.length === 0 && pending === 0 && turn.refusal === null}
 						<p class="state waiting"><Spinner /> {waitingLine()}</p>
 					{/if}
 
@@ -1186,60 +1262,173 @@
 		}
 	}
 
-	/* One run per row: the name, the verdict, and the gateway's reason under it
-	   when it gave one. A tool's output is deliberately not part of this shape. */
-	.tools {
+	/* A lone successful read is a note, not a timeline: one quiet line with the
+	   tool's own name beside it, and no rail, chip or header to read past. */
+	.step-one {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 6px;
+		margin: 0;
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.45;
+	}
+
+	.step-one .step-tool {
+		color: var(--df-text-meta);
+	}
+
+	/* The timeline: one row per settled step, hung on a hairline rail. The rail is
+	   the only chrome — no card, no header, no shadow. It sits under the answer the
+	   way a ledger sits under a paragraph, and a new row grows downward without
+	   moving the prose above it. */
+	.steps {
 		display: flex;
 		flex-direction: column;
 		margin: 0;
-		padding: 0;
+		padding: 0 0 0 12px;
 		list-style: none;
-		border: 1px solid var(--df-border-hairline);
-		border-radius: var(--df-p-radius-xs);
+		border-left: 1px solid var(--df-border-control);
 	}
 
-	.tool {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-		padding: 5px 9px;
+	.step {
+		position: relative;
+		padding: 6px 0;
 	}
 
-	.tool + .tool {
+	.step + .step {
 		border-top: 1px solid var(--df-border-hairline);
 	}
 
-	.tool-head {
+	/* The node on the rail. Filled by verdict, so a refusal is findable before the
+	   words on the row are read. */
+	.step-mark {
+		position: absolute;
+		left: -16px;
+		top: 10px;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--df-state-ok-ink);
+	}
+
+	.step[data-verdict='refused'] .step-mark {
+		background: var(--df-state-warn-ink);
+	}
+
+	.step[data-verdict='failed'] .step-mark {
+		background: var(--df-state-danger-ink);
+	}
+
+	/* The row that did not run is the one an operator came to read: it keeps its
+	   place, takes a tint, and puts the gateway's reason on the row at reading
+	   size — not behind a tooltip, and never in place of the model's words. */
+	.step[data-verdict='refused'],
+	.step[data-verdict='failed'] {
+		margin-left: -8px;
+		padding-left: 8px;
+		padding-right: 6px;
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	.step[data-verdict='refused'] {
+		background: color-mix(in srgb, var(--df-state-warn-bg) 70%, transparent);
+		box-shadow: inset 2px 0 0 var(--df-state-warn-ink);
+	}
+
+	.step[data-verdict='failed'] {
+		background: color-mix(in srgb, var(--df-state-danger-bg) 70%, transparent);
+		box-shadow: inset 2px 0 0 var(--df-state-danger-ink);
+	}
+
+	.step-main {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+
+	.step-head {
 		display: flex;
 		align-items: baseline;
-		gap: 8px;
+		gap: 6px;
 		flex-wrap: wrap;
 		min-width: 0;
 	}
 
-	.tool-name {
+	.step-say {
+		flex: 1 1 auto;
 		min-width: 0;
 		color: var(--df-text-primary);
-		font-size: var(--df-p-text-xs);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.35;
 		overflow-wrap: anywhere;
 	}
 
-	.tool-verdict {
+	/* The verdict, in the gateway's three words. Lowercase and mono on purpose: it
+	   is an outcome token, not a label this console composed. */
+	.step-chip {
 		flex: none;
+		padding: 0 4px;
+		border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
+		border-radius: var(--df-p-radius-xs);
+		font-family: var(--df-font-mono);
+		font-size: 9px;
+		letter-spacing: 0.01em;
+		line-height: 1.5;
 		color: var(--df-state-ok-ink);
-		font-size: var(--df-p-text-2xs);
 	}
 
-	.tool.refused .tool-verdict {
+	.step-chip[data-verdict='refused'] {
 		color: var(--df-state-warn-ink);
 	}
 
-	.tool-reason {
+	.step-chip[data-verdict='failed'] {
+		color: var(--df-state-danger-ink);
+	}
+
+	/* The time the gateway itself stamped between the step before and this one.
+	   Meta ink: it is evidence, not a headline. */
+	.step-gap {
+		flex: none;
+		margin-left: auto;
 		color: var(--df-text-meta);
-		font-size: 11px;
+		font-size: 9.5px;
+		letter-spacing: 0.02em;
+	}
+
+	.step-tool {
+		color: var(--df-text-meta);
+		font-size: 10px;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
+
+	.step-reason {
+		margin-top: 2px;
+		color: var(--df-text-primary);
+		font-size: 11.5px;
 		line-height: 1.45;
 		overflow-wrap: anywhere;
+		white-space: pre-wrap;
+	}
+
+	.step-code {
+		color: var(--df-text-secondary);
+	}
+
+	.step-sep {
+		color: var(--df-text-meta);
+	}
+
+	/* The plan line's counter: the batch the gateway announced, in mono so it reads
+	   as a position rather than as prose. */
+	.phase-count {
+		color: var(--df-text-meta);
+		font-family: var(--df-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.02em;
 	}
 
 	.retry {

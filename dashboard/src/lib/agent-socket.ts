@@ -14,11 +14,11 @@
  *   wss://<host>/agents/assistant/assistant?ticket=<ticket>
  *     → { type:"ready",  name }
  *     → { type:"turn",   streamId, idempotencyKey, conversationId }  first frame of a turn
- *     → { type:"status", phase }     "thinking" | "tool:<name>" | "answering"
+ *     → { type:"status", phase }     "thinking" | "tool:<name>" | "answering" | "waiting"
  *     → { type:"token",  text }                     only from a server that streams text
- *     → { type:"tool",   name, ok, output }         after a tool runs
- *     → { type:"calls",  calls:[{tool, ok, reason?}] }   when a turn used tools
- *     → { type:"answer", text, calls }              at the end
+ *     → { type:"calls",  calls:[{tool, input}] }    the batch it is about to run
+ *     → { type:"tool",   tool, ok, result }         after one of those calls settles
+ *     → { type:"answer", text, calls, proposals? }  at the end
  *     → { type:"error",  reason, message }          when the turn was refused
  *     ← { type:"ask", message, idempotencyKey }
  *     ← { type:"resume", streamId, from }           replay from a sequence, then tail
@@ -41,10 +41,11 @@
  *     expired, spent or foreign ticket, an untrusted origin — happens on the POST,
  *     and this module resolves it as a state with a sentence rather than waiting
  *     for a silent close.
- *  2. **A tool's output is dropped, not stored.** The `tool` frame carries an
- *     `output` member; this module deliberately does not keep it. A line here is a
- *     tool name, a verdict and the gateway's reason, so rendering a tool's raw JSON
- *     is not something a future template can do by accident.
+ *  2. **A tool's output is dropped, not stored.** A `tool` frame carries a
+ *     `result`, and a successful result carries the tool's raw output. This module
+ *     keeps only a refusal's reason and message: a line here is a tool, a verdict
+ *     and the gateway's own words, so rendering a tool's JSON is not something a
+ *     future template can do by accident.
  *  3. **The client owns the idempotency key.** The model never supplies one, and a
  *     retry after a link that died mid-answer must not become a second turn. `ask`
  *     returns the key it used, and the panel reuses it for "try that again".
@@ -101,25 +102,58 @@ export const MAX_QUESTION = 500;
 
 /* ---------------------------------------------------------------- shapes */
 
-/** One tool run, as this console prints it: a name, a verdict, and a reason. */
-export interface AgentToolCall {
+/**
+ * One tool call the gateway announced.
+ *
+ * `ok` is `boolean | null` because a `calls` frame announces the batch *before*
+ * it runs: `null` is "queued, not settled", and it is not the same fact as
+ * `false`, which would print every announced call as refused. The verdict, and
+ * the reason that goes with it, arrive on the `tool` frame that settles the run.
+ */
+export interface AgentCall {
 	tool: string;
-	ok: boolean;
-	/** Why the tool did not run, when the gateway said. `null` when it ran or said nothing. */
+	ok: boolean | null;
+}
+
+/** A settled step's verdict. Three states, because "no" has two different causes. */
+export type AgentStepVerdict = 'ok' | 'refused' | 'failed';
+
+/**
+ * One step of a turn, in the order the gateway worked.
+ *
+ * The identity is positional, not nominal: `index` is the step's place in the
+ * turn's own sequence and `seq` is the frame that settled it, so a turn that
+ * reads the same tool twice gets two rows and a replayed frame gets one.
+ */
+export interface AgentStep {
+	/** 1-based place in the turn, in the order the gateway ran the steps. */
+	index: number;
+	tool: string;
+	/** `refused` is the gateway saying no before the tool ran; `failed` is it running and breaking. */
+	verdict: AgentStepVerdict;
+	/** The gateway's own sentence. Never a sentence this console wrote. */
 	reason: string | null;
+	/** The gateway's own token, when it sent one beside the sentence. */
+	code: string | null;
+	/** The frame's own instant, when the gateway stamped it. Not a client clock. */
+	settledAt: number | null;
+	/** The stream sequence that settled the step; the row's identity across a replay. */
+	seq: number;
 }
 
 /**
- * One server frame. `tool.output` is absent on purpose: see the header. `answer`
- * carries `proposals` only when the gateway sends them — the stage-A contract
- * names none, and an answer without them is a complete answer.
+ * One server frame. `tool.result` is read for a refusal's reason and nothing
+ * else: see the header. `answer` carries `proposals` only when the gateway sends
+ * them — the stage-A contract names none, and an answer without them is complete.
  *
  * `seq` is the frame's position in the turn's durable stream, when the server
- * states it. It is optional because the socket contract does not require it and
- * a count from the `turn` frame addresses the same stream.
+ * states it. `at` is the server's own instant for the frame, in epoch
+ * milliseconds, when it stamps one; a client clock is never substituted, because
+ * a replay would then produce times that never happened.
  */
 interface Sequenced {
 	seq?: number;
+	at?: number;
 }
 
 export type AgentFrame = Sequenced &
@@ -133,9 +167,9 @@ export type AgentFrame = Sequenced &
 		  }
 		| { type: 'status'; phase: string }
 		| { type: 'token'; text: string }
-		| { type: 'tool'; name: string; ok: boolean }
+		| { type: 'tool'; name: string; ok: boolean; reason: string | null; code: string | null }
 		| { type: 'answer'; text: string; calls: number; proposals: Proposal[] }
-		| { type: 'calls'; calls: AgentToolCall[] }
+		| { type: 'calls'; calls: AgentCall[] }
 		| { type: 'error'; reason: string; message: string }
 	);
 
@@ -157,6 +191,23 @@ function readFinite(value: unknown): number | null {
 function readSeq(value: unknown): number | undefined {
 	const seq = readFinite(value);
 	return seq === null || !Number.isInteger(seq) || seq < 0 ? undefined : seq;
+}
+
+/**
+ * A frame's own instant, in epoch milliseconds.
+ *
+ * An ISO string is accepted because the Worker writes timestamps that way
+ * elsewhere, and `Date.parse` is the same conversion the console uses for every
+ * other time. A value that is not one is `undefined`: no measurement is better
+ * than a wrong one, and the panel then prints no elapsed time at all.
+ */
+function readStamp(value: unknown): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+	if (typeof value === 'string' && value.trim() !== '') {
+		const parsed = Date.parse(value);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	}
+	return undefined;
 }
 
 /**
@@ -197,20 +248,47 @@ function readCount(value: unknown): number | null {
 }
 
 /**
- * The `calls` frame, or `null` when it does not carry verdicts.
+ * A refusal's wording, kept as two fields that stay distinct.
  *
- * Every entry must state `ok`. A list of calls with inputs and no verdict is a
- * different document, and reading its absent `ok` as `false` would print every
- * tool as refused — a claim the gateway never made.
+ * `reason` is the operator's sentence and `code` is the gateway's token, and they
+ * are only separated when *both* were sent: a frame that carries a single
+ * `reason` gives one sentence, and printing it twice (once as a code and once as
+ * a reason) would be this console's duplication, not the gateway's.
+ *
+ * The successful branch is never read at all, which is where a tool's output is
+ * dropped: `{ ok: true, output: "…" }` has no path into the panel.
  */
-function readToolCalls(value: unknown): AgentToolCall[] | null {
+function readOutcome(value: unknown): { reason: string | null; code: string | null } {
+	if (typeof value === 'string') {
+		const reason = readString(value);
+		return { reason, code: null };
+	}
+	if (!isRecord(value)) return { reason: null, code: null };
+	const token = readString(value.reason);
+	const message = readString(value.message);
+	if (message !== null) return { reason: message, code: token };
+	// A refusal that names no sentence: its token is the gateway's own word for it,
+	// and `error` is the spelling a handler's 4xx body uses.
+	return { reason: token ?? readString(value.error), code: null };
+}
+
+/**
+ * The `calls` frame, or `null` when it does not carry calls.
+ *
+ * Two shapes arrive here and they are not the same statement. A batch is
+ * `{ tool, input }` with no verdict: the gateway is saying what it is about to
+ * run. A summary is the same list with `ok`: it is saying what already ran. The
+ * missing `ok` is read as `null` — "queued" — never as `false`, because that
+ * would print every announced call as refused.
+ */
+function readCalls(value: unknown): AgentCall[] | null {
 	if (!Array.isArray(value)) return null;
-	const calls: AgentToolCall[] = [];
+	const calls: AgentCall[] = [];
 	for (const entry of value) {
 		if (!isRecord(entry)) return null;
-		const tool = readString(entry.tool);
-		if (tool === null || typeof entry.ok !== 'boolean') return null;
-		calls.push({ tool, ok: entry.ok, reason: readString(entry.reason) });
+		const tool = readString(entry.tool) ?? readString(entry.name);
+		if (tool === null) return null;
+		calls.push({ tool, ok: typeof entry.ok === 'boolean' ? entry.ok : null });
 	}
 	return calls;
 }
@@ -224,9 +302,10 @@ function readToolCalls(value: unknown): AgentToolCall[] | null {
 export function readAgentFrame(raw: unknown): AgentFrame | null {
 	if (!isRecord(raw)) return null;
 	const seq = readSeq(raw.seq);
+	const at = readStamp(raw.at);
 	switch (raw.type) {
 		case 'ready':
-			return { type: 'ready', name: readString(raw.name) ?? '', seq };
+			return { type: 'ready', name: readString(raw.name) ?? '', seq, at };
 		case 'turn': {
 			// The announcement is what makes a turn resumable, so a frame without a
 			// stream id is not one this console can use.
@@ -237,7 +316,8 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				streamId,
 				idempotencyKey: readString(raw.idempotencyKey),
 				conversationId: readString(raw.conversationId),
-				seq
+				seq,
+				at
 			};
 		}
 		case 'status': {
@@ -245,18 +325,26 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 			// contract names: an unknown phase is printed as work in progress, which is
 			// still true, rather than dropped into a panel that looks stuck.
 			const phase = readString(raw.phase);
-			return phase === null ? null : { type: 'status', phase, seq };
+			return phase === null ? null : { type: 'status', phase, seq, at };
 		}
 		case 'token':
 			// An empty token is legal and prints nothing.
-			return typeof raw.text === 'string' ? { type: 'token', text: raw.text, seq } : null;
+			return typeof raw.text === 'string' ? { type: 'token', text: raw.text, seq, at } : null;
 		case 'tool': {
-			// `name` is the contract; `tool` is the same member under the spelling the
-			// runtime's own loop uses. Either way the rest of the frame is untouched,
-			// and `output` is read to nothing on purpose.
+			// `tool` is the loop's spelling, `name` the older one; either way the rest
+			// of the frame is untouched, and a successful `result` is read to nothing.
 			const name = readString(raw.name) ?? readString(raw.tool);
 			if (name === null || typeof raw.ok !== 'boolean') return null;
-			return { type: 'tool', name, ok: raw.ok, seq };
+			const outcome = raw.ok ? { reason: null, code: null } : readOutcome(raw.result);
+			return {
+				type: 'tool',
+				name,
+				ok: raw.ok,
+				reason: outcome.reason,
+				code: outcome.code,
+				seq,
+				at
+			};
 		}
 		case 'answer':
 			if (typeof raw.text !== 'string') return null;
@@ -265,11 +353,12 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				text: raw.text,
 				calls: readFinite(raw.calls) ?? 0,
 				proposals: readProposals(raw.proposals),
-				seq
+				seq,
+				at
 			};
 		case 'calls': {
-			const calls = readToolCalls(raw.calls);
-			return calls === null ? null : { type: 'calls', calls, seq };
+			const calls = readCalls(raw.calls);
+			return calls === null ? null : { type: 'calls', calls, seq, at };
 		}
 		case 'error':
 			return {
@@ -278,7 +367,8 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				// `reason` is the turn's own. Both are the gateway's token, not ours.
 				reason: readString(raw.reason) ?? readString(raw.error) ?? 'unspecified',
 				message: readString(raw.message) ?? '',
-				seq
+				seq,
+				at
 			};
 		default:
 			return null;
@@ -321,13 +411,21 @@ function readProposals(value: unknown): Proposal[] {
  * `text` is what has arrived so far: tokens append, and the final answer frame
  * replaces it. `refusal` is set alongside `text`, never instead of it — a turn
  * refused after the model had written three sentences shows both.
+ *
+ * `steps` and `queue` are the timeline, and they are two different statements:
+ * `queue` is the batch the gateway announced it is about to run, and `steps` are
+ * the runs that settled, in the order they settled. A step exists only because a
+ * `tool` frame said so.
  */
 export interface AgentTurn {
 	question: string;
 	/** The key this turn was asked with. A retry reuses it. */
 	key: string;
 	text: string;
-	tools: AgentToolCall[];
+	/** The runs that settled, in the gateway's own order. */
+	steps: AgentStep[];
+	/** The calls the last `calls` frame announced and that have not settled yet. */
+	queue: AgentCall[];
 	/** How many tool runs the answer frame reported. `null` before it arrives. */
 	calls: number | null;
 	refusal: { reason: string; message: string } | null;
@@ -348,7 +446,8 @@ export function beginTurn(question: string, key: string): AgentTurn {
 		question,
 		key,
 		text: '',
-		tools: [],
+		steps: [],
+		queue: [],
 		calls: null,
 		refusal: null,
 		proposals: [],
@@ -370,6 +469,82 @@ export interface AgentFrameResult {
 }
 
 /**
+ * The reasons that are the gateway saying **no**, and the ones that are it
+ * saying **it broke**.
+ *
+ * The authorisation gate (`worker/src/agent/grants.ts`) names all of these but
+ * `rule_rejected`, which is the other policy refusal a tool returns. Everything
+ * else that failed is a failure: the tool ran and broke, the call was malformed,
+ * or the tool does not exist. A token this console has never seen stays `failed`,
+ * because a refusal is a claim about who said no and an unknown token is not
+ * evidence of one.
+ */
+const REFUSAL_CODES: ReadonlySet<string> = new Set([
+	'autonomy_off',
+	'autonomy_other_session',
+	'autonomy_expired',
+	'sms_cap',
+	'write_cap',
+	'no_grant',
+	'grant_expired',
+	'rule_rejected'
+]);
+
+/** `ok`, or one of the two ways a `tool` frame can say it did not run. */
+function stepVerdict(ok: boolean, code: string | null): AgentStepVerdict {
+	if (ok) return 'ok';
+	return code !== null && REFUSAL_CODES.has(code) ? 'refused' : 'failed';
+}
+
+/**
+ * One settled step, in the turn's own order.
+ *
+ * The head of the announced batch is consumed, but only its *place* is used: the
+ * gateway runs a batch in the order it announced it, so the next `tool` frame is
+ * the next step even when two steps call the same tool. That is the whole reason
+ * this is positional — grouping by tool name would merge two runs into one row
+ * and call the second run's verdict the first one's.
+ *
+ * A row that already carries this frame's sequence is replaced in place, so a
+ * replay rebuilds the timeline instead of extending it.
+ */
+function settleStep(
+	turn: AgentTurn,
+	frame: Extract<AgentFrame, { type: 'tool' }>,
+	seq: number
+): { steps: AgentStep[]; queue: AgentCall[] } {
+	const verdict = stepVerdict(frame.ok, frame.code);
+
+	const known = turn.steps.findIndex((step) => step.seq === seq);
+	if (known >= 0) {
+		const steps = turn.steps.slice();
+		steps[known] = {
+			...steps[known],
+			tool: frame.name,
+			verdict,
+			reason: frame.reason,
+			code: frame.code,
+			settledAt: frame.at ?? null
+		};
+		return { steps, queue: turn.queue };
+	}
+
+	const step: AgentStep = {
+		index: turn.steps.length + 1,
+		tool: frame.name,
+		verdict,
+		reason: frame.reason,
+		code: frame.code,
+		settledAt: frame.at ?? null,
+		seq
+	};
+	return {
+		steps: [...turn.steps, step],
+		queue: turn.queue.length > 0 ? turn.queue.slice(1) : turn.queue
+	};
+}
+
+/**
  * One frame, applied to one turn. Pure, so the panel holds no frame logic.
  *
  * `at` is the frame's sequence when the caller knows it (the SSE `id:`, or a
@@ -383,6 +558,10 @@ export interface AgentFrameResult {
  *    whether it repeats one frame or a hundred, changes nothing.
  *  - A `turn` frame is idempotent: it names the stream and the key the server
  *    used, and both only ever get more specific.
+ *
+ * The timeline follows the same rule one level down: a step is settled by the
+ * `tool` frame that carries its sequence, so a replayed frame replaces the row it
+ * already made and never adds a second one.
  */
 export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame, at?: number): AgentFrameResult {
 	if (frame.type === 'ready') return { turn, fresh: false, seq: turn.seq };
@@ -417,23 +596,24 @@ export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame, at?: number)
 			return { turn: { ...turn, phase: frame.phase, seq }, fresh: true, seq };
 		case 'token':
 			return { turn: { ...turn, text: turn.text + frame.text, seq }, fresh: true, seq };
-		case 'tool':
-			return {
-				turn: {
-					...turn,
-					tools: [...turn.tools, { tool: frame.name, ok: frame.ok, reason: null }],
-					seq
-				},
-				fresh: true,
-				seq
-			};
-		case 'calls':
-			// An empty list is not a summary of anything; the running list stands.
-			return {
-				turn: frame.calls.length === 0 ? { ...turn, seq } : { ...turn, tools: frame.calls, seq },
-				fresh: frame.calls.length > 0,
-				seq
-			};
+		case 'tool': {
+			const { steps, queue } = settleStep(turn, frame, seq);
+			return { turn: { ...turn, steps, queue, seq }, fresh: true, seq };
+		}
+		case 'calls': {
+			// An empty list is not a summary of anything; the running queue stands.
+			if (frame.calls.length === 0) {
+				return { turn: { ...turn, seq }, fresh: false, seq };
+			}
+			// A batch is what the gateway is *about* to run: it queues steps and does
+			// not create one. A call that never settles is never shown as work done.
+			if (frame.calls.every((call) => call.ok === null)) {
+				return { turn: { ...turn, queue: frame.calls, seq }, fresh: true, seq };
+			}
+			// A summary with verdicts. `tool` frames own the timeline, so a summary
+			// that arrives after them says nothing this panel has not already got.
+			return { turn: { ...turn, seq }, fresh: false, seq };
+		}
 		case 'answer':
 			return {
 				turn: {
@@ -1061,14 +1241,15 @@ export function agentTroubleLine(trouble: AgentTrouble): string {
 /**
  * What the server says it is doing, in this console's words.
  *
- * The phase tokens are the contract's: `thinking`, `answering`, and `tool:<name>`
- * for a run in progress. The tool sentences are the operator's phrasing of what
- * that tool does, and an unknown name keeps its own token rather than being
- * rounded to something this console guessed.
+ * The phase tokens are the contract's: `thinking`, `answering`, `waiting` (the
+ * loop's heartbeat) and `tool:<name>` for a run in progress. The tool sentences
+ * are the operator's phrasing of what that tool does, and an unknown name keeps
+ * its own token rather than being rounded to something this console guessed.
  */
 export function agentPhaseLine(phase: string): string {
 	if (phase === 'thinking') return 'Reading this deployment';
 	if (phase === 'answering') return 'Writing the answer';
+	if (phase === 'waiting') return 'Still working';
 	if (phase.startsWith('tool:')) {
 		const tool = phase.slice(5);
 		switch (tool) {
@@ -1077,22 +1258,102 @@ export function agentPhaseLine(phase: string): string {
 			case 'telemetry':
 				return 'Running telemetry';
 			case 'search_messages':
-				return 'Reading the messages';
+				return 'Searching the delivery record';
+			case 'message_timeline':
+				return 'Reading the message timeline';
 			case 'diagnose':
 				return 'Checking the device';
 			case 'flow_ast':
 				return 'Reading the flow';
+			case 'flow_runs':
+				return 'Reading the flow runs';
+			case 'read_rules':
+				return 'Reading the rules';
 			case 'create_rule':
 				return 'Drafting a rule';
 			case 'create_template':
 				return 'Drafting a template';
 			case 'stage_workflow_patch':
 				return 'Staging the patch';
+			case 'create_rule_now':
+				return 'Creating a rule';
+			case 'send_sms':
+				return 'Sending the message';
+			case 'deploy_flow':
+				return 'Deploying the flow';
 			default:
 				return `Running ${tool}`;
 		}
 	}
 	return 'Working';
+}
+
+/**
+ * What one step did, in the operator's words.
+ *
+ * Two forms, because the verdict decides which one is true. A step that ran is
+ * past tense — "Created a rule" — and a step that was refused or broke names the
+ * operation without claiming it happened — "Create a rule". The chip beside it
+ * carries the outcome, so the row never has to say "could not" twice, and a
+ * refused row can never read as though the effect landed.
+ *
+ * An unknown tool is `Called <name>` / `Call <name>`: the row exists because the
+ * gateway received a call with that name, and what the tool does is not something
+ * this console can make up.
+ */
+export function agentStepLine(tool: string, verdict: AgentStepVerdict = 'ok'): string {
+	const ran = verdict === 'ok';
+	switch (tool) {
+		case 'fleet_health':
+			return 'Read the fleet';
+		case 'telemetry':
+			return ran ? 'Ran telemetry' : 'Run telemetry';
+		case 'search_messages':
+			return ran ? 'Searched the delivery record' : 'Search the delivery record';
+		case 'message_timeline':
+			return 'Read the message timeline';
+		case 'diagnose':
+			return ran ? 'Checked the device' : 'Check the device';
+		case 'flow_ast':
+			return 'Read the flow';
+		case 'flow_runs':
+			return 'Read the flow runs';
+		case 'read_rules':
+			return 'Read the rules';
+		case 'create_rule':
+			return ran ? 'Drafted a rule' : 'Draft a rule';
+		case 'create_template':
+			return ran ? 'Drafted a template' : 'Draft a template';
+		case 'stage_workflow_patch':
+			return ran ? 'Staged a workflow patch' : 'Stage a workflow patch';
+		case 'create_rule_now':
+			return ran ? 'Created a rule' : 'Create a rule';
+		case 'send_sms':
+			return ran ? 'Sent a message' : 'Send a message';
+		case 'deploy_flow':
+			return ran ? 'Deployed the flow' : 'Deploy the flow';
+		default:
+			return ran ? `Called ${tool}` : `Call ${tool}`;
+	}
+}
+
+/**
+ * The gap between two steps, from the stamps the frames themselves carried.
+ *
+ * Rendered beside a row, never computed from a client clock: a replay that
+ * arrives minutes later would otherwise date work that happened in a second.
+ * Sub-second work reads in milliseconds, a minute or more in minutes and
+ * seconds, and nothing at all when the frames carried no stamp.
+ */
+export function agentStepElapsed(ms: number): string {
+	const value = Math.max(0, ms);
+	if (value < 10) return 'now';
+	if (value < 1_000) return `${Math.round(value)} ms`;
+	if (value < 60_000) return `${(value / 1_000).toFixed(1)} s`;
+	const total = Math.round(value / 1_000);
+	const minutes = Math.floor(total / 60);
+	const seconds = total % 60;
+	return `${minutes} m ${String(seconds).padStart(2, '0')} s`;
 }
 
 /**
