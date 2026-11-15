@@ -97,7 +97,13 @@ export interface Proposal {
 }
 
 export type ChatOutcome =
-	| { status: 'ok'; answer: string; proposals: Proposal[] }
+	/**
+	 * `withheld` is the gateway refusing its own model: a proposal it dropped
+	 * (an impossible operation, an oversized payload) is reported here rather
+	 * than vanishing, so the operator is never left wondering why a card is
+	 * missing from an answer that mentions one.
+	 */
+	| { status: 'ok'; answer: string; proposals: Proposal[]; withheld: string[] }
 	| { status: 'plain'; text: string }
 	| { status: 'failed'; failure: Failure };
 
@@ -166,6 +172,23 @@ function readSettings(value: unknown): AiSettings | null {
 function readBudget(value: unknown): Pick<Extract<Failure, { kind: 'exhausted' }>, 'used' | 'limit' | 'day'> {
 	const source = isRecord(value) ? (isRecord(value.budget) ? value.budget : value) : {};
 	return { used: readFinite(source.used), limit: readFinite(source.limit), day: readDay(source.day) };
+}
+
+/**
+ * The reasons the gateway withheld a proposal. Server-authored text, printed as
+ * it arrived: nothing here is rewritten into a friendlier sentence.
+ */
+function readWithheld(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const reasons: string[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry)) continue;
+		const reason = readString(entry.reason);
+		if (reason === null || reason === '') continue;
+		const kind = readString(entry.kind);
+		reasons.push(kind === null ? reason : `${kind}: ${reason}`);
+	}
+	return reasons;
 }
 
 function readProposals(value: unknown): Proposal[] {
@@ -385,7 +408,7 @@ export async function askAssistant(input: {
 	if (answer.trim() === '' && proposals.length === 0) {
 		return { status: 'failed', failure: { kind: 'unreadable' } };
 	}
-	return { status: 'ok', answer, proposals };
+	return { status: 'ok', answer, proposals, withheld: readWithheld(raw.json.withheld) };
 }
 
 /** The ids the accept answer named, in the order they are worth showing. */

@@ -159,6 +159,15 @@ const STUB = String.raw`
 		if (path === '/v1/admin/assistant/chat') {
 			return json({
 				answer: 'One proposal, nothing applied.',
+				withheld:
+					knobs().withheld === true
+						? [
+								{
+									kind: 'stage_workflow_patch',
+									reason: 'removing "Condition" is refused because it has two outgoing connections'
+								}
+							]
+						: [],
 				proposals: [
 					{
 						id: 'ap_stubproposal01',
@@ -531,6 +540,45 @@ try {
 	);
 	check('the card reports the editor result', /staged/i.test(after.card), after.card.slice(0, 70));
 	await shot(cdp, 'assistant-staged');
+
+	/* --------------------------------------- a proposal the gateway withheld */
+
+	await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/admin/security/ai` });
+	await wait(1200);
+	if (!(await until(cdp, `!!document.querySelector('button.launcher')`, 'shell for the withheld case')))
+		throw new Error('shell never rendered for the withheld case');
+	await evaluate(cdp, `localStorage.setItem('stub', JSON.stringify({ withheld: true })); true`);
+	await cdp.send('Page.reload');
+	await wait(1200);
+	await until(cdp, `!!document.querySelector('button.launcher')`, 'reloaded for the withheld case');
+	await evaluate(cdp, `document.querySelector('button.launcher').click(); true`);
+	await until(cdp, `!!document.querySelector('form.ask input')`, 'panel opened for the withheld case');
+	await evaluate(
+		cdp,
+		`(() => {
+			const input = document.querySelector('form.ask input');
+			input.value = 'add a delay';
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+			return true;
+		})()`
+	);
+	await evaluate(cdp, `document.querySelector('form.ask').requestSubmit(); true`);
+	await until(cdp, `!!document.querySelector('.withheld-line')`, 'withheld line rendered');
+	const withheldLine = await evaluate(
+		cdp,
+		`(() => {
+			const line = document.querySelector('.withheld-line');
+			return line ? line.innerText : '';
+		})()`
+	);
+	const withheldText = String(withheldLine).replace(/\s+/g, ' ').trim();
+	check(
+		'a withheld proposal is reported, not silently dropped',
+		/two outgoing connections/.test(withheldText) && /stage_workflow_patch/.test(withheldText),
+		withheldText.slice(0, 100)
+	);
+	await shot(cdp, 'assistant-withheld');
+	await evaluate(cdp, `localStorage.setItem('stub', JSON.stringify({})); true`);
 
 	failed = results.some((result) => !result.ok);
 } catch (error) {

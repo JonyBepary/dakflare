@@ -34,6 +34,40 @@ interface WorkersAiResult {
   usage?: WorkersAiUsage;
 }
 
+/** The text in whichever of the three shapes the binding answered with. */
+function readText(raw: unknown): string | null {
+  if (typeof raw === "string") return raw;
+  if (raw === null || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.response === "string") return record.response;
+  const choices = record.choices;
+  if (Array.isArray(choices) && choices.length > 0) {
+    const choice = choices[0];
+    if (typeof choice === "string") return choice;
+    if (choice !== null && typeof choice === "object") {
+      const entry = choice as { text?: unknown; message?: unknown };
+      if (typeof entry.text === "string") return entry.text;
+      const message = entry.message;
+      if (message !== null && typeof message === "object") {
+        const content = (message as { content?: unknown }).content;
+        if (typeof content === "string") return content;
+        // A part list, as some providers return `[{type:"text", text:"…"}]`.
+        if (Array.isArray(content)) {
+          const joined = content
+            .map((part) =>
+              part !== null && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
+                ? ((part as { text: string }).text)
+                : ""
+            )
+            .join("");
+          if (joined !== "") return joined;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export function createWorkersAiAdapter(
   binding: WorkersAiBinding,
   model: string
@@ -60,18 +94,26 @@ export function createWorkersAiAdapter(
         );
       }
 
-      // Most text models answer `{ response: "…" }`; a string result is what a
-      // few of the smaller models return. Both are the text, neither is assumed.
-      const text =
-        typeof raw === "string"
-          ? raw
-          : raw !== null && typeof raw === "object" &&
-              typeof (raw as WorkersAiResult).response === "string"
-            ? ((raw as WorkersAiResult).response as string)
-            : null;
+      // Three shapes are live in the wild for the same binding: a bare string,
+      // `{ response: "…" }` (the classic text-model shape), and a chat-completions
+      // object with `choices[]` (measured on llama-3.3-70b in production). Read
+      // all three rather than assume one and call a good answer "no text".
+      const text = readText(raw);
 
       if (text === null) {
-        throw new ChatAdapterError("unparseable", "Workers AI returned no text");
+        // Name the shape, never the payload: "no text" alone cannot tell an
+        // empty completion from a model that answered in another field or an
+        // error object delivered with a 200.
+        const shape =
+          raw === null
+            ? "null"
+            : typeof raw === "object"
+              ? `object with keys ${Object.keys(raw as Record<string, unknown>).join(",") || "none"}`
+              : typeof raw;
+        throw new ChatAdapterError(
+          "unparseable",
+          `Workers AI returned no text (${shape})`
+        );
       }
 
       const usage =

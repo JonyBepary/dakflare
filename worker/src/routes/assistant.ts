@@ -47,6 +47,7 @@ import {
 import {
   CHAT_PROVIDER_KINDS,
   ChatAdapterError,
+  MAX_OUTPUT_TOKENS,
   isChatProviderKind,
   type ChatMessage,
 } from "../lib/ai/types";
@@ -302,7 +303,7 @@ const SYSTEM_PROMPT = [
   "- At most 3 proposals. Zero proposals is a normal answer.",
   "- create_rule payload: { name, matcher: { type: \"exact\"|\"prefix\"|\"suffix\"|\"glob\", value }, body_matcher: { type: \"keyword\", value }, reply_template }. NEVER author a regex matcher.",
   "- create_template payload: { name, body }.",
-  "- stage_workflow_patch payload: { flow_id, patch: { nodes: [ { id, type, position: { x, y }, data: {...} } ], edges: [ { id, source, target } ] } }. The patch must be the COMPLETE graph: every step that should remain, copied with its id and data unchanged, plus whatever the request adds or changes. The editor validates the patch and a human accepts it, so an unusable patch is refused rather than applied.",
+  '- stage_workflow_patch payload: { flow_id, ops: [ { "op": "add", "type": "<node type from the flow>", "after"|"before": "<existing node id>", "data": {...} }, { "op": "move", "id": "<node id>", "after"|"before": "<node id>" }, { "op": "rename", "id": "<node id>", "title": "..." }, { "op": "remove", "id": "<node id>" } ] }. Name steps by the ids in the flow block; do not copy the graph or step data. The server applies the operations and a human accepts the result, so an operation it cannot apply is refused rather than guessed at.',
   "- Use only ids and routes present in the context. Never invent a device, flow, message or rule id.",
 ].join("\n");
 
@@ -516,10 +517,16 @@ interface ProposalDraft {
   payload: Record<string, unknown>;
 }
 
-/** One parsed model reply. `raw` answers when the reply was not JSON. */
+/** One parsed model reply. */
+interface WithheldProposal {
+  kind: string;
+  reason: string;
+}
+
 interface ParsedReply {
   answer: string;
   proposals: ProposalDraft[];
+  withheld: WithheldProposal[];
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -527,12 +534,22 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function normalizeProposals(value: unknown): ProposalDraft[] {
-  if (!Array.isArray(value)) return [];
+function normalizeProposals(value: unknown): {
+  proposals: ProposalDraft[];
+  withheld: WithheldProposal[];
+} {
   const drafts: ProposalDraft[] = [];
+  const withheld: WithheldProposal[] = [];
+  if (!Array.isArray(value)) return { proposals: drafts, withheld };
 
   for (const entry of value) {
-    if (drafts.length >= MAX_PROPOSALS) break;
+    if (drafts.length >= MAX_PROPOSALS) {
+      withheld.push({
+        kind: "proposal",
+        reason: `only ${MAX_PROPOSALS} proposals are shown at once`,
+      });
+      break;
+    }
     const record = asObject(entry);
     if (record === null) continue;
 
@@ -551,7 +568,13 @@ function normalizeProposals(value: unknown): ProposalDraft[] {
     } catch {
       continue;
     }
-    if (payloadJson.length > MAX_PAYLOAD_JSON_CHARS) continue;
+    if (payloadJson.length > MAX_PAYLOAD_JSON_CHARS) {
+      withheld.push({
+        kind,
+        reason: `the ${kind} proposal was dropped because its payload is ${payloadJson.length} characters, over the ${MAX_PAYLOAD_JSON_CHARS}-character limit`,
+      });
+      continue;
+    }
 
     drafts.push({
       kind: kind as ProposalKind,
@@ -562,7 +585,369 @@ function normalizeProposals(value: unknown): ProposalDraft[] {
     });
   }
 
-  return drafts;
+  return { proposals: drafts, withheld };
+}
+
+/* ───────────────────────── server-side graph composition ───────────────── */
+
+/** The two halves of a flow, in the shape the editor persists. */
+export interface FlowPatchGraph {
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+}
+
+export type ApplyFlowOpsResult =
+  | { ok: true; graph: FlowPatchGraph }
+  | { ok: false; reason: string };
+
+const NODE_TYPE_TITLES: Record<string, string> = {
+  trigger: "Trigger",
+  extract: "Extract",
+  set_var: "Set variable",
+  condition: "Condition",
+  switch: "Switch",
+  delay: "Delay",
+  webhook: "Webhook",
+  send_sms: "Send SMS",
+  reply: "Reply",
+  stop: "Stop",
+};
+
+const COUNT_WORDS = [
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+  "ten",
+] as const;
+
+function countWord(count: number): string {
+  return COUNT_WORDS[count] ?? String(count);
+}
+
+/** The name an operator sees on a card: its override, its label, then its kind. */
+function nodeDisplayTitle(node: Record<string, unknown> | null): string {
+  if (node === null) return "Step";
+  const data = asObject(node.data);
+  if (data !== null && typeof data.title === "string" && data.title.trim() !== "") {
+    return data.title.trim();
+  }
+  if (data !== null && typeof data.label === "string" && data.label.trim() !== "") {
+    return data.label.trim();
+  }
+  const type = typeof node.type === "string" ? node.type : "";
+  return NODE_TYPE_TITLES[type] ?? (type === "" ? "Step" : type);
+}
+
+function outgoingOf(graph: FlowPatchGraph, id: string): Array<Record<string, unknown>> {
+  return graph.edges.filter((edge) => edge.source === id);
+}
+
+function incomingOf(graph: FlowPatchGraph, id: string): Array<Record<string, unknown>> {
+  return graph.edges.filter((edge) => edge.target === id);
+}
+
+function cloneGraph(graph: FlowPatchGraph): FlowPatchGraph {
+  try {
+    return JSON.parse(JSON.stringify(graph)) as FlowPatchGraph;
+  } catch {
+    return {
+      nodes: graph.nodes.map((node) => ({ ...node })),
+      edges: graph.edges.map((edge) => ({ ...edge })),
+    };
+  }
+}
+
+interface MintState {
+  node: number;
+  edge: number;
+}
+
+/** A deterministic, collision-free node id: the same ops always compose the same graph. */
+function mintNodeId(
+  type: string,
+  graph: FlowPatchGraph,
+  state: MintState
+): string {
+  const stem = `n_${type.replace(/[^A-Za-z0-9_]/g, "_")}`;
+  const taken = new Set(graph.nodes.map((node) => String(node.id)));
+  for (;;) {
+    state.node += 1;
+    const id = `${stem}_${state.node}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
+function mintEdgeId(graph: FlowPatchGraph, state: MintState): string {
+  const taken = new Set(graph.edges.map((edge) => String(edge.id)));
+  for (;;) {
+    state.edge += 1;
+    const id = `e_added_${state.edge}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
+/** The one anchor an op names: exactly one of `after` / `before`. */
+function readAnchor(
+  op: Record<string, unknown>
+): { where: "after" | "before"; id: string } | { error: string } {
+  const after = op.after;
+  const before = op.before;
+  if (after !== undefined && before !== undefined) {
+    return { error: "an operation cannot name both after and before" };
+  }
+  const where: "after" | "before" = before !== undefined ? "before" : "after";
+  const raw = where === "before" ? before : after;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { error: `a ${String(op.op ?? "graph")} operation needs an existing node id in ${where}` };
+  }
+  return { where, id: raw.trim() };
+}
+
+function removeRefusal(
+  node: Record<string, unknown>,
+  incoming: number,
+  outgoing: number
+): string {
+  const title = nodeDisplayTitle(node);
+  if (node.type === "trigger") {
+    return `removing "${title}" is refused because the flow needs its trigger`;
+  }
+  const branches =
+    node.type === "condition" || node.type === "switch" || incoming > 1 || outgoing > 1;
+  if (branches) {
+    if (outgoing > 1) {
+      return `removing "${title}" is refused because it has ${countWord(outgoing)} outgoing connections`;
+    }
+    if (incoming > 1) {
+      return `removing "${title}" is refused because it has ${countWord(incoming)} incoming connections`;
+    }
+    return `removing "${title}" is refused because it branches`;
+  }
+  return `removing "${title}" is refused because it has ${countWord(incoming)} connections in and ${countWord(outgoing)} out, so its neighbours cannot be rejoined`;
+}
+
+function applyOneOp(
+  graph: FlowPatchGraph,
+  op: Record<string, unknown>,
+  state: MintState
+): { ok: true } | { ok: false; reason: string } {
+  const kind = typeof op.op === "string" ? op.op : "";
+
+  if (kind === "add") {
+    const type = typeof op.type === "string" ? op.type.trim() : "";
+    if (type === "") {
+      return { ok: false, reason: 'an "add" operation needs a node type' };
+    }
+    const anchor = readAnchor(op);
+    if ("error" in anchor) return { ok: false, reason: anchor.error };
+    const anchorNode = graph.nodes.find((node) => node.id === anchor.id);
+    if (anchorNode === undefined) {
+      return {
+        ok: false,
+        reason: `adding a step is refused because node "${anchor.id}" is not in the flow`,
+      };
+    }
+    const anchorPosition = asObject(anchorNode.position);
+    const x =
+      anchorPosition !== null && typeof anchorPosition.x === "number"
+        ? anchorPosition.x + 280
+        : 0;
+    const y =
+      anchorPosition !== null && typeof anchorPosition.y === "number" ? anchorPosition.y : 0;
+    const data = asObject(op.data);
+    const created: Record<string, unknown> = {
+      id: mintNodeId(type, graph, state),
+      type,
+      position: { x, y },
+      data: data === null ? {} : JSON.parse(JSON.stringify(data)),
+    };
+    graph.nodes.push(created);
+    if (anchor.where === "after") {
+      // Splice the new step into the anchor's outgoing connection when it has
+      // one, then hang the anchor's own connection on the new step.
+      for (const edge of graph.edges) {
+        if (edge.source === anchor.id) edge.source = created.id;
+      }
+      graph.edges.push({
+        id: mintEdgeId(graph, state),
+        source: anchor.id,
+        target: created.id,
+      });
+    } else {
+      for (const edge of graph.edges) {
+        if (edge.target === anchor.id) edge.target = created.id;
+      }
+      graph.edges.push({
+        id: mintEdgeId(graph, state),
+        source: created.id,
+        target: anchor.id,
+      });
+    }
+    return { ok: true };
+  }
+
+  if (kind === "move") {
+    const id = typeof op.id === "string" ? op.id.trim() : "";
+    if (id === "") return { ok: false, reason: 'a "move" operation needs a node id' };
+    const anchor = readAnchor(op);
+    if ("error" in anchor) return { ok: false, reason: anchor.error };
+    const moved = graph.nodes.find((node) => node.id === id);
+    const anchorNode = graph.nodes.find((node) => node.id === anchor.id);
+    if (moved === undefined) {
+      return { ok: false, reason: `moving a step is refused because node "${id}" is not in the flow` };
+    }
+    if (anchorNode === undefined) {
+      return {
+        ok: false,
+        reason: `moving a step is refused because node "${anchor.id}" is not in the flow`,
+      };
+    }
+    if (moved.id === anchorNode.id) {
+      return { ok: false, reason: "moving a step next to itself is refused" };
+    }
+    if (moved.type === "trigger") {
+      return {
+        ok: false,
+        reason: `moving "${nodeDisplayTitle(moved)}" is refused because the trigger is where the flow starts`,
+      };
+    }
+    const incoming = incomingOf(graph, id);
+    const outgoing = outgoingOf(graph, id);
+    if (incoming.length !== 1 || outgoing.length !== 1) {
+      return {
+        ok: false,
+        reason: `moving "${nodeDisplayTitle(moved)}" is refused because it has ${countWord(incoming.length)} connections in and ${countWord(outgoing.length)} out; a move needs exactly one of each`,
+      };
+    }
+    const inEdge = incoming[0];
+    const outEdge = outgoing[0];
+
+    // Lift the step out first: its predecessor leads where it used to lead.
+    const stitch: Record<string, unknown> = { ...inEdge, target: outEdge.target };
+    graph.edges = graph.edges.filter(
+      (edge) => edge !== inEdge && edge !== outEdge
+    );
+    graph.edges.push(stitch);
+
+    if (anchor.where === "after") {
+      const outs = outgoingOf(graph, anchor.id);
+      if (outs.length === 0) {
+        return {
+          ok: false,
+          reason: `moving "${nodeDisplayTitle(moved)}" is refused because "${nodeDisplayTitle(anchorNode)}" is the last step, so nothing can go after it`,
+        };
+      }
+      if (outs.length > 1) {
+        return {
+          ok: false,
+          reason: `moving "${nodeDisplayTitle(moved)}" is refused because "${nodeDisplayTitle(anchorNode)}" has ${countWord(outs.length)} outgoing connections, so "after" names more than one place`,
+        };
+      }
+      const anchorOut = outs[0];
+      const successor = anchorOut.target;
+      anchorOut.target = id;
+      graph.edges.push({ ...outEdge, target: successor });
+    } else {
+      const ins = incomingOf(graph, anchor.id);
+      if (ins.length === 0) {
+        return {
+          ok: false,
+          reason: `moving "${nodeDisplayTitle(moved)}" is refused because "${nodeDisplayTitle(anchorNode)}" has no connection leading to it`,
+        };
+      }
+      if (ins.length > 1) {
+        return {
+          ok: false,
+          reason: `moving "${nodeDisplayTitle(moved)}" is refused because "${nodeDisplayTitle(anchorNode)}" has ${countWord(ins.length)} incoming connections, so "before" names more than one place`,
+        };
+      }
+      const anchorIn = ins[0];
+      anchorIn.target = id;
+      graph.edges.push({ ...outEdge, target: anchorNode.id });
+    }
+
+    // The moved step keeps its position; only its place in the list changes.
+    graph.nodes = graph.nodes.filter((node) => node.id !== id);
+    graph.nodes.push(moved);
+    return { ok: true };
+  }
+
+  if (kind === "rename") {
+    const id = typeof op.id === "string" ? op.id.trim() : "";
+    if (id === "") return { ok: false, reason: 'a "rename" operation needs a node id' };
+    const node = graph.nodes.find((entry) => entry.id === id);
+    if (node === undefined) {
+      return { ok: false, reason: `renaming a step is refused because node "${id}" is not in the flow` };
+    }
+    const title = typeof op.title === "string" ? op.title.trim() : "";
+    if (title === "") {
+      return { ok: false, reason: 'a "rename" operation needs a non-empty title' };
+    }
+    node.data = { ...(asObject(node.data) ?? {}), title };
+    return { ok: true };
+  }
+
+  if (kind === "remove") {
+    const id = typeof op.id === "string" ? op.id.trim() : "";
+    if (id === "") return { ok: false, reason: 'a "remove" operation needs a node id' };
+    const node = graph.nodes.find((entry) => entry.id === id);
+    if (node === undefined) {
+      return { ok: false, reason: `removing a step is refused because node "${id}" is not in the flow` };
+    }
+    const incoming = incomingOf(graph, id);
+    const outgoing = outgoingOf(graph, id);
+    if (incoming.length !== 1 || outgoing.length !== 1) {
+      return { ok: false, reason: removeRefusal(node, incoming.length, outgoing.length) };
+    }
+    const inEdge = incoming[0];
+    const outEdge = outgoing[0];
+    graph.nodes = graph.nodes.filter((entry) => entry !== node);
+    graph.edges = graph.edges.filter(
+      (edge) => edge !== inEdge && edge !== outEdge
+    );
+    graph.edges.push({ ...inEdge, target: outEdge.target });
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    reason: `an operation named "${kind === "" ? "(missing)" : kind}" is refused because the server only applies add, move, rename and remove`,
+  };
+}
+
+/**
+ * Compose a staged workflow patch from a model's operation list.
+ *
+ * The model names steps; code moves them. Every operation either applies
+ * completely or is refused with one operator-readable sentence naming the step,
+ * so a caller can withhold the whole proposal rather than stage half a change.
+ * The input graph is copied, never mutated, and ids are minted deterministically
+ * (collision-free against the graph in hand) so the same ops always compose the
+ * same graph.
+ */
+export function applyFlowOps(graph: FlowPatchGraph, ops: unknown): ApplyFlowOpsResult {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return { ok: false, reason: "the operations list is empty" };
+  }
+  const working = cloneGraph(graph);
+  const state: MintState = { node: 0, edge: 0 };
+
+  for (let index = 0; index < ops.length; index += 1) {
+    const entry = asObject(ops[index]);
+    if (entry === null) {
+      return { ok: false, reason: `operation ${index + 1} is not an object` };
+    }
+    const applied = applyOneOp(working, entry, state);
+    if (!applied.ok) return applied;
+  }
+  return { ok: true, graph: working };
 }
 
 function tryParseJsonObject(text: string): Record<string, unknown> | null {
@@ -581,6 +966,105 @@ function tryParseJsonObject(text: string): Record<string, unknown> | null {
  * zero proposals, because a raw sentence is more useful to the operator than an
  * error and it can never be accepted as a proposal.
  */
+/**
+ * Appends the closers a truncated or miscounted JSON object is missing.
+ *
+ * String-aware, so a brace inside a template body does not confuse it. Returns
+ * null when the text is not an object, when the stack underflows (a closer with
+ * no opener), or when nothing had to be added.
+ */
+export function closeOpenBrackets(text: string): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") stack.push("}");
+    else if (char === "[") stack.push("]");
+    else if (char === "}" || char === "]") {
+      if (stack.pop() !== char) return null;
+    }
+  }
+  if (inString || stack.length === 0) return null;
+  return text + stack.reverse().join("");
+}
+
+/**
+ * Read the `answer` value out of a reply whose JSON tail is invalid.
+ *
+ * A string-aware scan, not a regex: the answer may contain escaped quotes,
+ * braces and newlines, and cutting at the first `"` would truncate it. Returns
+ * null when no complete answer string is present.
+ */
+export function salvageAnswer(text: string): string | null {
+  let from = 0;
+  while (from < text.length) {
+    const key = text.indexOf('"answer"', from);
+    if (key === -1) return null;
+    from = key + '"answer"'.length;
+    let cursor = from;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    if (text[cursor] !== ":") continue;
+    cursor += 1;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    if (text[cursor] !== '"') continue;
+    cursor += 1;
+
+    let value = "";
+    let escaped = false;
+    for (; cursor < text.length; cursor += 1) {
+      const char = text[cursor];
+      if (escaped) {
+        switch (char) {
+          case "n":
+            value += "\n";
+            break;
+          case "r":
+            value += "\r";
+            break;
+          case "t":
+            value += "\t";
+            break;
+          case "b":
+            value += "\b";
+            break;
+          case "f":
+            value += "\f";
+            break;
+          case "u": {
+            const hex = text.slice(cursor + 1, cursor + 5);
+            if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+              value += String.fromCharCode(Number.parseInt(hex, 16));
+              cursor += 4;
+            } else {
+              value += "u";
+            }
+            break;
+          }
+          default:
+            value += char;
+        }
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') return value;
+      value += char;
+    }
+    return null;
+  }
+  return null;
+}
+
 function parseModelReply(text: string): ParsedReply {
   const trimmed = text.trim();
   const candidates: string[] = [trimmed];
@@ -591,18 +1075,47 @@ function parseModelReply(text: string): ParsedReply {
   const first = trimmed.indexOf("{");
   const last = trimmed.lastIndexOf("}");
   if (first !== -1 && last > first) candidates.push(trimmed.slice(first, last + 1));
+  if (first !== -1) {
+    const span = trimmed.slice(first);
+    // A model asked for one JSON object still miscounts a closing brace often
+    // enough to matter (measured against llama-3.3-70b: a complete-looking reply
+    // with one unclosed object). Closing the open brackets is a bounded repair,
+    // not a guess: it only runs when the text starts with `{`, and the result
+    // must still be an object carrying an `answer` string.
+    candidates.push(span);
+    const repaired = closeOpenBrackets(span);
+    if (repaired !== null) candidates.push(repaired);
+  }
 
   for (const candidate of candidates) {
     const parsed = tryParseJsonObject(candidate);
     if (parsed === null) continue;
     if (typeof parsed.answer !== "string") continue;
+    const normalized = normalizeProposals(parsed.proposals);
     return {
       answer: parsed.answer.trim().slice(0, MAX_ANSWER_CHARS),
-      proposals: normalizeProposals(parsed.proposals),
+      proposals: normalized.proposals,
+      withheld: normalized.withheld,
     };
   }
 
-  return { answer: trimmed.slice(0, MAX_ANSWER_CHARS), proposals: [] };
+  // The reply's tail was invalid (an extra or missing closer, or a stray
+  // character) but the answer itself may be intact. Keep the operator's sentence
+  // instead of showing them raw JSON with zero proposals.
+  const salvaged = salvageAnswer(trimmed);
+  if (salvaged !== null) {
+    return {
+      answer: salvaged.trim().slice(0, MAX_ANSWER_CHARS),
+      proposals: [],
+      withheld: [],
+    };
+  }
+
+  return {
+    answer: trimmed.slice(0, MAX_ANSWER_CHARS),
+    proposals: [],
+    withheld: [],
+  };
 }
 
 /** Server-minted, opaque, and short enough to be a URL segment. */
@@ -688,10 +1201,10 @@ export async function handleAssistantChat(
     return aiUnavailable(resolved.reason, resolved.message);
   }
 
-  // The editor validates a patch as a complete graph, so the model needs the
-  // exact graph the console is looking at. Read only when the console names a
-  // flow; the client never supplies graph content and `parseContext` stays a
-  // two-key allowlist.
+  // The server composes a patch from the model's ops, so it needs the exact
+  // graph the console is looking at. Read only when the console names a flow;
+  // the client never supplies graph content and `parseContext` stays a two-key
+  // allowlist.
   const flow =
     context.flowId === undefined ? undefined : await loadFlowForPrompt(env, context.flowId);
 
@@ -717,7 +1230,10 @@ export async function handleAssistantChat(
   const started = Date.now();
   let result;
   try {
-    result = await resolved.adapter.chat(messages, { maxOutputTokens: 400 });
+    // The model now returns a small ops list, but a model can still overrun a
+    // tight output cap on a verbose reply. The hard ceiling is the honest limit;
+    // a truncated tail is repaired or salvaged by `parseModelReply`.
+    result = await resolved.adapter.chat(messages, { maxOutputTokens: MAX_OUTPUT_TOKENS });
   } catch (error) {
     const reason = error instanceof ChatAdapterError ? error.reason : "provider_unavailable";
     const detail =
@@ -732,7 +1248,82 @@ export async function handleAssistantChat(
   await addTokens(env, budget.day, tokens);
 
   const reply = parseModelReply(result.text);
-  const proposals = await persistProposals(env, actor, reply.proposals);
+  const withheld: WithheldProposal[] = [...reply.withheld];
+  const drafts: ProposalDraft[] = [];
+
+  for (const draft of reply.proposals) {
+    if (draft.kind !== "stage_workflow_patch") {
+      drafts.push(draft);
+      continue;
+    }
+
+    // The model proposes operations; the server builds the graph. Without the
+    // flow row there is nothing honest to build from, so withhold rather than
+    // stage a patch the console cannot apply.
+    const parts = flow === null || flow === undefined ? null : parseFlowGraph(flow.graph);
+    if (flow === null || flow === undefined || parts === null) {
+      withheld.push({
+        kind: draft.kind,
+        reason:
+          flow === null || flow === undefined
+            ? "the stage_workflow_patch proposal is withheld because no flow was named in the console context"
+            : "the stage_workflow_patch proposal is withheld because the stored graph could not be read",
+      });
+      continue;
+    }
+
+    const applied = applyFlowOps(parts, draft.payload.ops);
+    if (!applied.ok) {
+      withheld.push({ kind: draft.kind, reason: applied.reason });
+      continue;
+    }
+
+    const payload: Record<string, unknown> = {
+      flow_id: flow.id,
+      ops: draft.payload.ops,
+      patch: applied.graph,
+    };
+
+    let patchJson: string;
+    try {
+      patchJson = JSON.stringify(applied.graph);
+    } catch {
+      withheld.push({
+        kind: draft.kind,
+        reason: "the stage_workflow_patch proposal is withheld because its patch is not serialisable",
+      });
+      continue;
+    }
+    if (patchJson.length > MAX_PATCH_JSON_CHARS) {
+      withheld.push({
+        kind: draft.kind,
+        reason: `the stage_workflow_patch proposal was dropped because its patch is ${patchJson.length} characters, over the ${MAX_PATCH_JSON_CHARS}-character limit`,
+      });
+      continue;
+    }
+
+    let payloadJson: string;
+    try {
+      payloadJson = JSON.stringify(payload);
+    } catch {
+      withheld.push({
+        kind: draft.kind,
+        reason: "the stage_workflow_patch proposal is withheld because its payload is not serialisable",
+      });
+      continue;
+    }
+    if (payloadJson.length > MAX_PAYLOAD_JSON_CHARS) {
+      withheld.push({
+        kind: draft.kind,
+        reason: `the stage_workflow_patch proposal was dropped because its payload is ${payloadJson.length} characters, over the ${MAX_PAYLOAD_JSON_CHARS}-character limit`,
+      });
+      continue;
+    }
+
+    drafts.push({ ...draft, payload });
+  }
+
+  const proposals = await persistProposals(env, actor, drafts);
 
   logAssistant("chat", {
     provider: result.provider,
@@ -741,7 +1332,7 @@ export async function handleAssistantChat(
     took_ms: Date.now() - started,
   });
 
-  return Response.json({ answer: reply.answer, proposals });
+  return Response.json({ answer: reply.answer, proposals, withheld });
 }
 
 /* ─────────────────────────── 4. accept proposal ─────────────────────────── */

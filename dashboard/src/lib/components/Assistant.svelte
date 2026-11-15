@@ -300,6 +300,16 @@
 				<p class="answer">{outcome.text}</p>
 			{:else}
 				<p class="answer">{outcome.answer}</p>
+				{#if outcome.withheld.length > 0}
+					<!-- A proposal the gateway refused to hand over. Saying so is the
+					     difference between "the model suggested nothing" and "the model
+					     suggested something the gateway would not stage". -->
+					<ul class="withheld">
+						{#each outcome.withheld as reason, index (index)}
+							<li class="withheld-line">{reason}</li>
+						{/each}
+					</ul>
+				{/if}
 				{#if outcome.proposals.length > 0}
 					<ul class="proposals">
 						{#each outcome.proposals as proposal (proposal.id)}
@@ -568,5 +578,18 @@
 			width: auto;
 			bottom: calc(64px + env(safe-area-inset-bottom, 0px));
 		}
+	}
+
+	.withheld {
+		margin: var(--df-p-space-2) 0 0;
+		padding: 0 0 0 var(--df-p-space-3);
+		list-style: none;
+		border-left: 2px solid var(--df-state-warn-ink);
+	}
+
+	.withheld-line {
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
 	}
 </style>
