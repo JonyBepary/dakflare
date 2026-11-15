@@ -144,7 +144,7 @@ simple = { limit = 20, period = 60 }
 [vars]
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
-AGENT_RUNTIME = "off"
+AGENT_RUNTIME = "on"
 # `AUTH_MODE` is retired: one gate, two credentials (Better Auth session, or
 # ADMIN_TOKEN plus X-Dakflare-Client: cli). A leftover `AUTH_MODE` here was read
 # by nothing and only made this file disagree with the other two.

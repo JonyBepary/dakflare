@@ -108,7 +108,7 @@ export default defineConfig({
 			INCOMING_ROWS_PER_DAY: bindings.text("10000"),
 			// Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless
 			// console assistant is unaffected.
-			AGENT_RUNTIME: bindings.text("off"),
+			AGENT_RUNTIME: bindings.text("on"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/JonyBepary/dakflare"),
 

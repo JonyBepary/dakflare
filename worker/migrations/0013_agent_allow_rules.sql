@@ -1,0 +1,13 @@
+-- DakFlare — agent autonomy: the "any rule" consent.
+--
+-- `targetMatches` deliberately refuses to treat an untargeted grant as a
+-- wildcard: an empty target matches an unscoped request only, never one that
+-- names a recipient or a flow. That is the right rule for SMS and deploys, whose
+-- targets are knowable before the act.
+--
+-- A rule is the exception: its id and body hash are minted by the act itself, so
+-- no grant minted in advance can name it. Rather than widen `targetMatches` for
+-- every token in the deployment, the operator's explicit consent lives here, and
+-- `authorizeAct` reads it for `rules:write` alone. Bounded by the window and the
+-- daily write cap, and every use is audited.
+ALTER TABLE agent_autonomy ADD COLUMN allow_rules INTEGER NOT NULL DEFAULT 0;

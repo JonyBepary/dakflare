@@ -70,8 +70,15 @@ export function isTrustedOrigin(
   }
 
   const trusted = new Set<string>();
+  const trustedHosts = new Set<string>();
   try {
-    trusted.add(new URL(request.url).origin);
+    const own = new URL(request.url);
+    trusted.add(own.origin);
+    // The Worker sees its own URL with an internal scheme (production reports
+    // http for a workers.dev route while every browser Origin is https), so a
+    // same-host Origin is accepted on either scheme. A hostile party controlling
+    // the scheme of our own host already controls the host.
+    trustedHosts.add(own.host);
   } catch {
     // A local dev request always parses; if it does not, only the configured
     // origins remain trusted.
@@ -95,9 +102,13 @@ export function isTrustedOrigin(
     }
   }
 
-  return trusted.has(supplied)
-    ? { ok: true, origin: supplied }
-    : { ok: false, reason: "origin_untrusted" };
+  if (trusted.has(supplied)) return { ok: true, origin: supplied };
+  try {
+    if (trustedHosts.has(new URL(supplied).host)) return { ok: true, origin: supplied };
+  } catch {
+    // unparsable origins were already refused above
+  }
+  return { ok: false, reason: "origin_untrusted" };
 }
 
 /** What the check order decided about an upgrade request, before any storage. */

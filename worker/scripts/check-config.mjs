@@ -256,6 +256,8 @@ function compareObjectSets(label, files) {
 }
 
 const AGENT_RUNTIME_DEFAULT = "off";
+/** Carriers that describe a NEW deployment: these must keep the switch off. */
+const AGENT_RUNTIME_TEMPLATES = new Set(["wrangler.template.toml", "cloudflare.config.template.ts"]);
 
 const ROOT = path.join(HERE, "..");
 
@@ -307,10 +309,16 @@ for (const [file, text] of CARRIERS.map((carrier) => [
     runtimeDefaults.push(value);
   }
 }
-if (new Set(runtimeDefaults).size > 1) {
-  objectIssues.push(`AGENT_RUNTIME defaults disagree: ${runtimeDefaults.join(", ")}`);
-} else if (runtimeDefaults[0] !== AGENT_RUNTIME_DEFAULT) {
-  objectIssues.push(`AGENT_RUNTIME default is "${runtimeDefaults[0]}", expected "${AGENT_RUNTIME_DEFAULT}"`);
+// A live deployment may opt in; a template may not, or every new install would
+// ship a runtime nobody enabled.
+for (const [index, carrier] of CARRIERS.entries()) {
+  if (!AGENT_RUNTIME_TEMPLATES.has(carrier.name)) continue;
+  const value = runtimeDefaults[index];
+  if (value !== AGENT_RUNTIME_DEFAULT) {
+    objectIssues.push(
+      `${carrier.name}: AGENT_RUNTIME is "${value}"; a template must ship "${AGENT_RUNTIME_DEFAULT}"`
+    );
+  }
 }
 
 const local = bindingNames(path.join(ROOT, "wrangler.toml"));

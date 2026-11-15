@@ -78,7 +78,7 @@ const MAX_PROPOSALS = 3;
 const SYSTEM1_ALIASES = ["clef", "clef-flash", "clef-omni"] as const;
 
 const PROPOSAL_KINDS = ["create_rule", "create_template", "stage_workflow_patch"] as const;
-type ProposalKind = (typeof PROPOSAL_KINDS)[number];
+export type ProposalKind = (typeof PROPOSAL_KINDS)[number];
 
 const PROPOSAL_KIND_SET: ReadonlySet<string> = new Set(PROPOSAL_KINDS);
 
@@ -881,7 +881,7 @@ function parseContext(value: unknown): ParsedContext {
   return { ok: true, context };
 }
 
-interface ProposalDraft {
+export interface ProposalDraft {
   kind: ProposalKind;
   title: string;
   summary: string;
@@ -1494,7 +1494,7 @@ function mintProposalId(): string {
   return `ap_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-async function persistProposals(
+export async function persistProposals(
   env: Env,
   actor: AdminActor,
   drafts: ProposalDraft[]
@@ -1522,6 +1522,73 @@ async function persistProposals(
   }
 
   return stored;
+}
+
+/**
+ * Stage one proposal for the runtime's propose tools, reusing the same
+ * composition the stateless chat route uses.
+ *
+ * A `stage_workflow_patch` is composed here — never accepted from the model —
+ * exactly as `handleAssistantChat` composes it: load the flow, apply the ops
+ * with `applyFlowOps`, and store `{flow_id, ops, patch}`. The validators are
+ * shared; this function does not reimplement them.
+ */
+export async function stageAssistantProposal(
+  env: Env,
+  actor: AdminActor,
+  draft: { kind: ProposalKind; title: string; summary?: string; payload: Record<string, unknown> }
+): Promise<
+  | { ok: true; proposal: ProposalDraft & { id: string } }
+  | { ok: false; reason: string; message: string }
+> {
+  let payload = draft.payload;
+
+  if (draft.kind === "stage_workflow_patch") {
+    const flowId =
+      typeof payload.flow_id === "string"
+        ? payload.flow_id
+        : typeof payload.flowId === "string"
+          ? payload.flowId
+          : "";
+    if (flowId === "") {
+      return {
+        ok: false,
+        reason: "flow_missing",
+        message: "stage_workflow_patch needs a flow_id; no patch was staged",
+      };
+    }
+    const flow = await loadFlowForPrompt(env, flowId);
+    const parts = flow === null ? null : parseFlowGraph(flow.graph);
+    if (flow === null || parts === null) {
+      return {
+        ok: false,
+        reason: "flow_not_found",
+        message: `no readable flow ${flowId}; no patch was staged`,
+      };
+    }
+    const applied = applyFlowOps(parts, payload.ops);
+    if (!applied.ok) {
+      return { ok: false, reason: "patch_not_applicable", message: applied.reason };
+    }
+    payload = { flow_id: flow.id, ops: payload.ops, patch: applied.graph };
+  }
+
+  const stored = await persistProposals(env, actor, [
+    {
+      kind: draft.kind,
+      title: draft.title.slice(0, MAX_TITLE_CHARS),
+      summary: (draft.summary ?? "").slice(0, MAX_SUMMARY_CHARS),
+      payload,
+    },
+  ]);
+  if (stored.length === 0) {
+    return {
+      ok: false,
+      reason: "proposal_not_stored",
+      message: "the proposal could not be stored",
+    };
+  }
+  return { ok: true, proposal: stored[0] };
 }
 
 /** One narrow read: the graph a stage_workflow_patch must reproduce exactly. */
@@ -1733,7 +1800,7 @@ type AcceptOutcome =
  * accept path indistinguishable from the rules editor: same allowlists, same
  * RE2 lint, same compile check, same id generation, same audit row.
  */
-async function acceptCreateRule(
+export async function acceptCreateRule(
   env: Env,
   actor: AdminActor,
   payload: Record<string, unknown>
@@ -1799,6 +1866,9 @@ async function acceptCreateRule(
   };
   if (typeof payload.name === "string" && payload.name.trim() !== "") {
     forwarded.name = payload.name.trim();
+  }
+  if (typeof payload.id === "string" && payload.id.trim() !== "") {
+    forwarded.id = payload.id.trim();
   }
   if (payload.priority !== undefined) forwarded.priority = payload.priority;
   if (payload.cooldown_s !== undefined || payload.cooldown_seconds !== undefined) {

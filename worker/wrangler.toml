@@ -193,7 +193,7 @@ simple = { limit = 20, period = 60 }
 [vars]
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
-AGENT_RUNTIME = "off"
+AGENT_RUNTIME = "on"
 # Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path

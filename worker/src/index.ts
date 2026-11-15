@@ -77,7 +77,8 @@ import {
   redeemTicket,
   ticketRefusal,
 } from "./lib/agent-runtime";
-import { handleAgentRuntimeRead, handleAgentTicketMint } from "./routes/agent-runtime";
+import { handleAgentRuntimeRead, handleAgentSay,
+ handleAgentTicketMint, handleAutonomyEnable, handleAutonomyRead, handleAutonomyRevoke } from "./routes/agent-runtime";
 import {
   handleAgentDiagnose,
   handleAgentSynthesize,
@@ -1135,6 +1136,12 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     // The ticket action is deliberately absent from SCOPE_FOR_ACTION, so an
     // agent token is refused before the handler runs. The GET resolves through
     // `runAsAgent`, the same function a future tool path must call.
+    // One non-streaming turn for a machine caller; the console uses the socket.
+    if (method === "POST" && pathname === "/v1/admin/agent/say") {
+      return withAdminAccess(req, env, "write", "run one agent turn", (actor) =>
+        handleAgentSay(req, env, actor)
+      );
+    }
     if (method === "POST" && pathname === "/v1/admin/agent/ticket") {
       return withAdminAccess(req, env, "write", "mint agent runtime tickets", (actor) =>
         handleAgentTicketMint(req, env, actor)
@@ -1142,6 +1149,24 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     }
     if (method === "GET" && pathname === "/v1/admin/agent/runtime") {
       return handleAgentRuntimeRead(req, env);
+    }
+    // Autonomy control plane (pass 3, stage C). Human-only: the three actions
+    // are absent from SCOPE_FOR_ACTION, and each handler calls assertHuman, so
+    // an agent credential is refused before it can widen its own window.
+    if (method === "GET" && pathname === "/v1/admin/agent/autonomy") {
+      return withAdminAccess(req, env, "read", "read agent autonomy", (_actor) =>
+        handleAutonomyRead(req, env)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/agent/autonomy") {
+      return withAdminAccess(req, env, "write", "enable agent autonomy", (actor) =>
+        handleAutonomyEnable(req, env, actor)
+      );
+    }
+    if (method === "DELETE" && pathname === "/v1/admin/agent/autonomy") {
+      return withAdminAccess(req, env, "write", "revoke agent autonomy", (actor) =>
+        handleAutonomyRevoke(req, env, actor)
+      );
     }
 
     /* ---- agent control plane (v6.1 P0) --------------------------------- */

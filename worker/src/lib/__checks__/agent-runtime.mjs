@@ -68,6 +68,22 @@ function check(label, condition, detail = "") {
   }
 }
 
+{
+  // Production reports its own URL as http while every browser sends https, so
+  // a same-host Origin must pass on either scheme; a different host must not.
+  const request = new Request("http://dakflare.example/agents/assistant/assistant");
+  const https = isTrustedOrigin(
+    new Request(request, { headers: { Origin: "https://dakflare.example" } }),
+    {}
+  );
+  check("same host, https origin accepted", https.ok === true, JSON.stringify(https));
+  const lookalike = isTrustedOrigin(
+    new Request(request, { headers: { Origin: "https://dakflare.example.evil" } }),
+    {}
+  );
+  check("lookalike host refused", lookalike.ok === false && lookalike.reason === "origin_untrusted");
+}
+
 /* ── an in-memory D1 for exactly the ticket statements ─────────────────── */
 
 function makeTicketDB() {
