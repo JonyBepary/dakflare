@@ -77,6 +77,13 @@ export interface AiSystem1 {
 	model: string;
 	provider: AiProvider;
 	baseUrl: string | null;
+	/**
+	 * Whether the base above is the chat origin because the row stores none.
+	 * The gateway reports it: two equal URLs cannot tell an inherited base from
+	 * an explicit override, and guessing drops the override on the next save.
+	 * Absent from an older Worker, where the page falls back to comparing.
+	 */
+	inheritsBase?: boolean;
 }
 
 /**
@@ -121,7 +128,7 @@ export interface AiSettings {
  * would leave an older own model in place.
  */
 export interface AiSystem1Input {
-	/** Omit to inherit the chat model. */
+	/** The decision model. It never inherits the chat model. */
 	model?: string;
 	/** Omit to inherit the chat base URL. Refused by Workers AI, which has none. */
 	baseUrl?: string;

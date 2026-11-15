@@ -74,6 +74,9 @@ const PROPOSAL_TTL_MS = 15 * 60 * 1000;
 const MAX_PROPOSALS = 3;
 
 /** The only kinds a proposal may carry. Anything else is dropped on parse. */
+/** The decision aliases Workers AI actually serves. */
+const SYSTEM1_ALIASES = ["clef", "clef-flash", "clef-omni"] as const;
+
 const PROPOSAL_KINDS = ["create_rule", "create_template", "stage_workflow_patch"] as const;
 type ProposalKind = (typeof PROPOSAL_KINDS)[number];
 
@@ -159,7 +162,13 @@ interface SettingsResponse {
    * "fall back to chat" resolution, so the console never has to re-implement it.
    * `provider` is echoed because it is the same selector, not a second one.
    */
-  system1: { model: string; provider: string; baseUrl: string | null };
+  system1: {
+    model: string;
+    provider: string;
+    baseUrl: string | null;
+    /** True when the row stores no origin and this is the chat base. */
+    inheritsBase: boolean;
+  };
   apiKeyConfigured: boolean;
   /**
    * Which secret answered EACH role — a name, never a value. Chat and System One
@@ -205,12 +214,15 @@ function settingsResponse(
     model: settings.model,
     baseUrl: settings.baseUrl,
     system1: {
-      // readSettings resolves both against the chat values when the row's
-      // columns are NULL; the chat model is repeated as a last resort for a
-      // settings object built in code.
+      // The model never inherits the chat model (a gateway decides with a
+      // different name than it chats with); the origin does, and the flag says
+      // so, because two equal URLs cannot tell an inherited base from an
+      // explicit override.
       model: settings.system1Model ?? settings.model,
       provider: settings.provider,
       baseUrl: settings.provider === "openai-compatible" ? settings.system1BaseUrl : null,
+      inheritsBase:
+        settings.provider === "openai-compatible" ? settings.system1BaseInherited : true,
     },
     apiKeyConfigured: configured,
     keySource: { chat: keys.chat.source, system1: keys.system1.source },
@@ -290,6 +302,17 @@ export async function handleAiSettingsPut(
       if (system1ModelValue.length > MAX_MODEL_CHARS) {
         return badRequest(`system1.model must be at most ${MAX_MODEL_CHARS} characters`);
       }
+      // Workers AI serves exactly three decision aliases and nothing else. A
+      // stored typo would be mapped to `clef` at ask time and answered
+      // silently, so it is refused here where the operator can see it.
+      if (
+        provider === "workers-ai" &&
+        !(SYSTEM1_ALIASES as readonly string[]).includes(system1ModelValue)
+      ) {
+        return badRequest(
+          `system1.model must be one of ${SYSTEM1_ALIASES.join(", ")} for workers-ai`
+        );
+      }
       system1Model = system1ModelValue;
     }
 
@@ -310,6 +333,8 @@ export async function handleAiSettingsPut(
     baseUrl,
     system1Model,
     system1BaseUrl,
+    // What was just written: an empty System One base is the inherit case.
+    system1BaseInherited: system1BaseUrl === null,
   };
   await writeSettings(env, settings, actor.label);
 

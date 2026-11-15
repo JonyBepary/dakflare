@@ -150,9 +150,10 @@ const STUB = String.raw`
 				// One row, two roles: the effective System One values are resolved
 				// server-side, so an inheriting row arrives already filled in.
 				system1: {
-					model,
+					model: workers ? 'clef' : 'Clef',
 					provider: workers ? 'workers-ai' : 'openai-compatible',
-					baseUrl: base
+					baseUrl: base,
+					inheritsBase: true
 				},
 				// Workers AI answers through the binding, so neither role needs a key.
 				apiKeyConfigured: configured,

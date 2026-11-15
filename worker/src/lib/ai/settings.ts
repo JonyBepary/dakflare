@@ -60,6 +60,13 @@ export interface AiSettings {
    */
   system1BaseUrl: string | null;
   /**
+   * True when the row stores no `system1_base_url` and the value above is the
+   * chat origin. The console and the CLI used to infer this by comparing two
+   * URLs, so an override equal to the chat base read as inherited and was
+   * dropped on the next save.
+   */
+  system1BaseInherited: boolean;
+  /**
    * Set when the CHAT base URL — from env or a hand-edited row — failed
    * `validateBaseUrl`. It never reaches an adapter: a caller must refuse the
    * request before resolving, so the key is not sent to a URL the PUT route
@@ -191,6 +198,7 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
   let system1Model: string | null = provider === "openai-compatible" ? "Clef" : "clef";
   let system1BaseUrl: string | null = null;
   let system1BaseUrlError: string | undefined;
+  let system1BaseInherited = true;
   if (provider === "openai-compatible") {
     const configuredModel =
       typeof env.TOKENLAB_SYSTEM1_MODEL === "string" ? env.TOKENLAB_SYSTEM1_MODEL.trim() : "";
@@ -199,6 +207,8 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
     if (rawSystem1Base !== "") {
       const checked = envBase(rawSystem1Base, "TOKENLAB_BASE_URL");
       system1BaseUrl = checked.baseUrl;
+      system1BaseInherited = false;
+      system1BaseInherited = false;
       // Its own field, not the chat one: a bad System One origin blocks System
       // One and nothing else, which is what the field's contract says. Writing it
       // into baseUrlError used to refuse chat and /models for a decision-only
@@ -218,6 +228,7 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
     baseUrl,
     system1Model,
     system1BaseUrl,
+    system1BaseInherited,
     ...(baseUrlError === undefined ? {} : { baseUrlError }),
     ...(system1BaseUrlError === undefined ? {} : { system1BaseUrlError }),
   };
@@ -268,6 +279,7 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
 
   let system1BaseUrl: string | null = null;
   let system1BaseUrlError: string | undefined;
+  let system1BaseInherited = true;
   if (provider === "openai-compatible") {
     const storedSystem1Base =
       row.system1_base_url !== null && row.system1_base_url !== ""
@@ -279,6 +291,7 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
       const checked = validateBaseUrl(storedSystem1Base);
       if (checked.ok) {
         system1BaseUrl = checked.value;
+        system1BaseInherited = false;
       } else {
         system1BaseUrlError = `system1_base_url is invalid: ${checked.message}`;
       }
@@ -291,6 +304,7 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
     baseUrl,
     system1Model,
     system1BaseUrl,
+    system1BaseInherited,
     ...(baseUrlError === undefined ? {} : { baseUrlError }),
     ...(system1BaseUrlError === undefined ? {} : { system1BaseUrlError }),
   };

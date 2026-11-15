@@ -417,10 +417,13 @@
 		const stored = next.system1;
 		s1Model = stored !== null ? stored.model : '';
 
+		// The gateway says whether the row stores an origin. Comparing two URLs
+		// cannot tell an inherited base from an override that happens to match,
+		// and the comparison silently dropped such an override on the next save.
 		const ownBase =
 			next.provider === 'openai-compatible' &&
 			stored !== null &&
-			(stored.baseUrl ?? '') !== next.baseUrl;
+			(stored.inheritsBase ?? (stored.baseUrl ?? '') !== next.baseUrl) === false;
 		s1InheritBase = !ownBase;
 		s1BaseUrl = stored !== null && ownBase ? (stored.baseUrl ?? '') : '';
 	}
@@ -782,16 +785,26 @@
 						<div class="s1-grid">
 							<div class="field">
 								<label class="label" for="ai-s1-model">Model</label>
-								<input
-									id="ai-s1-model"
-									class="input input-mono"
-									bind:value={s1Model}
-									placeholder={provider === 'workers-ai' ? 'clef' : 'Clef'}
-									autocomplete="off"
-									autocapitalize="off"
-									spellcheck="false"
-									aria-describedby="ai-s1-model-hint"
-								/>
+								{#if provider === 'workers-ai'}
+									<!-- Three aliases exist and nothing else. A free-text typo would be
+									     mapped to clef at ask time and answered silently. -->
+									<select id="ai-s1-model" class="input" bind:value={s1Model} aria-describedby="ai-s1-model-hint">
+										<option value="clef">clef</option>
+										<option value="clef-flash">clef-flash</option>
+										<option value="clef-omni">clef-omni</option>
+									</select>
+								{:else}
+									<input
+										id="ai-s1-model"
+										class="input input-mono"
+										bind:value={s1Model}
+										placeholder="Clef"
+										autocomplete="off"
+										autocapitalize="off"
+										spellcheck="false"
+										aria-describedby="ai-s1-model-hint"
+									/>
+								{/if}
 								<p class="hint" id="ai-s1-model-hint">
 									The model the provider decides with. It does not follow the chat model: a gateway
 									usually serves its decision model under a different name than the one it chats with.

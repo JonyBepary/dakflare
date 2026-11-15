@@ -6236,10 +6236,15 @@ function aiSettingsView(data) {
           provider: rawSystem1.provider ?? provider,
           model: system1Model,
           base_url: system1BaseUrl,
-          // workers-ai has no origin at all, so "inherits the base" has no
-          // meaning there; null says that instead of claiming either way.
+          // The gateway reports this; comparing two URLs cannot tell an
+          // inherited base from an override that happens to match. workers-ai
+          // has no origin at all, so "inherits the base" has no meaning there.
           inherits_base:
-            provider === 'openai-compatible' ? system1BaseUrl === baseUrl : null,
+            provider === 'openai-compatible'
+              ? typeof rawSystem1.inheritsBase === 'boolean'
+                ? rawSystem1.inheritsBase
+                : system1BaseUrl === baseUrl
+              : null,
         }
       : null,
     api_key_configured: data?.apiKeyConfigured === true,
