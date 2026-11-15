@@ -21,6 +21,8 @@ import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
 import { handleRulesGet, handleRulesPost, handleRulesTest } from "./routes/rules";
 import {
+  handleAiModels,
+
   handleAiSettingsGet,
   handleAiSettingsPut,
   handleAiTest,
@@ -1198,6 +1200,11 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     if (method === "PUT" && pathname === "/v1/admin/ai/settings") {
       return withAdminAccess(req, env, "write", "update AI settings", (actor) =>
         handleAiSettingsPut(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/ai/models") {
+      return withAdminAccess(req, env, "write", "list AI models", (_actor) =>
+        handleAiModels(env)
       );
     }
     if (method === "POST" && pathname === "/v1/admin/ai/test") {

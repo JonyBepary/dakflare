@@ -714,10 +714,10 @@ const COMMAND_SPECS = {
     examples: ['dakflare key fingerprint', 'dakflare key fingerprint --json'],
   },
   ai: {
-    summary: 'Read or change the console AI provider, and probe it (providers|configure|test)',
+    summary: 'Read or change the console AI provider, list its models, and probe it (providers|configure|models|test)',
     effect: 'mutating',
     usage:
-      'dakflare ai providers [--json] | ai configure --provider <workers-ai|openai-compatible> [--model <id>] [--base-url <url>] [--dry-run] [--json] | ai test [--json]',
+      'dakflare ai providers [--json] | ai configure --provider <workers-ai|openai-compatible> [--model <id>] [--base-url <url>] [--dry-run] [--json] | ai models [--json] | ai test [--json]',
     flags: {
       provider: { type: 'string', note: 'configure: workers-ai or openai-compatible' },
       model: {
@@ -733,6 +733,7 @@ const COMMAND_SPECS = {
     response: {
       provider: 'workers-ai|openai-compatible',
       model: 'the model id',
+      models: 'ai models: [{id, owned_by?}] with source static|provider',
       base_url: 'https URL, or null for workers-ai',
       api_key_configured: 'whether AI_CHAT_API_KEY is set on the Worker',
       budget: '{day, used, limit}',
@@ -742,6 +743,7 @@ const COMMAND_SPECS = {
       'dakflare ai providers --agent',
       'dakflare ai configure --provider workers-ai',
       'dakflare ai configure --provider openai-compatible --model gpt-4o-mini --base-url https://api.openai.com/v1 --dry-run',
+      'dakflare ai models --json',
       'dakflare ai test --json',
     ],
   },
@@ -6374,6 +6376,42 @@ async function commandAiConfigure(argv) {
 }
 
 /** `dakflare ai test` — one tiny provider call. */
+/** `ai models` — the catalog the configured provider publishes. */
+async function commandAiModels(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('ai');
+  assertCommandFlags(flags, 'ai');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'GET', '/v1/admin/ai/models');
+  if (result.status !== 200) throw aiFailure('list AI models', result);
+
+  const models = Array.isArray(result.data?.models) ? result.data.models : [];
+  const view = {
+    provider: result.data?.provider ?? null,
+    source: result.data?.source ?? null,
+    note: typeof result.data?.note === 'string' ? result.data.note : null,
+    count: models.length,
+    models: models.map((entry) =>
+      entry !== null && typeof entry === 'object'
+        ? {
+            id: String(entry.id ?? ''),
+            ...(typeof entry.owned_by === 'string' ? { owned_by: entry.owned_by } : {}),
+          }
+        : { id: String(entry) }
+    ),
+  };
+
+  if (MODE.json) {
+    emitJson(view, MODE);
+    return 0;
+  }
+  out(`${view.count} models (${view.provider ?? 'unknown'}, ${view.source ?? 'unknown'} source)`);
+  for (const model of view.models) out(`  ${model.id}`);
+  if (view.note !== null) out(`  note  ${view.note}`);
+  return 0;
+}
+
 async function commandAiTest(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('ai');
@@ -6416,6 +6454,7 @@ async function commandAi(argv) {
   }
   if (sub === 'providers') return commandAiProviders(rest);
   if (sub === 'configure') return commandAiConfigure(rest);
+  if (sub === 'models') return commandAiModels(rest);
   if (sub === 'test') return commandAiTest(rest);
   err(`dakflare: unknown ai subcommand "${sub}"`);
   err('try `dakflare ai --help`');
@@ -6914,12 +6953,14 @@ ${KEYSTORE_PROPS}; it is never printed.
 
 Requires keytool (JDK). This only reads the key; it never changes it.`,
 
-  ai: `Usage: dakflare ai <providers|configure|test> [options]
+  ai: `Usage: dakflare ai <providers|configure|models|test> [options]
 
   providers                       read the active provider, model, base URL,
                                   whether AI_CHAT_API_KEY is set, and today's budget
   configure --provider <kind> [--model <id>] [--base-url <url>] [--dry-run]
                                   write the singleton AI settings row
+  models                          the catalog the provider publishes (GET {base}/models);
+                                  workers-ai answers a short static list instead
   test                            one tiny provider call; prints ok, provider,
                                   model, took_ms and a sample
 

@@ -238,6 +238,125 @@ export async function handleAiSettingsPut(
   return Response.json(settingsResponse(env, settings, budget));
 }
 
+/* ──────────────────────────── 2b. model catalog ──────────────────────────── */
+
+/**
+ * The models a deployment can pick, in the provider's own words.
+ *
+ * An OpenAI-compatible gateway publishes `GET {base}/models`, and reading it is
+ * what turns a free-text model field into something an operator can choose
+ * from. The Workers AI binding publishes nothing, so the list there is a short,
+ * honest static one and `source` says so: a guess dressed as a catalog would be
+ * worse than no picker.
+ */
+const WORKERS_AI_CHAT_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-3.1-8b-instruct",
+  "@cf/meta/llama-3.1-8b-instruct-fast",
+  "@cf/qwen/qwen2.5-coder-32b-instruct",
+];
+
+/** `GET /v1/admin/ai/models` — what this provider offers right now. */
+export async function handleAiModels(env: Env): Promise<Response> {
+  const settings = await readSettings(env);
+  const refused = settingsRefusal(settings);
+  if (refused !== null) return refused;
+
+  if (settings.provider === "workers-ai") {
+    return Response.json({
+      provider: settings.provider,
+      source: "static",
+      note: "The AI binding has no catalog endpoint; these are the text models this gateway recommends.",
+      models: WORKERS_AI_CHAT_MODELS.map((id) => ({ id })),
+    });
+  }
+
+  const apiKey = typeof env.AI_CHAT_API_KEY === "string" ? env.AI_CHAT_API_KEY.trim() : "";
+  if (apiKey === "") {
+    return aiUnavailable(
+      "missing_key",
+      "AI_CHAT_API_KEY is not set; add it with `wrangler secret put AI_CHAT_API_KEY`"
+    );
+  }
+  if (settings.baseUrl === null || settings.baseUrl === "") {
+    return aiUnavailable(
+      "missing_base_url",
+      "openai-compatible needs a baseUrl before it has models"
+    );
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${settings.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    return aiUnavailable(
+      "provider_unavailable",
+      `the provider could not be reached: ${String(error).slice(0, 120)}`
+    );
+  }
+
+  if (!response.ok) {
+    const retryAfter = response.headers.get("retry-after");
+    if (response.status === 429) {
+      return aiUnavailable(
+        "provider_rate_limited",
+        "the provider is rate limiting this key",
+        retryAfter ?? undefined
+      );
+    }
+    if (response.status === 401 || response.status === 403) {
+      return aiUnavailable(
+        "provider_auth",
+        "the provider refused the key while listing models"
+      );
+    }
+    return aiUnavailable(
+      "provider_unavailable",
+      `the provider answered ${response.status} for /models`
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return aiUnavailable("unparseable", "the provider returned a non-JSON model list");
+  }
+
+  const raw = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const list = Array.isArray(raw.data)
+    ? raw.data
+    : Array.isArray(raw.models)
+      ? raw.models
+      : null;
+  if (list === null) {
+    return aiUnavailable("unparseable", "the provider has no data[] in its model list");
+  }
+
+  const models: Array<{ id: string; owned_by?: string }> = [];
+  for (const entry of list.slice(0, 200)) {
+    if (typeof entry === "string") {
+      models.push({ id: entry });
+      continue;
+    }
+    if (entry === null || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const id =
+      typeof record.id === "string"
+        ? record.id
+        : typeof record.name === "string"
+          ? record.name
+          : null;
+    if (id === null || id === "") continue;
+    models.push(typeof record.owned_by === "string" ? { id, owned_by: record.owned_by } : { id });
+  }
+
+  return Response.json({ provider: settings.provider, source: "provider", models });
+}
+
 /* ─────────────────────────────── 2. test ─────────────────────────────── */
 
 /** `POST /v1/admin/ai/test` — one tiny call, ≤64 output tokens. */
