@@ -6167,7 +6167,10 @@ function aiWorkerName() {
 }
 
 function aiKeyCommand() {
-  return `wrangler secret put AI_CHAT_API_KEY --name ${aiWorkerName()}`;
+  // `cf` is this project's deploy path, and it can set a secret; nothing here
+  // needs a second CLI. The key is never an argument, so it cannot land in a
+  // shell history or a process list.
+  return `cf workers secrets update AI_CHAT_API_KEY --worker ${aiWorkerName()} --type secret_text`;
 }
 
 function aiKeyMissingMessage() {
@@ -6973,7 +6976,7 @@ http on localhost; it is refused for workers-ai. --dry-run prints the PUT
 request and sends nothing.
 
 The API key is never accepted here: it belongs in a Worker secret, set with
-\`wrangler secret put AI_CHAT_API_KEY --name <worker>\` (the CLI names
+\`cf workers secrets update AI_CHAT_API_KEY --worker <worker> --type secret_text\` (the CLI names
 dakflare-worker unless DAKFLARE_WORKER_NAME says otherwise). If that secret is
 missing for openai-compatible, the command prints that exact remediation and
 exits 6, because it is a precondition rather than a network failure.

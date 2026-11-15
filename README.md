@@ -60,17 +60,17 @@ npx wrangler kv namespace create KV             # put the id in both files
 npx wrangler d1 migrations apply sms_gateway --remote
 
 # 2. secrets (never in the repo)
-npx wrangler secret put ADMIN_TOKEN --name dakflare-worker      # machine credential
-npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
-npx wrangler secret put AUTH_PEPPER --name dakflare-worker      # v2:<base64 32 bytes>,v1:<base64 32 bytes>
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text  # machine credential
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text  # v2:<b64 32B>,v1:<b64 32B>
 # optional: turns on the magic-link door
-npx wrangler secret put RESEND_API_KEY --name dakflare-worker
+npx cf workers secrets update RESEND_API_KEY --worker dakflare-worker --type secret_text
 
 # 3. deploy (builds the console into worker/public/admin first)
 npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
 ```
 
-`cf` is the deploy path. `wrangler` stays for local dev, `tail`, `secret put` and `d1 export`, because
+`cf` is the deploy path, and it sets secrets too. `wrangler` stays for local dev, `tail` and `d1 export`, because
 `cf` cannot set one secret or stream logs yet.
 
 CI runs the same checks on every pull request; it does not deploy. Deploy from a clean tree with

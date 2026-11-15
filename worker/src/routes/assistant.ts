@@ -154,7 +154,7 @@ function hintFor(settings: AiSettings, keyConfigured: boolean): string {
     return "Uses the Worker's AI binding; no API key is needed.";
   }
   if (!keyConfigured) {
-    return "Set AI_CHAT_API_KEY with `wrangler secret put AI_CHAT_API_KEY`. The key is never stored in D1.";
+    return "Set AI_CHAT_API_KEY with `cf workers secrets update AI_CHAT_API_KEY --type secret_text`. The key is never stored in D1.";
   }
   return `Key configured. Requests go to ${settings.baseUrl ?? "the configured base URL"}.`;
 }
@@ -275,7 +275,7 @@ export async function handleAiModels(env: Env): Promise<Response> {
   if (apiKey === "") {
     return aiUnavailable(
       "missing_key",
-      "AI_CHAT_API_KEY is not set; add it with `wrangler secret put AI_CHAT_API_KEY`"
+      "AI_CHAT_API_KEY is not set; add it with `cf workers secrets update AI_CHAT_API_KEY --type secret_text`"
     );
   }
   if (settings.baseUrl === null || settings.baseUrl === "") {

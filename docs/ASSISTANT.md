@@ -129,13 +129,31 @@ Adapters cap output at 400 tokens by default and 1024 hard. The registry refuses
 unknown provider kind, a missing `AI` binding, a missing key, and a missing base URL,
 each with a machine-readable reason that becomes the `503` body.
 
+## The provider this deployment uses
+
+Token Lab (`https://api.tokenlab.amd.com/v1`) serves both halves:
+
+- **chat** through the ordinary `openai-compatible` adapter, model
+  `DeepSeek-V4.1-Flash`, with `GET /v1/admin/ai/models` and `dakflare ai models`
+  listing the ten ids the gateway publishes;
+- **System One** through `POST /v1/systemone` with model `Clef`, which answers the
+  same typed questions the Workers AI binding does. `SYSTEM1_PROVIDER` decides:
+  `workers-ai`, `tokenlab`, or the shipped default `auto`, meaning "Token Lab when
+  this deployment holds `TOKENLAB_API_KEY`, Workers AI otherwise". `jev` still always
+  goes to TypeSafe, and `POST /v1/admin/ai/system1/test` runs one fixed decision
+  (choice, noul, score) so the typed path can be exercised on a deployment.
+
+Two secrets, both set with `cf workers secrets update … --type secret_text`:
+`AI_CHAT_API_KEY` for chat, `TOKENLAB_API_KEY` for System One.
+
 ## In the console
 
 `/admin/security/ai` (rail: Security → AI assistant) holds the provider form, the key
 state and the allowance. The panel is honest about the two things it cannot do: a
-missing key is shown as the command that installs one (`wrangler secret put
-AI_CHAT_API_KEY`), and there is no field anywhere to type a key, because a key typed
-into a browser ends up in a history, a log or a screenshot.
+missing key is shown as the command that installs one
+(`cf workers secrets update AI_CHAT_API_KEY --type secret_text`), and there is no field
+anywhere to type a key, because a key typed into a browser ends up in a history, a log
+or a screenshot.
 
 The floating button bottom-right opens one question at a time. It sends the current
 `route` and `flowId` as context, renders proposals as cards, and keeps nothing after

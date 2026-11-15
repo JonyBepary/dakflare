@@ -62,7 +62,7 @@ export function resolveAdapter(env: AdapterEnv, settings: AiSettings): AdapterRe
       ok: false,
       reason: "missing_key",
       message:
-        "AI_CHAT_API_KEY is not set; add it with `wrangler secret put AI_CHAT_API_KEY` (it is never stored in D1)",
+        "AI_CHAT_API_KEY is not set; add it with `cf workers secrets update AI_CHAT_API_KEY --type secret_text` (it is never stored in D1)",
     };
   }
   if (settings.baseUrl === null || settings.baseUrl === "") {

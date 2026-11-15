@@ -18,7 +18,7 @@ deployments coordinated with the physical Android handset.
 | File | Read by | Why it exists |
 |---|---|---|
 | `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical Worker definition: bindings, exports, triggers |
-| `worker/wrangler.toml` | `wrangler` (local dev, `tail`, `secret put`, `d1 export`) | `cf` cannot set one secret or stream logs yet, and the conformance suite needs `wrangler dev --local` with Durable Object SQLite and alarms |
+| `worker/wrangler.toml` | `wrangler` (local dev, `tail`, `d1 export`) | `cf` sets secrets now (`cf workers secrets update`), but cannot stream logs, and the conformance suite needs `wrangler dev --local` with Durable Object SQLite and alarms |
 | `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1` test lane) | the preview D1 and KV are `remote = true`; the Worker and Durable Object still run locally |
 
 `cf build` delegates to Wrangler, which is also why `wrangler.toml`'s `[assets] directory`
@@ -71,7 +71,7 @@ account credential. Nothing here does any more.
 
 **Worker secrets are not managed in CI.** `ADMIN_TOKEN`, `BETTER_AUTH_SECRET`, `AUTH_PEPPER`,
 `RESEND_API_KEY` and `FCM_SERVICE_ACCOUNT_JSON` are set once with
-`npx wrangler secret put <NAME> --name dakflare-worker` (or uploaded from `worker/.dev.vars` by
+`npx cf workers secrets update <NAME> --worker dakflare-worker --type secret_text` (or uploaded from `worker/.dev.vars` by
 `dakflare up`) and survive a deploy. `cf deploy --secrets-file` is driven locally by `dakflare up`.
 
 ## Deploying
@@ -114,9 +114,10 @@ Three that have each cost this repository something:
 - **D1 migrations need the database ID, never the name.** `cf d1 migrations list sms_gateway`
   answers `Expected a D1 database ID, but received <database>="sms_gateway". Database names and
   binding names are not accepted.` The ID is `8d88069e-71cf-49a2-ba33-c150b02246b7`.
-- **`tail` and `secret put` are still Wrangler.** `cf` cannot stream logs or set one secret yet.
+- **`tail` is still Wrangler; secrets are not.** `cf workers secrets update <NAME> --type secret_text`
+  sets one (it asks for the value, so the key never reaches argv). `cf` still cannot stream logs.
   Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
-  `npx wrangler secret put ADMIN_TOKEN --name dakflare-worker`.
+  `npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
 
 ## Rolling back
 
