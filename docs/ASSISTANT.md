@@ -85,11 +85,37 @@ re-validates the payload:
 - `create_template` writes nothing. It returns a validated `{name, body}` draft that the
   card shows as text, because a template is only real once something references it. The
   operator copies it from there; the panel keeps nothing after it closes.
-- `stage_workflow_patch` writes nothing. It returns `{patch}` and the console hands it
-  to the editor's own sink, which draws it as a ghost that still needs a human Accept.
+- `stage_workflow_patch` writes nothing. The model proposes **operations** (`add`,
+  `move`, `rename`, `remove`), naming the node ids it was shown; the Worker applies them
+  deterministically to the flow it already read and returns the composed `{patch}`. The
+  console hands that to the editor's own sink, which draws it as a ghost that still needs a
+  human Accept.
+
+  This is a correction, not a preference. Asking a 70B model to reproduce a whole graph as
+  one JSON object produced invalid JSON against a live flow (a `]` where a `}` belonged,
+  measured twice), which the parser rightly refused. Operations are small, checkable, and a
+  refusal names the step: `removing "Condition" is refused because it has two outgoing
+  connections`. Anything the Worker refuses appears in the response's `withheld` list and
+  is shown to the operator, so a missing card is never a mystery.
 
 Consumption is a timestamp written **after** success, so a failed accept leaves the
 proposal usable and a successful one cannot be replayed.
+
+## What a model's answer is trusted to be
+
+Nothing. The reply is parsed defensively in this order: clean JSON, a fenced block, the
+first-to-last brace span, and finally the same span with its open brackets closed, because
+one missing closer is common and repairable. When all of that fails, the `answer` string
+is salvaged with a string-aware scan so the operator still reads the prose; only when that
+also fails does the raw text become the answer with no proposals.
+
+The adapter is equally suspicious of the provider. The same `env.AI.run(...)` call really
+does answer three ways: a bare string, `{response}`, and a chat-completions object with
+`choices[]`. All three are read, and an error object delivered with a 200 becomes
+`unparseable` with the shape named (`object with keys …`) rather than a silent empty
+answer. `src/lib/__checks__/workers-ai-adapter.mjs` asserts each shape and each refusal.
+
+Output is capped at 1024 tokens for chat: a complete graph did not fit in 400.
 
 ## Cost, and what stops a loop
 
