@@ -1,0 +1,32 @@
+-- DakFlare — unified AI provider (pass 2).
+--
+-- Additive only: two nullable columns on the existing singleton. A Worker that
+-- predates them keeps running, and nothing is renamed or dropped, so applying
+-- this on top of 0009 is safe and idempotent by migration history.
+--
+--   npx cf d1 migrations apply 8d88069e-71cf-49a2-ba33-c150b02246b7
+-- (`cf` needs the database ID, not the name.)
+--
+-- SQLite's ALTER TABLE has no `ADD COLUMN IF NOT EXISTS`, so these two
+-- statements are guarded by D1's migration ledger instead: a version applies
+-- once. Both columns are nullable with no default, which is what makes the
+-- "fall back to the chat value" rule expressible without a second table.
+--
+-- `model` is deliberately NOT renamed. It stays the chat model; System One
+-- carries its own optional model below.
+-- ---------------------------------------------------------------------------
+-- system1_model — the System One model name.
+--
+-- NULL means "use the chat model" (`model` above), so a deployment that never
+-- touches System One needs no second value. A row with its own value wins over
+-- both that fallback and the TOKENLAB_SYSTEM1_MODEL env default.
+ALTER TABLE ai_settings ADD COLUMN system1_model TEXT;
+
+-- ---------------------------------------------------------------------------
+-- system1_base_url — the System One origin.
+--
+-- NULL means "use the chat base URL" (`base_url` above). It receives the same
+-- validateBaseUrl rule as the chat base: https, or http only on loopback, and
+-- never credentials in the URL. It is only used when provider is
+-- `openai-compatible`; a workers-ai row keeps it NULL.
+ALTER TABLE ai_settings ADD COLUMN system1_base_url TEXT;

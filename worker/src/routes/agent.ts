@@ -32,13 +32,16 @@ import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { canonicalTargetJson, type GrantTarget } from "../lib/authority";
 import {
+  aliasFor,
   ask,
-  defaultModel,
   judgeCandidatePatch,
+  system1Config,
   triageInboundAndSpans,
   type Answer,
-  type System1Env,
+  type System1Config,
 } from "../lib/system1";
+import { readSettingsOrEnv, type AiSettings } from "../lib/ai/settings";
+import { providerKey } from "../lib/ai/registry";
 
 /** 8 KiB: these are questions and one message, not a batch upload. */
 const AGENT_BODY_BYTES = 8 * 1024;
@@ -82,48 +85,18 @@ async function readValidated<T>(req: Request, schema: z.ZodType<T>): Promise<Val
   return { ok: true, data: result.data };
 }
 
-/** The System1 binding surface, without leaking `Ai`'s overloads into routes. */
-export function system1Env(env: Env): System1Env {
-  const {
-    SYSTEM1_DEFAULT_MODEL,
-    SYSTEM1_PROVIDER,
-    TYPESAFE_BASE_URL,
-    TYPESAFE_API_KEY,
-    TOKENLAB_BASE_URL,
-    TOKENLAB_API_KEY,
-    TOKENLAB_SYSTEM1_MODEL,
-  } = env as {
-    SYSTEM1_DEFAULT_MODEL?: string;
-    SYSTEM1_PROVIDER?: string;
-    TYPESAFE_BASE_URL?: string;
-    TYPESAFE_API_KEY?: string;
-    TOKENLAB_BASE_URL?: string;
-    TOKENLAB_API_KEY?: string;
-    TOKENLAB_SYSTEM1_MODEL?: string;
-  };
-  return {
-    AI: env.AI,
-    ...(typeof SYSTEM1_DEFAULT_MODEL === "string" ? { SYSTEM1_DEFAULT_MODEL } : {}),
-    ...(typeof SYSTEM1_PROVIDER === "string" ? { SYSTEM1_PROVIDER } : {}),
-    // Jev is opt-in: both values must be present or ask() reports
-    // provider_unavailable rather than falling back to Clef.
-    ...(typeof TYPESAFE_BASE_URL === "string" && TYPESAFE_BASE_URL.trim()
-      ? { TYPESAFE_BASE_URL }
-      : {}),
-    ...(typeof TYPESAFE_API_KEY === "string" && TYPESAFE_API_KEY.trim()
-      ? { TYPESAFE_API_KEY }
-      : {}),
-    // Token Lab is selected by SYSTEM1_PROVIDER and needs its own credentials.
-    // The base URL is passed even when empty: empty is a configuration gap the
-    // adapter reports, not a licence to substitute the documented default.
-    ...(typeof TOKENLAB_BASE_URL === "string" ? { TOKENLAB_BASE_URL } : {}),
-    ...(typeof TOKENLAB_API_KEY === "string" && TOKENLAB_API_KEY.trim()
-      ? { TOKENLAB_API_KEY }
-      : {}),
-    ...(typeof TOKENLAB_SYSTEM1_MODEL === "string" && TOKENLAB_SYSTEM1_MODEL.trim()
-      ? { TOKENLAB_SYSTEM1_MODEL }
-      : {}),
-  };
+/**
+ * The resolved System One call config for one request.
+ *
+ * Everything is decided here and nothing is decided again in `ask`: the row
+ * supplies provider/model/baseUrl, the System One ROLE supplies the key
+ * (`AI_PROVIDER_API_KEY` then `TOKENLAB_API_KEY` — never the chat key), and the
+ * binding is passed as a handle. `ask` therefore reads no env at all.
+ */
+export function system1ConfigFor(env: Env, settings: AiSettings): System1Config {
+  return system1Config(settings, providerKey(env, "system1").key, env.AI as
+    | { run(model: string, input: unknown): Promise<unknown> }
+    | undefined);
 }
 
 function describeChoice(answer: Answer | undefined): {
@@ -167,8 +140,11 @@ export async function handleAgentTriage(req: Request, env: Env): Promise<Respons
   if (!parsed.ok) return parsed.response;
   const { message, sender, spans } = parsed.data;
 
+  // One settings read for this request; no cache in this pass. A D1 fault
+  // degrades to the env defaults rather than a 500.
+  const settings = await readSettingsOrEnv(env);
   const triage = await triageInboundAndSpans(
-    system1Env(env),
+    system1ConfigFor(env, settings),
     message,
     sender,
     spans ?? []
@@ -177,10 +153,13 @@ export async function handleAgentTriage(req: Request, env: Env): Promise<Respons
   // `ok` is true only when at least one answer came back. A partial batch keeps
   // the answers it did get; a total failure reports `unavailable` rather than an
   // invented classification.
-  const source = triage.ok ? "workers-ai" : "unavailable";
+  //
+  // `source` is the backend that actually replied. There is no fallback name: an
+  // absent provider is omitted rather than rendered as "workers-ai".
+  const source = triage.ok ? triage.provider : "unavailable";
 
   logAgent("triage", {
-    source,
+    ...(source === undefined ? {} : { source }),
     roles: triage.roles.length,
     reason: triage.reason ?? null,
   });
@@ -354,9 +333,14 @@ const PLAN_QUERIES: Record<
 };
 
 /** Ask the model, then fall back to keywords. `null` means "not a plan". */
-async function resolvePlan(env: Env, question: string): Promise<TelemetryPlan | null> {
+async function resolvePlan(
+  env: Env,
+  settings: AiSettings,
+  question: string
+): Promise<TelemetryPlan | null> {
+  const config = system1ConfigFor(env, settings);
   const result = await ask(
-    system1Env(env),
+    config,
     { question: question.slice(0, 500) },
     {
       plan: {
@@ -366,7 +350,7 @@ async function resolvePlan(env: Env, question: string): Promise<TelemetryPlan | 
         criteria: PLAN_CRITERIA,
       },
     },
-    defaultModel(system1Env(env))
+    aliasFor(config.model)
   );
 
   const choice = result.answers.plan?.choice;
@@ -391,7 +375,8 @@ export async function handleAgentTelemetry(req: Request, env: Env): Promise<Resp
   const parsed = await readValidated(req, TelemetryBody);
   if (!parsed.ok) return parsed.response;
 
-  const plan = await resolvePlan(env, parsed.data.question);
+  const settings = await readSettingsOrEnv(env);
+  const plan = await resolvePlan(env, settings, parsed.data.question);
   if (plan === null || !PLAN_SET.has(plan)) {
     logAgent("telemetry.rejected", { reason: "unknown_plan" });
     return Response.json(
@@ -997,8 +982,9 @@ export async function handleAgentSynthesize(req: Request, env: Env): Promise<Res
   if (!parsed.ok) return parsed.response;
   const input = parsed.data;
 
+  const settings = await readSettingsOrEnv(env);
   const judged = await judgeCandidatePatch(
-    system1Env(env),
+    system1ConfigFor(env, settings),
     input.intent,
     input.diff_summary,
     input.corpus_report

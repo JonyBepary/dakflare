@@ -1,10 +1,16 @@
 /**
- * System 1 — Cloudflare's Clef decision models.
+ * System 1 — prefill decision models, over one of two backends.
  *
  * One prefill pass, zero output tokens: a state plus a schema of typed questions
  * comes back as calibrated probabilities. No prose is generated, so a low
  * confidence is meant to fall through to a human or to System 2 with approval —
  * never to be guessed.
+ *
+ * The backend comes from `ai_settings.provider`, the same row the console
+ * assistant uses:
+ *
+ *   workers-ai         the AI binding, with the `clef*` alias table below
+ *   openai-compatible  `POST {system1BaseUrl ?? baseUrl}/systemone`
  *
  * The API is a *batch of typed questions*, verified live against
  * `@cf/cloudflare/clef` and `@cf/cloudflare/clef-flash` on 2026-11-15:
@@ -22,51 +28,128 @@
  * round trip, not one per signal.
  */
 
-export type System1Model = "clef-flash" | "clef" | "clef-omni" | "jev";
+export type System1Model = "clef-flash" | "clef" | "clef-omni";
 
 export const SYSTEM1_MODELS: Record<System1Model, string> = {
   "clef-flash": "@cf/cloudflare/clef-flash",
   clef: "@cf/cloudflare/clef",
   "clef-omni": "@cf/cloudflare/clef-omni",
-  jev: "typesafe/jev",
 };
+
+/** The aliases `ask()` accepts; a wire model name is never one of these. */
+export const SYSTEM1_MODEL_ALIASES: readonly System1Model[] = [
+  "clef-flash",
+  "clef",
+  "clef-omni",
+];
+
+export function isSystem1Model(value: unknown): value is System1Model {
+  return (
+    value === "clef-flash" || value === "clef" || value === "clef-omni"
+  );
+}
 
 export interface System1Thresholds {
   /** At or above this, a choice may route without asking a human. */
   autoRouteMinConfidence: number;
   /** At or above this, a low-stakes tie-break may proceed. */
-  tiebreakMinConfidence: number;
   /** A `noul` at or above this blocks an injection-carrying input outright. */
   injectionNoulBlock: number;
 }
 
-/** Per-model, because the three models do not share a probability distribution. */
-export const SYSTEM1_THRESHOLDS: Record<System1Model, System1Thresholds> = {
-  "clef-flash": { autoRouteMinConfidence: 0.9, tiebreakMinConfidence: 0.7, injectionNoulBlock: 0.7 },
-  clef: { autoRouteMinConfidence: 0.85, tiebreakMinConfidence: 0.65, injectionNoulBlock: 0.7 },
-  "clef-omni": { autoRouteMinConfidence: 0.85, tiebreakMinConfidence: 0.65, injectionNoulBlock: 0.7 },
-  jev: { autoRouteMinConfidence: 0.8, tiebreakMinConfidence: 0.6, injectionNoulBlock: 0.7 },
+/**
+ * One set of numbers, for every alias.
+ *
+ * The three local aliases all reach ONE wire model per deployment (a Cloudflare
+ * clef id, or the row's OpenAI-compatible model), so per-alias distributions
+ * were fiction: the same model was being judged by different bars depending on
+ * which alias the caller happened to name. These are the strictest of the old
+ * per-alias values — 0.9 / 0.7 / 0.7 — kept deliberately so a call can never
+ * become less cautious than it was.
+ *
+ * Thresholds are a single object on purpose: nothing indexes them by a stored
+ * model string, so a hand-edited `system1_model` cannot select a laxer bar.
+ */
+export const SYSTEM1_THRESHOLDS: System1Thresholds = {
+  autoRouteMinConfidence: 0.9,
+  injectionNoulBlock: 0.7,
 };
 
-/** Minimal binding surface; avoids importing the whole worker Env (cycles). */
-export interface System1Env {
-  AI?: { run(model: string, input: unknown): Promise<unknown> };
-  SYSTEM1_DEFAULT_MODEL?: string;
-  /** Which backend answers `clef*`: `workers-ai` (default) | `tokenlab`. */
-  SYSTEM1_PROVIDER?: string;
-  /** TypeSafe Jev, an external provider. Absent or empty keeps `jev` unavailable. */
-  TYPESAFE_BASE_URL?: string;
-  /** Bearer token for TypeSafe. Absent or empty keeps `jev` unavailable. */
-  TYPESAFE_API_KEY?: string;
+/**
+ * The settings slice System One reads. Structural rather than an import, so this
+ * module has no runtime dependency and a check script can load it under plain
+ * `node`.
+ *
+ * `provider` is the ONLY thing that selects a backend: there is no second
+ * provider variable and no per-model exception. `system1Model` and
+ * `system1BaseUrl` already carry the "fall back to chat" resolution done by
+ * `readSettings`, and base-URL validation there has already nulled anything a
+ * key must not be sent to.
+ */
+export interface System1Settings {
+  provider: "workers-ai" | "openai-compatible";
+  model: string;
+  baseUrl: string | null;
+  system1Model: string | null;
+  system1BaseUrl: string | null;
   /**
-   * Token Lab's System 1 origin (`…/v1`). Absent falls back to the documented
-   * default when `SYSTEM1_PROVIDER` is `tokenlab`; empty is a config gap.
+   * Set by `readSettings` when the stored System One origin failed validation.
+   * A config built from such a row has no base at all, so the key is never
+   * attached to the refused URL (or silently sent to a different one).
    */
-  TOKENLAB_BASE_URL?: string;
-  /** Bearer token for Token Lab. Absent or empty keeps `tokenlab` unavailable. */
-  TOKENLAB_API_KEY?: string;
-  /** Model name Token Lab is asked for, for every `clef*` request. Default `Clef`. */
-  TOKENLAB_SYSTEM1_MODEL?: string;
+  system1BaseUrlError?: string;
+}
+
+/**
+ * Everything one System One call needs, resolved by the caller before `ask`.
+ *
+ * `model` is the WIRE name: the row's System One model, or the chat model it
+ * fell back to. `baseUrl` is the resolved System One origin (null means "do not
+ * send a key anywhere"). `apiKey` is the System One role's key, or null.
+ */
+export interface System1AiBinding {
+  run(model: string, input: unknown): Promise<unknown>;
+}
+
+export interface System1Config {
+  provider: "workers-ai" | "openai-compatible";
+  model: string;
+  baseUrl: string | null;
+  apiKey: string | null;
+  /**
+   * The resolved AI binding, when the deployment has one. This is the backend
+   * HANDLE, not env: it is passed in with the rest of the resolved config so
+   * `ask` never reads a binding name or a secret name itself.
+   */
+  ai?: System1AiBinding;
+}
+
+/**
+ * Fold a settings row into a call config.
+ *
+ * No env, no defaults beyond the row's own resolved values, and no key lookup:
+ * the caller resolves the System One role key once (`providerKey(env, "system1")`)
+ * and passes it. That keeps "which secret answered" a single decision made where
+ * the response reports it.
+ */
+export function system1Config(
+  settings: System1Settings,
+  apiKey: string | null,
+  ai?: System1AiBinding
+): System1Config {
+  return {
+    provider: settings.provider,
+    model: settings.system1Model ?? settings.model,
+    // The row's own origin, else the chat origin it falls back to. A stored
+    // value that failed validation is refused outright: falling back there
+    // would send the System One key to an origin nobody chose.
+    baseUrl:
+      settings.system1BaseUrlError === undefined
+        ? settings.system1BaseUrl ?? settings.baseUrl
+        : null,
+    apiKey,
+    ...(ai === undefined ? {} : { ai }),
+  };
 }
 
 export interface NoulQuestion {
@@ -109,13 +192,19 @@ export interface AskResult {
   answers: Record<string, Answer>;
   usage?: { input_tokens?: number; output_tokens?: number };
   /**
-   * Which backend handled the attempt: Cloudflare Clef, the TypeSafe Jev
-   * adapter, or the Token Lab adapter.
+   * Which backend handled the attempt: the Workers AI binding, or an
+   * OpenAI-compatible origin. It is the `ai_settings.provider` value, so a log
+   * line and the settings page cannot name two different backends.
    */
-  provider?: "clef" | "typesafe" | "tokenlab";
+  provider?: "workers-ai" | "openai-compatible";
   /** 429 only: the provider's `retry-after`, passed through untouched. */
   retryAfter?: string;
-  reason?: "no_ai_binding" | "provider_unavailable" | "invalid_question" | "unparseable";
+  reason?:
+    | "no_ai_binding"
+    | "provider_unavailable"
+    | "invalid_question"
+    | "invalid_model"
+    | "unparseable";
 }
 
 const MAX_QUESTIONS = 64;
@@ -130,12 +219,19 @@ export function toSnakeKey(label: string): string {
     .slice(0, 48);
 }
 
-export function defaultModel(env: System1Env): System1Model {
-  const configured = env.SYSTEM1_DEFAULT_MODEL;
-  if (configured === "clef" || configured === "clef-flash" || configured === "clef-omni" || configured === "jev") {
-    return configured;
-  }
-  return "clef-flash";
+/**
+ * The LOCAL alias for a stored wire model.
+ *
+ * A stored model is a wire name ("Clef", "gpt-4o-mini", "clef-flash"). Only the
+ * three aliases are meaningful for the Workers AI binding; anything else maps to
+ * `clef`, which is what a stored "Clef" means. This never reads env, so the alias
+ * and the wire name stay separate values: the alias is a local label for logs,
+ * responses and thresholds (which are no longer per-alias). Case is ignored so a
+ * console that echoes "Clef" agrees with the row.
+ */
+export function aliasFor(model: string | null | undefined): System1Model {
+  const value = typeof model === "string" ? model.trim().toLowerCase() : "";
+  return isSystem1Model(value) ? value : "clef";
 }
 
 /**
@@ -154,9 +250,15 @@ export function buildClefRequest(
   if (ids.length === 0) throw new Error("system1: at least one question is required");
   if (ids.length > MAX_QUESTIONS) throw new Error(`system1: at most ${MAX_QUESTIONS} questions`);
 
+  // Work on a copy. Snake-casing rewrites choice criteria, and mutating the
+  // caller's record made a second call see keys it never wrote — a caller that
+  // reuses one question set (the System One probe does) must not be changed by
+  // the first request.
+  const working: Record<string, ClefQuestion> = { ...questions };
+
   for (const id of ids) {
     if (!/^[A-Za-z0-9_.-]{1,100}$/.test(id)) throw new Error(`system1: invalid question id "${id}"`);
-    const question = questions[id];
+    const question = working[id];
     if (!question.instructions.trim()) throw new Error(`system1: question "${id}" has no instructions`);
 
     if (question.type === "choice") {
@@ -174,7 +276,7 @@ export function buildClefRequest(
       }
       // Rewrite in place on a clone: the wire format the model sees must use
       // snake_case keys, and the caller's object should not be mutated.
-      questions[id] = { ...question, criteria: snakeCriteria };
+      working[id] = { ...question, criteria: snakeCriteria };
     }
 
     if (question.type === "score") {
@@ -185,9 +287,9 @@ export function buildClefRequest(
   }
 
   return {
-    model: model === "jev" ? "jev" : model,
+    model,
     state,
-    questions,
+    questions: working,
   };
 }
 
@@ -242,91 +344,36 @@ function normalise(id: string, raw: unknown): Answer | null {
 }
 
 // ---------------------------------------------------------------------------
-// Remote adapters — TypeSafe Jev and Token Lab
+// OpenAI-compatible System One adapter
 // ---------------------------------------------------------------------------
 /**
- * Both remote providers take the same abstract request Clef takes and return
- * the same `answers` envelope, so they share one call path and one validator.
- * `askRemote` is the only place that speaks HTTP; the two config helpers below
- * are the only place that reads env.
+ * An OpenAI-compatible deployment answers System One on the same origin as
+ * chat (its own base URL overrides this when the settings row carries one):
  *
- * TypeSafe Jev — the contract our adapter assumes:
- *
- *   POST {TYPESAFE_BASE_URL}/v1/decide
- *   authorization: Bearer {TYPESAFE_API_KEY}
+ *   POST {system1BaseUrl ?? baseUrl}/systemone
+ *   authorization: Bearer {the provider key}
  *   content-type: application/json
  *
- *   { model: "jev", state, questions }        // questions as Clef defines them
- *
- * Token Lab System One — verified live on 2026-11-15 (HTTP 200):
- *
- *   POST {TOKENLAB_BASE_URL}/v1/systemone
- *   authorization: Bearer {TOKENLAB_API_KEY}
- *   content-type: application/json
- *
- *   { model: "Clef", state, questions }
+ *   { model: system1Model ?? "Clef", state, questions }
  *
  *   200 { answers: { id: { type, choice?, probabilities?, confidence?,
  *                          noul?, score?, legend? } }, usage, model }
  *
- * The state and questions are the same abstract shape Clef takes, and the
- * answers go through the same `normalise`, so callers cannot tell the providers
- * apart except by `AskResult.provider`. Every credential is required; with one
- * missing the model reports `provider_unavailable` rather than falling back to
- * Clef or Workers AI behind the caller's back.
+ * `askRemote` is the only place that speaks HTTP. The state and questions are
+ * the shape Clef takes, and the answers go through the same `normalise`, so a
+ * caller cannot tell the backends apart except by `AskResult.provider`.
+ *
+ * Credentials are required. With no key or no base the call reports
+ * `provider_unavailable` and never falls back to Workers AI behind the caller's
+ * back: a settings page that says openai-compatible is the thing that answers.
  */
-export const TYPESAFE_TIMEOUT_MS = 5_000;
-export const TYPESAFE_DECIDE_PATH = "/v1/decide";
-
-export const TOKENLAB_TIMEOUT_MS = 5_000;
-export const TOKENLAB_SYSTEMONE_PATH = "/v1/systemone";
-export const TOKENLAB_DEFAULT_BASE_URL = "https://api.tokenlab.amd.com/v1";
-export const TOKENLAB_DEFAULT_MODEL = "Clef";
-
-export interface TypesafeConfig {
-  baseUrl: string;
-  apiKey: string;
-}
-
-export function typesafeConfig(env: System1Env): TypesafeConfig | null {
-  const baseUrl = env.TYPESAFE_BASE_URL?.trim().replace(/\/+$/, "");
-  const apiKey = env.TYPESAFE_API_KEY?.trim();
-  // A base URL alone is not enough to authenticate, and a key alone has nowhere
-  // to go. Either missing is a configuration gap, reported as unavailable.
-  if (!baseUrl || !apiKey) return null;
-  return { baseUrl, apiKey };
-}
-
-export interface TokenLabConfig {
-  baseUrl: string;
-  apiKey: string;
-  /** The model name Token Lab is asked for, not the local `clef*` alias. */
-  model: string;
-}
-
-export function tokenlabConfig(env: System1Env): TokenLabConfig | null {
-  // The documented default applies ONLY to a deployment that selected Token
-  // Lab: another provider must not silently gain a Token Lab origin. An
-  // explicitly empty value stays empty (a config gap), so clearing the var by
-  // hand is not silently "fixed" into a different host.
-  const baseUrl =
-    env.TOKENLAB_BASE_URL === undefined
-      ? env.SYSTEM1_PROVIDER?.trim() === "tokenlab"
-        ? TOKENLAB_DEFAULT_BASE_URL
-        : ""
-      : env.TOKENLAB_BASE_URL.trim().replace(/\/+$/, "");
-  const apiKey = env.TOKENLAB_API_KEY?.trim();
-  if (!baseUrl || !apiKey) return null;
-  return {
-    baseUrl,
-    apiKey,
-    model: env.TOKENLAB_SYSTEM1_MODEL?.trim() || TOKENLAB_DEFAULT_MODEL,
-  };
-}
+export const SYSTEM1_REMOTE_TIMEOUT_MS = 5_000;
+export const SYSTEM1_SYSTEMONE_PATH = "/systemone";
+export const SYSTEM1_DEFAULT_WIRE_MODEL = "Clef";
 
 /** The provider-specific half of a remote call; everything else is shared. */
 interface RemoteConfig {
-  provider: "typesafe" | "tokenlab";
+  provider: "openai-compatible";
   baseUrl: string;
   apiKey: string;
   path: string;
@@ -347,21 +394,42 @@ function rejectOnAbort(signal: AbortSignal, provider: string): Promise<never> {
   });
 }
 
-/**
- * Token Lab documents its base as `https://api.tokenlab.amd.com/v1`, while a
- * configured base is often just the origin. Both are legitimate, so a base that
- * already ends in `/v1` is not given a second one. Every other base is used
- * verbatim, which is what `{base}/v1/systemone` means for an origin.
- */
+/** The base is stored without a trailing slash, so the path supplies the one slash. */
 function remoteUrl(baseUrl: string, path: string): string {
-  if (baseUrl.endsWith("/v1") && path.startsWith("/v1/")) {
-    return `${baseUrl}${path.slice("/v1".length)}`;
-  }
   return `${baseUrl}${path}`;
 }
 
 /**
- * POST one batch of typed questions to a remote provider and normalise the
+ * The remote call's configuration, from the already-resolved `System1Config`.
+ *
+ * There is no fallback to another origin here: `baseUrl` is exactly what
+ * `readSettings` resolved (or null, when validation refused it), so a bad
+ * stored origin cannot be papered over with the chat base.
+ */
+export interface OpenAICompatibleSystem1Config {
+  baseUrl: string;
+  apiKey: string;
+  /** The model name on the wire, not the local `clef*` alias. */
+  model: string;
+}
+
+export function openAiSystem1Config(
+  config: System1Config
+): OpenAICompatibleSystem1Config | null {
+  const baseUrl = (config.baseUrl ?? "").trim().replace(/\/+$/, "");
+  const apiKey = config.apiKey?.trim() ?? "";
+  // A base URL alone is not enough to authenticate, and a key alone has nowhere
+  // to go. Either missing is a configuration gap, reported as unavailable.
+  if (!baseUrl || !apiKey) return null;
+  return {
+    baseUrl,
+    apiKey,
+    model: config.model?.trim() || SYSTEM1_DEFAULT_WIRE_MODEL,
+  };
+}
+
+/**
+ * POST one batch of typed questions to the remote origin and normalise the
  * `answers` envelope. `model` is the wire model name; `config.resultModel` is
  * what the caller asked for and what comes back in `AskResult.model`.
  */
@@ -450,92 +518,89 @@ async function askRemote(
   };
 }
 
-async function askTypesafe(
-  env: System1Env,
-  state: string | Record<string, unknown>,
-  questions: Record<string, ClefQuestion>
-): Promise<AskResult> {
-  const config = typesafeConfig(env);
-  if (!config) {
-    return { ok: false, model: "jev", answers: {}, provider: "typesafe", reason: "provider_unavailable" };
-  }
-  return askRemote(
-    {
-      provider: "typesafe",
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-      path: TYPESAFE_DECIDE_PATH,
-      timeoutMs: TYPESAFE_TIMEOUT_MS,
-      resultModel: "jev",
-    },
-    state,
-    questions,
-    "jev"
-  );
-}
-
 /**
- * Ask Token Lab for one batch. `requested` is the local `clef*` alias the
- * caller used; it stays the result's model so local thresholds remain keyed by
- * the model the caller asked for, while the wire model comes from env.
+ * Ask the OpenAI-compatible origin for one batch. `requested` is the local
+ * `clef*` alias, which is only a label here: the wire model comes from the
+ * settings row (`config.model`), so a stored "Clef" is sent to a "clef" caller.
  */
-export async function askTokenLab(
-  env: System1Env,
+async function askOpenAiCompatible(
+  config: System1Config,
   state: string | Record<string, unknown>,
   questions: Record<string, ClefQuestion>,
   requested: System1Model
 ): Promise<AskResult> {
-  const config = tokenlabConfig(env);
-  if (!config) {
-    return { ok: false, model: requested, answers: {}, provider: "tokenlab", reason: "provider_unavailable" };
+  const remote = openAiSystem1Config(config);
+  if (!remote) {
+    return {
+      ok: false,
+      model: requested,
+      answers: {},
+      provider: "openai-compatible",
+      reason: "provider_unavailable",
+    };
   }
   return askRemote(
     {
-      provider: "tokenlab",
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-      path: TOKENLAB_SYSTEMONE_PATH,
-      timeoutMs: TOKENLAB_TIMEOUT_MS,
+      provider: "openai-compatible",
+      baseUrl: remote.baseUrl,
+      apiKey: remote.apiKey,
+      path: SYSTEM1_SYSTEMONE_PATH,
+      timeoutMs: SYSTEM1_REMOTE_TIMEOUT_MS,
       resultModel: requested,
     },
     state,
     questions,
-    config.model
+    remote.model
   );
 }
 
+/**
+ * One System One call, over the resolved config and nothing else.
+ *
+ * `model` is a required LOCAL alias; it is never inferred from env and never
+ * taken from a stored string. The alias selects a Cloudflare model id on the
+ * workers-ai path and labels the result; the wire model on the remote path is
+ * `config.model`. Callers that have no opinion pass `aliasFor(config.model)`.
+ */
 export async function ask(
-  env: System1Env,
+  config: System1Config,
   state: string | Record<string, unknown>,
   questions: Record<string, ClefQuestion>,
-  model: System1Model = defaultModel(env)
+  model: System1Model
 ): Promise<AskResult> {
-  // `jev` has exactly one provider. `clef*` uses Workers AI unless the
-  // deployment selected Token Lab; the requested alias is passed through so
-  // thresholds and the response stay keyed by what the caller asked for.
-  //
-  // `auto` (the shipped default) means "Token Lab if this deployment holds its
-  // key, Workers AI otherwise", mirroring how `jev` is opt-in by its own env.
-  // It is not a silent fallback: an explicit `tokenlab` with no key is an
-  // error, and an explicit `workers-ai` never reads the Token Lab values.
-  if (model === "jev") return askTypesafe(env, state, questions);
-  const selected = env.SYSTEM1_PROVIDER?.trim() || "auto";
-  const useTokenLab =
-    selected === "tokenlab" || (selected === "auto" && tokenlabConfig(env) !== null);
-  if (useTokenLab) {
-    return askTokenLab(env, state, questions, model);
+  // An alias that is not in the table is refused, never mapped to a guess. A
+  // retired name (`jev`) or a typo must read as an invalid model rather than be
+  // silently answered by whatever provider is selected.
+  if (!isSystem1Model(model)) {
+    return {
+      ok: false,
+      model: aliasFor(config.model),
+      answers: {},
+      provider: config.provider,
+      reason: "invalid_model",
+    };
   }
-  if (!env.AI?.run) return { ok: false, model, answers: {}, provider: "clef", reason: "no_ai_binding" };
+
+  // The resolved config selects the backend. There is no second selector and no
+  // per-model exception: `workers-ai` uses the AI binding with the alias table
+  // below, `openai-compatible` posts to the config's origin.
+  if (config.provider === "openai-compatible") {
+    return askOpenAiCompatible(config, state, questions, model);
+  }
+  const ai = config.ai;
+  if (!ai?.run) {
+    return { ok: false, model, answers: {}, provider: "workers-ai", reason: "no_ai_binding" };
+  }
 
   let body: ReturnType<typeof buildClefRequest>;
   try {
     body = buildClefRequest(state, questions, model);
   } catch {
-    return { ok: false, model, answers: {}, provider: "clef", reason: "invalid_question" };
+    return { ok: false, model, answers: {}, provider: "workers-ai", reason: "invalid_question" };
   }
 
   try {
-    const raw = (await env.AI.run(SYSTEM1_MODELS[model], body)) as {
+    const raw = (await ai.run(SYSTEM1_MODELS[model], body)) as {
       answers?: Record<string, unknown>;
       usage?: { input_tokens?: number; output_tokens?: number };
     };
@@ -549,12 +614,12 @@ export async function ask(
       ok,
       model,
       answers,
-      provider: "clef",
+      provider: "workers-ai",
       usage: raw?.usage,
       reason: ok ? undefined : "unparseable",
     };
   } catch {
-    return { ok: false, model, answers: {}, provider: "clef", reason: "provider_unavailable" };
+    return { ok: false, model, answers: {}, provider: "workers-ai", reason: "provider_unavailable" };
   }
 }
 
@@ -595,6 +660,8 @@ export interface TriageResult {
   roles: Array<{ index: number; role: SpanRole; probability: number }>;
   /** Deterministic anti-spoof check, independent of any model. */
   invariant: { balanceAtLeastPrincipal: boolean | null };
+  /** The backend that answered, so a log line does not have to assume one. */
+  provider?: AskResult["provider"];
   reason?: AskResult["reason"];
 }
 
@@ -607,12 +674,12 @@ export function parseAmount(text: string): number | null {
 }
 
 export async function triageInboundAndSpans(
-  env: System1Env,
+  config: System1Config,
   messageBody: string,
   sender: string,
   spans: SpanSample[]
 ): Promise<TriageResult> {
-  const model = defaultModel(env);
+  const model = aliasFor(config.model);
   const body = messageBody.slice(0, 4000);
 
   const questions: Record<string, ClefQuestion> = {
@@ -658,7 +725,7 @@ export async function triageInboundAndSpans(
   });
 
   const result = await ask(
-    env,
+    config,
     {
       message: body,
       sender,
@@ -689,6 +756,7 @@ export async function triageInboundAndSpans(
       balanceAtLeastPrincipal:
         principal !== null && balance !== null ? balance >= principal : null,
     },
+    provider: result.provider,
     reason: result.reason,
   };
 }
@@ -703,12 +771,12 @@ export const OPERATOR_COMMANDS = [
 ] as const;
 
 export async function classifyOperatorCommand(
-  env: System1Env,
+  config: System1Config,
   promptText: string,
   currentFlowSummary: string
 ): Promise<{ ok: boolean; command?: Answer; mutation?: Answer; reason?: AskResult["reason"] }> {
   const result = await ask(
-    env,
+    config,
     { prompt: promptText.slice(0, 2000), flow: currentFlowSummary.slice(0, 2000) },
     {
       command: {
@@ -729,19 +797,19 @@ export async function classifyOperatorCommand(
           "Would carrying out this request change a live workflow, send a message, or deploy anything? Reading is not consequential.",
       },
     },
-    defaultModel(env)
+    aliasFor(config.model)
   );
   return { ok: result.ok, command: result.answers.command, mutation: result.answers.mutation, reason: result.reason };
 }
 
 export async function judgeCandidatePatch(
-  env: System1Env,
+  config: System1Config,
   userIntent: string,
   flowDiffSummary: string,
   corpusReport: string
 ): Promise<{ ok: boolean; faithful?: Answer; approval?: Answer; reason?: AskResult["reason"] }> {
   const result = await ask(
-    env,
+    config,
     {
       intent: userIntent.slice(0, 1000),
       patch: flowDiffSummary.slice(0, 4000),
@@ -758,19 +826,19 @@ export async function judgeCandidatePatch(
         instructions: "Must a human approve this patch before it is applied? Anything changing production behaviour needs approval.",
       },
     },
-    defaultModel(env)
+    aliasFor(config.model)
   );
   return { ok: result.ok, faithful: result.answers.faithful, approval: result.answers.approval, reason: result.reason };
 }
 
 /** Should a choice proceed without a human? */
-export function canAutoRoute(answer: Answer | undefined, model: System1Model): boolean {
+export function canAutoRoute(answer: Answer | undefined): boolean {
   if (!answer || answer.type !== "choice") return false;
-  return answer.confidence >= SYSTEM1_THRESHOLDS[model].autoRouteMinConfidence;
+  return answer.confidence >= SYSTEM1_THRESHOLDS.autoRouteMinConfidence;
 }
 
 /** Does a noul say the input is hostile enough to block? */
-export function blockedAsInjection(answer: Answer | undefined, model: System1Model): boolean {
+export function blockedAsInjection(answer: Answer | undefined): boolean {
   if (!answer || answer.type !== "noul") return false;
-  return answer.probability >= SYSTEM1_THRESHOLDS[model].injectionNoulBlock;
+  return answer.probability >= SYSTEM1_THRESHOLDS.injectionNoulBlock;
 }

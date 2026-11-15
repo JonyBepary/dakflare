@@ -13,8 +13,10 @@
  *
  * Three properties are load-bearing:
  *
- *   1. The key is never stored. `AI_CHAT_API_KEY` is read from env per request;
- *      `apiKeyConfigured` is a boolean, and no response carries the key.
+ *   1. The key is never stored. The provider key is read from env per request
+ *      (`AI_PROVIDER_API_KEY`, then `AI_CHAT_API_KEY`, then `TOKENLAB_API_KEY`);
+ *      `apiKeyConfigured` is a boolean, `keySource` a name, and no response
+ *      carries the key.
  *   2. The budget is checked before a call and charged after it, from the
  *      provider's reported usage or a conservative estimate.
  *   3. A proposal id is minted here, never accepted from the client or the
@@ -33,14 +35,15 @@ import { writeAudit } from "../audit";
 import { readJsonBoundedResult } from "../lib/body";
 import { err } from "../lib/errors";
 import { handleRulesPost } from "./rules";
-import { system1Env } from "./agent";
-import { ask, defaultModel, type ClefQuestion, type System1Model } from "../lib/system1";
-import { resolveAdapter } from "../lib/ai/registry";
+import { system1ConfigFor } from "./agent";
+import { aliasFor, ask, type ClefQuestion, type System1Model } from "../lib/system1";
+import { providerKey, providerKeys, resolveAdapter } from "../lib/ai/registry";
 import {
   addTokens,
   billableTokens,
   readBudget,
   readSettings,
+  readSettingsOrEnv,
   validateBaseUrl,
   writeSettings,
   type AiSettings,
@@ -133,8 +136,16 @@ function budgetExhausted(budget: Budget): Response {
   );
 }
 
-function apiKeyConfigured(env: Env): boolean {
-  return typeof env.AI_CHAT_API_KEY === "string" && env.AI_CHAT_API_KEY.trim() !== "";
+/**
+ * "The role that needs a key has one."
+ *
+ * workers-ai needs no key at all, so the answer is true. An OpenAI-compatible
+ * deployment needs one for chat and one for System One, and they are resolved
+ * per role: a key that only answers chat does not make System One ready.
+ */
+function apiKeyConfigured(provider: AiSettings["provider"], keys: ReturnType<typeof providerKeys>): boolean {
+  if (provider === "workers-ai") return true;
+  return keys.chat.key !== null && keys.system1.key !== null;
 }
 
 /* ───────────────────────────── 1. settings ───────────────────────────── */
@@ -143,20 +154,43 @@ interface SettingsResponse {
   provider: string;
   model: string;
   baseUrl: string | null;
+  /**
+   * System One's effective values. `model` and `baseUrl` already carry the
+   * "fall back to chat" resolution, so the console never has to re-implement it.
+   * `provider` is echoed because it is the same selector, not a second one.
+   */
+  system1: { model: string; provider: string; baseUrl: string | null };
   apiKeyConfigured: boolean;
+  /**
+   * Which secret answered EACH role — a name, never a value. Chat and System One
+   * have separate chains, and may legitimately resolve to different secrets.
+   */
+  keySource: { chat: string; system1: string };
   hint: string;
   budget: { day: string; used: number; limit: number };
 }
 
-function hintFor(settings: AiSettings, keyConfigured: boolean): string {
-  if (settings.baseUrlError !== undefined) return settings.baseUrlError;
+function hintFor(
+  settings: AiSettings,
+  keys: ReturnType<typeof providerKeys>,
+  configured: boolean
+): string {
+  const chatError = settings.baseUrlError;
+  const system1Error = settings.system1BaseUrlError;
   if (settings.provider === "workers-ai") {
     return "Uses the Worker's AI binding; no API key is needed.";
   }
-  if (!keyConfigured) {
-    return "Set AI_CHAT_API_KEY with `cf workers secrets update AI_CHAT_API_KEY --type secret_text`. The key is never stored in D1.";
+  if (chatError !== undefined || system1Error !== undefined) {
+    return [chatError, system1Error].filter((entry): entry is string => entry !== undefined).join(" ");
   }
-  return `Key configured. Requests go to ${settings.baseUrl ?? "the configured base URL"}.`;
+  if (!configured) {
+    const missing = [
+      keys.chat.key === null ? "chat (AI_PROVIDER_API_KEY, then AI_CHAT_API_KEY)" : null,
+      keys.system1.key === null ? "System One (AI_PROVIDER_API_KEY, then TOKENLAB_API_KEY)" : null,
+    ].filter((entry): entry is string => entry !== null);
+    return `No key for ${missing.join(" and ")}. Set one with \`cf workers secrets update AI_PROVIDER_API_KEY --type secret_text\`; keys are never stored in D1.`;
+  }
+  return `Key from ${keys.chat.source} for chat and ${keys.system1.source} for System One. Requests go to ${settings.baseUrl ?? "the configured base URL"}, System One to ${settings.system1BaseUrl ?? settings.baseUrl ?? "the same base"}.`;
 }
 
 function settingsResponse(
@@ -164,13 +198,23 @@ function settingsResponse(
   settings: AiSettings,
   budget: Budget
 ): SettingsResponse {
-  const configured = apiKeyConfigured(env);
+  const keys = providerKeys(env);
+  const configured = apiKeyConfigured(settings.provider, keys);
   return {
     provider: settings.provider,
     model: settings.model,
     baseUrl: settings.baseUrl,
+    system1: {
+      // readSettings resolves both against the chat values when the row's
+      // columns are NULL; the chat model is repeated as a last resort for a
+      // settings object built in code.
+      model: settings.system1Model ?? settings.model,
+      provider: settings.provider,
+      baseUrl: settings.provider === "openai-compatible" ? settings.system1BaseUrl : null,
+    },
     apiKeyConfigured: configured,
-    hint: hintFor(settings, configured),
+    keySource: { chat: keys.chat.source, system1: keys.system1.source },
+    hint: hintFor(settings, keys, configured),
     budget: { day: budget.day, used: budget.used, limit: budget.limit },
   };
 }
@@ -187,7 +231,12 @@ export async function handleAiSettingsGet(env: Env): Promise<Response> {
  *
  * workers-ai has no base URL and ignores one: accepting and storing it would
  * leave a value that looks configured and is not. openai-compatible requires
- * one, and it must be https (or loopback http).
+ * one, and it must be https (or loopback http). The System One base gets the
+ * same rule, because it is where the same key is sent.
+ *
+ * `system1` is optional and, like every other field here, a replacement: an
+ * omitted member clears the stored value, which reads back as "use the chat
+ * model / base" rather than as an error.
  */
 export async function handleAiSettingsPut(
   req: Request,
@@ -224,18 +273,65 @@ export async function handleAiSettingsPut(
     return badRequest("baseUrl is not used by workers-ai");
   }
 
-  const settings: AiSettings = { provider, model, baseUrl };
+  let system1Model: string | null = null;
+  let system1BaseUrl: string | null = null;
+  const rawSystem1 = input.system1;
+  if (rawSystem1 !== undefined && rawSystem1 !== null) {
+    if (typeof rawSystem1 !== "object" || Array.isArray(rawSystem1)) {
+      return badRequest("system1 must be an object");
+    }
+    const system1 = rawSystem1 as Record<string, unknown>;
+
+    if (system1.model !== undefined && system1.model !== null) {
+      if (typeof system1.model !== "string" || system1.model.trim() === "") {
+        return badRequest("system1.model must be a non-empty string");
+      }
+      const system1ModelValue = system1.model.trim();
+      if (system1ModelValue.length > MAX_MODEL_CHARS) {
+        return badRequest(`system1.model must be at most ${MAX_MODEL_CHARS} characters`);
+      }
+      system1Model = system1ModelValue;
+    }
+
+    if (system1.baseUrl !== undefined && system1.baseUrl !== null) {
+      if (provider === "openai-compatible") {
+        const checked = validateBaseUrl(system1.baseUrl);
+        if (!checked.ok) return badRequest(`system1.${checked.message}`);
+        system1BaseUrl = checked.value;
+      } else if (typeof system1.baseUrl === "string" && system1.baseUrl.trim() !== "") {
+        return badRequest("system1.baseUrl is not used by workers-ai");
+      }
+    }
+  }
+
+  const settings: AiSettings = {
+    provider,
+    model,
+    baseUrl,
+    system1Model,
+    system1BaseUrl,
+  };
   await writeSettings(env, settings, actor.label);
 
   await writeAudit(env, {
     action: "ai.settings.updated",
     actor: { userId: actor.userId, label: actor.label },
     // The key is not here, and cannot be: it never reaches this handler.
-    detail: { provider, model, base_url: baseUrl },
+    detail: {
+      provider,
+      model,
+      base_url: baseUrl,
+      system1_model: system1Model,
+      system1_base_url: system1BaseUrl,
+    },
   });
 
   const budget = await readBudget(env);
-  return Response.json(settingsResponse(env, settings, budget));
+  // Read the row back rather than echoing the request: "fall back to the chat
+  // value" is a read-time rule, so the console must see the same effective
+  // System One values from PUT and GET.
+  const stored = await readSettings(env);
+  return Response.json(settingsResponse(env, stored, budget));
 }
 
 /* ──────────────────────────── 2b. model catalog ──────────────────────────── */
@@ -258,7 +354,7 @@ const WORKERS_AI_CHAT_MODELS = [
 
 /** `GET /v1/admin/ai/models` — what this provider offers right now. */
 export async function handleAiModels(env: Env): Promise<Response> {
-  const settings = await readSettings(env);
+  const settings = await readSettingsOrEnv(env);
   const refused = settingsRefusal(settings);
   if (refused !== null) return refused;
 
@@ -271,11 +367,11 @@ export async function handleAiModels(env: Env): Promise<Response> {
     });
   }
 
-  const apiKey = typeof env.AI_CHAT_API_KEY === "string" ? env.AI_CHAT_API_KEY.trim() : "";
-  if (apiKey === "") {
+  const apiKey = providerKey(env, "chat").key;
+  if (apiKey === null) {
     return aiUnavailable(
       "missing_key",
-      "AI_CHAT_API_KEY is not set; add it with `cf workers secrets update AI_CHAT_API_KEY --type secret_text`"
+      "no chat provider key is set; add one with `cf workers secrets update AI_PROVIDER_API_KEY --type secret_text` (AI_CHAT_API_KEY is also read for chat)"
     );
   }
   if (settings.baseUrl === null || settings.baseUrl === "") {
@@ -369,7 +465,7 @@ export async function handleAiTest(env: Env): Promise<Response> {
     if (!success) return err("rate_limited", 429);
   }
 
-  const settings = await readSettings(env);
+  const settings = await readSettingsOrEnv(env);
   const refused = settingsRefusal(settings);
   if (refused !== null) {
     logAssistant("test.unavailable", { reason: "bad_base_url", provider: settings.provider });
@@ -423,8 +519,8 @@ export async function handleAiTest(env: Env): Promise<Response> {
 
 /* ─────────────────────── 2b. System 1 provider test ─────────────────────── */
 
-/** The four ids `ask()` accepts; the alias, not the wire model name. */
-const SYSTEM1_TEST_MODELS = ["clef", "clef-flash", "clef-omni", "jev"] as const;
+/** The three ids `ask()` accepts; the alias, not the wire model name. */
+const SYSTEM1_TEST_MODELS = ["clef", "clef-flash", "clef-omni"] as const;
 
 const SYSTEM1_TEST_MODEL_SET: ReadonlySet<string> = new Set(SYSTEM1_TEST_MODELS);
 
@@ -471,28 +567,52 @@ export async function handleSystem1Test(req: Request, env: Env): Promise<Respons
     if (!success) return err("rate_limited", 429);
   }
 
-  // The body is optional: `{}` means "the deployment's default model".
+  // The body is optional: `{}` means "the row's model".
   const parsed = await readJsonBoundedResult(req, ASSISTANT_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
 
+  // One settings read: the probe uses the same row production uses, so its
+  // reported provider is what a real triage call would use.
+  const settings = await readSettingsOrEnv(env);
+  const config = system1ConfigFor(env, settings);
+  const configRefusal = settings.system1BaseUrlError;
+  if (configRefusal !== undefined) return aiUnavailable("bad_base_url", configRefusal);
+
+  // The allowlist is the LOCAL alias set, never the wire model: the request
+  // names which local label to report, and the row's model is what is sent. The
+  // stored wire name is accepted too, so a console that echoes `system1.model`
+  // back (for example "Clef") is not a 400.
+  const storedModel = settings.system1Model?.trim() ?? "";
   const rawModel = parsed.value.model;
-  if (
-    rawModel !== undefined &&
-    (typeof rawModel !== "string" || !SYSTEM1_TEST_MODEL_SET.has(rawModel))
-  ) {
-    return badRequest(`model must be one of ${SYSTEM1_TEST_MODELS.join(", ")}`);
+  const accepted =
+    rawModel === undefined ||
+    (typeof rawModel === "string" &&
+      (SYSTEM1_TEST_MODEL_SET.has(rawModel) || (storedModel !== "" && rawModel === storedModel)));
+  if (!accepted) {
+    return badRequest(
+      `model must be one of ${SYSTEM1_TEST_MODELS.join(", ")}${
+        storedModel === "" ? "" : `, or the configured System One model (${storedModel})`
+      }`
+    );
   }
-  const model = rawModel as System1Model | undefined;
+  const model: System1Model =
+    typeof rawModel === "string" && SYSTEM1_TEST_MODEL_SET.has(rawModel)
+      ? (rawModel as System1Model)
+      : aliasFor(config.model);
 
   const started = Date.now();
-  const result = await ask(system1Env(env), SYSTEM1_TEST_STATE, SYSTEM1_TEST_QUESTIONS, model);
+  const result = await ask(config, SYSTEM1_TEST_STATE, SYSTEM1_TEST_QUESTIONS, model);
   const tookMs = Date.now() - started;
+
+  // Report the backend that actually answered. Nothing is defaulted to a
+  // provider name here: on a failure the response's `provider` is "none".
+  const provider = result.provider ?? "none";
 
   if (!result.ok) {
     const reason = result.reason ?? "provider_unavailable";
     logAssistant("system1.test.failed", {
       reason,
-      provider: result.provider ?? "clef",
+      provider,
       model: result.model,
       took_ms: tookMs,
     });
@@ -500,14 +620,14 @@ export async function handleSystem1Test(req: Request, env: Env): Promise<Respons
   }
 
   logAssistant("system1.test", {
-    provider: result.provider ?? "clef",
+    provider,
     model: result.model,
     took_ms: tookMs,
   });
 
   return Response.json({
     ok: true,
-    provider: result.provider ?? "clef",
+    provider,
     model: result.model,
     took_ms: tookMs,
     answers: result.answers,
@@ -1415,7 +1535,7 @@ export async function handleAssistantChat(
   if (!contextResult.ok) return badRequest(contextResult.message);
   const context = contextResult.context;
 
-  const settings = await readSettings(env);
+  const settings = await readSettingsOrEnv(env);
   const refused = settingsRefusal(settings);
   if (refused !== null) {
     logAssistant("chat.unavailable", { reason: "bad_base_url", provider: settings.provider });

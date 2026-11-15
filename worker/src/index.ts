@@ -132,29 +132,21 @@ export interface Env {
   KV: KVNamespace;
   /** Cloudflare Workers AI binding for intent classification and text extraction. */
   AI?: Ai;
-  /** System 1 default model: clef-flash (default) | clef | jev. */
-  SYSTEM1_DEFAULT_MODEL?: string;
   /**
-   * Which backend answers `clef*`: `workers-ai` (default) | `tokenlab`.
-   * `jev` always goes to TypeSafe regardless of this value.
-   */
-  SYSTEM1_PROVIDER?: string;
-  /** TypeSafe Jev, opt-in: both must be set for the jev provider to answer. */
-  TYPESAFE_BASE_URL?: string;
-  TYPESAFE_API_KEY?: string;
-  /**
-   * Token Lab's System 1 origin. An absent value falls back to the documented
-   * default only when SYSTEM1_PROVIDER is `tokenlab`; an empty value is a
-   * configuration gap and answers provider_unavailable.
+   * System One defaults, used ONLY while `ai_settings` has no row. The row's
+   * `system1_model` / `system1_base_url` win, and `provider` in that row decides
+   * the backend (workers-ai or openai-compatible). This origin must end in the
+   * version segment, because the adapter appends `/systemone`.
    */
   TOKENLAB_BASE_URL?: string;
-  /**
-   * Bearer key for Token Lab. A Worker secret, never `[vars]`: absent makes
-   * `clef*` answer provider_unavailable when Token Lab is selected.
-   */
-  TOKENLAB_API_KEY?: string;
-  /** Token Lab's model name for `clef*` requests. Default `Clef`. */
+  /** The wire model System One is asked for when the row names none. Default `Clef`. */
   TOKENLAB_SYSTEM1_MODEL?: string;
+  /**
+   * Canonical provider key for chat, `/models` and System One. A Worker secret,
+   * never `[vars]`. `AI_CHAT_API_KEY` and `TOKENLAB_API_KEY` are still read as
+   * fallbacks, in that order, so an existing install needs no secret rename.
+   */
+  AI_PROVIDER_API_KEY?: string;
   /**
    * Console assistant (AI chat) defaults. The provider/model/base URL can also be
    * overridden per deployment in D1 (`ai_settings`); these env values are what a
@@ -166,11 +158,13 @@ export interface Env {
   /** Origin for an OpenAI-compatible provider. Unused by workers-ai. */
   AI_CHAT_BASE_URL?: string;
   /**
-   * Bearer key for an OpenAI-compatible provider. A Worker secret, never `[vars]`
-   * and never written to D1: absent makes that provider answer `ai_unavailable`,
-   * and `apiKeyConfigured` on the settings route is computed from it.
+   * Legacy provider key name for an OpenAI-compatible provider. A Worker secret,
+   * never `[vars]` and never written to D1. Read second in the key chain; the
+   * canonical name is `AI_PROVIDER_API_KEY`.
    */
   AI_CHAT_API_KEY?: string;
+  /** Legacy Token Lab key. Read third in the key chain; never a `[vars]` value. */
+  TOKENLAB_API_KEY?: string;
   /** Daily prompt+completion token ceiling for chat and the connectivity probe. */
   AI_DAILY_TOKEN_BUDGET?: string;
   /** R2 bucket for multi-channel media storage and presigned download links. */

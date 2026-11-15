@@ -222,26 +222,24 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # Retention window for message bodies and phone numbers (D1 and DO `commands`).
 # A product decision, not an engineering default: see OPERATIONS.md.
 MESSAGE_RETENTION_DAYS = "90"
-# System 1 decision model: clef-flash (default) | clef | jev.
-# Read per request in src/lib/system1.ts; an unsupported value falls back to
-# clef-flash rather than failing the route.
-SYSTEM1_DEFAULT_MODEL = "clef-flash"
-# Which backend answers clef*: workers-ai (default) | tokenlab. `jev` always
-# goes to TypeSafe regardless of this value. TOKENLAB_API_KEY is a Worker
-# secret, never a var here:
-#   wrangler secret put TOKENLAB_API_KEY
-SYSTEM1_PROVIDER = "auto"
-# Token Lab's System 1 origin. An empty value is a configuration gap, not a
-# request for the documented default; the default applies only when
-# SYSTEM1_PROVIDER = "tokenlab" and this var is absent.
+# The System One BACKEND and model are not vars: `ai_settings.provider` and
+# `ai_settings.system1_model` select them (workers-ai or openai-compatible), and
+# the console changes them without a deploy.
+# (workers-ai or openai-compatible), and the console changes it without a deploy.
+#
+# TOKENLAB_* below are env defaults used ONLY while `ai_settings` has no row; the
+# row wins once an operator saves settings. The origin must include the version
+# segment, because the adapter appends /systemone. The key is a Worker secret,
+# never a var and never a D1 value:
+#   wrangler secret put AI_PROVIDER_API_KEY   # canonical
+#   # AI_CHAT_API_KEY and TOKENLAB_API_KEY are read as fallbacks, in that order.
 TOKENLAB_BASE_URL = "https://api.tokenlab.amd.com/v1"
-# Token Lab's model name for every clef* request. Local thresholds stay keyed
-# by the alias the caller asked for.
+# The wire model System One is asked for when the row names none. Local
+# thresholds stay keyed by the alias the caller asked for.
 TOKENLAB_SYSTEM1_MODEL = "Clef"
 # Console assistant (AI chat). Provider/model/base URL are defaults; the console
-# may override them in D1 (`ai_settings`) without a deploy. AI_CHAT_API_KEY is a
-# Worker secret, never a var and never stored in D1:
-#   wrangler secret put AI_CHAT_API_KEY
+# may override them in D1 (`ai_settings`) without a deploy. The provider key is a
+# Worker secret, never a var and never stored in D1 (see above).
 # Empty base URL means "not configured"; openai-compatible requires one.
 AI_CHAT_PROVIDER = "workers-ai"
 AI_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
