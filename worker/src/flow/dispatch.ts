@@ -221,7 +221,7 @@ export async function isAuthorizedWebhookUrl(
   try {
     const targetUrl = new URL(urlStr);
     const webhookRows = await env.DB.prepare(
-      `SELECT target_url FROM webhooks WHERE enabled = 1`
+      `SELECT target_url FROM webhooks WHERE enabled = 1 AND kind = 'outbound'`
     ).all<{ target_url: string }>();
     if (webhookRows.results && webhookRows.results.length > 0) {
       for (const row of webhookRows.results) {

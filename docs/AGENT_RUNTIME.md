@@ -143,6 +143,26 @@ through the existing queue, which is the same gate a human write goes through.
 - Cookies are `SameSite=Strict` and `Path=/`, which already closes the cross-site case; the
   `Origin` check makes it explicit rather than incidental.
 
+## Inbound webhooks
+
+A service can wake the agent without a browser session. An operator creates a hook with
+`POST /v1/admin/webhooks`; the response carries the signing secret once and stores only
+`SHA-256(secret)` plus a sealed copy (HMAC verification needs the key, which a one-way hash
+cannot supply). The four admin actions are absent from `SCOPE_FOR_ACTION` and each handler
+calls `assertHuman`, so no agent token reaches them.
+
+Ingress is `POST /v1/webhooks/:id` with `x-dakflare-signature: sha256=<hex>` over the raw
+body and a required `x-dakflare-delivery`. The delivery id is the primary key: the insert is
+the claim, so a repeated id returns the stored answer with `replayed: true` and runs no
+second turn. A disabled hook is `403`, a bad signature `401`, a missing delivery id `400`,
+an oversized body `413`, and the per-hook limiter shares `ADMIN_LIMITER` under the
+`webhook:<id>` key.
+
+The turn runs `say()` with the synthetic actor `webhook:<id>` (`role: "webhook"`). That
+actor has no human session, so `authorizeAct` refuses every act with `webhook_cannot_act`
+even when the autonomy row is ownerless; the answer is stored on the delivery row and
+returned, and a failed turn stores its reason and answers `502`.
+
 ## Stages
 
 - **A (this one).** Pinned dependencies, the object with Lifecycle + State + WebSockets and

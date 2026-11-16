@@ -167,7 +167,7 @@ const headers = {
   check(
     "ready names the pinned object and the conversation",
     frames[0].name === "assistant" &&
-      frames[0].conversation === "conversation:u1",
+      frames[0].conversation === "conversation:v2:u1",
     JSON.stringify(frames[0])
   );
 

@@ -53,7 +53,7 @@ await harness.lifecycle.start();
 const conversationId = conversationIdFor("alice");
 check(
   "the socket path and say() resolve the same conversation",
-  conversationId === conversationIdFor("alice") && conversationId === "conversation:alice"
+  conversationId === conversationIdFor("alice") && conversationId === "conversation:v2:alice"
 );
 
 const session = sessions.session(conversationId);

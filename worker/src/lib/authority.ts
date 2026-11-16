@@ -131,13 +131,20 @@ export function assertHuman(actor: AdminActor | null | undefined): HumanCheck {
       ),
     };
   }
-  if (actor.role === "agent" || actor.agentTokenId !== undefined) {
+  if (
+    actor.role === "agent" ||
+    actor.role === "webhook" ||
+    actor.agentTokenId !== undefined
+  ) {
     return {
       ok: false,
       response: Response.json(
         {
           error: "permission",
-          message: "an agent credential cannot mint or decide a grant for itself",
+          message:
+            actor.role === "webhook"
+              ? "a webhook turn has no human session and cannot mint or decide a grant"
+              : "an agent credential cannot mint or decide a grant for itself",
         },
         { status: 403 }
       ),

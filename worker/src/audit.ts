@@ -28,7 +28,13 @@ export interface AuditActor {
  * agent fields below are the only identity the send gate needs.
  */
 export interface AdminActor extends AuditActor {
-  role: "owner" | "admin" | "member" | "machine" | "agent";
+  /**
+   * `webhook` is a synthetic actor for an inbound webhook turn. It has no
+   * session and no human behind it, so `authorizeAct` refuses every act it
+   * asks for (`webhook_cannot_act`). It exists only so the turn can run the
+   * agent's read/propose path with an honest label.
+   */
+  role: "owner" | "admin" | "member" | "machine" | "agent" | "webhook";
   canGrantOwner: boolean;
   /** Set only when the credential was an agent token. */
   agentTokenId?: string;

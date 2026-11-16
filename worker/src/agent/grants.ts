@@ -174,6 +174,19 @@ export async function authorizeActWithStore(
   effect: ActEffect,
   now: number = Date.now()
 ): Promise<ActDecision> {
+  // A webhook turn is a synthetic actor with no human behind it. Autonomy is
+  // opened by, and belongs to, a person: even when the window's actor column is
+  // NULL (an ownerless row) the label mismatch below would not catch this, so
+  // refuse it structurally before any grant or counter is read.
+  if (_actor?.role === "webhook") {
+    return {
+      ok: false,
+      reason: "webhook_cannot_act",
+      message:
+        "a webhook turn has no human session, so it cannot act; a person must approve the effect",
+    };
+  }
+
   const count = Math.max(1, Math.trunc(effect.count ?? 1));
   const autonomy = await store.readAutonomy(now);
   if (autonomy === null || Number(autonomy.enabled) !== 1) {

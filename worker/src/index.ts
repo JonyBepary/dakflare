@@ -39,6 +39,13 @@ import {
 } from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
+  handleWebhookCreate,
+  handleWebhookDelete,
+  handleWebhookDeliveries,
+  handleWebhookIngress,
+  handleWebhookList,
+} from "./routes/webhooks";
+import {
   handleDeviceArchive,
   handleDeviceCommands,
   handleDeviceRevoke,
@@ -203,6 +210,13 @@ export interface Env {
    * closed with 401 (see the comment there).
    */
   ADMIN_TOKEN?: string;
+  /**
+   * Optional dedicated key for sealing a webhook signing secret at rest
+   * (routes/webhooks.ts). Absent falls back to ADMIN_TOKEN then
+   * BETTER_AUTH_SECRET. Rotating it makes existing hooks unverifiable; they
+   * must be recreated, which is the same operation as rotating the hook itself.
+   */
+  WEBHOOK_SECRET_KEY?: string;
   /** FCM HTTP v1 service-account JSON. Absent is a normal local-dev state. */
   FCM_SERVICE_ACCOUNT_JSON?: string;
   /**
@@ -878,6 +892,15 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       return handleDevicePair(req, env);
     }
 
+    /* ---- inbound agent webhooks (v7.2) -------------------------------- */
+    // Public ingress: the HMAC signature over the raw body IS the credential.
+    // Deliberately outside the admin gate, and outside SCOPE_FOR_ACTION: no
+    // agent token can reach it, and the turn it starts has no human session.
+    const webhookIngressMatch = pathname.match(/^\/v1\/webhooks\/([^/]+)$/);
+    if (method === "POST" && webhookIngressMatch) {
+      return handleWebhookIngress(req, env, decodeURIComponent(webhookIngressMatch[1]));
+    }
+
     /* ---- Multi-Channel Webhooks (v7.0) -------------------------------- */
     if (pathname === "/v1/channels/telegram/webhook") {
       if (method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -1145,6 +1168,35 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       // A read: a member may see who did what, including their own actions.
       return withAdminAccess(req, env, "read", "read the audit log", (_actor) =>
         handleAuditList(env, url)
+      );
+    }
+
+    /* ---- inbound agent webhooks (v7.2) -------------------------------- */
+    // Human-only: all four actions are absent from SCOPE_FOR_ACTION and each
+    // handler calls assertHuman, so an agent token or a webhook actor can
+    // never mint, inspect or revoke an ingress credential.
+    if (method === "POST" && pathname === "/v1/admin/webhooks") {
+      return withAdminAccess(req, env, "write", "create webhooks", (actor) =>
+        handleWebhookCreate(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/webhooks") {
+      return withAdminAccess(req, env, "read", "list webhooks", (actor) =>
+        handleWebhookList(env, actor)
+      );
+    }
+    const webhookDeliveriesMatch = pathname.match(
+      /^\/v1\/admin\/webhooks\/([^/]+)\/deliveries$/
+    );
+    if (method === "GET" && webhookDeliveriesMatch) {
+      return withAdminAccess(req, env, "read", "read webhook deliveries", (actor) =>
+        handleWebhookDeliveries(env, decodeURIComponent(webhookDeliveriesMatch[1]), actor)
+      );
+    }
+    const webhookDeleteMatch = pathname.match(/^\/v1\/admin\/webhooks\/([^/]+)$/);
+    if (method === "DELETE" && webhookDeleteMatch) {
+      return withAdminAccess(req, env, "write", "delete webhooks", (actor) =>
+        handleWebhookDelete(env, decodeURIComponent(webhookDeleteMatch[1]), actor)
       );
     }
 
