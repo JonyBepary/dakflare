@@ -300,8 +300,33 @@ function readSystem1(value: unknown): AiSystem1 | null {
 	return {
 		model: value.model,
 		provider,
-		baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : null
+		baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : null,
+		// Keep the gateway's own answer. Dropping it forced the page to compare
+		// two URLs, which cannot tell an inherited origin from an override that
+		// happens to equal the chat one.
+		...(typeof value.inheritsBase === 'boolean' ? { inheritsBase: value.inheritsBase } : {})
 	};
+}
+
+/**
+ * Whether the System One origin is the operator's own rather than the chat one.
+ *
+ * The gateway reports it. Only when an older Worker does not is the comparison
+ * used, and then it is direct: equal URLs mean inherited, differing ones mean an
+ * override. The previous expression negated the comparison twice, so an equal
+ * base read as "own" and a differing one as "inherited" — and saving in that
+ * state cleared a stored origin.
+ */
+export function system1BaseIsOwn(
+	system1: { inheritsBase?: boolean; baseUrl: string | null } | null,
+	chatBase: string | null
+): boolean {
+	if (system1 === null) return false;
+	if (typeof system1.inheritsBase === 'boolean') return system1.inheritsBase === false;
+	// No stored origin is the inherit case, whatever the chat base is.
+	const stored = system1.baseUrl ?? '';
+	if (stored === '') return false;
+	return stored !== (chatBase ?? '');
 }
 
 function readSettings(value: unknown): AiSettings | null {

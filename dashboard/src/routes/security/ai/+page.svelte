@@ -31,6 +31,7 @@
 	 * `AiSettingsInput`, which has no key member either.
 	 */
 	import { onMount } from 'svelte';
+	import { system1BaseIsOwn } from '$lib/assistant';
 	import {
 		failureLine,
 		failureTone,
@@ -590,15 +591,16 @@
 		// with Clef and chats as DeepSeek), so the document's effective value is
 		// what this field shows and what Save writes back.
 		const stored = next.system1;
+		// A document with no System One block is an older Worker, not a draft: the
+		// page starts inheriting, so it does not arrive dirty with two disabled
+		// probes and a "save this first" line.
 		s1Model = stored !== null ? stored.model : '';
 
 		// The gateway says whether the row stores an origin. Comparing two URLs
 		// cannot tell an inherited base from an override that happens to match,
 		// and the comparison silently dropped such an override on the next save.
 		const ownBase =
-			next.provider === 'openai-compatible' &&
-			stored !== null &&
-			(stored.inheritsBase ?? (stored.baseUrl ?? '') !== next.baseUrl) === false;
+			next.provider === 'openai-compatible' && system1BaseIsOwn(stored, next.baseUrl);
 		s1InheritBase = !ownBase;
 		s1BaseUrl = stored !== null && ownBase ? (stored.baseUrl ?? '') : '';
 	}
