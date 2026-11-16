@@ -161,6 +161,200 @@ function refusal(error: string, status: number): Response {
   return Response.json({ error: `agent_${error}` }, { status });
 }
 
+/* ─────────────────────────── turn streams ─────────────────────────── */
+
+/** How long an SSE or socket resume waits for a new frame before giving up. */
+export const STREAM_IDLE_TIMEOUT_MS = 90_000;
+
+/** A tiny non-cryptographic hash for an ask without an idempotency key. */
+export function shortHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+/**
+ * The durable stream id for one turn.
+ *
+ * Keyed by the server-held turn key, as the brief requires. Streams caps an id
+ * at 256 characters, so a caller-supplied key that is too long is folded to a
+ * stable short form; the tag (the conversation) still carries ownership.
+ *
+ * Exported so a client can construct the id from the same key it asked with,
+ * and so the announcement frame and the handler cannot drift apart.
+ */
+export function streamIdFor(idempotencyKey: string): string {
+  const direct = `turn:${idempotencyKey}`;
+  if (direct.length <= 256) return direct;
+  return `turn:folded:${idempotencyKey.length}:${shortHash(idempotencyKey)}`;
+}
+
+/** The first frame of every turn: what stream to resume and under what key. */
+export interface TurnFrame {
+  type: "turn";
+  streamId: string;
+  idempotencyKey: string;
+  conversationId: string;
+}
+
+export function turnFrame(idempotencyKey: string, conversationId: string): TurnFrame {
+  return {
+    type: "turn",
+    streamId: streamIdFor(idempotencyKey),
+    idempotencyKey,
+    conversationId,
+  };
+}
+
+/** The slice of the Streams capability an SSE response needs. */
+export interface StreamReadSource {
+  read(
+    streamId: string,
+    options: { from?: number; signal?: AbortSignal }
+  ): AsyncGenerator<{ seq: number; chunk: unknown }, void, undefined>;
+  status(
+    streamId: string
+  ): Promise<{ state: string; error?: string | null } | null>;
+}
+
+/** Where a replay starts: `Last-Event-ID` + 1, else `?from=`, else 0. */
+export function resumeFrom(request: Request): number {
+  const header = request.headers.get("Last-Event-ID");
+  if (header !== null && header !== "") {
+    const lastEventId = Number(header);
+    if (Number.isInteger(lastEventId) && lastEventId >= 0) return lastEventId + 1;
+  }
+  const fromParam = new URL(request.url).searchParams.get("from");
+  if (fromParam !== null) {
+    const from = Number(fromParam);
+    if (Number.isInteger(from) && from >= 0) return from;
+  }
+  return 0;
+}
+
+/**
+ * Serve one durable stream as SSE, replaying from the resume point and then
+ * tailing live appends until the stream settles.
+ *
+ * This replaces the SDK's `sseResponse` for the panel's reconnect path because
+ * the SDK has no idle ceiling: a live producer that stops appending (or a
+ * turn that hangs) would hold the connection forever. Here every delivered
+ * chunk re-arms a bounded idle timer; when it fires the response ends with
+ * `event: timeout` and the reader can resume from its last `id:`.
+ */
+export function streamSseResponse(
+  streams: StreamReadSource,
+  streamId: string,
+  request: Request,
+  options: { idleMs?: number; heartbeatMs?: number } = {}
+): Response {
+  const from = resumeFrom(request);
+  const idleMs = options.idleMs ?? STREAM_IDLE_TIMEOUT_MS;
+  const heartbeatMs = options.heartbeatMs ?? 25_000;
+  const encoder = new TextEncoder();
+  const abort = new AbortController();
+  let open = true;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const write = (text: string): void => {
+        if (!open) return;
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          open = false;
+        }
+      };
+      const finish = (): void => {
+        if (!open) return;
+        open = false;
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (heartbeat !== null) {
+          clearInterval(heartbeat);
+          heartbeat = null;
+        }
+        try {
+          controller.close();
+        } catch {
+          // already closed by the consumer
+        }
+      };
+      const arm = (): void => {
+        if (timer !== null) clearTimeout(timer);
+        if (idleMs <= 0 || !open) return;
+        timer = setTimeout(() => {
+          timedOut = true;
+          write("event: timeout\ndata: {}\n\n");
+          finish();
+          abort.abort();
+        }, idleMs);
+      };
+      const onAbort = (): void => {
+        finish();
+        abort.abort();
+      };
+
+      if (request.signal.aborted) {
+        finish();
+        return;
+      }
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      arm();
+      // A comment keeps idle proxies from dropping the response; it is not a
+      // data frame, so the idle ceiling above still applies.
+      if (heartbeatMs > 0) {
+        heartbeat = setInterval(() => write(": heartbeat\n\n"), heartbeatMs);
+      }
+
+      void (async () => {
+        try {
+          for await (const chunk of streams.read(streamId, {
+            from,
+            signal: abort.signal,
+          })) {
+            if (!open) break;
+            write(`id: ${chunk.seq}\ndata: ${JSON.stringify(chunk.chunk)}\n\n`);
+            arm();
+          }
+          if (open && !timedOut) {
+            const status = await streams.status(streamId);
+            if (status?.state === "errored") {
+              write(`event: error\ndata: ${JSON.stringify({ reason: status.error ?? null })}\n\n`);
+            } else {
+              write("event: done\ndata: {}\n\n");
+            }
+          }
+        } catch {
+          // Aborted by the client, the idle timer, or a deleted stream.
+        } finally {
+          request.signal.removeEventListener("abort", onAbort);
+          finish();
+        }
+      })();
+    },
+    cancel() {
+      open = false;
+      abort.abort();
+    },
+  });
+
+  return new Response(body, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 /** A ticket token: 32 random bytes, URL-safe, never logged. */
 export function mintTicketToken(): string {
   const bytes = new Uint8Array(32);
