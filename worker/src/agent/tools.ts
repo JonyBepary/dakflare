@@ -59,6 +59,15 @@ function stringField(input: Record<string, unknown>, key: string): string {
   return typeof input[key] === "string" ? (input[key] as string) : "";
 }
 
+/** Column JSON that must not throw a turn. */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function numberField(input: Record<string, unknown>, key: string): number | null {
   const value = input[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -251,6 +260,64 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
           ok: true,
           output: JSON.stringify({ peer, count: messages.length, messages }),
           data: { peer, count: messages.length },
+        };
+      },
+    },
+    {
+      name: "read_rules",
+      description:
+        "Read the auto-reply rules on this deployment: id, name, whether each is enabled, its matcher and body matcher. Use it to answer questions about rules, including how many are enabled. Never returns message bodies.",
+      kind: "read",
+      parameters: {
+        type: "object",
+        properties: {
+          enabled: { type: "string", enum: ["any", "only", "disabled"] },
+          limit: { type: "number", description: "1-50, default 50" },
+        },
+        additionalProperties: false,
+      },
+      async execute(input, ctx) {
+        const which = stringField(input, "enabled") || "any";
+        const limitRaw = numberField(input, "limit");
+        const limit = Math.max(1, Math.min(50, limitRaw === null ? 50 : Math.trunc(limitRaw)));
+        const where =
+          which === "only" ? "WHERE enabled = 1" : which === "disabled" ? "WHERE enabled = 0" : "";
+        const rows = await ctx.env.DB.prepare(
+          `SELECT id, name, enabled, matcher_type, matcher_value, body_type, body_value,
+                  allow_shortcode, device_id
+             FROM rules ${where}
+            ORDER BY priority DESC, id
+            LIMIT ?`
+        )
+          .bind(limit)
+          .all<{
+            id: string;
+            name: string;
+            enabled: number;
+            matcher_type: string;
+            matcher_value: string;
+            body_type: string;
+            body_value: string;
+            allow_shortcode: number;
+            device_id: string | null;
+          }>();
+        const rules = (rows.results ?? []).map((row) => ({
+          id: row.id,
+          name: row.name,
+          enabled: Number(row.enabled) === 1,
+          matcher: { type: row.matcher_type, value: row.matcher_value },
+          body_matcher: { type: row.body_type, value: row.body_value },
+          allow_shortcode: Number(row.allow_shortcode) === 1,
+          device_id: row.device_id,
+        }));
+        return {
+          ok: true,
+          output: JSON.stringify({
+            count: rules.length,
+            enabled: rules.filter((rule) => rule.enabled).length,
+            rules,
+          }),
+          data: { count: rules.length },
         };
       },
     },
