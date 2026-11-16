@@ -76,9 +76,9 @@
 				aria-label={label}
 				shape-rendering="crispEdges"
 			>
-				<rect width={qr.count + quiet * 2} height={qr.count + quiet * 2} fill="#ffffff" />
+				<rect class="qr-paper" width={qr.count + quiet * 2} height={qr.count + quiet * 2} />
 				<g transform={`translate(${quiet} ${quiet})`}>
-					<path d={qr.path} fill="#000000" />
+					<path class="qr-ink" d={qr.path} />
 				</g>
 			</svg>
 		</div>
@@ -96,14 +96,24 @@
 		flex: none;
 	}
 
-	/* Always a white card: a QR inverted for dark mode is not reliably scannable. */
+	/* Always a white card: a QR inverted for dark mode is not reliably scannable.
+	   The two fills are the QR pair, which is the one place the theme must not
+	   reach; the border and shadow are this card's own, mixed from the ink. */
 	.qr-card {
 		padding: 10px;
-		border: 1px solid color-mix(in srgb, #000 14%, var(--line));
+		border: 1px solid color-mix(in srgb, var(--df-qr-ink) 14%, var(--line));
 		border-radius: var(--r-sm);
-		background: #ffffff;
-		box-shadow: 0 6px 18px -12px rgba(0, 0, 0, 0.45);
+		background: var(--df-qr-paper);
+		box-shadow: 0 6px 18px -12px color-mix(in srgb, var(--df-qr-ink) 45%, transparent);
 		line-height: 0;
+	}
+
+	.qr-paper {
+		fill: var(--df-qr-paper);
+	}
+
+	.qr-ink {
+		fill: var(--df-qr-ink);
 	}
 
 	.qr-card svg {

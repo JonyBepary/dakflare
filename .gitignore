@@ -52,3 +52,5 @@ docs/archive/
 # Local design review screenshots and preview artifacts
 .openchamber/
 .slim/deepwork/
+.ui-review/
+.design-system/

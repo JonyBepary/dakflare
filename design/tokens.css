@@ -74,6 +74,15 @@
 	--df-p-mist-300: #c9beaf;
 	--df-p-mist-500: #a0968a;
 
+	/* The system's only two absolute values, and not palette steps, because their
+	   job is to stay out of the theme: a pairing code has to decode, so its ink
+	   is pure black and its paper pure white in every scheme (umber-900 is
+	   #241f1a and the cream card #fffdf8, and that pair costs a scanner
+	   contrast), and a mask stop has to stay fully opaque in both schemes.
+	   Neither gains anything from a warm or dimmed version. */
+	--df-p-absolute-ink: #000;
+	--df-p-absolute-paper: #fff;
+
 	--df-p-text-2xs: 0.625rem;
 	--df-p-text-xs: 0.6875rem;
 	--df-p-text-sm: 0.75rem;
@@ -101,8 +110,7 @@
 	--df-p-radius-pill: 999px;
 
 	--df-p-shadow-1: 0 1px 2px rgba(74, 52, 26, 0.06);
-	--df-p-shadow-2:
-		0 2px 4px rgba(74, 52, 26, 0.06), 0 12px 28px -18px rgba(74, 52, 26, 0.35);
+	--df-p-shadow-2: 0 2px 4px rgba(74, 52, 26, 0.06), 0 12px 28px -18px rgba(74, 52, 26, 0.35);
 	--df-p-shadow-3: 0 24px 60px -24px rgba(74, 52, 26, 0.45);
 
 	--df-p-dur-press: 90ms;
@@ -110,7 +118,16 @@
 	--df-p-dur-settle: 220ms;
 	--df-p-dur-pop: 320ms;
 	--df-p-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+	/* The one deliberate overshoot, and the reason dashboard/scripts/check-allowlist.json
+	   holds a row: DESIGN_2026 §2 asks `pop` to spring past its target and settle
+	   (avatar entering a stack, a success check, the mascot). Every other curve
+	   here stays inside 0 to 1. */
 	--df-p-ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+	/* One nudge: how far a sheet slides in from its edge, and the width of the
+	   fade that says a strip scrolls further. Small enough to read as arrival,
+	   not as travel. */
+	--df-p-dist-nudge: 12px;
 
 	--df-p-focus-width: 2px;
 	--df-p-focus-offset: 2px;
@@ -171,6 +188,12 @@
 	--df-shadow-card: var(--df-p-shadow-1);
 	--df-shadow-raised: var(--df-p-shadow-2);
 	--df-shadow-dialog: var(--df-p-shadow-3);
+
+	/* A pairing code is the one thing on the console that must not follow the
+	   theme: a QR inverted for dark mode does not scan. It reads the absolute
+	   pair, so a component never writes a hex and a theme switch cannot reach it. */
+	--df-qr-ink: var(--df-p-absolute-ink);
+	--df-qr-paper: var(--df-p-absolute-paper);
 
 	--df-font-display: 'Nunito', ui-rounded, system-ui, sans-serif;
 }
@@ -333,4 +356,11 @@
 	--df-c-composer-counter-over-ink: var(--df-state-danger-ink);
 	--df-c-composer-hint-ink: var(--df-text-meta);
 	--df-c-composer-hint-size: var(--df-p-text-xs);
+
+	/* The source sheet is the widest overlay the console opens: a JSON editor
+	   with a line-number gutter. Capped by the viewport, never by a breakpoint. */
+	--df-c-sheet-width: min(720px, 100vw);
+	/* The workflow board's two loading placeholders hold the canvas height, so
+	   the page header and the panel edges do not jump when the graph arrives. */
+	--df-c-skeleton-height: 420px;
 }

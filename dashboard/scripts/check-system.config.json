@@ -1,0 +1,107 @@
+{
+	// The console's design-system check. `npm run check` runs svelte-check, then
+	// this, then theme-color-check.mjs, so one command is the whole gate.
+	//
+	// The script is a committed copy of
+	// .agents/skills/build-design-system/scripts/check-system.mjs. It is copied
+	// because .agents/ is gitignored tooling: CI checks out the repo without it,
+	// and a gate that does not exist on a fresh clone is not a gate. Re-copy both
+	// files (this one's sibling check-system.mjs and oklch.mjs) when the skill
+	// changes; the config below is ours and is not overwritten by a copy.
+	//
+	// Run it by hand from dashboard/:
+	//   node scripts/check-system.mjs --root .
+	//   node scripts/check-system.mjs --root . --left        what the allowlist still holds
+	//   node scripts/check-system.mjs --root . --files src/lib/components/QrCode.svelte --no-allowlist
+
+	// The system, one file at a time. Everything in src/lib/components is listed
+	// explicitly on purpose: a glob would silently adopt a file nobody decided on,
+	// and the point of this list is to answer "which components are the system?".
+	// A new component is added here in the same change that adds it.
+	"include": [
+		"src/lib/components/AgentTelemetryPanel.svelte",
+		"src/lib/components/AlertBanner.svelte",
+		"src/lib/components/Assistant.svelte",
+		"src/lib/components/AssistantProposalCard.svelte",
+		"src/lib/components/AuthGate.svelte",
+		"src/lib/components/AutomationHeader.svelte",
+		"src/lib/components/Badge.svelte",
+		"src/lib/components/Brand.svelte",
+		"src/lib/components/CommandTracker.svelte",
+		"src/lib/components/ConfirmDialog.svelte",
+		"src/lib/components/CopyButton.svelte",
+		"src/lib/components/DeviceDetail.svelte",
+		"src/lib/components/EmptyState.svelte",
+		"src/lib/components/Icon.svelte",
+		"src/lib/components/InviteMint.svelte",
+		"src/lib/components/Mascot.svelte",
+		"src/lib/components/Notice.svelte",
+		"src/lib/components/PageHeader.svelte",
+		"src/lib/components/PresenceChip.svelte",
+		"src/lib/components/QrCode.svelte",
+		"src/lib/components/RecoveryCodes.svelte",
+		"src/lib/components/RelativeTime.svelte",
+		"src/lib/components/ReplyFate.svelte",
+		"src/lib/components/RuleTestPanel.svelte",
+		"src/lib/components/SendSmsForm.svelte",
+		"src/lib/components/Spinner.svelte",
+		"src/lib/components/ThemeToggle.svelte",
+		"src/lib/components/workflow/ConditionNode.svelte",
+		"src/lib/components/workflow/DelayNode.svelte",
+		"src/lib/components/workflow/ExtractNode.svelte",
+		"src/lib/components/workflow/FlowBridge.svelte",
+		"src/lib/components/workflow/FlowEdge.svelte",
+		"src/lib/components/workflow/FlowPalette.svelte",
+		"src/lib/components/workflow/NodeCard.svelte",
+		"src/lib/components/workflow/NodeInspector.svelte",
+		"src/lib/components/workflow/PatternSheet.svelte",
+		"src/lib/components/workflow/SendSmsNode.svelte",
+		"src/lib/components/workflow/SetVarNode.svelte",
+		"src/lib/components/workflow/SimulationPanel.svelte",
+		"src/lib/components/workflow/SourceSheet.svelte",
+		"src/lib/components/workflow/StepFinder.svelte",
+		"src/lib/components/workflow/StopNode.svelte",
+		"src/lib/components/workflow/SwitchNode.svelte",
+		"src/lib/components/workflow/TriggerNode.svelte",
+		"src/lib/components/workflow/UnsupportedNode.svelte",
+		"src/lib/components/workflow/ValidationList.svelte",
+		"src/lib/components/workflow/VariableHints.svelte",
+		"src/lib/components/workflow/WebhookNode.svelte",
+		"src/lib/components/workflow/WorkflowEditor.svelte",
+		"src/lib/components/workflow/WorkflowSettings.svelte",
+
+		// The routes are the screens that assemble those components, and the theme
+		// colours live in app.html. New screens are covered without a config edit.
+		"src/routes",
+		"src/app.html"
+	],
+
+	// The review workbenches under src/routes/states/ are harnesses, not product:
+	// untracked, kept out of the build (scripts/assert-no-workbenches.mjs refuses
+	// a prerender while the folder exists), and out of this scan for the same
+	// reason.
+	"exclude": ["src/routes/states", "node_modules", ".svelte-kit", "build", "dist"],
+
+	// The single token source. A raw value is allowed on a custom-property line
+	// in this file and nowhere else in the scan, which is what makes a hex in a
+	// component or a route a finding. src/app.css is not listed: see below.
+	"tokenSources": ["../design/tokens.css"],
+
+	// Not in the scan, and why.
+	//
+	// src/app.css and src/lib/workflow/workflow.css are the sheet this system grew
+	// out of. The length rules report 129 pre-existing findings there, all
+	// rule/css-px over a pre-token geometry scale (a 40px control height, a 10px
+	// gap, an 11.5px hint, a 34px field). Tokenising that scale is a change of its
+	// own, with its own before/after captures, so it is recorded rather than
+	// attempted here; those two files are where the tokens are defined, not drift
+	// from them, which is why .design-system/legacy.json lists them as token files.
+	//
+	// A Svelte <style> block is a blind spot of the script itself, not of this
+	// config: it reads strings in JS-shaped files, so a raw colour inside <style>
+	// is invisible to it. legacy.mjs does count those, over the same 110 files.
+
+	// Counted exceptions, keyed by literal, so swapping a value for a new one
+	// still fails. One row today: the documented `pop` curve in tokens.css.
+	"allowlist": "scripts/check-allowlist.json"
+}

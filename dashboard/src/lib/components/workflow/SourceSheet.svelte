@@ -221,7 +221,7 @@
 		z-index: 81;
 		display: flex;
 		flex-direction: column;
-		width: min(720px, 100vw);
+		width: var(--df-c-sheet-width);
 		border-left: 1px solid var(--df-border-control);
 		background: var(--df-surface-card);
 		box-shadow: var(--df-shadow-dialog);
@@ -231,7 +231,7 @@
 	@keyframes sheet-in {
 		from {
 			opacity: 0;
-			transform: translateX(12px);
+			transform: translateX(var(--df-p-dist-nudge));
 		}
 	}
 
@@ -422,7 +422,7 @@
 
 	.switch input:checked + .switch-track > span {
 		transform: translateX(14px);
-		background: var(--df-text-on-accent, #fff);
+		background: var(--df-text-on-accent);
 	}
 
 	.switch input:focus-visible + .switch-track {

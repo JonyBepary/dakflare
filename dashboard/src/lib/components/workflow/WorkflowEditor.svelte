@@ -1844,8 +1844,8 @@
 		<section class="panel" aria-busy="true" aria-live="polite">
 			<div class="panel-head"><h2 class="panel-title">Loading workflow</h2></div>
 			<div class="loading-grid">
-				<div class="skeleton" style="height: 420px"></div>
-				<div class="skeleton" style="height: 420px"></div>
+				<div class="skeleton" style="height: var(--df-c-skeleton-height)"></div>
+				<div class="skeleton" style="height: var(--df-c-skeleton-height)"></div>
 			</div>
 		</section>
 	{:else if notFound}
@@ -3037,7 +3037,7 @@
 
 	.switch input:checked + .switch-track > span {
 		transform: translateX(14px);
-		background: var(--df-text-on-accent, #fff);
+		background: var(--df-text-on-accent);
 	}
 
 	.switch input:focus-visible + .switch-track {

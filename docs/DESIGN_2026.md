@@ -51,6 +51,17 @@ metadata was 3.68:1 on the well. `docs/history/design-review/03-design-system.md
 full measured table and the primitive/semantic/component naming that supersedes the flat
 list below.
 
+Two values are outside the palette on purpose: `--df-p-absolute-ink` and
+`--df-p-absolute-paper` (`#000` / `#fff`). A pairing code must decode, so
+`--df-qr-ink` and `--df-qr-paper` read them and never a themed surface — a QR
+inverted for dark mode is a QR that does not scan — and the fade at a scrolling
+edge reads the ink because a mask stop has to be opaque in both schemes.
+
+Geometry that used to be a literal inside one component now has a name:
+`--df-p-dist-nudge` (the 12px a sheet slides in from its edge, and the width of
+that edge fade), `--df-c-sheet-width` (the source sheet, `min(720px, 100vw)`) and
+`--df-c-skeleton-height` (the workflow board's loading placeholders).
+
 Radii: `--r-sm: 8px` (inputs, chips), `--r: 12px` (rows, small cards), `--r-lg: 20px`
 (bento cards), `--r-xl: 28px` (page sheets), `--r-pill: 999px`.
 
@@ -145,3 +156,20 @@ one dopamine moment; the carrier panel keeps mono for the injected number and bo
 - The dashboard remains a prerendered static build with no new runtime dependency.
 - Tables measure their card, not the viewport; a container query is the rule, not a higher
   breakpoint guess.
+
+## 7. Checks
+
+`npm run check` in `dashboard/` is the gate, in one command: `svelte-check`, then
+`scripts/check-system.mjs`, then `scripts/theme-color-check.mjs`.
+
+- `check-system.mjs` reads `scripts/check-system.config.json`. Its scan is the
+  system itself: every component in `src/lib/components/` listed by name (so a new
+  component is a decision, not something a glob adopts), the routes that assemble
+  them, and `src/app.html`, checked against `design/tokens.css`. The two
+  stylesheets and the Svelte `<style>` blocks it cannot read are recorded in the
+  config, with the counts, rather than quietly dropped.
+- `legacy.mjs --inventory --config .design-system/legacy.json` is the other half:
+  raw values over all 110 files, `<style>` blocks included.
+- `theme-color-check.mjs` holds the two `theme-color` metas in `src/app.html` to
+  `--df-surface-page`. Static HTML is parsed before any stylesheet, so those two
+  literals cannot be variables; the check compares them instead of trusting them.

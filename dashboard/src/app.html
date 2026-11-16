@@ -5,6 +5,11 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
 		<meta name="description" content="DakFlare SMS gateway operator console" />
+		<!-- These two literals mirror design/tokens.css: --df-surface-page in each
+		     scheme, which is the cream page in light and night-800 in dark. Static
+		     HTML is parsed before any stylesheet, so a meta cannot read a custom
+		     property; dashboard/scripts/theme-color-check.mjs fails when either
+		     one stops matching the token. -->
 		<meta name="theme-color" content="#FBF6EE" media="(prefers-color-scheme: light)" />
 		<meta name="theme-color" content="#1C1814" media="(prefers-color-scheme: dark)" />
 		<link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />

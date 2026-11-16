@@ -406,13 +406,14 @@
 <style>
 	/* The tab strip scrolls sideways on a phone and hides its scrollbar; without
 	   a mask a partly cut-off tab looks like the end of the list. The fade says
-	   there is more in that direction. */
+	   there is more in that direction. A mask reads alpha, so the stop is the
+	   absolute ink: opaque in both schemes, never a surface colour. */
 	:global(.shell-tabs) {
 		mask-image: linear-gradient(
 			to right,
 			transparent 0,
-			#000 12px,
-			#000 calc(100% - 12px),
+			var(--df-p-absolute-ink) var(--df-p-dist-nudge),
+			var(--df-p-absolute-ink) calc(100% - var(--df-p-dist-nudge)),
 			transparent 100%
 		);
 	}
