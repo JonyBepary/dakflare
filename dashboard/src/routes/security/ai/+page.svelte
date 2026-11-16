@@ -240,9 +240,10 @@
 	/**
 	 * The document as the gateway holds it, so "unsaved" means something.
 	 *
-	 * System One is compared by *effect*: the document carries no "inherited"
-	 * flag, so an own value equal to the chat value describes the same routing as
-	 * inheriting, and ticking the box back on changes nothing that is sent.
+	 * System One is compared by *effect*: the gateway now reports whether the base
+	 * is inherited, and an own value equal to the chat value describes the same
+	 * routing as inheriting, so ticking the box back on changes nothing that is
+	 * sent.
 	 */
 	// A document with no System One block is an older Worker: the page cannot know
 	// the server's decision default, so it shows a placeholder and is not dirty
@@ -254,8 +255,12 @@
 	const savedSystem1Base = $derived(
 		settings === null
 			? ''
-			: settings.system1 === null
-				? (settings.baseUrl ?? '')
+			: settings.system1 === null || settings.system1.provider !== settings.provider
+				? // No block, or a document that names a different System One provider:
+					// the fieldset renders the contradiction as a sentence and no base
+					// control, so the effect is the chat origin. Comparing it against
+					// the stored one flagged a contradiction the page invented.
+					(settings.baseUrl ?? '')
 				: (settings.system1.baseUrl ?? '')
 	);
 	const dirty = $derived(
