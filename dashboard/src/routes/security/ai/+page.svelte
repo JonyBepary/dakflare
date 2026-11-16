@@ -244,11 +244,19 @@
 	 * flag, so an own value equal to the chat value describes the same routing as
 	 * inheriting, and ticking the box back on changes nothing that is sent.
 	 */
+	// A document with no System One block is an older Worker: the page cannot know
+	// the server's decision default, so it shows a placeholder and is not dirty
+	// until the operator types something. Comparing against the chat model here
+	// made such a page arrive dirty, with both probes disabled.
 	const savedSystem1Model = $derived(
-		settings === null ? '' : (settings.system1?.model ?? settings.model)
+		settings === null ? '' : settings.system1 === null ? '' : settings.system1.model
 	);
 	const savedSystem1Base = $derived(
-		settings === null ? '' : ((settings.system1?.baseUrl ?? settings.baseUrl) ?? '')
+		settings === null
+			? ''
+			: settings.system1 === null
+				? (settings.baseUrl ?? '')
+				: (settings.system1.baseUrl ?? '')
 	);
 	const dirty = $derived(
 		settings !== null &&
