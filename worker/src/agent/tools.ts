@@ -76,6 +76,17 @@ function numberField(input: Record<string, unknown>, key: string): number | null
 /** The three handler calls an act needs, wired to the real routes. */
 export function realActDispatch(): ActDispatch {
   return {
+    async proposeRule(payload, env, actor) {
+      const staged = await stageAssistantProposal(env, actor, {
+        kind: "create_rule",
+        title:
+          typeof payload.name === "string" && payload.name !== ""
+            ? String(payload.name)
+            : "A rule the agent prepared",
+        payload,
+      });
+      return staged.ok ? { id: staged.proposal.id } : null;
+    },
     async createRule(payload, env, actor) {
       const outcome = await acceptCreateRule(env, actor as AdminActor, payload);
       return outcome.ok ? Response.json(outcome.body) : outcome.response;

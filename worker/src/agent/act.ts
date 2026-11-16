@@ -21,6 +21,15 @@ import { authorizeAct, refundAct, type ActDecision, type ActEffect } from "./gra
 
 /** The handlers an act ultimately calls. Real wiring lives in `tools.ts`. */
 export interface ActDispatch {
+  /**
+   * Stage the same intent as a proposal. Returns null when the intent cannot be
+   * expressed as one, in which case the original refusal stands.
+   */
+  proposeRule(
+    payload: Record<string, unknown>,
+    env: Env,
+    actor: AdminActor
+  ): Promise<{ id: string } | null>;
   createRule(
     payload: Record<string, unknown>,
     env: Env,
@@ -95,6 +104,12 @@ interface CallPlan {
   tool: string;
   effect: ActEffect;
   run: () => Promise<ToolResult>;
+  /**
+   * Offered when the authority gate refuses. The same intent becomes a proposal
+   * the operator accepts, which is the "plan once, ask once" path: without it the
+   * model has to be refused act by act with autonomy off.
+   */
+  proposeOnRefusal?: (refusal: ToolResult, args: Record<string, unknown>) => Promise<ToolResult>;
 }
 
 /**
@@ -116,6 +131,18 @@ async function executeAct(ctx: ToolContext, plan: CallPlan, args: Record<string,
   const decision = await (authorize ?? authorizeAct)(ctx.env, ctx.actor, plan.effect);
   if (!decision.ok) {
     const refusal: ToolResult = { ok: false, reason: decision.reason, message: decision.message };
+    const authority =
+      decision.reason === "autonomy_off" ||
+      decision.reason === "autonomy_other_session" ||
+      decision.reason === "autonomy_expired" ||
+      decision.reason === "no_grant" ||
+      decision.reason === "grant_expired";
+    if (authority && plan.proposeOnRefusal !== undefined) {
+      const offered = await plan.proposeOnRefusal(refusal, args);
+      // A proposal is not an effect: nothing was spent, so nothing is failed.
+      ctx.journal.fail(ctx.callId, offered);
+      return offered;
+    }
     ctx.journal.fail(ctx.callId, refusal);
     return refusal;
   }
@@ -244,6 +271,17 @@ export function createActTools(deps: ActToolDeps): AgentTool[] {
               target: { rule_id: id, body_hash: bodyHash },
             },
             run: async () => fromResponse(await deps.dispatch.createRule(payload, ctx.env, ctx.actor)),
+            proposeOnRefusal: async (refusal) => {
+              const staged = await deps.dispatch.proposeRule(payload, ctx.env, ctx.actor);
+              if (staged === null) return refusal;
+              return {
+                ok: true,
+                output:
+                  "No autonomy window covers this, so the rule was prepared as a proposal instead of created. " +
+                  "It is waiting for the operator to accept it in the panel.",
+                data: { proposal_id: staged.id, kind: "create_rule" },
+              };
+            },
           },
           input
         );

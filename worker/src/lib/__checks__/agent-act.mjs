@@ -57,6 +57,56 @@ function check(label, condition, detail = "") {
 }
 
 {
+  // With autonomy off, an act becomes a proposal instead of only a refusal: the
+  // operator gets one card to accept rather than an act refused per turn.
+  const { createActTools } = await import("../../agent/act.ts");
+  const staged = [];
+  const created = [];
+  const tools = createActTools({
+    // The refusal is injected through the same seam the other act checks use.
+    authorize: async () => ({ ok: false, reason: "autonomy_off", message: "agent autonomy is off" }),
+    dispatch: {
+      async proposeRule(payload) {
+        staged.push(payload);
+        return { id: "ap_check" };
+      },
+      async createRule() {
+        created.push(1);
+        return Response.json({ id: "r_should_not_exist" });
+      },
+      async sendSms() { return Response.json({}); },
+      async deployFlow() { return Response.json({}); },
+    },
+  });
+  const tool = tools.find((candidate) => candidate.name === "create_rule_now");
+  const result = await tool.execute(
+    {
+      matcher: { type: "exact", value: "BOT" },
+      body_matcher: { type: "keyword", value: "ping" },
+      reply_template: "pong",
+    },
+    {
+      env: { DB: { prepare() { throw new Error("no db in this check"); } } },
+      actor: { userId: "u1", label: "tester", role: "admin", canGrantOwner: true },
+      callId: "check:proposal:1",
+      journal: {
+        async reserve() { return { replay: false }; },
+        fail() {},
+        finishTurn() {},
+      },
+      budget: { chargeTokens: async () => {} },
+      signal: new AbortController().signal,
+    }
+  );
+  check(
+    "offers a proposal when authority is missing",
+    result.ok === true && result.data && result.data.proposal_id === "ap_check" && staged.length === 1,
+    JSON.stringify(result).slice(0, 160)
+  );
+  check("and creates nothing", created.length === 0, String(created.length));
+}
+
+{
   // A window is per operator. Someone else's live socket must not inherit it,
   // even while the row says enabled.
   const { authorizeActWithStore } = await import("../../agent/grants.ts");
