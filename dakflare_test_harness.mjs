@@ -24,6 +24,11 @@
  *                   two on a restarted process still make the fifth 429, and the
  *                   lock survives another restart. Owns its `wrangler dev` and
  *                   isolated D1/DO state under /tmp/opencode.
+ *   agent-pool      the three properties only a real pool can prove: a runtime
+ *                   ticket is one-use and expires, an autonomy window belongs to
+ *                   the operator who opened it, and a repeated webhook delivery
+ *                   is answered from its row with no second model turn. Needs
+ *                   the model stub from test-support/dev.sh.
  *   password-rotate pepper rotation end to end. Starts its own wrangler dev
  *                   (ring v1 -> v2,v1 -> v2) on PASSWORD_ROTATE_PORT, isolated
  *                   D1 state under /tmp/opencode.
@@ -59,6 +64,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_URL = process.env.WORKER_URL ?? 'http://127.0.0.1:8787';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token';
 const STUB_URL = process.env.STUB_URL ?? 'http://127.0.0.1:8790';
+/** The deterministic OpenAI-compatible fixture started by `test-support/dev.sh`. */
+const MODEL_STUB_URL = process.env.MODEL_STUB_URL ?? 'http://127.0.0.1:8791';
 const ACK_TIMEOUT_MS = Number(process.env.HARNESS_ACK_TIMEOUT_MS ?? 1500);
 // Must equal the Worker's LEASE_MS. `dev.sh` passes both through `--var` and
 // exports this one, but a harness started from another shell inherits nothing,
@@ -5629,6 +5636,355 @@ async function cmdLockoutGlobal() {
   process.exit(allOk ? 0 : 1);
 }
 
+/* ─────────────────────────────── agent pool ─────────────────────────────── */
+
+/**
+ * The three properties that need the real Workers pool and real D1, not a
+ * pure function: a ticket is spent exactly once and expires, a window belongs
+ * to the operator who opened it, and a repeated webhook delivery is answered
+ * from its delivery row without a second agent turn.
+ *
+ * Everything here is asserted on observable state (HTTP status, the upgrade
+ * handshake, D1 rows through the admin API, and the model stub's own request
+ * log). No assertion reads worker/src.
+ */
+async function cmdAgentPool() {
+  refuseNonLocal('agent-pool');
+  const rep = new Report('agent pool');
+
+  const runtimeSessions = async () => {
+    const status = await admin('GET', '/v1/admin/agent/runtime');
+    return Number(status.data?.sessions ?? -1);
+  };
+
+  const modelServed = async () => {
+    const response = await fetch(`${MODEL_STUB_URL}/__log`);
+    if (!response.ok) throw new Error(`model stub answered ${response.status}`);
+    const body = await response.json();
+    return Array.isArray(body.served) ? body.served : [];
+  };
+
+  /** Create a real owner session through the invite path the product ships. */
+  const inviteSession = async (tag) => {
+    const email = `pool-${tag}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}@example.test`;
+    const created = await admin('POST', '/v1/admin/invites', {
+      email,
+      role: 'owner',
+      expires_in_s: 300,
+    });
+    if (created.status !== 200 || typeof created.data?.token !== 'string') {
+      return { email, error: `invite ${created.status}: ${JSON.stringify(created.data)}` };
+    }
+    const redeemed = await api(WORKER_URL, 'POST', '/v1/auth/redeem', {
+      body: { token: created.data.token },
+    });
+    const cookie = (redeemed.cookies ?? [])
+      .map((entry) => entry.split(';')[0])
+      .find((entry) => entry.includes('session_token'));
+    return { email, cookie, error: cookie === undefined ? `redeem ${redeemed.status}` : undefined };
+  };
+
+  const socket = (ticket, cookie, origin = WORKER_URL) =>
+    new RawWs({
+      pathname: `/agents/assistant/assistant?ticket=${encodeURIComponent(ticket)}`,
+      headers: { Cookie: cookie, Origin: origin },
+    });
+
+  /* ── 1. a ticket is one-use and expires ─────────────────────────────── */
+
+  console.log('-- agent runtime ticket --');
+  try {
+    const runtime = await admin('GET', '/v1/admin/agent/runtime');
+    if (!rep.check('the runtime is enabled, so a ticket can exist at all', runtime.data?.enabled, true)) {
+      throw new Error('AGENT_RUNTIME is off; start the stack with test-support/dev.sh');
+    }
+
+    const operator = await inviteSession('ticket');
+    if (!rep.check('a real operator session was created for the ticket', typeof operator.cookie, 'string')) {
+      throw new Error(operator.error ?? 'no session cookie');
+    }
+
+    const baseline = await runtimeSessions();
+    rep.check('the runtime reports a session count before any socket', baseline >= 0, true);
+
+    const minted = await api(WORKER_URL, 'POST', '/v1/admin/agent/ticket', {
+      cookie: operator.cookie,
+      headers: { Origin: WORKER_URL },
+      body: {},
+    });
+    rep.check('a signed-in human can mint one ticket', minted.status, 201);
+    rep.check('the mint answer carries a ticket', typeof minted.data?.ticket, 'string');
+    const ticket = minted.data?.ticket;
+    if (typeof ticket !== 'string') throw new Error('no ticket was minted');
+
+    const first = socket(ticket, operator.cookie);
+    const firstHandshake = await first.connect();
+    rep.check('a fresh ticket opens exactly one socket (HTTP 101)', firstHandshake.status, 101);
+    await sleep(300);
+    const withOne = await runtimeSessions();
+    rep.check(
+      'the accepted socket is a real session inside the object, not only a handshake',
+      withOne,
+      baseline + 1
+    );
+
+    const second = socket(ticket, operator.cookie);
+    const secondHandshake = await second.connect();
+    rep.check(
+      'the same ticket cannot open a second socket (a reusable ticket is a socket for anyone who reads one log line)',
+      secondHandshake.status,
+      401
+    );
+    rep.check(
+      'the refused upgrade admits no socket at all, so there is no close code to hide a live session behind',
+      second.closeCode,
+      null
+    );
+    await sleep(300);
+    rep.check(
+      'a spent ticket does not increase the object session count (no second session was admitted)',
+      await runtimeSessions(),
+      baseline + 1
+    );
+
+    first.close();
+    second.close();
+    await sleep(400);
+    rep.check('after the accepted socket closes the count returns to the baseline', await runtimeSessions(), baseline);
+
+    // Expiry is proved with the real 60 s TTL rather than by editing D1: the
+    // clock is the mechanism under test, and a hand-edited row would also
+    // rewrite what a second process sees.
+    const expiring = await api(WORKER_URL, 'POST', '/v1/admin/agent/ticket', {
+      cookie: operator.cookie,
+      headers: { Origin: WORKER_URL },
+      body: {},
+    });
+    rep.check('a second ticket is minted for the expiry case', expiring.status, 201);
+    const expiringTicket = expiring.data?.ticket;
+    if (typeof expiringTicket !== 'string') throw new Error('no ticket was minted for the expiry case');
+
+    console.log('  (waiting 61 s for the real 60 s ticket TTL to pass; not editing D1)');
+    await sleep(61_500);
+
+    const expired = socket(expiringTicket, operator.cookie);
+    const expiredHandshake = await expired.connect();
+    rep.check(
+      'an expired ticket is refused (an expiry that is not enforced is a permanent socket)',
+      expiredHandshake.status,
+      401
+    );
+    rep.check('an expired ticket admits no socket, so it has no close code', expired.closeCode, null);
+    await sleep(300);
+    rep.check(
+      'an expired ticket leaves the object session count untouched',
+      await runtimeSessions(),
+      baseline
+    );
+    expired.close();
+  } catch (error) {
+    rep.checkFn(`ticket lifecycle could not be completed: ${error.message}`, () => false);
+  }
+
+  /* ── 2. a window belongs to the operator who opened it ──────────────── */
+
+  console.log('-- autonomy window ownership --');
+  try {
+    const owner = await inviteSession('window-owner');
+    const other = await inviteSession('window-other');
+    if (
+      !rep.check('the window owner has a real session', typeof owner.cookie, 'string') ||
+      !rep.check('a different operator has a real session', typeof other.cookie, 'string')
+    ) {
+      throw new Error(owner.error ?? other.error ?? 'a session was not created');
+    }
+    rep.check('the two actors are distinct operators', owner.email === other.email, false);
+
+    const enabled = await api(WORKER_URL, 'POST', '/v1/admin/agent/autonomy', {
+      cookie: owner.cookie,
+      headers: { Origin: WORKER_URL },
+      body: {
+        ttl_s: 600,
+        sms_cap: 2,
+        write_cap: 2,
+        recipients: ['+15555550199'],
+      },
+    });
+    rep.check('the owner opens an autonomy window with a live grant', enabled.status, 201);
+    rep.check('the window minted at least one grant for the act', (enabled.data?.grants ?? []).length >= 1, true);
+
+    const seenByOwner = await api(WORKER_URL, 'GET', '/v1/admin/agent/autonomy', {
+      cookie: owner.cookie,
+      headers: { Origin: WORKER_URL },
+    });
+    const seenByOther = await api(WORKER_URL, 'GET', '/v1/admin/agent/autonomy', {
+      cookie: other.cookie,
+      headers: { Origin: WORKER_URL },
+    });
+    rep.check('the owner reads the window as theirs', seenByOwner.data?.mine, true);
+    rep.check(
+      'a different operator reads the same window as not theirs (the console can say so before anyone tries)',
+      seenByOther.data?.mine,
+      false
+    );
+
+    // The model stub emits one send_sms tool call for this marker. The act is
+    // refused by authorizeAct before any grant or SMS handler is reached.
+    const actFromOther = await api(WORKER_URL, 'POST', '/v1/admin/agent/say', {
+      cookie: other.cookie,
+      headers: { Origin: WORKER_URL },
+      body: { message: '[[ACT:send_sms]] pool window ownership probe' },
+    });
+    const otherCalls = Array.isArray(actFromOther.data?.calls) ? actFromOther.data.calls : [];
+    rep.check('the other operator reaches the act path and gets an answer', actFromOther.status, 200);
+    rep.check('the turn attempted exactly the send_sms act', otherCalls[0]?.tool, 'send_sms');
+    rep.check(
+      'the other operator is refused with autonomy_other_session, not silently allowed',
+      otherCalls[0]?.result?.reason,
+      'autonomy_other_session'
+    );
+    rep.check(
+      'the other operator is refused at the authority layer, not later by a missing grant (no_grant would blame the grant table)',
+      otherCalls[0]?.result?.reason === 'no_grant',
+      false
+    );
+    rep.check(
+      'no act was allowed for the other operator',
+      otherCalls.every((call) => call?.ok === false),
+      true
+    );
+
+    // The control: the owner's identical turn gets past authority and fails
+    // later on the deliberately unknown device, which is what proves the
+    // refusal above is ownership and not a globally closed window.
+    const actFromOwner = await api(WORKER_URL, 'POST', '/v1/admin/agent/say', {
+      cookie: owner.cookie,
+      headers: { Origin: WORKER_URL },
+      body: { message: '[[ACT:send_sms]] pool window ownership probe' },
+    });
+    const ownerCalls = Array.isArray(actFromOwner.data?.calls) ? actFromOwner.data.calls : [];
+    const ownerReason = ownerCalls[0]?.result?.reason;
+    rep.check('the owner reaches the same act path', actFromOwner.status, 200);
+    rep.checkFn(
+      `the owner's act is decided on its own merits (got ${JSON.stringify(ownerReason)}), not refused as another session`,
+      () => ownerReason !== 'autonomy_other_session' && ownerReason !== 'no_grant' && ownerReason !== 'autonomy_off'
+    );
+
+    const revoked = await api(WORKER_URL, 'DELETE', '/v1/admin/agent/autonomy', {
+      cookie: owner.cookie,
+      headers: { Origin: WORKER_URL },
+    });
+    rep.check('the owner can close the window afterwards', revoked.status, 200);
+  } catch (error) {
+    rep.checkFn(`window ownership could not be completed: ${error.message}`, () => false);
+  }
+
+  /* ── 3. a repeated webhook delivery answers once ────────────────────── */
+
+  console.log('-- webhook delivery replay --');
+  try {
+    const created = await admin('POST', '/v1/admin/webhooks', { name: 'pool replay probe' });
+    rep.check('a webhook can be created with a sealable secret', created.status, 201);
+    rep.check('the create answer shows the signing secret exactly once', typeof created.data?.secret, 'string');
+    const hookId = created.data?.id;
+    const secret = created.data?.secret;
+    if (typeof hookId !== 'string' || typeof secret !== 'string') {
+      throw new Error('webhook was not created with an id and secret');
+    }
+
+    const bodyText = JSON.stringify({ message: `pool webhook ping ${Date.now()}` });
+    const signature = crypto.createHmac('sha256', secret).update(bodyText).digest('hex');
+    const deliveryId = `pool-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+
+    const deliver = async (sig, id) => {
+      const response = await fetch(`${WORKER_URL}/v1/webhooks/${hookId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-dakflare-signature': `sha256=${sig}`,
+          'x-dakflare-delivery': id,
+        },
+        body: bodyText,
+      });
+      return { status: response.status, data: await response.json().catch(() => null) };
+    };
+
+    const before = (await modelServed()).length;
+
+    const first = await deliver(signature, deliveryId);
+    rep.check('a correctly signed delivery is accepted with 2xx', first.status >= 200 && first.status < 300, true);
+    rep.check('the first delivery is not marked as a replay', first.data?.replayed, false);
+    rep.check('the first delivery carries a model answer', typeof first.data?.answer, 'string');
+    rep.check('the first delivery answer is not empty', (first.data?.answer ?? '') !== '', true);
+
+    const afterFirst = (await modelServed()).length;
+    rep.check('the first delivery ran exactly one model turn', afterFirst - before, 1);
+
+    const deliveriesAfterFirst = await admin('GET', `/v1/admin/webhooks/${hookId}/deliveries`);
+    const rowsAfterFirst = (deliveriesAfterFirst.data?.deliveries ?? []).filter((row) => row.id === deliveryId);
+    rep.check('the first delivery left exactly one delivery row', rowsAfterFirst.length, 1);
+    rep.check('that delivery row succeeded', rowsAfterFirst[0]?.status, 'succeeded');
+    rep.check(
+      'the delivery row stores the answer the caller received',
+      rowsAfterFirst[0]?.answer_text,
+      first.data?.answer
+    );
+
+    const second = await deliver(signature, deliveryId);
+    rep.check('the repeated delivery is answered with 2xx', second.status >= 200 && second.status < 300, true);
+    rep.check('the repeated delivery is marked as a replay', second.data?.replayed, true);
+    rep.check(
+      'the replay returns the recorded answer, not a newly generated one',
+      second.data?.answer,
+      first.data?.answer
+    );
+
+    const afterSecond = (await modelServed()).length;
+    rep.check(
+      'the replay ran no second model/agent turn (a replay is a read of the delivery row, not a retry)',
+      afterSecond - afterFirst,
+      0
+    );
+
+    const deliveriesAfterSecond = await admin('GET', `/v1/admin/webhooks/${hookId}/deliveries`);
+    const rowsAfterSecond = (deliveriesAfterSecond.data?.deliveries ?? []).filter((row) => row.id === deliveryId);
+    rep.check(
+      'exactly one delivery row exists for the delivery identity after the replay',
+      rowsAfterSecond.length,
+      1
+    );
+
+    const wrongSameId = await deliver('0'.repeat(64), deliveryId);
+    rep.check('a wrong signature is refused on the replay attempt', wrongSameId.status, 401);
+
+    const wrongNewId = `pool-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const wrongFresh = await deliver('0'.repeat(64), wrongNewId);
+    rep.check('a wrong signature is refused on a fresh delivery attempt', wrongFresh.status, 401);
+
+    const afterWrong = await admin('GET', `/v1/admin/webhooks/${hookId}/deliveries`);
+    const wrongRows = (afterWrong.data?.deliveries ?? []).filter((row) => row.id === wrongNewId);
+    rep.check(
+      'a refused signature leaves no delivery row behind (an unsigned caller cannot spend a turn)',
+      wrongRows.length,
+      0
+    );
+    rep.check(
+      'refused signatures ran no model turn',
+      (await modelServed()).length - afterSecond,
+      0
+    );
+
+    const removed = await admin('DELETE', `/v1/admin/webhooks/${hookId}`);
+    rep.check('the webhook can be removed afterwards', removed.status, 200);
+  } catch (error) {
+    rep.checkFn(`webhook replay could not be completed: ${error.message}`, () => false);
+  }
+
+  const allOk = rep.print();
+  console.log(allOk ? 'AGENT POOL CASES PASSED' : 'AGENT POOL CASES FAILED');
+  process.exit(allOk ? 0 : 1);
+}
+
 /* ───────────────────────────────── stub command ──────────────────────────── */
 
 async function cmdStub() {
@@ -5651,6 +6007,7 @@ const COMMANDS = {
   auth: cmdAuth,
   password: cmdPassword,
   'lockout-global': cmdLockoutGlobal,
+  'agent-pool': cmdAgentPool,
   'password-rotate': cmdPasswordRotate,
   magic: cmdMagic,
   proxy: cmdProxy,

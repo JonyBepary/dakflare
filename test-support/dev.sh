@@ -14,9 +14,9 @@
 # database: the suite writes rules and messages, and those must not land in the
 # database a real phone will pair against.
 #
-# Overridable: WORKER_PORT, STUB_PORT, ACK_TIMEOUT_MS, LEASE_MS, OFFLINE_ALERT_MS,
-# STALE_SOCKET_MS, AUTH_PEPPER, AUTH_LOCKOUT_WINDOW_SECONDS, AUTH_PASSWORD_MODE,
-# AUTH_BASE_URL, AUTH_TRUSTED_ORIGINS.
+# Overridable: WORKER_PORT, STUB_PORT, MODEL_PORT, ACK_TIMEOUT_MS, LEASE_MS,
+# OFFLINE_ALERT_MS, STALE_SOCKET_MS, AUTH_PEPPER, AUTH_LOCKOUT_WINDOW_SECONDS,
+# AUTH_PASSWORD_MODE, AUTH_BASE_URL, AUTH_TRUSTED_ORIGINS.
 #
 #   ./test-support/dev.sh
 #
@@ -35,6 +35,11 @@ WORKER_DIR="$ROOT/worker"
 
 WORKER_PORT="${WORKER_PORT:-8787}"
 STUB_PORT="${STUB_PORT:-8790}"
+# A deterministic OpenAI-compatible chat endpoint. Workers AI cannot run under
+# `wrangler dev --local` (the binding needs a real account), so an agent turn or
+# a webhook delivery has no model at all without this. It is a fixture, not a
+# provider: the conformance assertions stay on Worker HTTP answers and D1 rows.
+MODEL_PORT="${MODEL_PORT:-8791}"
 ACK_TIMEOUT_MS="${ACK_TIMEOUT_MS:-1500}"
 # The lease must be LONGER than the ack timeout, as it is in production
 # (60 s vs 8 s), or the two timers cannot be told apart: `ack_wake` would close
@@ -70,6 +75,15 @@ PIDS+=($!)
 
 for _ in $(seq 1 60); do
   if curl -sf "http://127.0.0.1:$STUB_PORT/__log" >/dev/null 2>&1; then break; fi
+  sleep 0.1
+done
+
+echo "[dev.sh] starting deterministic model stub on :$MODEL_PORT"
+MODEL_PORT="$MODEL_PORT" node "$HERE/model-stub.mjs" &
+PIDS+=($!)
+
+for _ in $(seq 1 60); do
+  if curl -sf "http://127.0.0.1:$MODEL_PORT/__health" >/dev/null 2>&1; then break; fi
   sleep 0.1
 done
 
@@ -120,6 +134,11 @@ export HARNESS_LEASE_MS="$LEASE_MS"
     --var "FCM_BASE_URL:http://127.0.0.1:$STUB_PORT" \
     --var "GOOGLE_TOKEN_URL:http://127.0.0.1:$STUB_PORT/token" \
     --var "FCM_SERVICE_ACCOUNT_JSON:$SA_JSON" \
+    --var "AI_CHAT_PROVIDER:openai-compatible" \
+    --var "AI_CHAT_MODEL:model-stub" \
+    --var "AI_CHAT_BASE_URL:http://127.0.0.1:$MODEL_PORT/v1" \
+    --var "AI_PROVIDER_API_KEY:dev-model-stub-key" \
+    --var "WEBHOOK_SECRET_KEY:dev-webhook-seal-key" \
     "${EXTRA_VARS[@]}"
 ) &
 PIDS+=($!)

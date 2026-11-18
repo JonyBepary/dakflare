@@ -182,6 +182,15 @@ dev-stack harness covers the socket: refused without a ticket, refused on a wron
 approval, a revoked or expired grant refused, and a repeated key returning `replayed: true`
 with a single command.
 
-Only a real Workers pool can prove eviction, hibernation wake, the browser `Origin`/cookie
-matrix, live-model tool calling and reconnect across a deploy. Those are named as
-smoke-tested, not asserted.
+Only a real Workers pool can prove more than a pure function can. `node
+dakflare_test_harness.mjs agent-pool` now asserts, on observable state rather than source
+text: that a minted ticket opens exactly one socket (`101`), that the same ticket is refused
+on a second upgrade with no session admitted, and that the real 60-second TTL ends it (the
+harness waits, it does not edit D1); that an autonomy window opened by operator A refuses
+operator B's act with `autonomy_other_session` — not `no_grant`, and not silently — while
+A's identical act is decided on its merits; and that a signed webhook delivery answers once,
+that an identical repeat returns the same answer with `replayed: true`, exactly one
+`webhook_deliveries` row and no second model turn, and that a wrong signature is refused on
+both a replay and a fresh delivery. Eviction, hibernation wake, the browser `Origin`/cookie
+matrix, live-model tool calling and reconnect across a deploy remain smoke-tested, not
+asserted.
