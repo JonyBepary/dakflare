@@ -1002,7 +1002,7 @@
 
 						<div class="s1-grid">
 							<div class="field">
-								<label class="label" for="ai-s1-model">Model</label>
+								<label class="label" for="ai-s1-model">System One model</label>
 								{#if provider === 'workers-ai'}
 									<!-- Three aliases exist and nothing else. A free-text typo would be
 									     mapped to clef at ask time and answered silently. -->
