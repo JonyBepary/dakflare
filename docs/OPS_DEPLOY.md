@@ -87,6 +87,14 @@ cd worker && npm run deploy        # builds the console, then `cf deploy`
 account credential never lives in the repository, and a deploy is a decision rather than a
 consequence of merging.
 
+Both deploy scripts first run `scripts/assert-clean-dashboard.mjs`, which refuses when
+`dashboard/src` differs from HEAD. `cf deploy` uploads `worker/public/admin`, and that is a
+build artifact: nothing in it says which source produced it. On 2026-11-19 a work lane built
+the console to verify its own work, and `deploy:no-dashboard` — which means *do not rebuild*,
+not *do not upload* — published those files to production a commit early. The guard turns
+that into a refusal with the file list. `--force` (or `DAKFLARE_ALLOW_DIRTY_ASSETS=1`) ships
+anyway, and says so.
+
 ## Order of operations for a schema change
 
 1. Back up: a Time Travel bookmark, or an export. `docs/OPS_BACKUP.md`.
@@ -106,7 +114,7 @@ pipeline that applies one on every push will eventually apply one nobody read.
 
 ## Traps when scripting `cf`
 
-Four that have each cost this repository something:
+Five that have each cost this repository something:
 
 - **An aborted destructive command exits `0`.** In a non-interactive session a delete without
   `--force` prints `Aborted.` to stderr and returns success. A script that trusts the exit status
@@ -119,6 +127,10 @@ Four that have each cost this repository something:
   Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
   `npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
 
+- **`deploy:no-dashboard` still uploads the console.** The name reads as "Worker only"; it
+  means "do not run the dashboard build first". Whatever is in `worker/public/admin` goes
+  live, including a build another process left there. The guard described under Deploying is
+  what makes this safe now; `deploy:worker` is the honest name for the same command.
 - **`cf deploy` exits `1` on a successful deploy, because of the Workflow trigger.** Since
   the v7.0 workflow export, every deploy ends with:
 

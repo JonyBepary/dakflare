@@ -9,8 +9,8 @@
 		"dev": "wrangler dev --local",
 		"dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
 		"build:dashboard": "npm --prefix ../dashboard ci --no-audit --no-fund && npm --prefix ../dashboard run build",
-		"deploy": "npm run build:dashboard && cf deploy",
-		"deploy:no-dashboard": "cf deploy",
+		"deploy": "node scripts/assert-clean-dashboard.mjs && npm run build:dashboard && cf deploy",
+		"deploy:no-dashboard": "node scripts/assert-clean-dashboard.mjs && cf deploy",
 		"smoke": "./scripts/smoke.sh",
 		"cf:check": "cf deploy --dry-run",
 		"verify:deploy": "node scripts/verify-deploy.mjs",
@@ -19,7 +19,8 @@
 		"test": "vitest run",
 		"check:config": "node scripts/check-config.mjs",
 		"migrate:local": "wrangler d1 migrations apply sms_gateway --local",
-		"migrate:preview": "wrangler d1 migrations apply sms_gateway_preview --remote"
+		"migrate:preview": "wrangler d1 migrations apply sms_gateway_preview --remote",
+		"deploy:worker": "node scripts/assert-clean-dashboard.mjs && cf deploy"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.8.2",
