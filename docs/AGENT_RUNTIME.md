@@ -143,6 +143,51 @@ through the existing queue, which is the same gate a human write goes through.
 - Cookies are `SameSite=Strict` and `Path=/`, which already closes the cross-site case; the
   `Origin` check makes it explicit rather than incidental.
 
+## A conversation, a file, and a turn that runs once
+
+The panel used to be stateless by design, and that is what made it feel unlike an agent:
+every question began from nothing. Three additions, all admin-scoped, none of them able to
+act without the authority rules above.
+
+**The conversation is the operator's, and readable.** `GET /v1/admin/agent/conversation`
+returns the transcript the Sessions API already holds for that operator — `{conversation,
+messages:[{id, role, text, at}], truncated}` with `?limit=1-100` (default 40, newest last).
+`DELETE` clears it. Both go through the Durable Object rather than D1 because that is where
+the transcript lives; the route's action is absent from `SCOPE_FOR_ACTION`, so an agent
+token cannot read a human's history.
+
+**Attachments are metadata in D1 and bytes in R2.** `POST /v1/admin/agent/attachments`
+takes one multipart `file`:
+
+| Limit | Value | Why |
+|---|---|---|
+| One file | ≤ 1 MiB | A single R2 object per upload; a bigger body is refused with the limit in the message |
+| Kept per operator | 3 | The panel has room for three chips; more is a decision nobody made |
+| Lifetime | 24 h | An attachment is a prompt ingredient, not a document store |
+| Text budget per turn | 64 KiB, all attachments | Bounded so three files cannot crowd out the transcript |
+| Text types | `.txt .md .json .csv .log .yaml .yml .eml`, or `text/*` | Read into the user message, never the system prompt |
+| Images and others | named only | The prompt says the model cannot see them. An agent that pretends to read a screenshot is worse than one that says it cannot |
+
+An attachment past its 24 h is refused by name rather than silently dropped: an operator who
+sees their file listed and not used learns nothing, and a model that was handed an empty
+version of it answers confidently about nothing.
+
+**A turn carries a key, and a replay is a read.** `say` and the socket's `ask` accept
+`idempotencyKey` — 8–64 characters of `A-Z a-z 0-9 _ -`. The same key returns the recorded
+answer with `replayed: true`, without a second model call and without a second transcript row;
+the stream id is derived from the key, so a reconnect and a retry land on the same turn. The
+socket forced this from the start; the HTTP path now matches it, which is what makes `Try
+again` safe to press.
+
+**Two ceilings, not one.** `agent_autonomy.daily_sms_cap` (default 20) bounds the
+deployment's day; the per-window `sms_cap` bounds one operator's hour. `authorizeAct` reads
+the daily ceiling before it looks at a grant, so two short windows on the same day cannot
+double the total.
+
+**A proposal says why it exists.** A proposal created because an act was refused for
+authority carries `origin: "act_refused"` in its payload, so the card can say it was
+prepared rather than chosen — the same states, two different causes.
+
 ## Inbound webhooks
 
 A service can wake the agent without a browser session. An operator creates a hook with
