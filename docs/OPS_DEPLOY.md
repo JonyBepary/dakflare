@@ -134,10 +134,13 @@ Four that have each cost this repository something:
   `script_name: dakflare-worker` with a `modified_on` inside the deploy minute. Measured
   on 2026-11-19 with version `9675e667`: exit `1`, new routes answering `401` instead of
   `404`, and the workflow listed and current. So the exit code is wrong, not the deploy.
-  A release gate must confirm three things instead of the status — the new version id in
-  `cf workers deployments list`, the newest route answering `401` rather than `404`, and
-  `modified_on` on `cf workflows list`. Re-running `cf workers triggers deploy` alone
-  exits `0` and changes nothing, which is a safe second opinion when in doubt.
+  A release gate therefore reads the evidence, not the status: `npm run verify:deploy` in
+  `worker/` checks the newest version id, four live routes (two of them answering `401`
+  rather than `404`, which is how a route that exists differs from one that was never
+  deployed), the workflow still bound to the deployed script, and an empty unapplied
+  migration ledger. `node scripts/verify-deploy.mjs --expect <id8>` pins the version the
+  build was supposed to become. Re-running `cf workers triggers deploy` alone exits `0`
+  and changes nothing, which is a safe second opinion when in doubt.
 
 ## Rolling back
 
