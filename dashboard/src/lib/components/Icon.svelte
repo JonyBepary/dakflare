@@ -33,6 +33,7 @@
 		| 'fingerprint'
 		| 'history'
 		| 'mail'
+		| 'paperclip'
 		| 'archive'
 		| 'unarchive'
 		| 'undo'
@@ -178,6 +179,8 @@
 	{:else if name === 'mail'}
 		<rect x="3" y="5" width="18" height="14" rx="2.5" />
 		<path d="m4.5 7.5 6.6 4.9a1.5 1.5 0 0 0 1.8 0l6.6-4.9" />
+	{:else if name === 'paperclip'}
+		<path d="M20 11.5 12.2 19.3a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.55 1.55 0 0 1-2.2-2.2l7.4-7.4" />
 	{:else if name === 'archive'}
 		<rect x="3" y="3.5" width="18" height="5" rx="1.2" />
 		<path d="M4.75 8.5v10A1.5 1.5 0 0 0 6.25 20h11.5a1.5 1.5 0 0 0 1.5-1.5v-10" />

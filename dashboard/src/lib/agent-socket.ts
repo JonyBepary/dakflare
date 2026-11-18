@@ -20,12 +20,24 @@
  *     → { type:"tool",   tool, ok, result }         after one of those calls settles
  *     → { type:"answer", text, calls, proposals? }  at the end
  *     → { type:"error",  reason, message }          when the turn was refused
- *     ← { type:"ask", message, idempotencyKey }
+ *     ← { type:"ask", message, idempotencyKey, attachmentIds? }
  *     ← { type:"resume", streamId, from }           replay from a sequence, then tail
  *
- *   GET /agents/assistant/assistant/streams/<streamId>?from=<seq>
+ *   GET  /agents/assistant/assistant/streams/<streamId>?from=<seq>
  *     text/event-stream: one frame per `data:` line with its sequence in `id:`,
  *     ending in `event: done` (or `event: timeout` while the turn is still live)
+ *
+ *   GET    /v1/admin/agent/conversation?limit=40
+ *     { conversation, messages:[{id, role, text, at}], truncated }   oldest first
+ *   DELETE /v1/admin/agent/conversation                            clears it
+ *   GET    /v1/admin/agent/attachments                             the kept files
+ *   POST   /v1/admin/agent/attachments   multipart `file`
+ *     201 { id, name, bytes, kind:"text"|"image"|"other", expires_at }
+ *   DELETE /v1/admin/agent/attachments/:id                         removes the file
+ *
+ *   POST /v1/admin/agent/say  { message, context?, attachmentIds?, idempotencyKey? }
+ *     → { answer, proposals?, withheld?, replayed? }   the route that keeps a
+ *     conversation; `assistant.ts` reads it, because it answers like `/chat`.
  *
  *   GET    /v1/admin/agent/runtime   { enabled, schemaVersion, sessions, pinnedName }
  *   GET    /v1/admin/agent/autonomy  { enabled, expiresAt, caps:{sms,writes}, usage:{day,tokens,writes,sms} }
@@ -75,13 +87,19 @@
  * double — the one frame the operator is waiting for.
  */
 
-import { failureFromAnswer, type Failure, type Proposal } from './assistant';
+import { failureFromAnswer, failureLine, type Failure, type Proposal } from './assistant';
 
 /* ------------------------------------------------------------- endpoints */
 
 const TICKET_PATH = '/v1/admin/agent/ticket';
 const RUNTIME_PATH = '/v1/admin/agent/runtime';
 const AUTONOMY_PATH = '/v1/admin/agent/autonomy';
+
+/** The operator's own durable conversation: the transcript the panel renders. */
+const CONVERSATION_PATH = '/v1/admin/agent/conversation';
+
+/** Files the operator attached to a question. Kept for a day, at most three. */
+const ATTACHMENTS_PATH = '/v1/admin/agent/attachments';
 
 /** The object name is pinned server-side; the path repeats it and chooses nothing. */
 const SOCKET_PATH = '/agents/assistant/assistant';
@@ -164,11 +182,20 @@ export type AgentFrame = Sequenced &
 				streamId: string;
 				idempotencyKey: string | null;
 				conversationId: string | null;
+				/** The gateway had already answered this key: nothing ran twice. */
+				replayed: boolean;
 		  }
 		| { type: 'status'; phase: string }
 		| { type: 'token'; text: string }
 		| { type: 'tool'; name: string; ok: boolean; reason: string | null; code: string | null }
-		| { type: 'answer'; text: string; calls: number; proposals: Proposal[] }
+		| {
+				type: 'answer';
+				text: string;
+				calls: number;
+				proposals: Proposal[];
+				/** The gateway answered this key before; nothing ran twice. */
+				replayed: boolean;
+		  }
 		| { type: 'calls'; calls: AgentCall[] }
 		| { type: 'error'; reason: string; message: string }
 	);
@@ -316,6 +343,9 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				streamId,
 				idempotencyKey: readString(raw.idempotencyKey),
 				conversationId: readString(raw.conversationId),
+				// The ask's answer may carry the replay marker. Absent is `false`:
+				// this panel never claims a replay it was not told about.
+				replayed: raw.replayed === true,
 				seq,
 				at
 			};
@@ -353,6 +383,9 @@ export function readAgentFrame(raw: unknown): AgentFrame | null {
 				text: raw.text,
 				calls: readFinite(raw.calls) ?? 0,
 				proposals: readProposals(raw.proposals),
+				// The replay marker may ride either the turn's first frame or its
+				// terminal one; absent means "not told", never "not replayed".
+				replayed: raw.replayed === true,
 				seq,
 				at
 			};
@@ -435,6 +468,8 @@ export interface AgentTurn {
 	streamId: string | null;
 	/** The conversation the server filed the turn under, when it said. */
 	conversationId: string | null;
+	/** The gateway answered this key before: the same turn, not a second one. */
+	replayed: boolean;
 	/** The last sequence applied. `-1` before the first frame. */
 	seq: number;
 	/** The server's latest progress phase, cleared by a terminal frame. */
@@ -454,6 +489,7 @@ export function beginTurn(question: string, key: string): AgentTurn {
 		status: 'streaming',
 		streamId: null,
 		conversationId: null,
+		replayed: false,
 		seq: -1,
 		phase: null
 	};
@@ -587,6 +623,7 @@ export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame, at?: number)
 					// one, not the one this panel happened to mint.
 					key: frame.idempotencyKey ?? turn.key,
 					conversationId: frame.conversationId ?? turn.conversationId,
+					replayed: frame.replayed || turn.replayed,
 					seq
 				},
 				fresh: true,
@@ -621,6 +658,7 @@ export function applyAgentFrame(turn: AgentTurn, frame: AgentFrame, at?: number)
 					text: frame.text !== '' ? frame.text : turn.text,
 					calls: frame.calls,
 					proposals: frame.proposals,
+					replayed: frame.replayed || turn.replayed,
 					phase: null,
 					status: 'answered',
 					seq
@@ -770,8 +808,16 @@ export class AgentLink {
 	 * `waiting` is not a failure: the link is still being opened, and the caller
 	 * keeps the question and its key for the moment it opens. `refused` means the
 	 * question itself cannot be sent at all.
+	 *
+	 * `attachmentIds` are the stored files the operator chose. They travel on the
+	 * same frame as the question and are omitted entirely when there are none, so
+	 * a deployment that predates them receives exactly the frame it always did.
 	 */
-	ask(message: string, key: string = newIdempotencyKey()): AgentSendOutcome {
+	ask(
+		message: string,
+		key: string = newIdempotencyKey(),
+		attachmentIds: string[] = []
+	): AgentSendOutcome {
 		const text = message.trim().slice(0, MAX_QUESTION);
 		if (text === '') {
 			return { status: 'refused', message: 'Nothing was sent: the question was empty.' };
@@ -782,8 +828,15 @@ export class AgentLink {
 			return { status: 'waiting', message: 'The agent link is not open, so nothing was sent.' };
 		}
 
+		const frame: Record<string, unknown> = {
+			type: 'ask',
+			message: text,
+			idempotencyKey: key
+		};
+		if (attachmentIds.length > 0) frame.attachmentIds = attachmentIds;
+
 		try {
-			socket.send(JSON.stringify({ type: 'ask', message: text, idempotencyKey: key }));
+			socket.send(JSON.stringify(frame));
 		} catch {
 			return {
 				status: 'waiting',
@@ -1428,7 +1481,9 @@ async function request(path: string, init: RequestInit = {}): Promise<Raw> {
 	const headers = new Headers(init.headers);
 	headers.set('Accept', 'application/json');
 	headers.set(ADMIN_HEADER, '1');
-	if (init.body !== undefined && init.body !== null && !headers.has('Content-Type')) {
+	// Only a JSON string is this console's own body. A File upload must keep the
+	// browser's multipart boundary, so nothing is set for it.
+	if (typeof init.body === 'string' && !headers.has('Content-Type')) {
 		headers.set('Content-Type', 'application/json');
 	}
 
@@ -1499,6 +1554,228 @@ export async function readAgentRuntime(): Promise<AgentRuntimeOutcome> {
 			pinnedName: readString(raw.body.pinnedName)
 		}
 	};
+}
+
+/* ------------------------------------------------------- the conversation */
+
+/** The panel asks for the last forty messages: enough for a working session. */
+export const CONVERSATION_LIMIT = 40;
+
+/** One saved message. `at` is the gateway's instant, `null` when it sent none. */
+export interface AgentConversationMessage {
+	id: string;
+	role: 'user' | 'assistant';
+	text: string;
+	at: number | null;
+}
+
+export interface AgentConversation {
+	/** The conversation's own id, when the gateway named one. */
+	id: string | null;
+	/** Oldest first, newest last: the order it is read in. */
+	messages: AgentConversationMessage[];
+	/** True when the gateway held more than it sent. */
+	truncated: boolean;
+}
+
+export type ConversationOutcome =
+	| { status: 'ok'; conversation: AgentConversation }
+	| { status: 'failed'; failure: Failure };
+
+export type ClearOutcome = { status: 'ok' } | { status: 'failed'; failure: Failure };
+
+function parseMessage(value: unknown): AgentConversationMessage | null {
+	if (!isRecord(value)) return null;
+	const id = readString(value.id);
+	const text = typeof value.text === 'string' ? value.text : null;
+	const role = value.role === 'user' || value.role === 'assistant' ? value.role : null;
+	if (id === null || text === null || role === null || text.trim() === '') return null;
+	return { id, role, text, at: readInstant(value.at) };
+}
+
+function parseConversation(value: unknown): AgentConversation | null {
+	if (!isRecord(value) || !Array.isArray(value.messages)) return null;
+	const messages: AgentConversationMessage[] = [];
+	for (const entry of value.messages) {
+		const message = parseMessage(entry);
+		// A malformed row is dropped rather than rendered as half a turn.
+		if (message !== null) messages.push(message);
+	}
+	const named = isRecord(value.conversation) ? value.conversation : null;
+	return {
+		id: readString(value.conversation) ?? (named === null ? null : readString(named.id)),
+		messages,
+		truncated: value.truncated === true
+	};
+}
+
+/**
+ * `GET /v1/admin/agent/conversation` — the operator's durable history.
+ *
+ * A failed read is not an empty conversation. The panel says the transcript
+ * could not be loaded and still answers; it never prints "no earlier turns" for
+ * a gateway it could not reach.
+ */
+export async function readConversation(limit = CONVERSATION_LIMIT): Promise<ConversationOutcome> {
+	const raw = await request(`${CONVERSATION_PATH}?limit=${Math.max(1, Math.floor(limit))}`);
+	if (!raw.ok) return { status: 'failed', failure: failureFromAnswer(raw.status, raw.body) };
+	const conversation = parseConversation(raw.body);
+	if (conversation === null) return { status: 'failed', failure: { kind: 'unreadable' } };
+	return { status: 'ok', conversation };
+}
+
+/** `DELETE /v1/admin/agent/conversation` — clears the saved transcript. */
+export async function clearConversation(): Promise<ClearOutcome> {
+	const raw = await request(CONVERSATION_PATH, { method: 'DELETE' });
+	if (!raw.ok) return { status: 'failed', failure: failureFromAnswer(raw.status, raw.body) };
+	return { status: 'ok' };
+}
+
+/* ---------------------------------------------------------- the attachments */
+
+/** The contract's limits, named once so the panel's copy and its checks agree. */
+export const ATTACHMENT_MAX_BYTES = 1_048_576;
+export const ATTACHMENT_MAX_KEPT = 3;
+export const ATTACHMENT_TTL_HOURS = 24;
+
+export type AttachmentKind = 'text' | 'image' | 'other';
+
+/**
+ * One stored file.
+ *
+ * `kind` is the gateway's classification, not this console's guess from a file
+ * extension, and `expiresAt` is its own instant. The panel uses both to stay
+ * honest: an image is named, never described as read, because the chat model on
+ * this deployment cannot see one.
+ */
+export interface AgentAttachment {
+	id: string;
+	name: string;
+	bytes: number;
+	kind: AttachmentKind;
+	expiresAt: number | null;
+}
+
+export type AttachmentsOutcome =
+	| { status: 'ok'; attachments: AgentAttachment[] }
+	| { status: 'failed'; failure: Failure };
+
+export type AttachmentUploadOutcome =
+	| { status: 'ok'; attachment: AgentAttachment }
+	/** `message` is the one line the panel prints, limit included where one applies. */
+	| { status: 'failed'; message: string; failure: Failure };
+
+export type AttachmentDeleteOutcome =
+	| { status: 'ok' }
+	| { status: 'failed'; message: string; failure: Failure };
+
+function parseAttachment(value: unknown): AgentAttachment | null {
+	if (!isRecord(value)) return null;
+	const id = readString(value.id);
+	const name = readString(value.name);
+	const bytes = readFinite(value.bytes);
+	if (id === null || name === null || bytes === null) return null;
+	const kind: AttachmentKind =
+		value.kind === 'text' || value.kind === 'image' || value.kind === 'other'
+			? value.kind
+			: 'other';
+	return { id, name, bytes: Math.max(0, Math.round(bytes)), kind, expiresAt: readInstant(value.expires_at) };
+}
+
+/** Bytes in the operator's units. Binary units, because the limit is 1 MiB. */
+export function attachmentSize(bytes: number): string {
+	const value = Math.max(0, Math.round(bytes));
+	if (value < 1024) return `${value} B`;
+	if (value < 1024 * 1024) {
+		const kib = value / 1024;
+		return `${kib < 10 ? kib.toFixed(1) : Math.round(kib)} KiB`;
+	}
+	return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/** `text`, `image`, `other`, in a word a chip can carry. */
+export function attachmentKindLabel(kind: AttachmentKind): string {
+	return kind === 'image' ? 'image' : kind === 'text' ? 'text' : 'file';
+}
+
+/** A file whose own expiry has passed is shown as expired, never sent. */
+export function attachmentIsExpired(attachment: AgentAttachment, now = Date.now()): boolean {
+	return attachment.expiresAt !== null && attachment.expiresAt <= now;
+}
+
+export function attachmentTooBigLine(name: string, bytes: number): string {
+	return `${name} is ${attachmentSize(bytes)}. The limit is 1 MiB per file.`;
+}
+
+export function attachmentTooManyLine(): string {
+	return `${ATTACHMENT_MAX_KEPT} files are kept at a time. Remove one before adding another.`;
+}
+
+export function attachmentExpiredLine(name: string): string {
+	return `${name} expired. Files are kept ${ATTACHMENT_TTL_HOURS} hours; attach it again.`;
+}
+
+/**
+ * The one line an upload's refusal gets.
+ *
+ * The limits are named where they caused the refusal, so "too big" arrives with
+ * the size and the limit rather than as a bare status code; anything else keeps
+ * the gateway's own sentence through `failureLine`.
+ */
+function uploadRefusal(response: Raw, file: File, failure: Failure): string {
+	if (response.status === 413) return attachmentTooBigLine(file.name, file.size);
+	if (response.status === 409 || response.status === 422) return attachmentTooManyLine();
+	if (response.status === 410) return attachmentExpiredLine(file.name);
+	return failureLine(failure);
+}
+
+export async function readAttachments(): Promise<AttachmentsOutcome> {
+	const raw = await request(ATTACHMENTS_PATH);
+	if (!raw.ok) return { status: 'failed', failure: failureFromAnswer(raw.status, raw.body) };
+
+	// The route may answer with `{attachments: [...]}` or with the list itself.
+	const list = Array.isArray(raw.body)
+		? raw.body
+		: isRecord(raw.body) && Array.isArray(raw.body.attachments)
+			? raw.body.attachments
+			: null;
+	if (list === null) return { status: 'failed', failure: { kind: 'unreadable' } };
+
+	const attachments: AgentAttachment[] = [];
+	for (const entry of list) {
+		const attachment = parseAttachment(entry);
+		if (attachment !== null) attachments.push(attachment);
+	}
+	return { status: 'ok', attachments };
+}
+
+/** `POST /v1/admin/agent/attachments` — one `file`, multipart. */
+export async function uploadAttachment(file: File): Promise<AttachmentUploadOutcome> {
+	const form = new FormData();
+	form.append('file', file, file.name);
+
+	const raw = await request(ATTACHMENTS_PATH, { method: 'POST', body: form });
+	const failure = failureFromAnswer(raw.status, raw.body);
+	if (!raw.ok) return { status: 'failed', message: uploadRefusal(raw, file, failure), failure };
+
+	const attachment = parseAttachment(raw.body);
+	if (attachment === null) {
+		return { status: 'failed', message: failureLine({ kind: 'unreadable' }), failure: { kind: 'unreadable' } };
+	}
+	return { status: 'ok', attachment };
+}
+
+/** `DELETE /v1/admin/agent/attachments/:id` — removing a chip deletes the file. */
+export async function deleteAttachment(id: string): Promise<AttachmentDeleteOutcome> {
+	const raw = await request(`${ATTACHMENTS_PATH}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+	// A file that is already gone is the state the operator asked for. Saying
+	// "removed" would be a claim; saying "no file" would leave a dead chip.
+	if (raw.status === 404) return { status: 'ok' };
+	if (!raw.ok) {
+		const failure = failureFromAnswer(raw.status, raw.body);
+		return { status: 'failed', message: failureLine(failure), failure };
+	}
+	return { status: 'ok' };
 }
 
 /* -------------------------------------------------------------- autonomy */

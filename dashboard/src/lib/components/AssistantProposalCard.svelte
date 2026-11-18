@@ -75,7 +75,7 @@
 
 <li class="proposal">
 	<span class="kind mono">{proposalKindLabel(proposal.kind)}</span>
-	<h3 class="title">{proposal.title}</h3>
+	<h4 class="title">{proposal.title}</h4>
 	{#if proposal.summary !== ''}
 		<p class="summary">{proposal.summary}</p>
 	{/if}
@@ -96,7 +96,15 @@
 		<p class="note">Stages in the editor.</p>
 		{#if stageReady}
 			<div class="actions">
-				<button type="button" class="btn btn-sm" onclick={onstage}>
+				<!-- The visible text stays "Stage the patch"; the name adds the proposal,
+				     because two patches on one answer would otherwise be two controls
+				     with one accessible name. -->
+				<button
+					type="button"
+					class="btn btn-sm"
+					aria-label={`Stage the patch: ${proposal.title}`}
+					onclick={onstage}
+				>
 					<Icon name="branch" size={13} /> Stage the patch
 				</button>
 				<span class="hint">It stays a preview until you accept it there.</span>
@@ -109,7 +117,14 @@
 		{/if}
 	{:else if accepts}
 		<div class="actions">
-			<button type="button" class="btn btn-sm" onclick={onaccept} disabled={accepting} aria-busy={accepting}>
+			<button
+				type="button"
+				class="btn btn-sm"
+				aria-label={`Accept: ${proposal.title}`}
+				onclick={onaccept}
+				disabled={accepting}
+				aria-busy={accepting}
+			>
 				{#if accepting}<Spinner />{:else}<Icon name="check" size={13} />{/if}
 				{accepting ? 'Accepting' : 'Accept'}
 			</button>
@@ -121,7 +136,7 @@
 		</div>
 	{:else}
 		<p class="why">
-			This console has no path for a <span class="mono">{proposal.kind}</span> proposal, so nothing was
+			This console has no path for a <span class="mono kind-inline">{proposal.kind}</span> proposal, so nothing was
 			changed.
 		</p>
 	{/if}
@@ -147,13 +162,16 @@
 		border-radius: var(--df-p-radius-xs);
 		background: var(--df-surface-well);
 		color: var(--df-text-meta);
-		font-size: 10px;
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.1em;
 		line-height: 1.5;
 		text-transform: uppercase;
 	}
 
+	/* A card title sits under the panel's "This turn" heading, so it is an h4:
+	   the heading order is h2 panel, h3 section, h4 card. */
 	.title {
+		margin: 0;
 		font-size: var(--df-p-text-sm);
 		font-weight: 700;
 		line-height: 1.35;
@@ -179,6 +197,12 @@
 		font-size: var(--df-p-text-xs);
 		line-height: 1.5;
 		overflow-wrap: anywhere;
+	}
+
+	/* `.mono` scales to 0.94em, which would put this token under 11px inside an
+	   11px sentence; the size is restated at the floor. */
+	.kind-inline {
+		font-size: var(--df-p-text-xs);
 	}
 
 	/* The button, then its one line of consequence underneath: at 380px the two
@@ -243,17 +267,17 @@
 		overflow-wrap: anywhere;
 	}
 
-	/* At 390 the card's Accept is the panel's one write and the link is the only
-	   route to the editor; both take the console's 44 px floor on touch. */
+	/* The editor's standalone link takes the console's 44px floor on touch. */
 	@media (max-width: 720px), (pointer: coarse) {
 		.proposal .btn {
 			min-height: 44px;
 		}
 
 		.why :global(a) {
-			display: inline-block;
-			min-height: 24px;
-			padding: 6px 0;
+			display: inline-flex;
+			align-items: center;
+			min-height: 44px;
+			padding: 0;
 		}
 	}
 </style>

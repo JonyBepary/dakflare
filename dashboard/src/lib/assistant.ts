@@ -11,6 +11,7 @@
  *   POST /v1/admin/ai/test                         one sample answer from the provider
  *   POST /v1/admin/ai/system1/test                 one fixed routing decision, in three answers
  *   POST /v1/admin/assistant/chat                  one answer, and proposals
+ *   POST /v1/admin/agent/say                       one answer, kept in the operator's conversation
  *   POST /v1/admin/assistant/proposals/:id/accept  the only write a proposal makes
  *
  * One provider answers both roles: chat, and System One (the routing decision
@@ -841,17 +842,15 @@ export async function listModels(): Promise<ModelsOutcome> {
 
 /* ------------------------------------------------------------------- chat */
 
-/** `POST /v1/admin/assistant/chat` — one question in, one answer and proposals out. */
-export async function askAssistant(input: {
-	message: string;
-	context?: AssistantContext;
-	signal?: AbortSignal;
-}): Promise<ChatOutcome> {
-	const raw = await call('/v1/admin/assistant/chat', {
-		method: 'POST',
-		body: JSON.stringify({ message: input.message, context: input.context ?? {} }),
-		signal: input.signal
-	});
+/**
+ * One chat answer, read the same way from either route.
+ *
+ * The two routes that carry a question (`/v1/admin/agent/say` and the older
+ * `/v1/admin/assistant/chat`) answer with the same document, so the reader
+ * exists once: a console where two modules disagree about what a 200 contains
+ * is a console that can only be debugged by reading both.
+ */
+function readChat(raw: Raw): ChatOutcome {
 	if (!raw.ok) return { status: 'failed', failure: failureFrom(raw) };
 
 	if (raw.json === null) {
@@ -870,6 +869,103 @@ export async function askAssistant(input: {
 		return { status: 'failed', failure: { kind: 'unreadable' } };
 	}
 	return { status: 'ok', answer, proposals, withheld: readWithheld(raw.json.withheld) };
+}
+
+/**
+ * `POST /v1/admin/assistant/chat` — one question in, one answer and proposals out.
+ *
+ * This is the route every deployment has. The panel asks it only when the agent
+ * route below is not there at all, because this one keeps no conversation and
+ * accepts no files.
+ */
+export async function askAssistant(input: {
+	message: string;
+	context?: AssistantContext;
+	signal?: AbortSignal;
+}): Promise<ChatOutcome> {
+	const raw = await call('/v1/admin/assistant/chat', {
+		method: 'POST',
+		body: JSON.stringify({ message: input.message, context: input.context ?? {} }),
+		signal: input.signal
+	});
+	return readChat(raw);
+}
+
+/* ------------------------------------------------------- the agent session */
+
+/**
+ * One question, on the route that keeps a conversation.
+ *
+ * The wire:
+ *
+ *   POST /v1/admin/agent/say
+ *     { message, context?, attachmentIds?, idempotencyKey? }
+ *     → { answer, proposals?, withheld?, replayed? }
+ *
+ * `idempotencyKey` is minted by this browser, never by the model. A retry sends
+ * the same one, and the gateway answers `replayed: true` when it had already
+ * answered that key: the same sentence, no second turn. `attachmentIds` are the
+ * stored files the operator chose for this question, and an answer that used
+ * them is the model's own sentence — nothing here claims otherwise.
+ *
+ * A deployment with the runtime off refuses this route with `agent_runtime_off`,
+ * and one older than it answers 404/405/501; both fall back to the stateless
+ * route. That path is honest: it answers, it just keeps nothing.
+ */
+export interface SayInput {
+	message: string;
+	context?: AssistantContext;
+	attachmentIds?: string[];
+	idempotencyKey?: string;
+	signal?: AbortSignal;
+}
+
+/** Which route answered. Both are real; only one keeps a transcript. */
+export type SayRoute = 'agent' | 'assistant';
+
+export type SayOutcome = ChatOutcome & {
+	/** True when the gateway had already answered this key. */
+	replayed: boolean;
+	via: SayRoute;
+};
+
+export async function sayAgent(input: SayInput): Promise<SayOutcome> {
+	const payload: Record<string, unknown> = {
+		message: input.message,
+		context: input.context ?? {}
+	};
+	if (input.attachmentIds !== undefined && input.attachmentIds.length > 0) {
+		payload.attachmentIds = input.attachmentIds;
+	}
+	if (input.idempotencyKey !== undefined && input.idempotencyKey !== '') {
+		payload.idempotencyKey = input.idempotencyKey;
+	}
+
+	const raw = await call('/v1/admin/agent/say', {
+		method: 'POST',
+		body: JSON.stringify(payload),
+		signal: input.signal
+	});
+
+	// The runtime is off on this deployment: this route exists but refuses, and
+	// the stateless route is the one that answers. A missing route is the same
+	// story. Both keep the operator's question and lose only the transcript.
+	const runtimeOff =
+		raw.status === 503 &&
+		isRecord(raw.json) &&
+		(raw.json.error === 'agent_runtime_off' || raw.json.reason === 'agent_runtime_off');
+
+	if (raw.status === 404 || raw.status === 405 || raw.status === 501 || runtimeOff) {
+		const legacy = await askAssistant({
+			message: input.message,
+			context: input.context,
+			signal: input.signal
+		});
+		return { ...legacy, replayed: false, via: 'assistant' };
+	}
+
+	const replayed = isRecord(raw.json) && raw.json.replayed === true;
+	return { ...readChat(raw), replayed, via: 'agent' };
 }
 
 /** The ids the accept answer named, in the order they are worth showing. */

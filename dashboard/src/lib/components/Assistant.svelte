@@ -1,17 +1,18 @@
 <script lang="ts">
 	/**
-	 * The floating assistant.
+	 * The agent panel.
 	 *
-	 * One button, bottom-right, above every page of the console; one panel that is
-	 * not a modal and not a route. It asks about the page the operator is standing
-	 * on, prints the answer, and renders the proposals as cards.
+	 * One launcher, bottom-right, above every page of the console; one panel that
+	 * is not a modal and not a route. It reads the operator's saved conversation,
+	 * asks about the page they are standing on, and renders answers, the work that
+	 * produced them, proposals and the files a question carries.
 	 *
 	 * Two paths, and the deployment decides which one:
 	 *
-	 *  - **Stateless, and this is the default.** `POST /v1/admin/assistant/chat`
-	 *    answers with one document: an answer, or plain text, or a refusal. Every
-	 *    deployment behaves like this until someone turns the agent runtime on, and
-	 *    nothing on this panel says anything about a runtime that is off.
+	 *  - **The agent route, and this is the panel.** `POST /v1/admin/agent/say`
+	 *    answers with one document and files the turn under the operator's durable
+	 *    conversation. `GET /v1/admin/agent/conversation` is that transcript, and
+	 *    `DELETE` clears it.
 	 *  - **Live.** `GET /v1/admin/agent/runtime` said `enabled: true`, so the panel
 	 *    holds an `AgentLink` (`$lib/agent-socket`): a ticket, then a WebSocket. The
 	 *    answer streams in, the steps that ran are drawn as a timeline under it, and
@@ -23,24 +24,33 @@
 	 *
 	 *  - No invented state. Each failure is one line from `failureLine()` or
 	 *    `agentTroubleLine()`, with the gateway's own detail under it only when the
-	 *    gateway sent one.
+	 *    gateway sent one. A read of the transcript that fails says so; it never
+	 *    renders as an empty conversation, and the panel still answers.
 	 *  - A refusal never replaces the model's words. A turn refused after the model
 	 *    had written three sentences shows both, in the order they happened.
 	 *  - A tool is a name and a verdict. Its output is dropped in the socket module
 	 *    and there is no template here that could print it.
 	 *  - A step exists because a `tool` frame settled it. The plan line counts the
 	 *    batch the gateway announced in `calls`; the timeline is what already ran.
-	 *    Neither is filled in from what this panel expected to happen next.
 	 *  - One run is a note, several are a timeline: a lone successful read stays a
 	 *    single quiet line, and the rail only appears when there is more than one
 	 *    step or one of them did not succeed.
 	 *  - No accept on `stage_workflow_patch`. That kind belongs to the workflow
 	 *    editor's ghost banner; this panel only hands the patch over when an editor
 	 *    is mounted, and explains the way there when it is not.
-	 *  - A retry after a lost link reuses the turn's idempotency key, so a question
-	 *    that did reach the runtime is not asked twice. The same rule makes a
-	 *    resume safe: the turn is picked up where its sequence stopped, and the
-	 *    answer is folded in once.
+	 *  - A retry reuses the turn's idempotency key, so a question that did reach the
+	 *    gateway is answered instead of asked twice. An answer that comes back
+	 *    `replayed` says so, and the same rule makes a socket resume safe: the turn
+	 *    is picked up where its sequence stopped, and the answer is folded in once.
+	 *
+	 * Files are honest about what the model can see. A chip carries the gateway's
+	 * own kind; an image chip says it is named only, because the chat model on this
+	 * deployment cannot see images. Removing a chip deletes the stored file.
+	 *
+	 * The panel is deliberately quiet: the console's tokens, 4px radii, no shadow,
+	 * no gradient, no avatar, mono for ids and file names, and exactly one coral
+	 * action (Ask). Its structure is header, transcript, this turn, files, composer,
+	 * footer, so the reading order and the visual order are the same.
 	 *
 	 * The button is fixed, so `+layout.svelte` gives the main region a floor under
 	 * it: at 390px the page's last row must never end behind this control.
@@ -49,18 +59,21 @@
 	import { page } from '$app/state';
 	import {
 		acceptProposal,
-		askAssistant,
 		failureLine,
 		failureTone,
 		handPatchToEditor,
+		sayAgent,
 		workflowPatchSinkReady,
 		type AssistantContext,
-		type ChatOutcome,
 		type Failure,
-		type Proposal
+		type Proposal,
+		type SayOutcome
 	} from '$lib/assistant';
 	import {
 		AgentLink,
+		ATTACHMENT_MAX_BYTES,
+		ATTACHMENT_MAX_KEPT,
+		ATTACHMENT_TTL_HOURS,
 		agentCloseNote,
 		agentLinkLabel,
 		agentPhaseLine,
@@ -69,17 +82,30 @@
 		agentStepLine,
 		agentTroubleLine,
 		applyAgentFrame,
+		attachmentExpiredLine,
+		attachmentIsExpired,
+		attachmentKindLabel,
+		attachmentSize,
+		attachmentTooBigLine,
+		attachmentTooManyLine,
 		beginTurn,
+		clearConversation,
+		deleteAttachment,
 		newIdempotencyKey,
 		readAgentRuntime,
+		readAttachments,
+		readConversation,
 		readTurnStream,
+		uploadAttachment,
+		type AgentAttachment,
+		type AgentConversationMessage,
 		type AgentEvent,
 		type AgentFrame,
 		type AgentLinkState,
 		type AgentTrouble,
 		type AgentTurn
 	} from '$lib/agent-socket';
-	import { announce } from '$lib/announce.svelte';
+	import { formatAbsolute, formatClock } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import AssistantProposalCard, { type ProposalResult } from './AssistantProposalCard.svelte';
@@ -88,8 +114,12 @@
 
 	const uid = $props.id();
 	const panelId = `assistant-panel-${uid}`;
+	const titleId = `assistant-title-${uid}`;
 	const inputId = `assistant-question-${uid}`;
 	const contextId = `assistant-context-${uid}`;
+	const historyId = `assistant-history-${uid}`;
+	const turnId = `assistant-turn-${uid}`;
+	const filesId = `assistant-files-${uid}`;
 
 	/**
 	 * A turn whose socket went away, and what this panel is doing about it.
@@ -98,6 +128,9 @@
 	 * panel only says a turn was lost after it has actually tried to pick it up.
 	 */
 	type Recovery = { kind: 'resuming'; via: 'socket' | 'sse' } | { kind: 'lost' };
+
+	/** One line under the files block: a limit, an expiry, or a removal that failed. */
+	type Note = { tone: 'warn' | 'danger'; text: string };
 
 	/**
 	 * Three fresh tickets and three sockets inside about a second, or the durable
@@ -135,7 +168,7 @@
 	/** The question the current answer belongs to, so Try again repeats that one. */
 	let asked = $state('');
 	let asking = $state(false);
-	let outcome = $state<ChatOutcome | null>(null);
+	let outcome = $state<SayOutcome | null>(null);
 
 	/** `unknown` until the runtime read answers; `off` never opens a socket. */
 	let runtime = $state<'unknown' | 'on' | 'off'>('unknown');
@@ -151,7 +184,7 @@
 	let agentName = $state<string | null>(null);
 	let turn = $state<AgentTurn | null>(null);
 	/** One question held while the link is being opened. */
-	let queued = $state<{ question: string; key: string } | null>(null);
+	let queued = $state<{ question: string; key: string; attachmentIds: string[] } | null>(null);
 
 	/**
 	 * What happened to a turn whose link went away.
@@ -176,11 +209,58 @@
 	 */
 	let stageReady = $state(false);
 
+	/* ---- the durable session ---- */
+
+	/** `loading` until the read answers. `failed` is a line, never an empty list. */
+	let historyState = $state<'loading' | 'ready' | 'failed'>('loading');
+	/** The read failed because this deployment has no durable session at all. */
+	let historyUnavailable = $state(false);
+	let history = $state<AgentConversationMessage[]>([]);
+	let historyTruncated = $state(false);
+	let confirmingClear = $state(false);
+	let clearing = $state(false);
+
+	/** `loading` until the kept files are read; a failure keeps upload available. */
+	let attachmentState = $state<'loading' | 'ready' | 'failed'>('loading');
+	let attachments = $state<AgentAttachment[]>([]);
+	let uploading = $state(false);
+	let removingId = $state<string | null>(null);
+	let attachmentNote = $state<Note | null>(null);
+	let dragOver = $state(false);
+
+	/**
+	 * The key and files the current question was sent with.
+	 *
+	 * Try again reuses both: the same turn, not a second one. The gateway then
+	 * answers `replayed` instead of running the question again.
+	 */
+	let lastKey = $state<string | null>(null);
+	let lastIds = $state<string[]>([]);
+	let replayed = $state(false);
+	/** Replay and loss are announced once per turn, whichever path reached them. */
+	let replaySaid = false;
+	let lossSaid = false;
+
+	/* ---- the two live regions ---- */
+
+	/**
+	 * One polite region and one assertive one.
+	 *
+	 * Answer and replay are polite — they are the end of something the operator
+	 * asked for. A refusal and a lost answer are assertive, because they change
+	 * what the operator may believe is on screen. Each message is written once to
+	 * exactly one region; nothing in the panel announces a second time.
+	 */
+	let politeText = $state('');
+	let alertText = $state('');
+
 	let launcher = $state<HTMLButtonElement | null>(null);
 	let field = $state<HTMLInputElement | null>(null);
 
 	/** Drops an answer that arrives after the panel was closed or re-asked. */
 	let sequence = 0;
+	/** Drops a transcript or file read that belongs to a panel that is gone. */
+	let sessionId = 0;
 
 	/** The live link. Not reactive: its events are mirrored into the state above. */
 	let agent: AgentLink | null = null;
@@ -224,6 +304,14 @@
 	const resuming = $derived(recovery?.kind === 'resuming');
 	const cutOff = $derived(unfinished && recovery?.kind === 'lost');
 
+	/** The header's phase word: the link's state, or the HTTP ask in flight. */
+	const phaseWord = $derived.by(() => {
+		if (live) {
+			return turn !== null && !unfinished && linkState === 'closed' ? 'recovered' : linkWord;
+		}
+		return asking ? 'asking' : '';
+	});
+
 	/**
 	 * The timeline, as the turn holds it.
 	 *
@@ -244,6 +332,16 @@
 	 */
 	const timeline = $derived(steps.length >= 2 || steps.some((step) => step.verdict !== 'ok'));
 
+	/** Whether the current exchange has anything to show under "This turn". */
+	const showTurn = $derived(
+		asked !== '' ||
+			asking ||
+			turn !== null ||
+			outcome !== null ||
+			(historyState === 'ready' && history.length > 0)
+	);
+	const sentFiles = $derived(lastIds.length);
+
 	// The sink appears and disappears with the editor, which is a different
 	// component on a different route. Nothing else would tell this panel.
 	$effect(() => {
@@ -255,6 +353,7 @@
 
 	onDestroy(() => {
 		sequence += 1;
+		sessionId += 1;
 		// A read that is still tailing must not write into a panel that is gone.
 		resumeToken += 1;
 		stream?.abort();
@@ -262,6 +361,23 @@
 		agent?.close();
 		agent = null;
 	});
+
+	/** Write one message into exactly one live region, once. */
+	function say(text: string, urgent = false): void {
+		const next = text.trim();
+		if (next === '') return;
+		if (urgent) {
+			alertText = '';
+			queueMicrotask(() => {
+				alertText = next;
+			});
+			return;
+		}
+		politeText = '';
+		queueMicrotask(() => {
+			politeText = next;
+		});
+	}
 
 	async function toggle(): Promise<void> {
 		if (open) close();
@@ -271,10 +387,46 @@
 	async function show(): Promise<void> {
 		open = true;
 		stageReady = workflowPatchSinkReady();
+		sessionId += 1;
 		await tick();
 		field?.focus();
+		void loadSession();
 		liveProbe = startLive();
 		void liveProbe;
+	}
+
+	/**
+	 * Read the two things that outlive one open: the transcript and the kept files.
+	 *
+	 * They are read together and reported apart: a conversation that cannot be
+	 * read does not stop the files from being listed, and neither stops a question.
+	 */
+	async function loadSession(): Promise<void> {
+		const id = sessionId;
+		historyState = 'loading';
+		attachmentState = 'loading';
+
+		const [conversation, files] = await Promise.all([readConversation(), readAttachments()]);
+		if (!open || id !== sessionId) return;
+
+		if (conversation.status === 'ok') {
+			history = conversation.conversation.messages;
+			historyTruncated = conversation.conversation.truncated;
+			historyUnavailable = false;
+			historyState = 'ready';
+		} else {
+			history = [];
+			historyTruncated = false;
+			historyUnavailable = conversation.failure.kind === 'unavailable';
+			historyState = 'failed';
+		}
+
+		if (files.status === 'ok') {
+			attachments = files.attachments;
+			attachmentState = 'ready';
+		} else {
+			attachmentState = 'failed';
+		}
 	}
 
 	/** One link, tuned for a panel: a few quick reconnects, then the stream. */
@@ -289,8 +441,8 @@
 	/**
 	 * Ask the runtime whether this deployment has one, and open a link when it does.
 	 *
-	 * A read that fails is not a reason to try the socket: the stateless path is
-	 * the default and it works, so `off` is the honest answer to both.
+	 * A read that fails is not a reason to try the socket: the agent route over
+	 * HTTP is the default and it works, so `off` is the honest answer to both.
 	 */
 	async function startLive(): Promise<void> {
 		const id = sequence;
@@ -378,8 +530,8 @@
 		asking = false;
 
 		if (next?.reason === 'agent_runtime_off') {
-			// The runtime went off between the read and the ticket: the stateless
-			// path is the honest fallback, and it is the same question.
+			// The runtime went off between the read and the ticket: the HTTP route is
+			// the honest fallback, and it is the same question.
 			const holding = queued;
 			queued = null;
 			runtime = 'off';
@@ -388,7 +540,7 @@
 			turn = null;
 			if (holding !== null) {
 				asking = true;
-				void askStateless(holding.question);
+				void askStateless(holding.question, holding.key, holding.attachmentIds);
 			}
 		}
 	}
@@ -493,13 +645,14 @@
 			// settled: a five-step turn is five tool runs whether or not the last
 			// frame repeated the number.
 			const calls = Math.max(frame.calls, turn?.steps.length ?? 0);
-			announce(
+			say(
 				calls > 0
 					? `The assistant answered, after ${calls} ${calls === 1 ? 'tool run' : 'tool runs'}.`
 					: count === 0
 						? 'The assistant answered.'
 						: `The assistant answered, with ${count} ${count === 1 ? 'proposal' : 'proposals'}.`
 			);
+			if (turn?.replayed === true) announceReplay();
 			return;
 		}
 
@@ -507,7 +660,7 @@
 			asking = false;
 			queued = null;
 			resetRecovery();
-			announce(agentRefusalLine(frame.reason));
+			say(agentRefusalLine(frame.reason), true);
 		}
 	}
 
@@ -521,7 +674,7 @@
 			return;
 		}
 
-		const sent = agent.ask(holding.question, holding.key);
+		const sent = agent.ask(holding.question, holding.key, holding.attachmentIds);
 		if (sent.status === 'waiting') {
 			// It closed between the event and the send. The next `open` gets it.
 			queued = holding;
@@ -531,13 +684,12 @@
 			asking = false;
 			turn = null;
 			const failure: Failure = { kind: 'refused', message: sent.message };
-			outcome = { status: 'failed', failure };
-			announce(sent.message);
+			outcome = { status: 'failed', failure, replayed: false, via: 'agent' };
+			say(sent.message, true);
 		}
 	}
 
 	function close(): void {
-		// No history survives: this is one question at a time, by design.
 		open = false;
 		question = '';
 		asked = '';
@@ -552,6 +704,26 @@
 		linkState = 'idle';
 		agentName = null;
 		sequence += 1;
+		sessionId += 1;
+		history = [];
+		historyState = 'loading';
+		historyUnavailable = false;
+		historyTruncated = false;
+		confirmingClear = false;
+		clearing = false;
+		attachments = [];
+		attachmentState = 'loading';
+		attachmentNote = null;
+		uploading = false;
+		removingId = null;
+		dragOver = false;
+		lastKey = null;
+		lastIds = [];
+		replayed = false;
+		replaySaid = false;
+		lossSaid = false;
+		politeText = '';
+		alertText = '';
 		agent?.close();
 		agent = null;
 		launcher?.focus();
@@ -567,15 +739,36 @@
 	/**
 	 * Ask one question, on whichever path this deployment has.
 	 *
-	 * `reuseKey` is a retry's key: the same question, the same turn, so a runtime
-	 * that did receive the first attempt answers instead of running a second one.
+	 * `reuseKey` and `reuseIds` are a retry's: the same question, the same turn, so
+	 * a gateway that did receive the first attempt answers instead of running a
+	 * second one.
 	 */
-	async function runAsk(text: string, reuseKey?: string): Promise<void> {
+	async function runAsk(
+		text: string,
+		reuseKey?: string | null,
+		reuseIds?: string[]
+	): Promise<void> {
 		const next = text.trim();
 		if (next === '' || asking) return;
 		// The probe decides which path this turn takes, so an early ask waits for it.
 		if (runtime === 'unknown' && liveProbe !== null) await liveProbe;
 		if (!open) return;
+
+		const expired =
+			reuseIds === undefined ? attachments.filter((file) => attachmentIsExpired(file)) : [];
+		if (expired.length > 0) {
+			// One line, and it names the limit: a file is kept 24 hours, not forever.
+			const line =
+				expired.length === 1
+					? attachmentExpiredLine(expired[0].name)
+					: `${expired.length} files expired. Files are kept ${ATTACHMENT_TTL_HOURS} hours; attach them again.`;
+			attachmentNote = { tone: 'warn', text: line };
+			say(line, true);
+		}
+
+		const ids: string[] =
+			reuseIds ?? attachments.filter((file) => !attachmentIsExpired(file)).map((file) => file.id);
+		const key = reuseKey ?? newIdempotencyKey();
 
 		question = next;
 		asked = next;
@@ -583,39 +776,56 @@
 		outcome = null;
 		turn = null;
 		queued = null;
+		lastKey = key;
+		lastIds = ids;
+		replayed = false;
+		replaySaid = false;
+		lossSaid = false;
+		// A refusal from the attempt before is no longer the current fact. It is
+		// removed without being announced: nothing new happened yet.
+		alertText = '';
 		resetRecovery();
 		results = {};
 
+		// The files belong to the question they were attached for; the stored copy
+		// stays on the gateway until it expires or is removed.
+		if (reuseIds === undefined) attachments = [];
+
 		if (runtime === 'on') {
-			await askLive(next, reuseKey);
+			await askLive(next, key, ids);
 			return;
 		}
-		await askStateless(next);
+		await askStateless(next, key, ids);
 	}
 
-	async function askStateless(text: string): Promise<void> {
+	async function askStateless(text: string, key: string, ids: string[]): Promise<void> {
 		const id = ++sequence;
-		const result = await askAssistant({ message: text, context });
+		const result = await sayAgent({
+			message: text,
+			context,
+			attachmentIds: ids,
+			idempotencyKey: key
+		});
 		if (id !== sequence) return;
 
 		outcome = result;
 		asking = false;
 		if (result.status === 'ok') {
 			const count = result.proposals.length;
-			announce(
+			say(
 				count === 0
 					? 'The assistant answered.'
 					: `The assistant answered, with ${count} ${count === 1 ? 'proposal' : 'proposals'}.`
 			);
+			if (result.replayed) announceReplay();
 		} else if (result.status === 'failed') {
-			announce(failureLine(result.failure));
+			say(failureLine(result.failure), true);
 		}
 	}
 
-	async function askLive(text: string, reuseKey?: string): Promise<void> {
-		const key = reuseKey ?? newIdempotencyKey();
+	async function askLive(text: string, key: string, ids: string[]): Promise<void> {
 		turn = beginTurn(text, key);
-		queued = { question: text, key };
+		queued = { question: text, key, attachmentIds: ids };
 
 		if (agent === null) agent = newLink();
 		if (agent.state === 'open') {
@@ -629,6 +839,123 @@
 		event.preventDefault();
 		void runAsk(question);
 	}
+
+	/* ------------------------------------------------------------ the files */
+
+	/** The file control's change: one batch, checked before anything is sent. */
+	function pickFiles(event: Event): void {
+		const input = event.currentTarget as HTMLInputElement;
+		const files = Array.from(input.files ?? []);
+		// Clearing the value lets the same file be chosen twice in a row.
+		input.value = '';
+		void attachFiles(files);
+	}
+
+	function onDrop(event: DragEvent): void {
+		event.preventDefault();
+		dragOver = false;
+		if (asking) return;
+		const files = Array.from(event.dataTransfer?.files ?? []);
+		void attachFiles(files);
+	}
+
+	function onDragOver(event: DragEvent): void {
+		event.preventDefault();
+		if (!asking) dragOver = true;
+	}
+
+	function onDragLeave(event: DragEvent): void {
+		// The panel has children; a drag leaving one of them is not a drag out.
+		const next = event.relatedTarget;
+		if (next instanceof Node && (event.currentTarget as Node).contains(next)) return;
+		dragOver = false;
+	}
+
+	/** One refusal, one line, the limit in it. */
+	function refuseAttachment(text: string, tone: 'warn' | 'danger' = 'danger'): void {
+		attachmentNote = { tone, text };
+		say(text, true);
+	}
+
+	async function attachFiles(files: File[]): Promise<void> {
+		if (files.length === 0 || asking) return;
+		attachmentNote = null;
+
+		for (const file of files) {
+			if (attachments.length >= ATTACHMENT_MAX_KEPT) {
+				refuseAttachment(attachmentTooManyLine());
+				return;
+			}
+			if (file.size > ATTACHMENT_MAX_BYTES) {
+				refuseAttachment(attachmentTooBigLine(file.name, file.size));
+				continue;
+			}
+
+			uploading = true;
+			const result = await uploadAttachment(file);
+			uploading = false;
+			if (!open) return;
+
+			if (result.status === 'failed') {
+				refuseAttachment(result.message);
+				return;
+			}
+			attachments = [...attachments, result.attachment];
+			if (attachmentIsExpired(result.attachment)) {
+				refuseAttachment(attachmentExpiredLine(result.attachment.name), 'warn');
+				continue;
+			}
+			say(`Attached ${result.attachment.name}.`);
+		}
+	}
+
+	/** Removing the chip deletes the stored file, not just the row on screen. */
+	async function removeAttachment(file: AgentAttachment): Promise<void> {
+		if (removingId !== null || uploading) return;
+		removingId = file.id;
+		const result = await deleteAttachment(file.id);
+		removingId = null;
+		if (!open) return;
+
+		if (result.status === 'ok') {
+			attachments = attachments.filter((entry) => entry.id !== file.id);
+			attachmentNote = null;
+			say(`Removed ${file.name}.`);
+			return;
+		}
+		refuseAttachment(result.message);
+	}
+
+	/* --------------------------------------------------------- the transcript */
+
+	/** Clear, then confirm inline. Nothing here opens a dialog. */
+	async function clearHistory(): Promise<void> {
+		if (clearing) return;
+		clearing = true;
+		attachmentNote = null;
+		const result = await clearConversation();
+		clearing = false;
+		confirmingClear = false;
+		if (!open) return;
+
+		if (result.status === 'ok') {
+			history = [];
+			historyTruncated = false;
+			historyState = 'ready';
+			say('The saved transcript was deleted.');
+			return;
+		}
+		say(failureLine(result.failure), true);
+	}
+
+	function announceReplay(): void {
+		if (replaySaid) return;
+		replaySaid = true;
+		replayed = true;
+		say('Answered earlier from the same request — nothing ran twice.');
+	}
+
+	/* ----------------------------------------------------------- proposals */
 
 	async function accept(proposal: Proposal): Promise<void> {
 		if (acceptingId !== null) return;
@@ -647,9 +974,7 @@
 						}
 					: { tone: 'danger', text: failureLine(result.failure), ids: [], detail: null }
 		};
-		announce(
-			result.status === 'ok' ? 'Proposal accepted.' : 'The proposal was not accepted.'
-		);
+		say(result.status === 'ok' ? 'Proposal accepted.' : 'The proposal was not accepted.');
 	}
 
 	/**
@@ -673,7 +998,7 @@
 				detail: null
 			}
 		};
-		announce(result.ok ? 'Patch staged in the editor.' : 'The patch was not staged.');
+		say(result.ok ? 'Patch staged in the editor.' : 'The patch was not staged.');
 	}
 
 	/** The flow a patch names in its own payload, or null when it names none. */
@@ -720,19 +1045,14 @@
 	}
 
 	/**
-	 * The line under a turn that stopped arriving.
-	 *
-	 * Two facts, and the difference is whether there was a stream to ask again: a
-	 * turn that was never announced cannot be resumed, and saying so is not the
-	 * same sentence as a resume that was tried and did not reach the answer.
-	 */
-	/**
 	 * The loss is a terminal outcome like an answer or a refusal, so it is announced
 	 * the same way. Without this a screen reader hears nothing where the turn died.
+	 * It is said once per turn, whichever close path noticed it first.
 	 */
 	function announceLoss(): void {
-		if (turn === null) return;
-		announce(lostLine());
+		if (lossSaid || turn === null) return;
+		lossSaid = true;
+		say(lostLine(), true);
 	}
 
 	function lostLine(): string {
@@ -765,22 +1085,22 @@
 	<section
 		id={panelId}
 		class="panel"
-		aria-label="Assistant"
+		aria-labelledby={titleId}
 		aria-describedby={contextId}
 	>
 		<header class="panel-head">
 			<div class="head-copy">
 				<div class="title-row">
-					<h2 class="panel-title">Assistant</h2>
-					{#if live && linkWord !== ''}
+					<h2 class="panel-title" id={titleId}>Assistant</h2>
+					{#if phaseWord !== ''}
 						<!-- The one factual marker of the live path: a word, not a badge. It
-						     is absent entirely when the runtime is off, which is the default. -->
+						     is absent entirely when the runtime is off and nothing is asked. -->
 						<span
 							class="link-chip mono"
-							data-state={linkState}
+							data-state={live ? linkState : 'asking'}
 							title={agentName === null ? undefined : `agent ${agentName}`}
 						>
-							{turn !== null && !unfinished && linkState === 'closed' ? 'recovered' : linkWord}
+							{phaseWord}
 						</span>
 					{/if}
 				</div>
@@ -791,236 +1111,450 @@
 			</button>
 		</header>
 
-		<form class="ask" onsubmit={submit}>
-			<label class="sr-only" for={inputId}>Your question</label>
-			<input
-				id={inputId}
-				class="input ask-input"
-				type="text"
-				bind:this={field}
-				bind:value={question}
-				placeholder="What does this page tell me?"
-				autocomplete="off"
-				spellcheck="false"
-				maxlength="500"
-				enterkeyhint="send"
-				disabled={asking}
-			/>
-			<button type="submit" class="btn btn-primary btn-sm ask-send" disabled={!canAsk}>
-				{asking ? 'Asking' : 'Ask'}
-			</button>
-		</form>
+		<!-- Two regions, both present before anything is written into them, and
+		     each event written to exactly one: answers and replays are polite,
+		     refusals and losses are assertive. -->
+		<div class="sr-only" role="status" aria-live="polite">{politeText}</div>
+		<div class="sr-only" role="alert">{alertText}</div>
 
 		<div class="body" aria-busy={asking}>
-			{#if live && (asking || turn !== null)}
-				<!-- The live path. Nothing here is drawn from a frame this turn does not
-				     have: the text is what arrived, the steps are what settled, the
-				     refusal is what the gateway said. -->
-				{#if turn !== null}
-					{#if turn.phase !== null && unfinished && recovery === null}
-						<!-- One quiet line, the server's own progress. No invented tokens: the
-						     panel says what is happening without pretending to write. The
-						     counter is the batch the gateway announced, so it can never
-						     point at a step the server did not name. Once a turn is being
-						     recovered, the recovery line owns this space. -->
-						<p class="state quiet phase">
-							<Spinner /> {agentPhaseLine(turn.phase)}{#if pending > 0 && planTotal > 1}<span
-									class="phase-count"
-								>· step {planStep} of {planTotal}</span>{/if}
-						</p>
-					{/if}
-
-					{#if turn.text !== ''}
-						<p class="answer">
-							{turn.text}{#if unfinished && recovery === null && trouble === null}<span
-									class="caret"
-									aria-hidden="true"
-								></span>{/if}
-						</p>
-					{/if}
-
-					{#if steps.length === 1 && !timeline}
-						<!-- One read is a note, not a timeline: no rail, no chip, no header. -->
-						<p class="step-one">
-							<span class="mono step-tool">{steps[0].tool}</span>
-							<span>{agentStepLine(steps[0].tool)}</span>
-						</p>
-					{:else if timeline}
-						<!-- The timeline. One row per settled step, in the order the gateway
-						     ran them, with the reason on the row rather than behind a tooltip:
-						     a refusal is the row an operator came here to read. -->
-						<ol class="steps" aria-label="What the agent did">
-							{#each steps as step, index (step.seq)}
-								{@const gap = gapBefore(index)}
-								<li class="step" data-verdict={step.verdict}>
-									<span class="step-mark" aria-hidden="true"></span>
-									<span class="step-main">
-										<span class="step-head">
-											<span class="step-say">{agentStepLine(step.tool, step.verdict)}</span>
-											{#if gap !== null}
-												<span class="step-gap mono">+{gap}</span>
-											{/if}
-											<span class="step-chip" data-verdict={step.verdict}>{step.verdict}</span>
-										</span>
-										<span class="step-tool mono">{step.tool}</span>
-										{#if step.reason !== null && step.reason !== ''}
-											<!-- The gateway's own words, verbatim. A step with no reason
-											     prints none rather than a sentence this console wrote. -->
-											<span class="step-reason">
-												{#if step.code !== null && step.code !== ''}<span class="mono step-code"
-														>{step.code}</span
-													><span class="step-sep">{' · '}</span>{/if}{step.reason}
-											</span>
-										{/if}
-									</span>
-								</li>
-							{/each}
-						</ol>
-					{/if}
-
-					{#if resuming}
-						<!-- The turn is still being recovered, so it is not lost: what is on
-						     screen is the connection that went away, not a verdict on the agent. -->
-						<p class="state waiting"><Spinner /> {waitingLine()}</p>
-						{#if closeNote !== null}
-							<p class="detail mono">{closeNote}</p>
-						{/if}
-					{:else if cutOff}
-						<p class="state" data-tone="warn">{lostLine()}</p>
-						{#if closeNote !== null}
-							<p class="detail mono">{closeNote}</p>
-						{/if}
-					{/if}
-
-					{#if turn.refusal !== null}
-						<p class="state" data-tone={refusalTone(turn.refusal.reason)}>
-							{agentRefusalLine(turn.refusal.reason)}
-							{#if !NAMED_REFUSALS.has(turn.refusal.reason)}
-								<span class="mono">reason {turn.refusal.reason}</span>
-							{/if}
-						</p>
-						{#if turn.refusal.message !== ''}
-							<p class="detail mono">{turn.refusal.message}</p>
-						{/if}
-					{/if}
-
-					{#if unfinished && recovery === null && trouble !== null && linkState === 'closed'}
-						<p class="state" data-tone={trouble.retryable ? 'warn' : 'danger'}>
-							{agentTroubleLine(trouble)}
-						</p>
-						{#if trouble.detail !== null}
-							<p class="detail mono">{trouble.detail}</p>
-						{/if}
-					{/if}
-
-					{#if unfinished && recovery === null && trouble === null && turn.phase === null && turn.text === '' && steps.length === 0 && pending === 0 && turn.refusal === null}
-						<p class="state waiting"><Spinner /> {waitingLine()}</p>
-					{/if}
-
-					{#if cutOff || (unfinished && linkState === 'closed' && trouble !== null && turn.refusal === null)}
-						<div class="retry">
-							<!-- The same key, so a turn the runtime already started is not started
-							     again: this asks for its answer, not for a second attempt. -->
-							<button type="button" class="btn btn-sm" onclick={() => runAsk(asked, turn?.key)}>
-								<Icon name="refresh" size={13} /> Try again
+			{#if historyState === 'loading'}
+				<p class="state waiting"><Spinner /> Reading the saved conversation…</p>
+			{:else if historyState === 'failed'}
+				<p class="state" data-tone="warn">
+					{historyUnavailable
+						? 'This deployment keeps no saved conversation. You can still ask.'
+						: 'The saved conversation could not be read, so earlier turns are not shown. You can still ask.'}
+				</p>
+			{:else if history.length > 0}
+				<section class="thread" aria-labelledby={historyId}>
+					<div class="section-head">
+						<h3 class="section-title" id={historyId}>Earlier turns</h3>
+						<span class="section-meta mono">
+							{history.length} {history.length === 1 ? 'message' : 'messages'}
+						</span>
+						{#if !confirmingClear}
+							<button
+								type="button"
+								class="clear"
+								onclick={() => (confirmingClear = true)}
+							>
+								Clear
 							</button>
+						{/if}
+					</div>
+
+					{#if confirmingClear}
+						<!-- The confirm is inline: no dialog, no scrim, and the sentence
+						     says what deletion means before the button does it. -->
+						<div class="clear-confirm" role="group" aria-label="Clear the saved transcript">
+							<p class="clear-say">
+								{clearing
+									? 'Deleting the saved transcript…'
+									: 'Deletes the saved transcript on the gateway. This cannot be undone.'}
+							</p>
+							<div class="clear-actions">
+								<button
+									type="button"
+									class="btn btn-sm"
+									disabled={clearing}
+									aria-busy={clearing}
+									onclick={() => void clearHistory()}
+								>
+									{clearing ? 'Deleting' : 'Delete transcript'}
+								</button>
+								<button
+									type="button"
+									class="btn btn-ghost btn-sm"
+									disabled={clearing}
+									onclick={() => (confirmingClear = false)}
+								>
+									Keep
+								</button>
+							</div>
 						</div>
 					{/if}
 
-					{#if turn.proposals.length > 0}
-						<p class="proposal-count mono">
-							{turn.proposals.length} {turn.proposals.length === 1 ? 'proposal' : 'proposals'}
+					{#if historyTruncated}
+						<p class="history-note">
+							Showing the last {history.length} messages; earlier ones are not loaded.
 						</p>
-						<ul class="proposals">
-							{#each turn.proposals as proposal (proposal.id)}
-								<AssistantProposalCard
-									{proposal}
-									result={results[proposal.id] ?? null}
-									accepting={acceptingId === proposal.id}
-									{stageReady}
-									onaccept={() => void accept(proposal)}
-									onstage={() => stage(proposal)}
-								/>
-							{/each}
-						</ul>
 					{/if}
-				{:else}
-					<p class="state waiting"><Spinner /> Asking the assistant…</p>
-				{/if}
-			{:else if asking}
-				<p class="state waiting"><Spinner /> Asking the assistant…</p>
-			{:else if outcome === null}
+
+					<ol class="messages">
+						{#each history as message (message.id)}
+							{@const when = message.at}
+							<li class="message" data-role={message.role}>
+								<span class="message-head">
+									<span class="message-who">{message.role === 'user' ? 'You' : 'Assistant'}</span>
+									{#if when !== null}
+										<time
+											class="message-time mono"
+											datetime={new Date(when).toISOString()}
+											title={formatAbsolute(when)}
+										>
+											{formatClock(when)}
+										</time>
+									{/if}
+								</span>
+								<p class="message-text">{message.text}</p>
+							</li>
+						{/each}
+					</ol>
+				</section>
+			{:else if !showTurn}
 				<p class="state quiet">
-					One question about this page. Nothing is kept after you close this panel.
+					No earlier turns yet. Ask about this page; your questions and answers are kept on this
+					gateway.
 				</p>
-			{:else if outcome.status === 'failed'}
-				<p class="state" data-tone={failureTone(outcome.failure)}>
-					{failureLine(outcome.failure)}
-				</p>
-				{#if outcome.failure.kind === 'unavailable'}
-					{#if outcome.failure.detail}
-						<p class="detail mono">{outcome.failure.detail}</p>
-					{/if}
-					<p class="state quiet">
-						{#if session.canViewSecurity}
-							An owner sets the model and the chat key. <a href="{BASE}/security/ai">AI settings</a>
-						{:else}
-							Ask an owner or admin to set the model and chat key.
+			{/if}
+
+			{#if showTurn}
+				<section class="turn" aria-labelledby={turnId}>
+					<div class="section-head">
+						<h3 class="section-title" id={turnId}>This turn</h3>
+						{#if sentFiles > 0}
+							<span class="section-meta mono">
+								{sentFiles} {sentFiles === 1 ? 'file' : 'files'}
+							</span>
 						{/if}
-					</p>
-				{:else if outcome.failure.kind === 'exhausted' && outcome.failure.day}
-					<p class="detail mono">day {outcome.failure.day}</p>
-				{/if}
-				<div class="retry">
-					<button type="button" class="btn btn-sm" onclick={() => runAsk(asked)}>
-						<Icon name="refresh" size={13} /> Try again
-					</button>
-				</div>
-			{:else if outcome.status === 'plain'}
-				<p class="answer">{outcome.text}</p>
-			{:else}
-				<p class="answer">{outcome.answer}</p>
-				{#if outcome.withheld.length > 0}
-					<!-- A proposal the gateway refused to hand over. Saying so is the
-					     difference between "the model suggested nothing" and "the model
-					     suggested something the gateway would not stage". -->
-					<ul class="withheld">
-						{#each outcome.withheld as reason, index (index)}
-							<li class="withheld-line">{reason}</li>
-						{/each}
-					</ul>
-				{/if}
-				{#if outcome.proposals.length > 0}
-					<p class="proposal-count mono">
-						{outcome.proposals.length}
-						{outcome.proposals.length === 1 ? 'proposal' : 'proposals'}
-					</p>
-					<ul class="proposals">
-						{#each outcome.proposals as proposal (proposal.id)}
-							<AssistantProposalCard
-								{proposal}
-								result={results[proposal.id] ?? null}
-								accepting={acceptingId === proposal.id}
-								{stageReady}
-								onaccept={() => void accept(proposal)}
-								onstage={() => stage(proposal)}
-							/>
-						{/each}
-					</ul>
-				{/if}
+					</div>
+
+					{#if asked !== ''}
+						<p class="turn-question"><span class="sr-only">Your question: </span>{asked}</p>
+					{/if}
+
+					{#if live && (asking || turn !== null)}
+						<!-- The live path. Nothing here is drawn from a frame this turn does
+						     not have: the text is what arrived, the steps are what settled, the
+						     refusal is what the gateway said. -->
+						{#if turn !== null}
+							{#if turn.phase !== null && unfinished && recovery === null}
+								<!-- One quiet line, the server's own progress. No invented tokens: the
+								     panel says what is happening without pretending to write. The
+								     counter is the batch the gateway announced, so it can never
+								     point at a step the server did not name. Once a turn is being
+								     recovered, the recovery line owns this space. -->
+								<p class="state quiet phase">
+									<Spinner /> {agentPhaseLine(turn.phase)}{#if pending > 0 && planTotal > 1}<span
+											class="phase-count"
+										>· step {planStep} of {planTotal}</span>{/if}
+								</p>
+							{/if}
+
+							{#if turn.text !== ''}
+								<p class="answer">
+									{turn.text}{#if unfinished && recovery === null && trouble === null}<span
+											class="caret"
+											aria-hidden="true"
+										></span>{/if}
+								</p>
+							{/if}
+
+							{#if steps.length === 1 && !timeline}
+								<!-- One read is a note, not a timeline: no rail, no chip, no header. -->
+								<p class="step-one">
+									<span class="mono step-tool">{steps[0].tool}</span>
+									<span>{agentStepLine(steps[0].tool)}</span>
+								</p>
+							{:else if timeline}
+								<!-- The timeline. One row per settled step, in the order the gateway
+								     ran them, with the reason on the row rather than behind a tooltip:
+								     a refusal is the row an operator came here to read. -->
+								<ol class="steps" aria-label="What the agent did">
+									{#each steps as step, index (step.seq)}
+										{@const gap = gapBefore(index)}
+										<li class="step" data-verdict={step.verdict}>
+											<span class="step-mark" aria-hidden="true"></span>
+											<span class="step-main">
+												<span class="step-head">
+													<span class="step-say">{agentStepLine(step.tool, step.verdict)}</span>
+													{#if gap !== null}
+														<span class="step-gap mono">+{gap}</span>
+													{/if}
+													<span class="step-chip" data-verdict={step.verdict}>{step.verdict}</span>
+												</span>
+												<span class="step-tool mono">{step.tool}</span>
+												{#if step.reason !== null && step.reason !== ''}
+													<!-- The gateway's own words, verbatim. A step with no reason
+													     prints none rather than a sentence this console wrote. -->
+													<span class="step-reason">
+														{#if step.code !== null && step.code !== ''}<span class="mono step-code"
+																>{step.code}</span
+															><span class="step-sep">{' · '}</span>{/if}{step.reason}
+													</span>
+												{/if}
+											</span>
+										</li>
+									{/each}
+								</ol>
+							{/if}
+
+							{#if resuming}
+								<!-- The turn is still being recovered, so it is not lost: what is on
+								     screen is the connection that went away, not a verdict on the agent. -->
+								<p class="state waiting"><Spinner /> {waitingLine()}</p>
+								{#if closeNote !== null}
+									<p class="detail mono">{closeNote}</p>
+								{/if}
+							{:else if cutOff}
+								<p class="state" data-tone="warn">{lostLine()}</p>
+								{#if closeNote !== null}
+									<p class="detail mono">{closeNote}</p>
+								{/if}
+							{/if}
+
+							{#if turn.refusal !== null}
+								<p class="state" data-tone={refusalTone(turn.refusal.reason)}>
+									{agentRefusalLine(turn.refusal.reason)}
+									{#if !NAMED_REFUSALS.has(turn.refusal.reason)}
+										<span class="mono">reason {turn.refusal.reason}</span>
+									{/if}
+								</p>
+								{#if turn.refusal.message !== ''}
+									<p class="detail mono">{turn.refusal.message}</p>
+								{/if}
+							{/if}
+
+							{#if unfinished && recovery === null && trouble !== null && linkState === 'closed'}
+								<p class="state" data-tone={trouble.retryable ? 'warn' : 'danger'}>
+									{agentTroubleLine(trouble)}
+								</p>
+								{#if trouble.detail !== null}
+									<p class="detail mono">{trouble.detail}</p>
+								{/if}
+							{/if}
+
+							{#if unfinished && recovery === null && trouble === null && turn.phase === null && turn.text === '' && steps.length === 0 && pending === 0 && turn.refusal === null}
+								<p class="state waiting"><Spinner /> {waitingLine()}</p>
+							{/if}
+
+							{#if cutOff || (unfinished && linkState === 'closed' && trouble !== null && turn.refusal === null)}
+								<div class="retry">
+									<!-- The same key and the same files, so a turn the gateway already
+									     started is not started again: this asks for its answer, not for
+									     a second attempt. -->
+									<button
+										type="button"
+										class="btn btn-sm"
+										onclick={() => runAsk(asked, turn?.key ?? lastKey, lastIds)}
+									>
+										<Icon name="refresh" size={13} /> Try again
+									</button>
+								</div>
+							{/if}
+
+							{#if turn.proposals.length > 0}
+								<p class="proposal-count mono">
+									{turn.proposals.length} {turn.proposals.length === 1 ? 'proposal' : 'proposals'}
+								</p>
+								<ul class="proposals">
+									{#each turn.proposals as proposal (proposal.id)}
+										<AssistantProposalCard
+											{proposal}
+											result={results[proposal.id] ?? null}
+											accepting={acceptingId === proposal.id}
+											{stageReady}
+											onaccept={() => void accept(proposal)}
+											onstage={() => stage(proposal)}
+										/>
+									{/each}
+								</ul>
+							{/if}
+						{:else}
+							<p class="state waiting"><Spinner /> Asking the assistant…</p>
+						{/if}
+					{:else if asking}
+						<p class="state waiting"><Spinner /> Asking the assistant…</p>
+					{:else if outcome === null}
+						<!-- A saved transcript above, and nothing asked yet in this one: the
+						     boundary stays visible and says what the next step is. -->
+						<p class="state quiet">
+							{question.trim() === ''
+								? 'Ask a question about this page to continue.'
+								: 'Ask to send this question.'}
+						</p>
+					{:else if outcome.status === 'failed'}
+						<p class="state" data-tone={failureTone(outcome.failure)}>
+							{failureLine(outcome.failure)}
+						</p>
+						{#if outcome.failure.kind === 'unavailable'}
+							{#if outcome.failure.detail}
+								<p class="detail mono">{outcome.failure.detail}</p>
+							{/if}
+							<p class="state quiet">
+								{#if session.canViewSecurity}
+									An owner sets the model and the chat key. <a href="{BASE}/security/ai">AI settings</a>
+								{:else}
+									Ask an owner or admin to set the model and chat key.
+								{/if}
+							</p>
+						{:else if outcome.failure.kind === 'exhausted' && outcome.failure.day}
+							<p class="detail mono">day {outcome.failure.day}</p>
+						{/if}
+						<div class="retry">
+							<button type="button" class="btn btn-sm" onclick={() => runAsk(asked, lastKey, lastIds)}>
+								<Icon name="refresh" size={13} /> Try again
+							</button>
+						</div>
+					{:else if outcome.status === 'plain'}
+						<p class="answer">{outcome.text}</p>
+					{:else}
+						<p class="answer">{outcome.answer}</p>
+						{#if outcome.withheld.length > 0}
+							<!-- A proposal the gateway refused to hand over. Saying so is the
+							     difference between "the model suggested nothing" and "the model
+							     suggested something the gateway would not stage". -->
+							<ul class="withheld">
+								{#each outcome.withheld as reason, index (index)}
+									<li class="withheld-line">{reason}</li>
+								{/each}
+							</ul>
+						{/if}
+						{#if outcome.proposals.length > 0}
+							<p class="proposal-count mono">
+								{outcome.proposals.length}
+								{outcome.proposals.length === 1 ? 'proposal' : 'proposals'}
+							</p>
+							<ul class="proposals">
+								{#each outcome.proposals as proposal (proposal.id)}
+									<AssistantProposalCard
+										{proposal}
+										result={results[proposal.id] ?? null}
+										accepting={acceptingId === proposal.id}
+										{stageReady}
+										onaccept={() => void accept(proposal)}
+										onstage={() => stage(proposal)}
+									/>
+								{/each}
+							</ul>
+						{/if}
+					{/if}
+
+					{#if replayed && !asking}
+						<!-- The gateway answered the key it had already answered. This is a
+						     fact about the request, not a second answer. -->
+						<p class="state replay">
+							Answered earlier from the same request — nothing ran twice.
+						</p>
+					{/if}
+
+					{#if !live && outcome !== null && outcome.via === 'assistant' && outcome.status !== 'failed' && !asking}
+						<!-- The stateless route answered, so the transcript and the files
+						     could not have been used. One line says both, where they apply. -->
+						<p class="state quiet">
+							Answered without the agent runtime, so this is not added to a transcript{#if lastIds.length > 0}, and the attached {lastIds.length === 1
+								? 'file was'
+								: 'files were'} not read{/if}.
+						</p>
+					{/if}
+				</section>
 			{/if}
 		</div>
+
+		<section
+			class="composer"
+			aria-label="Your question and files"
+			data-dragging={dragOver}
+			ondragover={onDragOver}
+			ondragleave={onDragLeave}
+			ondrop={onDrop}
+		>
+			<section class="files" aria-labelledby={filesId}>
+				<div class="files-head">
+					<h3 class="section-title" id={filesId}>Files</h3>
+					<label class="attach" class:busy={uploading}>
+						<input
+							class="sr-only"
+							type="file"
+							multiple
+							disabled={asking || uploading}
+							onchange={pickFiles}
+						/>
+						{#if uploading}<Spinner />{:else}<Icon name="paperclip" size={13} />{/if}
+						{uploading ? 'Uploading' : 'Attach a file'}
+					</label>
+				</div>
+				<p class="files-note">
+					Up to {ATTACHMENT_MAX_KEPT} files, {attachmentSize(ATTACHMENT_MAX_BYTES)} each, kept
+					{ATTACHMENT_TTL_HOURS} hours. Drop files anywhere on this panel.
+				</p>
+
+				{#if attachmentState === 'failed'}
+					<p class="state" data-tone="warn">
+						The saved files could not be read. You can still attach a new one.
+					</p>
+				{/if}
+
+				{#if attachments.length > 0}
+					<ul class="file-chips">
+						{#each attachments as file (file.id)}
+							{@const expired = attachmentIsExpired(file)}
+							<li class="file-chip" data-kind={file.kind} data-expired={expired}>
+								<span class="file-chip-main">
+									<span class="file-chip-name mono">{file.name}</span>
+									<span class="file-chip-meta">
+										{attachmentSize(file.bytes)} · {attachmentKindLabel(file.kind)}
+									</span>
+									{#if file.kind === 'image'}
+										<!-- The model this deployment chats with cannot see an image. The
+										     chip is named, never described as read. -->
+										<span class="file-chip-note">Named only — this model cannot see images.</span>
+									{:else if expired}
+										<span class="file-chip-note">
+											Expired — files are kept {ATTACHMENT_TTL_HOURS} hours; attach it again.
+										</span>
+									{/if}
+								</span>
+								<button
+									type="button"
+									class="file-chip-remove"
+									aria-label={`Remove ${file.name}`}
+									disabled={removingId !== null}
+									onclick={() => void removeAttachment(file)}
+								>
+									{#if removingId === file.id}<Spinner />{:else}<Icon name="x" size={13} />{/if}
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				{#if attachmentNote !== null}
+					<p class="state" data-tone={attachmentNote.tone}>{attachmentNote.text}</p>
+				{/if}
+			</section>
+
+			<form class="ask" onsubmit={submit}>
+				<label class="sr-only" for={inputId}>Your question</label>
+				<input
+					id={inputId}
+					class="input ask-input"
+					type="text"
+					bind:this={field}
+					bind:value={question}
+					placeholder="What does this page tell me?"
+					autocomplete="off"
+					spellcheck="false"
+					maxlength="500"
+					enterkeyhint="send"
+					disabled={asking}
+				/>
+				<button type="submit" class="btn btn-primary ask-send" disabled={!canAsk}>
+					{asking ? 'Asking' : 'Ask'}
+				</button>
+			</form>
+		</section>
 
 		<footer class="panel-foot">
 			<span class="foot-note">
 				{#if live}
 					Live agent · it can act only while an autonomy window is open.
+				{:else if historyState === 'failed'}
+					No transcript on this deployment. Files are removed after {ATTACHMENT_TTL_HOURS} hours.
 				{:else}
-					{#if (turn !== null && turn.proposals.length > 0) || (outcome !== null && outcome.status === 'ok' && outcome.proposals.length > 0)}
-						Your question is not kept. Accept still writes.
-					{:else}
-						Your question is not kept here.
-					{/if}
+					The transcript is saved on this gateway. Files are removed after
+					{ATTACHMENT_TTL_HOURS} hours.
 				{/if}
 			</span>
 		</footer>
@@ -1094,7 +1628,8 @@
 
 	/* The panel sits directly above the launcher and never wider than the phone
 	   it is on. No scrim and no focus trap: the page behind stays usable, which is
-	   what "not a modal" means here. */
+	   what "not a modal" means here. Taller than it was, because it now holds a
+	   transcript, but still a panel: one column, header to footer. */
 	.panel {
 		position: fixed;
 		right: 16px;
@@ -1102,8 +1637,8 @@
 		z-index: 70;
 		display: flex;
 		flex-direction: column;
-		width: min(380px, calc(100vw - 32px));
-		max-height: min(70vh, 620px);
+		width: min(420px, calc(100vw - 32px));
+		max-height: min(82vh, 720px);
 		border: 1px solid var(--df-border-control);
 		border-radius: var(--df-p-radius-xs);
 		background: var(--df-surface-card);
@@ -1114,7 +1649,7 @@
 		display: flex;
 		align-items: flex-start;
 		gap: var(--df-p-space-2);
-		padding: 10px 11px 8px;
+		padding: 10px 12px 9px;
 		border-bottom: 1px solid var(--df-border-hairline);
 	}
 
@@ -1136,13 +1671,13 @@
 		letter-spacing: -0.01em;
 	}
 
-	/* A word, not a badge: 9.5px mono on a hairline, and the ink says which state. */
+	/* A word, not a badge: mono on a hairline, and the ink says which state. */
 	.link-chip {
 		padding: 0 4px;
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-xs);
 		color: var(--df-text-meta);
-		font-size: 9.5px;
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.08em;
 		line-height: 1.5;
 		text-transform: uppercase;
@@ -1154,7 +1689,8 @@
 
 	.link-chip[data-state='ticket'],
 	.link-chip[data-state='connecting'],
-	.link-chip[data-state='retrying'] {
+	.link-chip[data-state='retrying'],
+	.link-chip[data-state='asking'] {
 		color: var(--df-state-warn-ink);
 	}
 
@@ -1176,13 +1712,6 @@
 		place-items: center;
 		width: 28px;
 		height: 28px;
-		/* Touch: the close control is one of two ways out of a panel that covers
-		   40 % of the phone, so it takes the console's 44 px floor. */
-		@media (max-width: 720px), (pointer: coarse) {
-			width: 44px;
-			height: 44px;
-			margin: -8px -8px 0 0;
-		}
 		margin-top: -3px;
 		margin-right: -3px;
 		border: 1px solid transparent;
@@ -1198,50 +1727,177 @@
 		}
 	}
 
-	.ask {
-		display: flex;
-		gap: 6px;
-		align-items: stretch;
-		padding: 10px 11px 0;
-	}
-
-	.ask-input {
-		flex: 1;
-		min-width: 0;
-		min-height: 36px;
-		font-size: var(--df-p-text-sm);
-		/* The global 16 px guard lives on `.input` and this scoped rule outranks it,
-		   so the guard is restated here and below. */
-		@media (max-width: 720px), (pointer: coarse) {
-			font-size: 16px;
-		}
-		/* The assistant's own geometry: 4px, the smaller step of the console's
-		   radius scale, so the panel reads as a tool rather than a card. */
-		border-radius: var(--df-p-radius-xs);
-	}
-
-	/* Same reason as the field: every control inside the panel is 4px. */
-	.panel .btn {
-		border-radius: var(--df-p-radius-xs);
-	}
-
-	.ask-send {
-		flex: none;
-		height: 36px;
-	}
-
+	/* The transcript and the current turn. One scroll region, so the header, the
+	   files and the composer stay put while a long history moves. */
 	.body {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
+		gap: 10px;
 		min-height: 0;
-		padding: 10px 11px 11px;
+		flex: 1 1 auto;
+		padding: 12px;
 		overflow-y: auto;
+	}
+
+	.section-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 24px;
+	}
+
+	/* Section headings are mono labels, not headlines: the panel title is the one
+	   heading with weight, and the cards sit under it at h4. */
+	.section-title {
+		margin: 0;
+		color: var(--df-text-meta);
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		letter-spacing: 0.1em;
+		line-height: 1.4;
+		text-transform: uppercase;
+	}
+
+	.section-meta {
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+		letter-spacing: 0.02em;
+	}
+
+	.clear {
+		flex: none;
+		margin-left: auto;
+		min-height: 28px;
+		padding: 0 8px;
+		border: 1px solid transparent;
+		border-radius: var(--df-p-radius-xs);
+		background: transparent;
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.clear:hover {
+			background: var(--df-surface-well);
+			color: var(--df-text-primary);
+		}
+	}
+
+	.clear-confirm {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 9px;
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+	}
+
+	.clear-say {
+		margin: 0;
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+	}
+
+	.clear-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.history-note {
+		margin: 6px 0 0;
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+	}
+
+	.messages {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		margin: 8px 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	/* The operator's own words take a hairline on the left; the answer stays flat.
+	   No avatar, no bubble, no tint: the rail is the only mark of who spoke. */
+	.message {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding-left: 8px;
+		border-left: 2px solid transparent;
+	}
+
+	.message[data-role='user'] {
+		border-left-color: var(--df-border-strong);
+	}
+
+	.message[data-role='assistant'] {
+		padding-left: 0;
+		border-left: 0;
+	}
+
+	.message-head {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+	}
+
+	.message-who {
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+	}
+
+	.message[data-role='assistant'] .message-who {
+		color: var(--df-text-meta);
+	}
+
+	.message-time {
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+	}
+
+	.message-text {
+		margin: 0;
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.55;
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
+	}
+
+	/* The boundary between what already happened and this question. A rule and a
+	   label, not a card: the turn is the same exchange, continued. */
+	.turn {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding-top: 10px;
+		border-top: 1px solid var(--df-border-control);
+	}
+
+	.turn-question {
+		margin: 0;
+		padding-left: 8px;
+		border-left: 2px solid var(--df-border-strong);
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
 	}
 
 	.state {
 		font-size: var(--df-p-text-sm);
 		line-height: 1.5;
+		overflow-wrap: anywhere;
 	}
 
 	.state.quiet {
@@ -1265,6 +1921,13 @@
 		font-size: var(--df-p-text-xs);
 	}
 
+	.state.replay {
+		padding-left: 8px;
+		border-left: 2px solid var(--df-state-ok-ink);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+	}
+
 	.state[data-tone='danger'] {
 		color: var(--df-state-danger-ink);
 	}
@@ -1283,11 +1946,12 @@
 	/* The provider's line breaks are its own: an answer shaped like a list stays
 	   a list, and nothing is reflowed into a paragraph. */
 	.answer {
+		margin: 0;
 		color: var(--df-text-primary);
 		font-size: var(--df-p-text-sm);
 		line-height: 1.55;
-		white-space: pre-wrap;
 		overflow-wrap: anywhere;
+		white-space: pre-wrap;
 	}
 
 	/* One thin block, blinking: the only motion the panel adds, and it disappears
@@ -1353,11 +2017,6 @@
 		border-top: 1px solid var(--df-border-hairline);
 	}
 
-	/* A refused row is inset for its tint; its mark keeps the rail's x. */
-	.step[data-verdict='refused'] .step-mark {
-		margin-left: 8px;
-	}
-
 	/* The node on the rail. Filled by verdict, so a refusal is findable before the
 	   words on the row are read. */
 	.step-mark {
@@ -1380,23 +2039,25 @@
 
 	/* The row that did not run is the one an operator came to read: it keeps its
 	   place, takes a tint, and puts the gateway's reason on the row at reading
-	   size — not behind a tooltip, and never in place of the model's words. */
+	   size — not behind a tooltip, and never in place of the model's words. The
+	   2px edge is a border, not a shadow: the console's rows do not float. */
 	.step[data-verdict='refused'],
 	.step[data-verdict='failed'] {
 		margin-left: -8px;
-		padding-left: 8px;
+		padding-left: 6px;
 		padding-right: 6px;
+		border-left: 2px solid;
 		border-radius: var(--df-p-radius-xs);
 	}
 
 	.step[data-verdict='refused'] {
 		background: color-mix(in srgb, var(--df-state-warn-bg) 70%, transparent);
-		box-shadow: inset 2px 0 0 var(--df-state-warn-ink);
+		border-left-color: var(--df-state-warn-ink);
 	}
 
 	.step[data-verdict='failed'] {
 		background: color-mix(in srgb, var(--df-state-danger-bg) 70%, transparent);
-		box-shadow: inset 2px 0 0 var(--df-state-danger-ink);
+		border-left-color: var(--df-state-danger-ink);
 	}
 
 	.step-main {
@@ -1431,7 +2092,7 @@
 		border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
 		border-radius: var(--df-p-radius-xs);
 		font-family: var(--df-font-mono);
-		font-size: 9px;
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.01em;
 		line-height: 1.5;
 		color: var(--df-state-ok-ink);
@@ -1451,13 +2112,13 @@
 		flex: none;
 		margin-left: auto;
 		color: var(--df-text-meta);
-		font-size: 9.5px;
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.02em;
 	}
 
 	.step-tool {
 		color: var(--df-text-meta);
-		font-size: 10px;
+		font-size: var(--df-p-text-xs);
 		line-height: 1.4;
 		overflow-wrap: anywhere;
 	}
@@ -1465,7 +2126,7 @@
 	.step-reason {
 		margin-top: 2px;
 		color: var(--df-text-primary);
-		font-size: 11.5px;
+		font-size: var(--df-p-text-xs);
 		line-height: 1.45;
 		overflow-wrap: anywhere;
 		white-space: pre-wrap;
@@ -1473,6 +2134,9 @@
 
 	.step-code {
 		color: var(--df-text-secondary);
+		/* `.mono` scales to 0.94em of its parent; this is the one place that would
+		   land under 11px, so the size is restated. */
+		font-size: var(--df-p-text-xs);
 	}
 
 	.step-sep {
@@ -1484,7 +2148,7 @@
 	.phase-count {
 		color: var(--df-text-meta);
 		font-family: var(--df-font-mono);
-		font-size: var(--df-p-text-2xs);
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.02em;
 	}
 
@@ -1501,46 +2165,193 @@
 		list-style: none;
 	}
 
+	/* ---- files ---- */
+
+	.composer {
+		flex: none;
+		border-top: 1px solid var(--df-border-hairline);
+		transition: background-color 140ms ease;
+	}
+
+	/* The drop target is the whole lower panel; the dashed edge says so only while
+	   a file is actually over it. No shadow, no tint beyond the well. */
+	.composer[data-dragging='true'] {
+		background: var(--df-surface-well);
+		outline: 1px dashed var(--df-border-strong);
+		outline-offset: -4px;
+	}
+
+	.files {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 9px 12px 0;
+	}
+
+	.files-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.files-note {
+		margin: 0;
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+	}
+
+	/* A file control that looks like the console's quiet button. The real input is
+	   the control, so Tab reaches it and its label names it; the ring is drawn on
+	   the label, where the operator can see it. */
+	.attach {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		flex: none;
+		margin-left: auto;
+		height: 28px;
+		padding: 0 8px;
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-card);
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		line-height: 1;
+		cursor: pointer;
+	}
+
+	.attach:has(input:focus-visible) {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	.attach.busy {
+		color: var(--df-text-meta);
+	}
+
+	.attach:has(input:disabled) {
+		color: var(--df-text-meta);
+		background: var(--df-surface-well);
+		border-color: var(--df-border-hairline);
+		cursor: not-allowed;
+	}
+
+	.file-chips {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin: 4px 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.file-chip {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 5px 5px 5px 8px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+	}
+
+	.file-chip[data-expired='true'] {
+		border-color: color-mix(in srgb, var(--df-state-warn-ink) 40%, var(--df-border-hairline));
+	}
+
+	.file-chip-main {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+		flex: 1 1 auto;
+	}
+
+	.file-chip-name {
+		color: var(--df-text-primary);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
+
+	.file-chip-meta {
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.4;
+	}
+
+	.file-chip-note {
+		color: var(--df-state-warn-ink);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.45;
+		overflow-wrap: anywhere;
+	}
+
+	.file-chip-remove {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		border: 1px solid transparent;
+		border-radius: var(--df-p-radius-xs);
+		background: transparent;
+		color: var(--df-text-meta);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.file-chip-remove:hover {
+			background: var(--df-surface-card);
+			color: var(--df-text-primary);
+		}
+	}
+
+	.ask {
+		display: flex;
+		gap: 6px;
+		align-items: stretch;
+		padding: 10px 12px 12px;
+	}
+
+	.ask-input {
+		flex: 1;
+		min-width: 0;
+		min-height: 36px;
+		font-size: var(--df-p-text-sm);
+		/* The global 16 px guard lives on `.input` and this scoped rule outranks it,
+		   so the guard is restated here and below. */
+		@media (max-width: 720px), (pointer: coarse) {
+			font-size: 16px;
+		}
+		/* The assistant's own geometry: 4px, the smaller step of the console's
+		   radius scale, so the panel reads as a tool rather than a card. */
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	/* Same reason as the field: every control inside the panel is 4px. */
+	.panel .btn {
+		border-radius: var(--df-p-radius-xs);
+	}
+
+	.ask-send {
+		flex: none;
+		height: 36px;
+	}
+
 	.panel-foot {
-		padding: 7px 11px;
+		flex: none;
+		padding: 7px 12px;
 		border-top: 1px solid var(--df-border-hairline);
 		background: var(--df-surface-well);
 	}
 
 	.foot-note {
 		color: var(--df-text-meta);
-		font-size: 10.5px;
+		font-size: var(--df-p-text-xs);
 		letter-spacing: 0.02em;
-	}
-
-	@media (max-width: 420px) {
-		.launcher {
-			right: 12px;
-			bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-		}
-
-		.panel {
-			right: 12px;
-			left: 12px;
-			width: auto;
-			bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-		}
-
-		.close {
-			width: 44px;
-			height: 44px;
-			margin-top: -8px;
-			margin-right: -8px;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.launcher {
-			transition: none;
-		}
-		.launcher:active {
-			transform: none;
-		}
 	}
 
 	.withheld {
@@ -1554,5 +2365,77 @@
 		color: var(--df-text-secondary);
 		font-size: var(--df-p-text-xs);
 		line-height: 1.5;
+	}
+
+	/* ---- touch and the small phone ---- */
+
+	/* At 390 the panel is nearly the whole screen: every control inside it takes
+	   the console's 44 px floor, and every field 16 px so iOS does not zoom. */
+	@media (max-width: 720px), (pointer: coarse) {
+		.panel .btn,
+		.clear,
+		.attach {
+			min-height: 44px;
+		}
+
+		.attach {
+			padding-inline: 12px;
+		}
+
+		.file-chip {
+			padding-block: 6px;
+		}
+
+		.file-chip-remove {
+			width: 44px;
+			height: 44px;
+		}
+
+		.close {
+			width: 44px;
+			height: 44px;
+			margin-top: -8px;
+			margin-right: -8px;
+		}
+
+		.ask-input {
+			font-size: 16px;
+			min-height: 44px;
+		}
+
+		.ask-send {
+			height: 44px;
+		}
+
+		.messages {
+			gap: 12px;
+		}
+	}
+
+	@media (max-width: 420px) {
+		.launcher {
+			right: 12px;
+			bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+		}
+
+		.panel {
+			right: 12px;
+			left: 12px;
+			width: auto;
+			bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+			max-height: min(86vh, 760px);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.launcher {
+			transition: none;
+		}
+		.launcher:active {
+			transform: none;
+		}
+		.composer {
+			transition: none;
+		}
 	}
 </style>

@@ -86,7 +86,7 @@ re-validates the payload:
   cannot make one reply to a shortcode.
 - `create_template` writes nothing. It returns a validated `{name, body}` draft that the
   card shows as text, because a template is only real once something references it. The
-  operator copies it from there; the panel keeps nothing after it closes.
+  operator copies it from there; the draft itself is never stored.
 - `stage_workflow_patch` writes nothing. The model proposes **operations** (`add`,
   `move`, `rename`, `remove`), naming the node ids it was shown; the Worker applies them
   deterministically to the flow it already read and returns the composed `{patch}`. The
@@ -187,9 +187,17 @@ missing key is shown as the command that installs one
 anywhere to type a key, because a key typed into a browser ends up in a history, a log
 or a screenshot.
 
-The floating button bottom-right opens one question at a time. It sends the current
-`route` and `flowId` as context, renders proposals as cards, and keeps nothing after
-the panel closes: no transcript, no storage, no history.
+The floating button bottom-right opens the agent panel. It sends the current `route`
+and `flowId` as context, renders proposals as cards, and shows the operator's saved
+transcript above the turn in progress. On a deployment with the agent runtime, the
+transcript is durable: `GET /v1/admin/agent/conversation` is read on open, "Clear"
+deletes it inline, and each question carries an idempotency key so a retry is answered
+rather than re-run (`replayed: true`). Files are attached to a question through
+`POST /v1/admin/agent/attachments` (one file, at most 1 MiB, three kept per operator,
+24 h); text is read into the turn's user message, an image is named to the model and
+the panel says it cannot be seen, and removing a chip deletes the stored file. A
+deployment with the runtime off keeps the older stateless route: it still answers, and
+the panel says the turn is not added to a transcript.
 
 `stage_workflow_patch` is the one proposal with a second step. The card offers "Stage
 the patch" only while a workflow editor is mounted, because the handover is a function
