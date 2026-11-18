@@ -63,6 +63,15 @@ install them into another repository unchanged.
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
 | `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, and `history/` for point-in-time plans |
 
+## How this owner wants work done
+
+Carry a task to resolution in one run: do not stop at a plan, a partial commit or a green
+type-check while something you can finish is unfinished. When a choice is yours, take the
+one that raises all three of user experience, developer experience and agent experience,
+and never buy one by breaking another. Verify against the rendered thing and the running
+deployment, not only against source: this repository has shipped three defects that every
+static gate passed.
+
 ## Before you claim something works
 
 `node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite` against a
