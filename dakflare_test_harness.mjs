@@ -1948,6 +1948,40 @@ async function cmdSuite() {
     rep.check('DELIVERED->PENDING returns 200', back.status, 200);
     rep.check('DELIVERED->PENDING rejected', (await readState()).state, 'DELIVERED');
 
+    // A FAILED command carries the phone's reason. The console tracker used to
+    // say "the phone did not say why" because the reason had nowhere to live.
+    const failing = await admin('POST', '/v1/sms/send', {
+      device_id: identity.deviceId, to: '+8801712345678', body: 'fail me',
+    });
+    const failId = failing.data?.command_id;
+    const failPoll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+    const failCmd = (failPoll.data?.commands ?? []).find((c) => c.command_id === failId);
+    await device(identity, 'POST', '/v1/sms/outgoing/poll',
+      { acks: [{ command_id: failId, claim_token: failCmd?.claim_token }] });
+    const failBatch = await device(identity, 'POST', '/v1/sms/status/batch', {
+      updates: [{
+        command_id: failId,
+        status: 'FAILED',
+        claim_token: failCmd?.claim_token,
+        error_code: 'no_service',
+        error_message: 'The radio reported RESULT_ERROR_NO_SERVICE.',
+      }],
+    });
+    rep.check('FAILED with a reason -> 200', failBatch.status, 200);
+    rep.check('FAILED applied', (await readState(failId)).state, 'FAILED');
+    const failedRead = await admin('GET', `/v1/sms/commands/${failId}?device_id=${identity.deviceId}`);
+    rep.check('the failed command exposes error_code', failedRead.data?.command?.error_code, 'no_service');
+    rep.check('...and error_message',
+      failedRead.data?.command?.error_message, 'The radio reported RESULT_ERROR_NO_SERVICE.');
+    const failedTrace = await admin(
+      'GET', `/v1/admin/trace/${encodeURIComponent(failId)}?device_id=${identity.deviceId}`
+    );
+    rep.check('the trace command record carries error_code',
+      failedTrace.data?.durable_object?.command?.error_code, 'no_service');
+    rep.check('...and error_message',
+      failedTrace.data?.durable_object?.command?.error_message,
+      'The radio reported RESULT_ERROR_NO_SERVICE.');
+
     // expiry, then resurrection attempt
     const expiring = await admin('POST', '/v1/sms/send', {
       device_id: identity.deviceId, to: '+8801712345678', body: 'expire me', expires_in_s: 1,
@@ -1991,6 +2025,7 @@ async function cmdSuite() {
     rep.check('batch returns 5 command ids', (batch.data?.command_ids ?? []).length, 5);
     await sleep(900);
 
+    const batchIds = new Set(batch.data?.command_ids ?? []);
     const delivered = [];
     const tokens = new Map();
     for (const m of ws.messages.slice(before)) {
@@ -1998,8 +2033,10 @@ async function cmdSuite() {
         const j = JSON.parse(m.text);
         if (j.op === 'commands') {
           for (const c of j.commands) {
-            delivered.push(c.command_id);
-            tokens.set(c.command_id, c.claim_token);
+            if (batchIds.has(c.command_id)) {
+              delivered.push(c.command_id);
+              tokens.set(c.command_id, c.claim_token);
+            }
           }
         }
       } catch { /* not JSON */ }
@@ -2203,10 +2240,18 @@ async function cmdSuite() {
 
     // At expiry the edge hands it over again, with a fresh token, so the first
     // holder's late ack cannot apply to the new lease.
+    // Keep ws2 "fresh" by sending a periodic ping so freshSockets() doesn't
+    // close it as stale (STALE_SOCKET_MS=2000ms in the test stack) before the
+    // lease alarm fires at ~LEASE_MS from the original send.
     const deadline = Date.now() + LEASE_MS + 5_000;
     let token2 = null;
+    let lastPing = Date.now();
     while (Date.now() < deadline && token2 === null) {
       await sleep(200);
+      if (Date.now() - lastPing >= 1000) {
+        ws2.sendText(JSON.stringify({ op: 'ping' }));
+        lastPing = Date.now();
+      }
       token2 = tokenFrom(ws2.messages.splice(0));
     }
     rep.check('the expired lease is re-delivered to the live socket', typeof token2, 'string');
@@ -2379,7 +2424,13 @@ async function cmdSuite() {
     const runCli = (...args) =>
       spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
         encoding: 'utf8',
-        env: { ...process.env, HOME: home, NO_COLOR: '1' },
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: path.join(home, '.config'),
+          DAKFLARE_CONFIG: path.join(home, '.config', 'dakflare'),
+          NO_COLOR: '1',
+        },
       });
     const docOf = (run) => JSON.parse(run.stdout.trim().split('\n').pop());
 
@@ -2449,7 +2500,14 @@ async function cmdSuite() {
     const runCli = (...args) =>
       spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
         encoding: 'utf8',
-        env: { ...process.env, HOME: home, NO_COLOR: '1', WORKER_URL },
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: path.join(home, '.config'),
+          DAKFLARE_CONFIG: path.join(home, '.config', 'dakflare'),
+          NO_COLOR: '1',
+          WORKER_URL,
+        },
       });
     const docOf = (run) => JSON.parse((run.stdout ?? '').trim().split('\n').pop());
     fs.mkdirSync(path.join(home, '.config', 'dakflare'), { recursive: true });
@@ -2765,7 +2823,17 @@ async function cmdSuite() {
     const bridged = spawnSync(
       process.execPath,
       [path.join(HERE, 'cli', 'bin', 'dakflare.js'), 'mcp', 'serve', '--token-file', tokenFile],
-      { input: stdin, encoding: 'utf8', env: { ...process.env, HOME: cliHome, NO_COLOR: '1' } }
+      {
+        input: stdin,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: cliHome,
+          XDG_CONFIG_HOME: path.join(cliHome, '.config'),
+          DAKFLARE_CONFIG: path.join(cliHome, '.config', 'dakflare'),
+          NO_COLOR: '1',
+        },
+      }
     );
     const lines = (bridged.stdout ?? '').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
     rep.check('the CLI bridge answers tools/list', (lines[0]?.result?.tools ?? []).length, 7);
@@ -3224,7 +3292,13 @@ async function cmdSuite() {
     const runCli = (...args) =>
       spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
         encoding: 'utf8',
-        env: { ...process.env, HOME: cliHome, NO_COLOR: '1' },
+        env: {
+          ...process.env,
+          HOME: cliHome,
+          XDG_CONFIG_HOME: path.join(cliHome, '.config'),
+          DAKFLARE_CONFIG: cliConfigDir,
+          NO_COLOR: '1',
+        },
       });
     const cliSend = (...extra) =>
       runCli('send', '--device', identity.deviceId, '--to', '+8801766666666',
@@ -3266,6 +3340,299 @@ async function cmdSuite() {
     rep.check('the suite revokes every token it minted',
       remaining.filter((row) => created.includes(row.id)).length, 0);
     fs.rmSync(cliHome, { recursive: true, force: true });
+
+    run(rep);
+  }
+
+  /* ── streamable mcp, failure reasons, otp guard & rules ────────────────── */
+  console.log('-- streamable mcp, failure reasons, otp guard & rules --');
+  {
+    const rep = new Report('streamable mcp, failure reasons, otp guard & rules');
+    const mcpCliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-mcp-cli-'));
+    const adminCliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-admin-cli-'));
+    let mcpTokenId = null;
+    let otpRuleId = null;
+
+    const writeCliHome = (homeDir, token) => {
+      const cfgDir = path.join(homeDir, '.config', 'dakflare');
+      fs.mkdirSync(cfgDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(cfgDir, 'config.json'),
+        JSON.stringify({ url: WORKER_URL, token })
+      );
+      return cfgDir;
+    };
+    const runWithConfig = (cfgDir, ...args) => {
+      const env = { ...process.env, DAKFLARE_CONFIG: cfgDir, NO_COLOR: '1' };
+      delete env.XDG_CONFIG_HOME;
+      return spawnSync(process.execPath, [path.join(HERE, 'cli', 'bin', 'dakflare.js'), ...args], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        env,
+      });
+    };
+    const parseLastJson = (stdout) => {
+      const raw = String(stdout ?? '').trim();
+      if (!raw) return null;
+      return JSON.parse(raw.split('\n').pop());
+    };
+    const parseMcpBody = async (res) => {
+      const ct = String(res.headers.get('content-type') ?? '').toLowerCase();
+      if (ct.includes('text/event-stream')) {
+        const text = await res.text();
+        for (const line of text.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload && payload !== '[DONE]') return JSON.parse(payload);
+        }
+        return null;
+      }
+      return res.json().catch(() => null);
+    };
+
+    try {
+      /* ---- 1. OAuth discovery + Streamable HTTP /mcp + stdio bridge ---- */
+      const prmRes = await fetch(WORKER_URL + '/.well-known/oauth-protected-resource');
+      const prmBody = await prmRes.json().catch(() => null);
+      rep.check('GET /.well-known/oauth-protected-resource -> 200', prmRes.status, 200);
+      rep.check('...resource ends with /mcp', String(prmBody?.resource ?? '').endsWith('/mcp'), true);
+
+      const mcpMint = await admin('POST', '/v1/admin/agent-tokens', {
+        name: 'mcp suite',
+        scopes: ['devices:read', 'messages:read', 'flows:read', 'sms:send'],
+      });
+      rep.check('mint scoped MCP agent token -> 200', mcpMint.status, 200);
+      mcpTokenId = mcpMint.data?.id ?? null;
+      const mcpToken = mcpMint.data?.token;
+
+      if (typeof mcpToken === 'string' && mcpToken !== '') {
+        const initRes = await fetch(WORKER_URL + '/mcp', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${mcpToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': '2025-03-26',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-03-26',
+              capabilities: {},
+              clientInfo: { name: 'harness', version: '1.0.0' },
+            },
+          }),
+        });
+        const mcpSessionId = initRes.headers.get('mcp-session-id') ?? '';
+        const initPayload = await parseMcpBody(initRes);
+        rep.check('POST /mcp initialize -> 200', initRes.status, 200);
+        rep.check('...returns non-empty Mcp-Session-Id', mcpSessionId.length > 0, true);
+        rep.check('...returns initialize protocolVersion', typeof initPayload?.result?.protocolVersion, 'string');
+
+        const listRes = await fetch(WORKER_URL + '/mcp', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${mcpToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': '2025-03-26',
+            'Mcp-Session-Id': mcpSessionId,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+            params: {},
+          }),
+        });
+        const listPayload = await parseMcpBody(listRes);
+        rep.check('POST /mcp tools/list -> 200', listRes.status, 200);
+        rep.checkFn('...lists all 7 scoped tools', () =>
+          Array.isArray(listPayload?.result?.tools) && listPayload.result.tools.length === 7
+        );
+
+        const mcpCfgDir = writeCliHome(mcpCliHome, mcpToken);
+        const mcpStdioEnv = { ...process.env, DAKFLARE_CONFIG: mcpCfgDir, NO_COLOR: '1' };
+        delete mcpStdioEnv.XDG_CONFIG_HOME;
+        const stdioInput = [
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-03-26',
+              capabilities: {},
+              clientInfo: { name: 'stdio-harness', version: '1.0.0' },
+            },
+          }),
+          JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }),
+          JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+        ].join('\n') + '\n';
+        const stdioRun = spawnSync(
+          process.execPath,
+          [path.join(HERE, 'cli', 'bin', 'dakflare.js'), 'mcp', 'serve'],
+          {
+            input: stdioInput,
+            encoding: 'utf8',
+            timeout: 8000,
+            env: mcpStdioEnv,
+          }
+        );
+        const stdioMessages = String(stdioRun.stdout ?? '')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            try { return JSON.parse(line); } catch { return null; }
+          })
+          .filter(Boolean);
+        const stdioInit = stdioMessages.find((m) => m.id === 1);
+        const stdioTools = stdioMessages.find((m) => m.id === 2);
+        rep.check('dakflare mcp serve exits 0 on EOF', stdioRun.status, 0);
+        rep.check('...stdio initialize responds with protocolVersion', typeof stdioInit?.result?.protocolVersion, 'string');
+        rep.checkFn('...stdio tools/list returns all 7 tools', () =>
+          Array.isArray(stdioTools?.result?.tools) && stdioTools.result.tools.length === 7
+        );
+      }
+
+      /* ---- 2. SENT -> FAILED reason sync to D1 + status/trace CLI ------ */
+      const adminCfgDir = writeCliHome(adminCliHome, ADMIN_TOKEN);
+      const failSyncSend = await admin('POST', '/v1/sms/send', {
+        device_id: identity.deviceId,
+        to: '+8801777777701',
+        body: 'failure reason sync check',
+      });
+      rep.check('POST /v1/sms/send for SENT->FAILED sync -> 200', failSyncSend.status, 200);
+      const failSyncId = failSyncSend.data?.command_id;
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const tr = await admin('GET', `/v1/admin/trace/${encodeURIComponent(failSyncId)}?device_id=${identity.deviceId}`);
+        const doCmd = tr.data?.durable_object?.command;
+        if (!doCmd || ['DISPATCHED', 'SENT', 'DELIVERED', 'FAILED', 'EXPIRED'].includes(doCmd.state)) break;
+        if (doCmd.state === 'LEASED' && typeof doCmd.claim_token === 'string') {
+          await device(identity, 'POST', '/v1/sms/outgoing/poll', {
+            acks: [{ command_id: failSyncId, claim_token: doCmd.claim_token }],
+          });
+        } else {
+          const poll = await device(identity, 'POST', '/v1/sms/outgoing/poll', { acks: [] });
+          const hit = (poll.data?.commands ?? []).find((c) => c.command_id === failSyncId);
+          if (hit) {
+            await device(identity, 'POST', '/v1/sms/outgoing/poll', {
+              acks: [{ command_id: failSyncId, claim_token: hit.claim_token }],
+            });
+          }
+        }
+        await sleep(100);
+      }
+
+      const sentRes = await device(identity, 'POST', '/v1/sms/status/batch', {
+        updates: [{ command_id: failSyncId, status: 'SENT' }],
+      });
+      rep.check('report SENT before FAILED -> 200', sentRes.status, 200);
+      const failRes = await device(identity, 'POST', '/v1/sms/status/batch', {
+        updates: [{
+          command_id: failSyncId,
+          status: 'FAILED',
+          error_code: 'radio_no_service',
+          error_message: 'SIM 1 reported no carrier service',
+        }],
+      });
+      rep.check('SENT -> FAILED with error_code/error_message -> 200', failRes.status, 200);
+      rep.check('...applied === 1', failRes.data?.applied, 1);
+
+      const msgsAfterFail = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=50`);
+      const failedMsgRow = (msgsAfterFail.data?.messages ?? []).find(
+        (row) => row.id === failSyncId || row.local_id === failSyncId
+      );
+      rep.check('SENT->FAILED mirrors lowercase reply_state="failed" into D1 messages',
+        failedMsgRow?.reply_state, 'failed');
+      rep.checkFn('...and mirrors radio_no_service + SIM 1 message into reply_error', () => {
+        const txt = String(failedMsgRow?.reply_error ?? '');
+        return txt.includes('radio_no_service') && txt.includes('SIM 1 reported no carrier service');
+      });
+
+      const cliStatusRun = runWithConfig(adminCfgDir, 'status', failSyncId, '--device', identity.deviceId, '--agent');
+      const cliStatusDoc = parseLastJson(cliStatusRun.stdout);
+      rep.check('dakflare status on FAILED exits 1', cliStatusRun.status, 1);
+      rep.check('...surfaces error_code radio_no_service', cliStatusDoc?.data?.command?.error_code, 'radio_no_service');
+
+      const cliTraceRun = runWithConfig(adminCfgDir, 'trace', failSyncId, '--device', identity.deviceId, '--agent');
+      const cliTraceDoc = parseLastJson(cliTraceRun.stdout);
+      rep.check('dakflare trace on FAILED exits 0', cliTraceRun.status, 0);
+      rep.check('...surfaces error_code radio_no_service',
+        cliTraceDoc?.data?.command?.error_code ?? cliTraceDoc?.data?.durable_object?.command?.error_code,
+        'radio_no_service');
+
+      /* ---- 3. OTP safety guard + PUT rules + CLI rules + filtered audit */
+      otpRuleId = `suite_otp_${crypto.randomBytes(3).toString('hex')}`;
+      const createRule = await admin('POST', '/v1/rules', {
+        id: otpRuleId,
+        name: 'otp test rule',
+        matcher: { type: 'prefix', value: '+880' },
+        body_matcher: { type: 'keyword', value: 'OTP' },
+        reply_template: 'auto ack',
+      });
+      rep.check('create OTP test rule -> 200', createRule.status, 200);
+
+      const otpLocalId = `otp_guard_${crypto.randomBytes(3).toString('hex')}`;
+      const otpInbound = await device(identity, 'POST', '/v1/sms/incoming/batch', {
+        messages: [{
+          local_id: otpLocalId,
+          sender: '+8801777777702',
+          body: 'Your verification OTP code is 482910',
+          received_at: new Date().toISOString(),
+        }],
+        acks: [],
+      });
+      rep.check('post OTP inbound message -> 200', otpInbound.status, 200);
+
+      const afterOtp = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=50`);
+      const otpRow = (afterOtp.data?.messages ?? []).find((row) => row.local_id === otpLocalId);
+      rep.checkFn('OTP message is suppressed (reply_command_id is null/undefined)', () =>
+        otpRow !== undefined && (otpRow.reply_command_id === null || otpRow.reply_command_id === undefined)
+      );
+
+      const putRule = await admin('PUT', `/v1/admin/rules/${encodeURIComponent(otpRuleId)}`, {
+        reply_template: 'updated auto ack',
+      });
+      rep.check('PUT /v1/admin/rules/:id -> 200', putRule.status, 200);
+
+      const rulesList1 = runWithConfig(adminCfgDir, 'rules', 'list', '--agent');
+      const rulesListDoc1 = parseLastJson(rulesList1.stdout);
+      const updatedRule = (rulesListDoc1?.data?.rules ?? []).find((r) => r.id === otpRuleId);
+      rep.check('dakflare rules list --agent exits 0', rulesList1.status, 0);
+      rep.check('...reflects updated reply_template', updatedRule?.reply_template, 'updated auto ack');
+
+      const rulesDisable = runWithConfig(adminCfgDir, 'rules', 'update', otpRuleId, '--disabled', '--agent');
+      rep.check('dakflare rules update --disabled --agent exits 0', rulesDisable.status, 0);
+
+      const rulesList2 = runWithConfig(adminCfgDir, 'rules', 'list', '--agent');
+      const rulesListDoc2 = parseLastJson(rulesList2.stdout);
+      const disabledRule = (rulesListDoc2?.data?.rules ?? []).find((r) => r.id === otpRuleId);
+      rep.checkFn('...rule is now disabled (enabled === 0 || enabled === false)', () =>
+        disabledRule !== undefined && (disabledRule.enabled === 0 || disabledRule.enabled === false)
+      );
+
+      const filteredAudit = await admin(
+        'GET',
+        `/v1/admin/audit?category=automation&q=${encodeURIComponent(otpRuleId)}`
+      );
+      rep.check('GET /v1/admin/audit?category=automation&q=<ruleId> -> 200', filteredAudit.status, 200);
+      rep.checkFn('...returns audit events matching rule subject', () =>
+        (filteredAudit.data?.events ?? []).some((e) => e.subject === otpRuleId)
+      );
+
+      const rulesDelete = runWithConfig(adminCfgDir, 'rules', 'delete', otpRuleId, '--yes', '--agent');
+      rep.check('dakflare rules delete --yes --agent exits 0', rulesDelete.status, 0);
+      otpRuleId = null;
+    } finally {
+      if (otpRuleId) await admin('DELETE', `/v1/admin/rules/${encodeURIComponent(otpRuleId)}`).catch(() => {});
+      if (mcpTokenId) await admin('DELETE', `/v1/admin/agent-tokens/${mcpTokenId}`).catch(() => {});
+      fs.rmSync(mcpCliHome, { recursive: true, force: true });
+      fs.rmSync(adminCliHome, { recursive: true, force: true });
+    }
 
     run(rep);
   }
@@ -4571,6 +4938,8 @@ async function cmdMagic() {
       args.push('--var', 'RESEND_API_KEY:harness-resend-key');
       args.push('--var', `RESEND_BASE_URL:${captureBase}`);
       args.push('--var', 'MAGIC_LINK_FROM:DakFlare <onboarding@resend.dev>');
+    } else {
+      args.push('--var', 'RESEND_API_KEY:');
     }
 
     const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, {
@@ -4591,7 +4960,10 @@ async function cmdMagic() {
       }
       try {
         const res = await fetch(`${base}/v1/admin/health`, {
-          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+          headers: {
+            Authorization: `Bearer ${ADMIN_TOKEN}`,
+            'X-Dakflare-Client': 'cli',
+          },
         });
         if (res.ok) return server;
       } catch { /* not listening yet */ }
@@ -4893,6 +5265,7 @@ async function cmdPasswordRotate() {
       '--var', `AUTH_PEPPER:${pepper}`,
       '--var', 'AUTH_PASSWORD_MODE:client-derived',
       '--var', 'AUTH_TRUSTED_ORIGINS:' + base,
+      '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
     ], { cwd: workerDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
 
     let log = '';
@@ -4906,7 +5279,10 @@ async function cmdPasswordRotate() {
       if (proc.exitCode !== null) throw new Error(`${label}: wrangler dev exited (${proc.exitCode})\n${log.slice(-4000)}`);
       try {
         const res = await fetch(`${base}/v1/admin/health`, {
-          headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+          headers: {
+            Authorization: `Bearer ${ADMIN_TOKEN}`,
+            'X-Dakflare-Client': 'cli',
+          },
         });
         if (res.ok) return server;
       } catch { /* not listening yet */ }
