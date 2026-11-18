@@ -333,6 +333,52 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
       },
     },
     {
+      name: "read_devices",
+      description:
+        "Read the paired handsets: id, label, SIM slot, when each was last seen, and whether it is archived. Use it for questions about the fleet's phones. Never returns keys or push tokens.",
+      kind: "read",
+      parameters: {
+        type: "object",
+        properties: {
+          include_archived: { type: "boolean" },
+          limit: { type: "number", description: "1-20, default 20" },
+        },
+        additionalProperties: false,
+      },
+      async execute(input, ctx) {
+        const limitRaw = numberField(input, "limit");
+        const limit = Math.max(1, Math.min(20, limitRaw === null ? 20 : Math.trunc(limitRaw)));
+        const includeArchived = input.include_archived === true;
+        const rows = await ctx.env.DB.prepare(
+          `SELECT device_id, label, sim_slot, last_seen, archived_at
+             FROM devices
+            ${includeArchived ? "" : "WHERE archived_at IS NULL"}
+            ORDER BY last_seen DESC
+            LIMIT ?`
+        )
+          .bind(limit)
+          .all<{
+            device_id: string;
+            label: string | null;
+            sim_slot: number | null;
+            last_seen: number;
+            archived_at: number | null;
+          }>();
+        const devices = (rows.results ?? []).map((row) => ({
+          id: row.device_id,
+          label: row.label ?? null,
+          sim_slot: row.sim_slot === null ? null : Number(row.sim_slot),
+          last_seen: new Date(Number(row.last_seen)).toISOString(),
+          archived: row.archived_at !== null,
+        }));
+        return {
+          ok: true,
+          output: JSON.stringify({ count: devices.length, devices }),
+          data: { count: devices.length },
+        };
+      },
+    },
+    {
       name: "diagnose",
       description:
         "Diagnose one failure into a root-cause card. Accepts a message id; the message body is never echoed.",
