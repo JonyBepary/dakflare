@@ -75,7 +75,7 @@ All four live under `/v1/agent/*` and go through the same gate as the rest of th
 | Endpoint | Scope | Answers |
 |---|---|---|
 | `POST /v1/agent/triage` | `messages:read` | intent, injection risk, template specificity, up to five span roles, `balance >= principal` |
-| `POST /v1/agent/telemetry` | `devices:read` | one of six fixed plans, executed as a single bounded D1 batch |
+| `POST /v1/agent/telemetry` | `devices:read`; `authority_audit` also needs an owner/admin session or the machine token | one of six fixed plans, executed as a single bounded D1 batch |
 | `POST /v1/agent/diagnose` | `messages:read` | a root-cause card with an exact offset |
 | `POST /v1/agent/synthesize` | `flows:write` | a faithfulness score, an approval verdict and an `apply_token` |
 

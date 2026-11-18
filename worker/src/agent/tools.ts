@@ -132,7 +132,11 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
           return { ok: false, reason: "bad_request", message: "question is required" };
         }
         return fromResponse(
-          await handleAgentTelemetry(jsonRequest("/v1/agent/telemetry", "POST", { question }), ctx.env)
+          await handleAgentTelemetry(
+            jsonRequest("/v1/agent/telemetry", "POST", { question }),
+            ctx.env,
+            ctx.actor
+          )
         );
       },
     },

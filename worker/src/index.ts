@@ -1257,8 +1257,8 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       );
     }
     if (method === "POST" && pathname === "/v1/agent/telemetry") {
-      return withAdminAccess(req, env, "read", "read agent telemetry", (_actor) =>
-        handleAgentTelemetry(req, env)
+      return withAdminAccess(req, env, "read", "read agent telemetry", (actor) =>
+        handleAgentTelemetry(req, env, actor)
       );
     }
     if (method === "POST" && pathname === "/v1/agent/diagnose") {

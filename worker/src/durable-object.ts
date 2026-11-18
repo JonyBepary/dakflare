@@ -1137,10 +1137,10 @@ export class DeviceGateway extends DurableObject<Env> {
     const assignments = ["state = ?"];
     const params: unknown[] = [targetStatus];
 
-    // The phone's failure reason is written in the same UPDATE as the state, so a
-    // reader never sees FAILED without it. Other transitions leave the columns
-    // untouched; they are only ever set on the way into FAILED.
-    if (targetStatus === "FAILED") {
+    // The failure reason is written in the same UPDATE as the state, so a reader
+    // never sees FAILED without it. EXPIRED writes its own reason from the
+    // expiry task; other transitions leave the columns untouched.
+    if (targetStatus === "FAILED" || targetStatus === "EXPIRED") {
       assignments.push("error_code = ?", "error_message = ?");
       params.push(errorCode ?? null, errorMessage ?? null);
     }
@@ -1662,7 +1662,13 @@ export class DeviceGateway extends DurableObject<Env> {
       const commandId = payload.command_id;
       if (typeof commandId === "string") {
         // §6.1: `PENDING|DISPATCHED -> EXPIRED`. Terminal states are never touched.
-        this.transition(commandId, "EXPIRED");
+        this.transition(
+          commandId,
+          "EXPIRED",
+          undefined,
+          "expired",
+          "The command expired before the phone collected it."
+        );
       }
       return "consumed";
     }

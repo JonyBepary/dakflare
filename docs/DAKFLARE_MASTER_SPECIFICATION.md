@@ -100,13 +100,15 @@ A `FAILED` update may carry the handset's reason in two optional fields:
 
 | Field | Shape | Stored |
 |---|---|---|
-| `error_code` | `[a-z0-9_]{1,64}` | only on `FAILED` |
-| `error_message` | trimmed string, at most 280 characters | only on `FAILED` |
+| `error_code` | `[a-z0-9_]{1,64}`, normalized from the handset's value | `FAILED`, and `expired` on `EXPIRED` |
+| `error_message` | trimmed string, at most 280 characters | `FAILED`, and a fixed sentence on `EXPIRED` |
 
 Both live on the command row in the owning Durable Object and are returned by
-`GET /v1/sms/commands/:command_id` and the trace's `command` record. A malformed or missing value is
-ignored, never a `400` for the whole batch: the status is still worth applying. Transitions into any
-other state leave the two columns untouched.
+`GET /v1/sms/commands/:command_id` and the trace's `command` record. A handset value is lower-cased and
+runs of non-alphanumerics become `_` before storage; a value that normalizes to nothing is ignored,
+never a `400` for the whole batch. An `EXPIRED` command carries `error_code: "expired"` and the sentence
+"The command expired before the phone collected it.", so an expiry is not a silent terminal state.
+Transitions into any other state leave the two columns untouched.
 
 ### 3.4 Command states
 

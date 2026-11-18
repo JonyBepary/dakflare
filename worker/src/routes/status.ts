@@ -46,18 +46,29 @@ interface StatusUpdate {
   error_message?: string;
 }
 
-/** §6: a machine-readable failure reason, lower snake case. */
-const ERROR_CODE_PATTERN = /^[a-z0-9_]{1,64}$/;
 
 /** §6: the free-text reason is trimmed and capped; overlong values are ignored. */
 const MAX_ERROR_MESSAGE_LENGTH = 280;
 
 /**
- * Validate the optional failure reason. A malformed value is dropped, never a
- * reason to reject the whole batch: the status itself is still useful.
+ * Normalize the optional failure reason to the contract's lower snake case.
+ *
+ * A handset may send a platform constant (`RESULT_ERROR_NO_SERVICE`), an older
+ * client may use punctuation, and a third-party bridge may invent its own
+ * spelling. Dropping those turned every one of them into "FAILED, no reason";
+ * lower-casing and replacing runs of non-alphanumerics keeps the reason.
+ * A value that normalizes to nothing is ignored, never a reason to reject the
+ * batch: the status itself is still worth applying.
  */
 function parseErrorCode(value: unknown): string | undefined {
-  return typeof value === "string" && ERROR_CODE_PATTERN.test(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return normalized === "" ? undefined : normalized;
 }
 
 function parseErrorMessage(value: unknown): string | undefined {

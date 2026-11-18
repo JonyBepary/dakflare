@@ -28,6 +28,7 @@
 import { z } from "zod";
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { canonicalTargetJson, type GrantTarget } from "../lib/authority";
@@ -370,7 +371,11 @@ async function resolvePlan(
  * handler does one D1 batch, so the work is bounded by construction rather than
  * by a timeout this runtime cannot preempt.
  */
-export async function handleAgentTelemetry(req: Request, env: Env): Promise<Response> {
+export async function handleAgentTelemetry(
+  req: Request,
+  env: Env,
+  actor: AdminActor
+): Promise<Response> {
   const started = Date.now();
   const parsed = await readValidated(req, TelemetryBody);
   if (!parsed.ok) return parsed.response;
@@ -386,6 +391,25 @@ export async function handleAgentTelemetry(req: Request, env: Env): Promise<Resp
         plans: [...TELEMETRY_PLANS],
       },
       { status: 400 }
+    );
+  }
+
+  // `authority_audit` reads the grant and approval tables. The scope table says
+  // an agent can never read those, and the console's approvals page is
+  // owner/admin; the plan must not be a back door around either.
+  if (
+    plan === "authority_audit" &&
+    actor.role !== "owner" &&
+    actor.role !== "admin" &&
+    actor.role !== "machine"
+  ) {
+    logAgent("telemetry.rejected", { reason: "authority_scope" });
+    return Response.json(
+      {
+        error: "scope_denied",
+        message: "authority_audit is for an owner, an admin or the machine token",
+      },
+      { status: 403 }
     );
   }
 

@@ -1990,6 +1990,7 @@ async function cmdSuite() {
     await sleep(1400);
     const expState = await admin('GET', `/v1/sms/commands/${expId}?device_id=${identity.deviceId}`);
     rep.check('expired command is EXPIRED', expState.data?.command?.state, 'EXPIRED');
+    rep.check('an expired command carries its reason', expState.data?.command?.error_code, 'expired');
     await device(identity, 'POST', '/v1/sms/status/batch', { updates: [{ command_id: expId, status: 'SENT' }] });
     const after = await admin('GET', `/v1/sms/commands/${expId}?device_id=${identity.deviceId}`);
     rep.check('EXPIRED->SENT rejected (still EXPIRED)', after.data?.command?.state, 'EXPIRED');
@@ -3153,6 +3154,19 @@ async function cmdSuite() {
     rep.check('the list never carries the token',
       ((await admin('GET', '/v1/admin/agent-tokens')).data?.agent_tokens ?? [])
         .some((row) => 'token' in row || 'token_hash' in row), false);
+
+    // `authority_audit` reads the grant and approval tables. A fleet-read token
+    // must not be a back door around the scope table's "never for an agent".
+    const telemetryReader = await mint('telemetry reader', ['devices:read'], { max_per_hour: 5 });
+    created.push(telemetryReader.data?.id);
+    const authority = await agentApi(
+      telemetryReader.data?.token,
+      'POST',
+      '/v1/agent/telemetry',
+      { question: 'which authority grants are live' }
+    );
+    rep.check('an agent cannot read grants through telemetry', authority.status, 403);
+    rep.check('...and the refusal names the scope', authority.data?.error, 'scope_denied');
 
     // "The token appears nowhere in logs" is an exit criterion, so it is proven
     // rather than asserted: the secret half must not appear in any audit row.
