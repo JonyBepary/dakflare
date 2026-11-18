@@ -242,4 +242,18 @@
 		overflow-y: auto;
 		overflow-wrap: anywhere;
 	}
+
+	/* At 390 the card's Accept is the panel's one write and the link is the only
+	   route to the editor; both take the console's 44 px floor on touch. */
+	@media (max-width: 720px), (pointer: coarse) {
+		.proposal .btn {
+			min-height: 44px;
+		}
+
+		.why :global(a) {
+			display: inline-block;
+			min-height: 24px;
+			padding: 6px 0;
+		}
+	}
 </style>

@@ -350,6 +350,7 @@
 				// No stream was ever named, so there is nothing to ask for. This is the
 				// one close after which the text that arrived is all there will be.
 				recovery = { kind: 'lost' };
+				announceLoss();
 			} else {
 				recovery = { kind: 'resuming', via: 'socket' };
 				asking = true;
@@ -367,7 +368,10 @@
 			asking = false;
 			// Nothing arrived at all: the refusal is the story, and the line below it
 			// stays the gateway's own.
-			if (turn.text !== '' || turn.steps.length > 0) recovery = { kind: 'lost' };
+			if (turn.text !== '' || turn.steps.length > 0) {
+				recovery = { kind: 'lost' };
+				announceLoss();
+			}
 			return;
 		}
 
@@ -443,6 +447,7 @@
 		if (token !== resumeToken || !open) return;
 		if (turn !== null && turn.status === 'streaming') {
 			recovery = { kind: 'lost' };
+			announceLoss();
 			asking = false;
 		}
 	}
@@ -721,6 +726,15 @@
 	 * turn that was never announced cannot be resumed, and saying so is not the
 	 * same sentence as a resume that was tried and did not reach the answer.
 	 */
+	/**
+	 * The loss is a terminal outcome like an answer or a refusal, so it is announced
+	 * the same way. Without this a screen reader hears nothing where the turn died.
+	 */
+	function announceLoss(): void {
+		if (turn === null) return;
+		announce(lostLine());
+	}
+
 	function lostLine(): string {
 		return turn?.streamId != null
 			? 'The link closed and the answer could not be picked up again. Nothing after this point arrived.'
@@ -757,7 +771,7 @@
 		<header class="panel-head">
 			<div class="head-copy">
 				<div class="title-row">
-					<p class="panel-title">Assistant</p>
+					<h2 class="panel-title">Assistant</h2>
 					{#if live && linkWord !== ''}
 						<!-- The one factual marker of the live path: a word, not a badge. It
 						     is absent entirely when the runtime is off, which is the default. -->
@@ -766,13 +780,13 @@
 							data-state={linkState}
 							title={agentName === null ? undefined : `agent ${agentName}`}
 						>
-							{linkWord}
+							{turn !== null && !unfinished && linkState === 'closed' ? 'recovered' : linkWord}
 						</span>
 					{/if}
 				</div>
 				<p class="context mono" id={contextId}>{contextLabel}</p>
 			</div>
-			<button type="button" class="close" onclick={close} aria-label="Close the assistant">
+			<button type="button" class="close" onclick={close} aria-label="Close panel">
 				<Icon name="x" size={15} />
 			</button>
 		</header>
@@ -914,6 +928,9 @@
 					{/if}
 
 					{#if turn.proposals.length > 0}
+						<p class="proposal-count mono">
+							{turn.proposals.length} {turn.proposals.length === 1 ? 'proposal' : 'proposals'}
+						</p>
 						<ul class="proposals">
 							{#each turn.proposals as proposal (proposal.id)}
 								<AssistantProposalCard
@@ -974,6 +991,10 @@
 					</ul>
 				{/if}
 				{#if outcome.proposals.length > 0}
+					<p class="proposal-count mono">
+						{outcome.proposals.length}
+						{outcome.proposals.length === 1 ? 'proposal' : 'proposals'}
+					</p>
 					<ul class="proposals">
 						{#each outcome.proposals as proposal (proposal.id)}
 							<AssistantProposalCard
@@ -995,7 +1016,11 @@
 				{#if live}
 					Live agent · it can act only while an autonomy window is open.
 				{:else}
-					Your question is not kept. Accept still writes.
+					{#if (turn !== null && turn.proposals.length > 0) || (outcome !== null && outcome.status === 'ok' && outcome.proposals.length > 0)}
+						Your question is not kept. Accept still writes.
+					{:else}
+						Your question is not kept here.
+					{/if}
 				{/if}
 			</span>
 		</footer>
@@ -1012,7 +1037,7 @@
 	onclick={() => void toggle()}
 >
 	<span class="launcher-mark"><Icon name="sparkles" size={15} /></span>
-	<span class="launcher-label">Ask</span>
+	<span class="launcher-label">{open ? 'Close' : 'Ask'}</span>
 </button>
 
 <style>
@@ -1326,6 +1351,11 @@
 
 	.step + .step {
 		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	/* A refused row is inset for its tint; its mark keeps the rail's x. */
+	.step[data-verdict='refused'] .step-mark {
+		margin-left: 8px;
 	}
 
 	/* The node on the rail. Filled by verdict, so a refusal is findable before the
