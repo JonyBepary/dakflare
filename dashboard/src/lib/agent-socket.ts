@@ -41,7 +41,7 @@
  *
  *   GET    /v1/admin/agent/runtime   { enabled, schemaVersion, sessions, pinnedName }
  *   GET    /v1/admin/agent/autonomy  { enabled, expiresAt, caps:{sms,writes}, usage:{day,tokens,writes,sms} }
- *   POST   /v1/admin/agent/autonomy  { smsCap?, writeCap?, minutes? }
+ *   POST   /v1/admin/agent/autonomy  { sms_cap?, write_cap?, daily_sms_cap?, ttl_s? }
  *   DELETE /v1/admin/agent/autonomy  revoke, and stop every open session
  *
  * Six things shape the code below, because each one is a place a console can
@@ -1806,6 +1806,13 @@ export interface AgentAutonomy {
 	caps: AgentAutonomyCaps;
 	usage: AgentAutonomyUsage;
 	/**
+	 * The deployment's own daily SMS ceiling, beside this window's `caps.sms`.
+	 * It bounds the day for every window, which is what stops two short windows
+	 * doubling it. `null` when the gateway did not send one (a Worker from before
+	 * the ceiling): the page then shows no value rather than inventing a default.
+	 */
+	dailySmsCap: number | null;
+	/**
 	 * Who opened this window. A window is per operator, so a session that did not
 	 * open it is refused with `autonomy_other_session` even while it is open.
 	 * Absent from an older Worker, where the notion did not exist.
@@ -1830,10 +1837,19 @@ function parseAutonomy(value: unknown): AgentAutonomy | null {
 	const day = usage.day;
 	return {
 		enabled: value.enabled,
-		expiresAt: readInstant(value.expiresAt),
+		// The Worker's document is snake_case at the root (`expires_at`, `sms_cap`,
+		// `write_cap`). The camelCase and nested shapes are read too, because this
+		// is the boundary where a rename would otherwise leave the card showing a
+		// blank cap and a window that never expires — which it did until this was
+		// found by comparing the two sides field by field.
+		expiresAt: readInstant(value.expires_at) ?? readInstant(value.expiresAt),
 		actor: typeof value.actor === 'string' ? value.actor : null,
 		mine: typeof value.mine === 'boolean' ? value.mine : null,
-		caps: { sms: readCount(caps.sms), writes: readCount(caps.writes) },
+		dailySmsCap: readCount(value.daily_sms_cap) ?? readCount(caps.daily_sms_cap),
+		caps: {
+			sms: readCount(value.sms_cap) ?? readCount(caps.sms),
+			writes: readCount(value.write_cap) ?? readCount(caps.writes)
+		},
 		usage: {
 			day:
 				typeof day === 'string' && day.trim() !== ''
@@ -1862,16 +1878,27 @@ export interface AutonomyInput {
 	smsCap?: number;
 	/** Writes allowed in this window. Omitted means the gateway's own default. */
 	writeCap?: number;
+	/**
+	 * The deployment-wide daily SMS ceiling. Omitted keeps the gateway's own
+	 * default; the wire name is the Worker's (`daily_sms_cap`), beside `sms_cap`.
+	 */
+	dailySmsCap?: number;
 	/** How long the window is. Omitted means the gateway's own default. */
 	minutes?: number;
 }
 
 /** `POST /v1/admin/agent/autonomy` — mint effect-shaped grants for a window. */
 export async function openAutonomy(input: AutonomyInput): Promise<AutonomyChange> {
+	// Wire names, and this is the only place that knows them: the Worker reads
+	// `sms_cap`, `write_cap`, `daily_sms_cap` and a duration in SECONDS as `ttl_s`.
+	// Sending `smsCap`/`minutes` was accepted with a 200 and silently replaced by
+	// the gateway's defaults, so the console could promise a 25-SMS window and
+	// grant a 10-SMS one. The domain field stays `minutes`; the conversion is here.
 	const body: Record<string, number> = {};
-	if (input.smsCap !== undefined) body.smsCap = input.smsCap;
-	if (input.writeCap !== undefined) body.writeCap = input.writeCap;
-	if (input.minutes !== undefined) body.minutes = input.minutes;
+	if (input.smsCap !== undefined) body.sms_cap = input.smsCap;
+	if (input.writeCap !== undefined) body.write_cap = input.writeCap;
+	if (input.dailySmsCap !== undefined) body.daily_sms_cap = input.dailySmsCap;
+	if (input.minutes !== undefined) body.ttl_s = Math.round(input.minutes * 60);
 
 	const raw = await request(AUTONOMY_PATH, { method: 'POST', body: JSON.stringify(body) });
 	if (!raw.ok) return { status: 'failed', failure: failureFromAnswer(raw.status, raw.body) };
