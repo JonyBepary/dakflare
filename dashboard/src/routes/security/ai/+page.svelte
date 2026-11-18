@@ -897,6 +897,11 @@
 							disabled={busy}
 							aria-describedby="ai-model-hint"
 						/>
+						{#if settings !== null && model.trim() !== settings.model}
+							<!-- The change is marked where it is made: Save sits below the fold,
+							     and an edit with no in-place sign is one an operator forgets. -->
+							<p class="hint field-dirty" role="status">Unsaved: the model answers with this now.</p>
+						{/if}
 						<p class="hint" id="ai-model-hint">
 							The provider's own model name, exactly as it is called and billed.
 						</p>
@@ -1723,6 +1728,19 @@
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-surface-well);
 		min-width: 0;
+	}
+
+	/* A copy control inside a code block is worth 44 px: a miss means selecting an
+	   86-character command by hand. */
+	@media (max-width: 720px), (pointer: coarse) {
+		.command :global(button) {
+			min-width: 44px;
+			min-height: 44px;
+		}
+	}
+
+	.field-dirty {
+		color: var(--df-state-warn-ink);
 	}
 
 	.command code {

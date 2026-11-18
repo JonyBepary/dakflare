@@ -995,7 +995,7 @@
 				{#if live}
 					Live agent · it can act only while an autonomy window is open.
 				{:else}
-					Nothing here is saved.
+					Your question is not kept. Accept still writes.
 				{/if}
 			</span>
 		</footer>
@@ -1151,6 +1151,13 @@
 		place-items: center;
 		width: 28px;
 		height: 28px;
+		/* Touch: the close control is one of two ways out of a panel that covers
+		   40 % of the phone, so it takes the console's 44 px floor. */
+		@media (max-width: 720px), (pointer: coarse) {
+			width: 44px;
+			height: 44px;
+			margin: -8px -8px 0 0;
+		}
 		margin-top: -3px;
 		margin-right: -3px;
 		border: 1px solid transparent;
@@ -1178,6 +1185,11 @@
 		min-width: 0;
 		min-height: 36px;
 		font-size: var(--df-p-text-sm);
+		/* The global 16 px guard lives on `.input` and this scoped rule outranks it,
+		   so the guard is restated here and below. */
+		@media (max-width: 720px), (pointer: coarse) {
+			font-size: 16px;
+		}
 		/* The assistant's own geometry: 4px, the smaller step of the console's
 		   radius scale, so the panel reads as a tool rather than a card. */
 		border-radius: var(--df-p-radius-xs);

@@ -284,7 +284,7 @@
 									<tr>
 										{#each table.columns as column (column.key)}
 											{@const cell = telemetryCell(column.key, row[column.key])}
-											<td class:empty={cell.empty} title={cell.title ?? undefined}>
+											<td class:is-empty={cell.empty} title={cell.title ?? undefined}>
 												{cell.text}
 											</td>
 										{/each}
@@ -379,6 +379,10 @@
 	}
 
 	.ask-input {
+		/* Restated for the same reason as the panel's: the global guard is outranked. */
+		@media (max-width: 720px), (pointer: coarse) {
+			font-size: 16px;
+		}
 		font-size: var(--df-p-text-base);
 	}
 
@@ -522,6 +526,21 @@
 		min-width: 560px;
 	}
 
+	/* Narrow: a device label is text the operator chose to identify something, so
+	   it wraps instead of ellipsizing, and the table stops demanding 560 px of a
+	   322 px card — no sideways scroll, no clipped header, no hidden value. */
+	@media (max-width: 720px) {
+		.ask-table {
+			min-width: 0;
+		}
+
+		.ask-table th,
+		.ask-table td {
+			white-space: normal;
+			overflow-wrap: anywhere;
+		}
+	}
+
 	.ask-table th,
 	.ask-table td {
 		max-width: 0;
@@ -544,7 +563,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.ask-table td.empty {
+	.ask-table td.is-empty {
 		color: var(--df-text-meta);
 	}
 
