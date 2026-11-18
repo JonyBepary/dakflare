@@ -46,12 +46,24 @@ import { readSettingsOrEnv } from "../lib/ai/settings";
 import { resolveAdapter } from "../lib/ai/registry";
 import {
   appendTurnMessages,
+  clearConversationMessages,
   conversationIdFor,
+  readConversationMessages,
   readHistoryNewestFirst,
   readTurnAnswer,
   recordTurnAnswer,
   toChatHistory,
+  withRecordedTurn,
+  type ConversationReadMessage,
 } from "./conversation";
+import {
+  actorHashFor,
+  d1AttachmentStore,
+  MAX_ATTACHMENTS_PER_TURN,
+  messageWithAttachments,
+  r2BlobStore,
+  resolveAttachments,
+} from "./attachments";
 import { Journal, type JournalSql } from "./journal";
 import type { AgentActor } from "./types";
 import { runTurn, type RunFrame } from "./loop";
@@ -131,11 +143,37 @@ interface StoredVersionRow extends Record<string, SqlStorageValue> {
 }
 
 /**
+ * `attachmentIds` from an `ask` frame: strings only, no dedupe here.
+ *
+ * The cap is enforced where the ids are resolved, so an over-limit frame is a
+ * named refusal rather than a silently shortened list.
+ */
+function readAttachmentIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry !== "");
+}
+
+/**
  * The cadence of the SDK's `keepAlive()` heartbeat. A DO is evicted after
  * roughly 70–140 s idle; a turn takes 10–25 s, so one 30 s wake-up during the
  * model call is enough to keep the instance resident.
  */
 export const TURN_HEARTBEAT_SECONDS = 30;
+
+/**
+ * The result of one `say()` turn. `replayed` is on both the fresh and replayed
+ * success shapes so a caller never has to infer it from `took_ms`.
+ */
+export type SayResult =
+  | {
+      ok: true;
+      answer: string;
+      calls: unknown[];
+      tokens: unknown;
+      took_ms: number;
+      replayed: boolean;
+    }
+  | { ok: false; reason: string; message: string };
 
 /**
  * The acting agent, on the SDK's `Agent` base class.
@@ -450,9 +488,10 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       typeof payload.idempotencyKey === "string" && payload.idempotencyKey !== ""
         ? payload.idempotencyKey
         : `${connection.id}:${shortHash(messageText)}`;
+    const attachmentIds = readAttachmentIds(payload.attachmentIds);
 
     const sessionId = connection.id;
-    await this.#ask(connection, state, sessionId, messageText.trim(), idempotencyKey);
+    await this.#ask(connection, state, sessionId, messageText.trim(), idempotencyKey, attachmentIds);
 
     await this.#armExpiryAlarm();
   }
@@ -589,7 +628,8 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     state: AssistantConnectionState,
     sessionId: string,
     message: string,
-    idempotencyKey: string
+    idempotencyKey: string,
+    attachmentIds: string[] = []
   ): Promise<void> {
     const started = Date.now();
     let frames = 0;
@@ -626,6 +666,26 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       }
       logTurn("replayed");
       return;
+    }
+
+    // Attachments are resolved only for a turn that will actually run, and
+    // before any history or stream exists: an unknown or expired id must fail
+    // the turn by name rather than silently arriving without the file.
+    let promptMessage = message;
+    if (attachmentIds.length > 0) {
+      const resolved = await this.#resolveAttachmentPrompt(attachmentIds, state.actor.label);
+      if (!resolved.ok) {
+        try {
+          connection.send(
+            JSON.stringify({ type: "error", error: resolved.reason, message: resolved.message })
+          );
+        } catch {
+          // closed; the refusal is in the log
+        }
+        logTurn(`error:${resolved.reason}`);
+        return;
+      }
+      promptMessage = messageWithAttachments(message, resolved.block);
     }
 
     const { messages: newestFirst } = await readHistoryNewestFirst(session);
@@ -741,7 +801,7 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
           this.env,
           state.actor,
           sessionId,
-          message,
+          promptMessage,
           tools,
           {
             model: resolved.adapter,
@@ -793,19 +853,56 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
 
 
   /**
+   * Resolve attachment ids into the text block a turn may carry.
+   *
+   * Text files are read from R2; images and other binaries are named only. The
+   * returned block goes into the user message, never the system prompt.
+   */
+  async #resolveAttachmentPrompt(
+    ids: string[],
+    actorLabel: string
+  ): Promise<
+    { ok: true; block: string } | { ok: false; reason: string; message: string }
+  > {
+    if (this.env.MEDIA_BUCKET === undefined) {
+      return {
+        ok: false,
+        reason: "attachments_unavailable",
+        message: "MEDIA_BUCKET is not bound, so attachments cannot be read on this deployment",
+      };
+    }
+    if (ids.length > MAX_ATTACHMENTS_PER_TURN) {
+      return {
+        ok: false,
+        reason: "too_many",
+        message: `at most ${MAX_ATTACHMENTS_PER_TURN} attachments may be named in one turn`,
+      };
+    }
+    const resolved = await resolveAttachments(ids, await actorHashFor(actorLabel), {
+      store: d1AttachmentStore(this.env),
+      blobs: r2BlobStore(this.env.MEDIA_BUCKET),
+    });
+    if (!resolved.ok) return resolved;
+    return { ok: true, block: resolved.block };
+  }
+
+  /**
    * One non-streaming turn, for an HTTP caller.
    *
    * The console uses the WebSocket; this exists so a machine with an admin token
    * (the CLI, a test harness) can exercise the same loop, tools, grants and
    * journal without a browser session. Frames are collected rather than sent.
+   *
+   * `idempotencyKey` makes the whole turn replayable: the same key returns the
+   * recorded answer with `replayed: true` and no second model call, the same
+   * guarantee the journal gives an act. Without one the key is server-held and
+   * a retry is a new turn, exactly as before.
    */
   async say(
     actor: AgentActor,
-    message: string
-  ): Promise<
-    | { ok: true; answer: string; calls: unknown[]; tokens: unknown; took_ms: number }
-    | { ok: false; reason: string; message: string }
-  > {
+    message: string,
+    options: { idempotencyKey?: string; attachmentIds?: string[] } = {}
+  ): Promise<SayResult> {
     await this.lifecycle.start();
     if (this.#schemaAhead) {
       return { ok: false, reason: "agent_schema_ahead", message: "agent storage is newer than this code" };
@@ -817,151 +914,233 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     // CLI turn and a panel turn are one memory, not one memory per transport.
     const conversationId = conversationIdFor(actor.label);
     const session = this.sessions.session(conversationId);
-    const idempotencyKey = "http:" + crypto.randomUUID();
+    // Prefix keeps a caller's key from colliding with a socket turn's
+    // connection-derived key; the rest is deterministic, which is the point.
+    const idempotencyKey =
+      options.idempotencyKey !== undefined && options.idempotencyKey !== ""
+        ? `say:${options.idempotencyKey}`
+        : "http:" + crypto.randomUUID();
     // The journal's turn cap is per call on the machine path; only the
     // transcript is shared with the socket path.
     const journalSessionId = "http:" + crypto.randomUUID();
 
-    const replayedAnswer = await readTurnAnswer(session, idempotencyKey);
-    if (replayedAnswer !== null) {
-      return { ok: true, answer: replayedAnswer, calls: [], tokens: null, took_ms: 0 };
-    }
+    return withRecordedTurn<SayResult>(
+      session,
+      idempotencyKey,
+      async () => {
+        let promptMessage = trimmed;
+        const attachmentIds = options.attachmentIds ?? [];
+        if (attachmentIds.length > 0) {
+          const resolved = await this.#resolveAttachmentPrompt(attachmentIds, actor.label);
+          if (!resolved.ok) return resolved;
+          promptMessage = messageWithAttachments(trimmed, resolved.block);
+        }
 
-    const { messages: newestFirst } = await readHistoryNewestFirst(session);
-    const history = toChatHistory(newestFirst);
-    const before = history.length;
+        const { messages: newestFirst } = await readHistoryNewestFirst(session);
+        const history = toChatHistory(newestFirst);
+        const before = history.length;
 
-    const streamId = streamIdFor(idempotencyKey);
-    let writer: StreamWriter | null = null;
-    try {
-      writer = await this.streams.open(streamId, {
-        tag: conversationId,
-        metadata: { turn: idempotencyKey, actor: actor.label },
-      });
-    } catch {
-      // A settled stream from a completed turn; the answer marker is the replay.
-    }
-
-    const started = Date.now();
-    const calls: unknown[] = [];
-    let answer = "";
-    let frames = 0;
-    const logTurn = (outcome: string): void => {
-      console.log(
-        `[agent] turn ${JSON.stringify({
-          turn: idempotencyKey,
-          actor: actor.label,
-          took_ms: Date.now() - started,
-          frames,
-          outcome,
-        })}`
-      );
-    };
-    // The HTTP turn's stream announces itself like a socket turn does, so an
-    // SSE consumer of a machine turn can resume it from seq 0.
-    if (writer !== null) {
-      try {
-        writer.append(turnFrame(idempotencyKey, conversationId) as unknown as StreamJson);
-        frames += 1;
-      } catch {
-        // A settled stream is presentation only.
-      }
-    }
-    // A holder, not a bare `let`: TypeScript's flow analysis does not see an
-    // assignment made inside a callback, and narrows a reassigned `let` to null.
-    const failureRef: { current: { reason: string; message: string } | null } = { current: null };
-
-    const settings = await readSettingsOrEnv(this.env);
-    const resolved = resolveAdapter(this.env, settings);
-    if (!resolved.ok) {
-      if (writer !== null) {
+        const streamId = streamIdFor(idempotencyKey);
+        let writer: StreamWriter | null = null;
         try {
-          writer.error(resolved.reason);
+          writer = await this.streams.open(streamId, {
+            tag: conversationId,
+            metadata: { turn: idempotencyKey, actor: actor.label },
+          });
         } catch {
-          // already settled
+          // A settled stream from a completed turn; the answer marker is the replay.
         }
-      }
-      logTurn(`error:${resolved.reason}`);
-      return { ok: false, reason: resolved.reason, message: resolved.message };
-    }
 
-    // The machine path holds the object awake the same way the socket path
-    // does: one ref-counted heartbeat, disposed even when the turn throws. It
-    // is also a durable fiber for the same reason: an interrupted machine turn
-    // leaves a marker for `onFiberRecovered` instead of vanishing.
-    return this.#runTurnFiber(`turn:${idempotencyKey}`, async (fiber) => {
-      fiber.stash({ turn: idempotencyKey, phase: "model" });
-      const result = await runTurn(
-        this.env,
-        actor,
-        journalSessionId,
-        trimmed,
-        buildAgentTools(),
-        {
-          model: resolved.adapter,
-          journal: this.#journal,
-          budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
-          autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
-          idempotencyKey,
-          history,
-          onEvent: (frame) => {
-            frames += 1;
-            fiber.stash({ turn: idempotencyKey, phase: frame.type });
-            if (writer !== null) {
-              try {
-                writer.append(frame as unknown as StreamJson);
-              } catch {
-                // A settled stream is presentation only; the journal is intact.
-              }
-            }
-            if (frame.type === "answer") answer = frame.text;
-            else if (frame.type === "tool") calls.push(frame);
-            else if (frame.type === "error") {
-              failureRef.current = { reason: frame.reason, message: frame.message };
-            }
-          },
-        }
-      );
-
-      if (writer !== null) {
-        try {
-          if (failureRef.current !== null) writer.error(failureRef.current.message);
-          else writer.close();
-        } catch {
-          // closing a settled stream is safe
-        }
-      }
-
-      try {
-        await appendTurnMessages(session, idempotencyKey, history.slice(before));
-        if (answer !== "") {
-          await recordTurnAnswer(session, idempotencyKey, answer);
-        }
-      } catch {
-        // a lost transcript costs context, not the turn
-      }
-
-      if (failureRef.current !== null) {
-        // A provider or parse failure is a refusal with a reason, never an empty
-        // "answer" the operator has to interpret.
-        logTurn(`error:${failureRef.current.reason}`);
-        return {
-          ok: false as const,
-          reason: failureRef.current.reason,
-          message: failureRef.current.message,
+        const started = Date.now();
+        const calls: unknown[] = [];
+        let answer = "";
+        let frames = 0;
+        const logTurn = (outcome: string): void => {
+          console.log(
+            `[agent] turn ${JSON.stringify({
+              turn: idempotencyKey,
+              actor: actor.label,
+              took_ms: Date.now() - started,
+              frames,
+              outcome,
+            })}`
+          );
         };
-      }
-      if (answer === "") answer = result.answer ?? "";
-      fiber.stash({ turn: idempotencyKey, phase: "settled" });
-      logTurn(result.stopped);
-      return {
+        // The HTTP turn's stream announces itself like a socket turn does, so an
+        // SSE consumer of a machine turn can resume it from seq 0.
+        if (writer !== null) {
+          try {
+            writer.append(turnFrame(idempotencyKey, conversationId) as unknown as StreamJson);
+            frames += 1;
+          } catch {
+            // A settled stream is presentation only.
+          }
+        }
+        // A holder, not a bare `let`: TypeScript's flow analysis does not see an
+        // assignment made inside a callback, and narrows a reassigned `let` to null.
+        const failureRef: { current: { reason: string; message: string } | null } = { current: null };
+
+        const settings = await readSettingsOrEnv(this.env);
+        const resolved = resolveAdapter(this.env, settings);
+        if (!resolved.ok) {
+          if (writer !== null) {
+            try {
+              writer.error(resolved.reason);
+            } catch {
+              // already settled
+            }
+          }
+          logTurn(`error:${resolved.reason}`);
+          return { ok: false, reason: resolved.reason, message: resolved.message };
+        }
+
+        // The machine path holds the object awake the same way the socket path
+        // does: one ref-counted heartbeat, disposed even when the turn throws. It
+        // is also a durable fiber for the same reason: an interrupted machine turn
+        // leaves a marker for `onFiberRecovered` instead of vanishing.
+        return this.#runTurnFiber(`turn:${idempotencyKey}`, async (fiber) => {
+          fiber.stash({ turn: idempotencyKey, phase: "model" });
+          const result = await runTurn(
+            this.env,
+            actor,
+            journalSessionId,
+            promptMessage,
+            buildAgentTools(),
+            {
+              model: resolved.adapter,
+              journal: this.#journal,
+              budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
+              autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
+              idempotencyKey,
+              history,
+              onEvent: (frame) => {
+                frames += 1;
+                fiber.stash({ turn: idempotencyKey, phase: frame.type });
+                if (writer !== null) {
+                  try {
+                    writer.append(frame as unknown as StreamJson);
+                  } catch {
+                    // A settled stream is presentation only; the journal is intact.
+                  }
+                }
+                if (frame.type === "answer") answer = frame.text;
+                else if (frame.type === "tool") calls.push(frame);
+                else if (frame.type === "error") {
+                  failureRef.current = { reason: frame.reason, message: frame.message };
+                }
+              },
+            }
+          );
+
+          if (writer !== null) {
+            try {
+              if (failureRef.current !== null) writer.error(failureRef.current.message);
+              else writer.close();
+            } catch {
+              // closing a settled stream is safe
+            }
+          }
+
+          try {
+            await appendTurnMessages(session, idempotencyKey, history.slice(before));
+            if (answer !== "") {
+              await recordTurnAnswer(session, idempotencyKey, answer);
+            }
+          } catch {
+            // a lost transcript costs context, not the turn
+          }
+
+          if (failureRef.current !== null) {
+            // A provider or parse failure is a refusal with a reason, never an empty
+            // "answer" the operator has to interpret.
+            logTurn(`error:${failureRef.current.reason}`);
+            return {
+              ok: false as const,
+              reason: failureRef.current.reason,
+              message: failureRef.current.message,
+            };
+          }
+          if (answer === "") answer = result.answer ?? "";
+          fiber.stash({ turn: idempotencyKey, phase: "settled" });
+          logTurn(result.stopped);
+          return {
+            ok: true as const,
+            answer,
+            calls,
+            tokens: null,
+            took_ms: Date.now() - started,
+            replayed: false,
+          };
+        });
+      },
+      (replayedAnswer: string) => ({
+        // A replay is answered from storage: no attachment read, no model call,
+        // no token charge and no second transcript row.
         ok: true as const,
-        answer,
-        calls,
+        answer: replayedAnswer,
+        calls: [],
         tokens: null,
-        took_ms: Date.now() - started,
+        took_ms: 0,
+        replayed: true,
+      })
+    );
+  }
+
+  /* ─────────────────────────── conversation read ─────────────────────── */
+
+  /**
+   * `GET /v1/admin/agent/conversation` — the operator's durable transcript.
+   *
+   * The rows live in this object's SQLite, so the route must ask the object;
+   * `lifecycle.start()` is awaited because the Sessions schema is created by
+   * the capability's startup hook, and an RPC can be the first entry point.
+   */
+  async readConversation(
+    actor: { label: string },
+    limit: number
+  ): Promise<
+    | { ok: true; conversation: string; messages: ConversationReadMessage[]; truncated: boolean }
+    | { ok: false; reason: string; message: string }
+  > {
+    await this.lifecycle.start();
+    if (this.#schemaAhead) {
+      return {
+        ok: false,
+        reason: "agent_schema_ahead",
+        message: "agent storage is newer than this code",
       };
-    });
+    }
+    const conversation = conversationIdFor(actor.label);
+    const { messages, truncated } = await readConversationMessages(
+      this.sessions.session(conversation),
+      limit
+    );
+    return { ok: true, conversation, messages, truncated };
+  }
+
+  /**
+   * `DELETE /v1/admin/agent/conversation` — clear this operator's transcript.
+   *
+   * Sessions does have a delete-all for one session (`clearMessages`), so the
+   * conversation id is kept: the panel's next turn appends to the same id and a
+   * client holding it does not have to re-learn a new one. The replay markers
+   * live in the same session, so a cleared conversation also forgets which turn
+   * keys were already answered.
+   */
+  async clearConversation(
+    actor: { label: string }
+  ): Promise<{ ok: true; conversation: string; cleared: true } | { ok: false; reason: string; message: string }> {
+    await this.lifecycle.start();
+    if (this.#schemaAhead) {
+      return {
+        ok: false,
+        reason: "agent_schema_ahead",
+        message: "agent storage is newer than this code",
+      };
+    }
+    const conversation = conversationIdFor(actor.label);
+    await clearConversationMessages(this.sessions.session(conversation));
+    return { ok: true, conversation, cleared: true };
   }
 
   /* ─────────────────────────── schema ledger ─────────────────────────── */

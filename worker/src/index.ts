@@ -87,7 +87,9 @@ import {
   ticketRefusal,
 } from "./lib/agent-runtime";
 import { handleAgentRuntimeRead, handleAgentSay,
- handleAgentTicketMint, handleAutonomyEnable, handleAutonomyRead, handleAutonomyRevoke } from "./routes/agent-runtime";
+ handleAgentTicketMint, handleAutonomyEnable, handleAutonomyRead, handleAutonomyRevoke,
+ handleAgentConversationRead, handleAgentConversationClear,
+ handleAgentAttachmentUpload, handleAgentAttachmentList, handleAgentAttachmentDelete } from "./routes/agent-runtime";
 import {
   handleAgentDiagnose,
   handleAgentSynthesize,
@@ -1280,6 +1282,31 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     if (method === "POST" && pathname === "/v1/admin/agent/say") {
       return withAdminAccess(req, env, "write", "run one agent turn", (actor) =>
         handleAgentSay(req, env, actor)
+      );
+    }
+    // The durable transcript and the attachments it may carry. Every action is
+    // absent from SCOPE_FOR_ACTION, so an agent credential is refused before the
+    // handler runs: a transcript is operator data and a file upload is a write.
+    if (method === "GET" && pathname === "/v1/admin/agent/conversation") {
+      return handleAgentConversationRead(req, env);
+    }
+    if (method === "DELETE" && pathname === "/v1/admin/agent/conversation") {
+      return withAdminAccess(req, env, "write", "clear the agent conversation", (actor) =>
+        handleAgentConversationClear(req, env, actor)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/agent/attachments") {
+      return withAdminAccess(req, env, "write", "upload agent attachments", (actor) =>
+        handleAgentAttachmentUpload(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/agent/attachments") {
+      return handleAgentAttachmentList(req, env);
+    }
+    const attachmentDeleteMatch = pathname.match(/^\/v1\/admin\/agent\/attachments\/([^/]+)$/);
+    if (method === "DELETE" && attachmentDeleteMatch) {
+      return withAdminAccess(req, env, "write", "delete agent attachments", (actor) =>
+        handleAgentAttachmentDelete(req, env, actor, decodeURIComponent(attachmentDeleteMatch[1]))
       );
     }
     if (method === "POST" && pathname === "/v1/admin/agent/ticket") {

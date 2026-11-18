@@ -37,6 +37,20 @@ import {
   type MintedTicket,
 } from "../lib/agent-runtime";
 import { AGENT_SCHEMA_VERSION } from "../agent/runtime";
+import {
+  actorHashFor,
+  attachmentKind,
+  ATTACHMENT_TTL_MS,
+  d1AttachmentStore,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_TURN,
+  checkUpload,
+  objectKeyFor,
+  r2BlobStore,
+  safeObjectName,
+  turnRefusalStatus,
+  type AttachmentRow,
+} from "../agent/attachments";
 
 const TICKET_ACTION = "mint agent runtime tickets";
 const RUNTIME_READ_ACTION = "read the agent runtime";
@@ -162,6 +176,8 @@ interface AutonomyBody {
   ttl_s?: number;
   sms_cap?: number;
   write_cap?: number;
+  /** The deployment-wide daily SMS ceiling, beside the per-window `sms_cap`. */
+  daily_sms_cap?: number;
   recipients?: string[];
   flows?: Array<{ flow_id?: string; graph_hash?: string }>;
   rules?: Array<{ rule_id?: string; body_hash?: string }>;
@@ -200,6 +216,7 @@ export async function handleAutonomyEnable(
   const ttlS = readInteger(input.ttl_s, 3_600, 60, 3_600);
   const smsCap = readInteger(input.sms_cap, 10, 0, 1_000);
   const writeCap = readInteger(input.write_cap, 50, 0, 1_000);
+  const dailySmsCap = readInteger(input.daily_sms_cap, 20, 0, 1_000);
 
   const recipients = Array.isArray(input.recipients)
     ? input.recipients.filter((entry): entry is string => typeof entry === "string")
@@ -228,6 +245,7 @@ export async function handleAutonomyEnable(
     ttl_s: ttlS,
     sms_cap: smsCap,
     write_cap: writeCap,
+    daily_sms_cap: dailySmsCap,
     recipients,
     flows,
     rules,
@@ -265,6 +283,7 @@ export async function handleAutonomyEnable(
         mine: (typeof row.actor === "string" ? row.actor : null) === actor.label,
       sms_cap: smsCap,
       write_cap: writeCap,
+      daily_sms_cap: dailySmsCap,
       grants: minted.grants.map((grant) => ({ id: grant.id, scope: grant.scope })),
     },
   });
@@ -275,6 +294,7 @@ export async function handleAutonomyEnable(
       expires_at: row.expires_at,
       sms_cap: smsCap,
       write_cap: writeCap,
+      daily_sms_cap: dailySmsCap,
       grants: minted.grants.map((grant) => ({
         id: grant.id,
         scope: grant.scope,
@@ -328,6 +348,28 @@ export async function handleAutonomyRevoke(
   return Response.json({ enabled: false, revoked_grants: revokedGrants, sessions_closed: closed });
 }
 
+interface SayBody {
+  message?: unknown;
+  idempotencyKey?: unknown;
+  attachmentIds?: unknown;
+}
+
+/** 8–64 chars of `[A-Za-z0-9_-]`, or null when the caller supplied one badly. */
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** A caller-supplied or empty attachment id list, or null when malformed. */
+function readAttachmentIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return null;
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry === "") return null;
+    ids.push(entry);
+  }
+  if (ids.length > MAX_ATTACHMENTS_PER_TURN) return null;
+  return ids;
+}
+
 /**
  * `POST /v1/admin/agent/say` — one non-streaming turn for a machine caller.
  *
@@ -335,6 +377,11 @@ export async function handleAutonomyRevoke(
  * exercise the same loop, tools, grants and journal without a browser session.
  * It is admin-only, its action is absent from SCOPE_FOR_ACTION, and it refuses
  * when the runtime is off.
+ *
+ * `idempotencyKey` (optional, 8–64 chars) makes the turn replayable: the same
+ * key returns the recorded answer with `replayed: true` and no second model
+ * call. `attachmentIds` (max 3) are resolved by the object, which owns the
+ * conversation and the R2 binding.
  */
 export async function handleAgentSay(
   req: Request,
@@ -357,10 +404,8 @@ export async function handleAgentSay(
   } catch {
     return Response.json({ error: "bad_request", message: "body must be JSON" }, { status: 400 });
   }
-  const message =
-    body !== null && typeof body === "object" && typeof (body as { message?: unknown }).message === "string"
-      ? ((body as { message: string }).message).trim()
-      : "";
+  const input = (body !== null && typeof body === "object" ? body : {}) as SayBody;
+  const message = typeof input.message === "string" ? input.message.trim() : "";
   if (message === "") {
     return Response.json(
       { error: "bad_request", message: "message must be a non-empty string" },
@@ -374,13 +419,303 @@ export async function handleAgentSay(
     );
   }
 
+  let idempotencyKey: string | undefined;
+  if (input.idempotencyKey !== undefined) {
+    if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+      return Response.json(
+        {
+          error: "bad_request",
+          message: "idempotencyKey must be 8-64 characters of A-Z, a-z, 0-9, _ or -",
+        },
+        { status: 400 }
+      );
+    }
+    idempotencyKey = input.idempotencyKey;
+  }
+
+  const attachmentIds = readAttachmentIds(input.attachmentIds);
+  if (attachmentIds === null) {
+    return Response.json(
+      {
+        error: "bad_request",
+        message: `attachmentIds must be an array of at most ${MAX_ATTACHMENTS_PER_TURN} strings`,
+      },
+      { status: 400 }
+    );
+  }
+
   const stub = env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME);
-  const result = await stub.say(actor, message);
+  const result = await stub.say(actor, message, {
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    attachmentIds,
+  });
+  if (!result.ok) {
+    return Response.json(
+      { error: "agent_refused", reason: result.reason, message: result.message },
+      { status: turnRefusalStatus(result.reason) }
+    );
+  }
+  return Response.json(result);
+}
+
+/* ──────────────────────────────── conversation ───────────────────────────── */
+
+const CONVERSATION_READ_ACTION = "read the agent conversation";
+const CONVERSATION_CLEAR_ACTION = "clear the agent conversation";
+
+/** `GET /v1/admin/agent/conversation?limit=` — the durable transcript. */
+export async function handleAgentConversationRead(req: Request, env: Env): Promise<Response> {
+  return runAsAgent(
+    req,
+    env,
+    CONVERSATION_READ_ACTION,
+    async (actor) => {
+      if (!agentRuntimeEnabled(env) || env.ASSISTANT === undefined) {
+        return Response.json({ error: "agent_runtime_off" }, { status: 503 });
+      }
+      const raw = new URL(req.url).searchParams.get("limit");
+      const parsed = raw === null ? 40 : Number(raw);
+      const limit = Number.isInteger(parsed) ? Math.max(1, Math.min(100, parsed)) : 40;
+
+      const stub = env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME);
+      const result = await stub.readConversation({ label: actor.label }, limit);
+      if (!result.ok) {
+        return Response.json(
+          { error: "agent_refused", reason: result.reason, message: result.message },
+          { status: 503 }
+        );
+      }
+      return Response.json({
+        conversation: result.conversation,
+        messages: result.messages,
+        truncated: result.truncated,
+      });
+    },
+    "read"
+  );
+}
+
+/**
+ * `DELETE /v1/admin/agent/conversation` — clear this operator's transcript.
+ *
+ * Sessions has `clearMessages()` for one session, so the conversation id is
+ * stable across a clear: the panel's next turn appends to the same id. The
+ * clear is audited because deleting the memory a later turn reasons from is a
+ * change to what the agent can say.
+ */
+export async function handleAgentConversationClear(
+  _req: Request,
+  env: Env,
+  actor: AdminActor
+): Promise<Response> {
+  if (!agentRuntimeEnabled(env) || env.ASSISTANT === undefined) {
+    return Response.json({ error: "agent_runtime_off" }, { status: 503 });
+  }
+  const stub = env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME);
+  const result = await stub.clearConversation({ label: actor.label });
   if (!result.ok) {
     return Response.json(
       { error: "agent_refused", reason: result.reason, message: result.message },
       { status: 503 }
     );
   }
-  return Response.json(result);
+  await writeAudit(env, {
+    action: "agent.conversation_cleared",
+    actor: { userId: actor.userId, label: actor.label },
+    subject: "agent conversation",
+    detail: { conversation: result.conversation },
+  });
+  return Response.json({
+    cleared: true,
+    conversation: result.conversation,
+  });
+}
+
+/* ──────────────────────────────── attachments ────────────────────────────── */
+
+const ATTACHMENT_WRITE_ACTION = "upload agent attachments";
+const ATTACHMENT_DELETE_ACTION = "delete agent attachments";
+const ATTACHMENT_READ_ACTION = "list agent attachments";
+
+/** Multipart overhead above the file itself (boundary, headers, fields). */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+function attachmentDto(row: AttachmentRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    name: row.name,
+    bytes: Number(row.bytes),
+    kind: row.kind,
+    created_at: new Date(Number(row.created_at)).toISOString(),
+    expires_at: new Date(Number(row.expires_at)).toISOString(),
+  };
+}
+
+/** Is this form entry a file? `File` exists in Workers; keep the check structural. */
+function asFile(value: unknown): { name: string; size: number; arrayBuffer(): Promise<ArrayBuffer> } | null {
+  if (value === null || typeof value !== "object") return null;
+  const candidate = value as { name?: unknown; size?: unknown; arrayBuffer?: unknown };
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.size !== "number" ||
+    typeof candidate.arrayBuffer !== "function"
+  ) {
+    return null;
+  }
+  return candidate as { name: string; size: number; arrayBuffer(): Promise<ArrayBuffer> };
+}
+
+/**
+ * `POST /v1/admin/agent/attachments` — one file, multipart/form-data.
+ *
+ * Bounded at 1 MiB and 3 live attachments per operator. The refusal names the
+ * limit it crossed: "too big" without the number is a message an operator has
+ * to guess at.
+ */
+export async function handleAgentAttachmentUpload(
+  req: Request,
+  env: Env,
+  actor: AdminActor
+): Promise<Response> {
+  if (env.MEDIA_BUCKET === undefined) {
+    return Response.json(
+      {
+        error: "attachments_unavailable",
+        message: "MEDIA_BUCKET is not bound, so attachments cannot be stored on this deployment",
+      },
+      { status: 503 }
+    );
+  }
+
+  // Fast path: a declared length larger than the file cap plus multipart
+  // overhead is refused without reading the stream.
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES + MULTIPART_OVERHEAD_BYTES) {
+    return Response.json(
+      {
+        error: "attachment_too_large",
+        message: `a file may be at most ${MAX_ATTACHMENT_BYTES} bytes (1 MiB)`,
+      },
+      { status: 413 }
+    );
+  }
+
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return Response.json(
+      {
+        error: "bad_request",
+        message: "the body must be multipart/form-data with one `file` field",
+      },
+      { status: 400 }
+    );
+  }
+  const file = asFile(form.get("file"));
+  if (file === null) {
+    return Response.json(
+      { error: "bad_request", message: "the multipart body must contain one `file` field" },
+      { status: 400 }
+    );
+  }
+
+  const now = Date.now();
+  const actorHash = await actorHashFor(actor.label);
+  const store = d1AttachmentStore(env);
+  const refusal = checkUpload({
+    name: file.name,
+    size: file.size,
+    liveCount: await store.count(actorHash, now),
+  });
+  if (refusal !== null) {
+    return Response.json(
+      { error: refusal.error, message: refusal.message },
+      { status: refusal.status }
+    );
+  }
+
+  const id = `att_${crypto.randomUUID().replace(/-/g, "")}`;
+  const name = safeObjectName(file.name);
+  const kind = attachmentKind(file.name);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const key = objectKeyFor(actorHash, id, name);
+  const row: AttachmentRow = {
+    id,
+    actor_hash: actorHash,
+    actor: actor.label,
+    name,
+    kind,
+    bytes: bytes.byteLength,
+    r2_key: key,
+    created_at: now,
+    expires_at: now + ATTACHMENT_TTL_MS,
+  };
+
+  await r2BlobStore(env.MEDIA_BUCKET).put(key, bytes);
+  try {
+    await store.insert(row);
+  } catch (error) {
+    // The row is the index; an orphaned object would bill storage forever.
+    await env.MEDIA_BUCKET.delete(key).catch(() => undefined);
+    throw error;
+  }
+
+  return Response.json(
+    {
+      id: row.id,
+      name: row.name,
+      bytes: row.bytes,
+      kind: row.kind,
+      expires_at: new Date(row.expires_at).toISOString(),
+    },
+    { status: 201 }
+  );
+}
+
+/** `GET /v1/admin/agent/attachments` — the caller's live attachments. */
+export async function handleAgentAttachmentList(
+  req: Request,
+  env: Env
+): Promise<Response> {
+  return runAsAgent(
+    req,
+    env,
+    ATTACHMENT_READ_ACTION,
+    async (actor) => {
+      if (env.MEDIA_BUCKET === undefined) {
+        return Response.json({ attachments: [] });
+      }
+      const actorHash = await actorHashFor(actor.label);
+      const rows = await d1AttachmentStore(env).list(actorHash, Date.now());
+      return Response.json({ attachments: rows.map(attachmentDto) });
+    },
+    "read"
+  );
+}
+
+/** `DELETE /v1/admin/agent/attachments/:id` — remove the object and the row. */
+export async function handleAgentAttachmentDelete(
+  _req: Request,
+  env: Env,
+  actor: AdminActor,
+  id: string
+): Promise<Response> {
+  if (env.MEDIA_BUCKET === undefined) {
+    return Response.json({ error: "attachments_unavailable" }, { status: 503 });
+  }
+  const actorHash = await actorHashFor(actor.label);
+  const store = d1AttachmentStore(env);
+  const row = await store.find(actorHash, id);
+  if (row === null) {
+    return Response.json(
+      { error: "not_found", message: `no attachment ${id} belongs to this operator` },
+      { status: 404 }
+    );
+  }
+  // Object first: a failed delete leaves the row so the caller can retry, and a
+  // retried delete of a missing object is harmless.
+  await env.MEDIA_BUCKET.delete(row.r2_key);
+  await store.remove(actorHash, id);
+  return Response.json({ deleted: true, id });
 }

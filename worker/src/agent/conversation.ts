@@ -201,3 +201,104 @@ export async function readTurnAnswer(
   const stored = await session.getMessage(turnAnswerId(idempotencyKey));
   return stored === null ? null : messageText(stored);
 }
+
+/**
+ * Run a turn unless its key already has a recorded answer.
+ *
+ * `run` is the ONLY place a model call can happen, so a replay that never calls
+ * it is a replay that made no second model call. Both the socket turn and
+ * `say()` go through this, which is what makes them behave the same.
+ */
+export async function withRecordedTurn<T>(
+  session: ConversationSession,
+  idempotencyKey: string,
+  run: () => Promise<T>,
+  replay: (answer: string) => T
+): Promise<T> {
+  const answer = await readTurnAnswer(session, idempotencyKey);
+  if (answer !== null) return replay(answer);
+  return run();
+}
+
+/* ─────────────────────── readable conversation (panel) ──────────────────── */
+
+/**
+ * What `GET /v1/admin/agent/conversation` returns for one message.
+ *
+ * Only `user` and `assistant` rows with text are exposed. The `turn-result`
+ * `system` marker is the assistant's final answer (kept out of the prompt so a
+ * replay marker is never re-sent as conversation); it is presented as an
+ * assistant message here. Tool rows and other system rows are skipped.
+ */
+export interface ConversationReadMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+}
+
+/** The read/clear shape the panel route needs from a session handle. */
+export interface ConversationReadSession {
+  getRecentHistory(
+    maxContentBytes: number
+  ): Promise<{ messages: SessionMessage[]; truncated: boolean }>;
+  clearMessages(): Promise<void>;
+}
+
+/**
+ * How much transcript a panel read may hydrate.
+ *
+ * The route asks for 1–100 messages; 256 KiB covers 100 ordinary turns and
+ * bounds the isolate's memory when a turn carried a large attachment. A
+ * transcript that exceeds it reports `truncated: true` rather than growing
+ * without limit.
+ */
+export const CONVERSATION_READ_BUDGET_BYTES = 256 * 1024;
+
+/**
+ * The newest `limit` readable messages, oldest first.
+ *
+ * Read through `getRecentHistory` — the same bounded API prompt hydration uses —
+ * so this cannot materialise an unbounded transcript inside the object.
+ * `truncated` covers both reasons a window can be partial: older rows existed,
+ * or readable messages were dropped to fit the byte budget.
+ */
+export async function readConversationMessages(
+  session: ConversationReadSession,
+  limit: number,
+  budgetBytes: number = CONVERSATION_READ_BUDGET_BYTES
+): Promise<{ messages: ConversationReadMessage[]; truncated: boolean }> {
+  const cap = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const recent = await session.getRecentHistory(budgetBytes);
+  const readable: ConversationReadMessage[] = [];
+  for (const message of recent.messages) {
+    let role: "user" | "assistant";
+    if (message.role === "user" || message.role === "assistant") {
+      role = message.role;
+    } else if (message.role === "system") {
+      const metadata = (message.metadata ?? {}) as Record<string, unknown>;
+      if (metadata.kind !== "turn-result") continue;
+      role = "assistant";
+    } else {
+      continue;
+    }
+    const text = messageText(message);
+    if (text.trim() === "") continue;
+    readable.push({
+      id: message.id,
+      role,
+      text,
+      at: message.createdAt?.toISOString() ?? new Date().toISOString(),
+    });
+  }
+  return {
+    messages: readable.slice(-cap),
+    truncated: recent.truncated || readable.length > cap,
+  };
+}
+
+/** Clear one operator's conversation. A later turn starts a fresh history. */
+export async function clearConversationMessages(session: ConversationReadSession): Promise<void> {
+  await session.clearMessages();
+}
+

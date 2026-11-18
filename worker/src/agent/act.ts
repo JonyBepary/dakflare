@@ -272,7 +272,15 @@ export function createActTools(deps: ActToolDeps): AgentTool[] {
             },
             run: async () => fromResponse(await deps.dispatch.createRule(payload, ctx.env, ctx.actor)),
             proposeOnRefusal: async (refusal) => {
-              const staged = await deps.dispatch.proposeRule(payload, ctx.env, ctx.actor);
+              // The proposal exists because an ACT was refused for authority,
+              // not because the model chose to propose. The marker rides in the
+              // open payload (`assistant_proposals.payload_json` has no closed
+              // shape) so the console can say why the card appeared.
+              const staged = await deps.dispatch.proposeRule(
+                { ...payload, origin: "act_refused" },
+                ctx.env,
+                ctx.actor
+              );
               if (staged === null) return refusal;
               return {
                 ok: true,

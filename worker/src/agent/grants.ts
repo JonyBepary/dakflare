@@ -43,6 +43,13 @@ export interface AutonomyRow {
   expires_at: number;
   updated_by: string;
   /**
+   * The DEPLOYMENT-wide daily SMS ceiling, beside the per-window `sms_cap`.
+   * Optional in this interface so a row written before migration 0016, or a
+   * hand-built check fixture, is read as the migration's default (20). The
+   * window cap bounds one operator's hour; this bounds the day for everyone.
+   */
+  daily_sms_cap?: number;
+  /**
    * The operator's explicit "any rule" consent. An untargeted `rules:write`
    * grant only matches an unscoped request by design, and a rule act always
    * carries the id it just minted, so without this flag the grant could never
@@ -77,6 +84,9 @@ export type ActDecision =
 
 export type UsageCharge = "ok" | "sms_cap" | "write_cap";
 
+/** The migration's default for the deployment-wide daily SMS ceiling. */
+export const DEFAULT_DAILY_SMS_CAP = 20;
+
 /** The storage seam `authorizeAct` needs, small enough to fake in a check. */
 export interface AutonomyStore {
   readAutonomy(now: number): Promise<AutonomyRow | null>;
@@ -102,7 +112,8 @@ export function d1AutonomyStore(env: Env): AutonomyStore {
   return {
     async readAutonomy() {
       const row = await env.DB.prepare(
-        `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor
+        `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor,
+                daily_sms_cap
            FROM agent_autonomy WHERE id = 1`
       ).first<AutonomyRow>();
       return row ?? null;
@@ -121,7 +132,18 @@ export function d1AutonomyStore(env: Env): AutonomyStore {
     },
     async chargeUsage(day, kind, count, autonomy) {
       const column = kind === "sms" ? "sms" : "writes";
-      const cap = kind === "sms" ? autonomy.sms_cap : autonomy.write_cap;
+      // The atomic guard enforces the tighter of the window cap and the
+      // deployment-wide daily SMS cap, so two windows racing on the same day
+      // cannot between them pass the pre-check and exceed the day's ceiling.
+      const cap =
+        kind === "sms"
+          ? Math.min(
+              Number(autonomy.sms_cap),
+              autonomy.daily_sms_cap === undefined || autonomy.daily_sms_cap === null
+                ? DEFAULT_DAILY_SMS_CAP
+                : Number(autonomy.daily_sms_cap)
+            )
+          : Number(autonomy.write_cap);
       const result = await env.DB.prepare(
         `INSERT INTO agent_usage (day, tokens, writes, sms)
          VALUES (?, 0, ?, ?)
@@ -224,6 +246,21 @@ export async function authorizeActWithStore(
       ok: false,
       reason: "write_cap",
       message: `agent daily write cap reached (${Number(autonomy.write_cap)}/day)`,
+    };
+  }
+
+  // The deployment-wide ceiling, beside the per-window one above. It is read
+  // here — before any grant — so two short windows on the same UTC day cannot
+  // spend twice the day's allowance between them.
+  const dailySmsCap =
+    autonomy.daily_sms_cap === undefined || autonomy.daily_sms_cap === null
+      ? DEFAULT_DAILY_SMS_CAP
+      : Number(autonomy.daily_sms_cap);
+  if (effect.kind === "sms" && usage.sms + count > dailySmsCap) {
+    return {
+      ok: false,
+      reason: "daily_sms_cap",
+      message: `agent deployment-wide daily SMS cap reached (${dailySmsCap}/day)`,
     };
   }
 
@@ -428,6 +465,8 @@ export interface EnableAutonomyInput extends AutonomyPlan {
   updated_by: string;
   /** The operator the window belongs to; defaults to `updated_by`. */
   actor?: string;
+  /** The deployment-wide daily SMS ceiling; defaults to the migration's 20. */
+  daily_sms_cap?: number;
 }
 
 /** Write the singleton row: the window and the two daily caps. */
@@ -439,18 +478,23 @@ export async function enableAutonomy(
   const ttl = Math.max(60, Math.min(3_600, Math.trunc(input.ttl_s ?? 3_600)));
   const smsCap = Math.max(0, Math.trunc(input.sms_cap ?? 10));
   const writeCap = Math.max(0, Math.trunc(input.write_cap ?? 50));
+  const dailySmsCap = Math.max(
+    0,
+    Math.min(1_000, Math.trunc(input.daily_sms_cap ?? DEFAULT_DAILY_SMS_CAP))
+  );
   const row: AutonomyRow = {
     enabled: 1,
     sms_cap: smsCap,
     write_cap: writeCap,
+    daily_sms_cap: dailySmsCap,
     expires_at: now + ttl * 1_000,
     updated_by: input.updated_by,
     allow_rules: input.allow_rules === true ? 1 : 0,
     actor: input.actor ?? input.updated_by,
   };
   await env.DB.prepare(
-    `INSERT INTO agent_autonomy (id, enabled, sms_cap, write_cap, expires_at, updated_by, updated_at, allow_rules, actor)
-     VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO agent_autonomy (id, enabled, sms_cap, write_cap, expires_at, updated_by, updated_at, allow_rules, actor, daily_sms_cap)
+     VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        enabled = 1,
        sms_cap = excluded.sms_cap,
@@ -459,9 +503,19 @@ export async function enableAutonomy(
        updated_by = excluded.updated_by,
        updated_at = excluded.updated_at,
        allow_rules = excluded.allow_rules,
-       actor = excluded.actor`
+       actor = excluded.actor,
+       daily_sms_cap = excluded.daily_sms_cap`
   )
-    .bind(smsCap, writeCap, row.expires_at, row.updated_by, now, row.allow_rules, row.actor ?? null)
+    .bind(
+      smsCap,
+      writeCap,
+      row.expires_at,
+      row.updated_by,
+      now,
+      row.allow_rules,
+      row.actor ?? null,
+      dailySmsCap
+    )
     .run();
   return row;
 }
@@ -496,6 +550,7 @@ export interface AutonomyStatus {
   enabled: boolean;
   sms_cap: number;
   write_cap: number;
+  daily_sms_cap: number;
   expires_at: number | null;
   updated_by: string | null;
   /** The operator the window belongs to; null for a row that predates 0014. */
@@ -511,7 +566,8 @@ export function describeAutonomy(status: AutonomyStatus): string {
   const until = status.expires_at === null ? "no stated expiry" : new Date(status.expires_at).toISOString();
   const writes = `${status.usage.writes}/${status.write_cap} writes today`;
   const sms = `${status.usage.sms}/${status.sms_cap} SMS today`;
-  return `Autonomy is ON until ${until}: ${writes}, ${sms}. Live grants cover the act classes this window minted, so call the act tool and let it answer; a refusal names the reason.`;
+  const daily = `${status.usage.sms}/${status.daily_sms_cap} SMS today deployment-wide`;
+  return `Autonomy is ON until ${until}: ${writes}, ${sms}, ${daily}. Live grants cover the act classes this window minted, so call the act tool and let it answer; a refusal names the reason.`;
 }
 
 export async function readAutonomyStatus(
@@ -519,7 +575,8 @@ export async function readAutonomyStatus(
   now: number = Date.now()
 ): Promise<AutonomyStatus> {
   const row = await env.DB.prepare(
-    `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor
+    `SELECT enabled, sms_cap, write_cap, expires_at, updated_by, allow_rules, actor,
+            daily_sms_cap
        FROM agent_autonomy WHERE id = 1`
   ).first<AutonomyRow>();
   const day = utcDay(now);
@@ -533,6 +590,10 @@ export async function readAutonomyStatus(
     enabled,
     sms_cap: Number(row?.sms_cap ?? 0),
     write_cap: Number(row?.write_cap ?? 0),
+    daily_sms_cap:
+      row?.daily_sms_cap === undefined || row?.daily_sms_cap === null
+        ? DEFAULT_DAILY_SMS_CAP
+        : Number(row.daily_sms_cap),
     expires_at: enabled ? Number(row.expires_at) : null,
     updated_by: row?.updated_by ?? null,
     actor: typeof row?.actor === "string" ? row.actor : null,
