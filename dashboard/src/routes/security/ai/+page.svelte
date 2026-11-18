@@ -176,6 +176,12 @@
 	/** Caps as typed. Strings, so an empty field is an empty field and not a zero. */
 	let autonomySms = $state('25');
 	let autonomyWrites = $state('5');
+	/**
+	 * The deployment's daily SMS ceiling, as typed. It starts from the value the
+	 * gateway reported, so the field shows what bounds the day right now; an empty
+	 * string is a gateway that did not report one, not a zero.
+	 */
+	let autonomyDaily = $state('');
 
 	const allowed = $derived(session.canViewSecurity);
 
@@ -199,11 +205,24 @@
 		return null;
 	});
 
-	/** A window is a spend, not a setting: it needs the runtime and both caps. */
+	/** The daily ceiling the operator typed, with the gateway's own absence as "empty". */
+	const dailyCapValid = $derived.by(() => {
+		const daily = autonomyDaily.trim();
+		if (daily === '') return (autonomy?.dailySmsCap ?? null) === null;
+		// The Worker clamps to 0–1000; a value it would clamp is one this page must
+		// not describe as what the window got.
+		return /^\d+$/.test(daily) && Number(daily) <= 1000;
+	});
+
+	/** A window is a spend, not a setting: it needs the runtime and every cap. */
 	const autonomyCapsValid = $derived.by(() => {
 		const sms = autonomySms.trim();
 		const writes = autonomyWrites.trim();
-		return /^\d+$/.test(sms) && /^\d+$/.test(writes);
+		// The daily ceiling is the gateway's to report. When it reported one, the
+		// field has to carry a whole number the Worker will not clamp; when it
+		// reported none, an empty field sends no member and the gateway keeps its
+		// own default.
+		return /^\d+$/.test(sms) && /^\d+$/.test(writes) && dailyCapValid;
 	});
 
 	const canOpenWindow = $derived(
@@ -524,13 +543,25 @@
 		}
 
 		if (autonomyRead.status === 'ok') {
-			autonomy = autonomyRead.autonomy;
 			autonomyFailure = null;
+			showAutonomy(autonomyRead.autonomy);
 		} else {
 			autonomy = null;
 			autonomyFailure = autonomyRead.failure;
 		}
 		autonomyLoading = false;
+	}
+
+	/**
+	 * Hold the window the gateway reported, and the daily ceiling with it.
+	 *
+	 * The field is the saved value, not a default: a gateway that reports no
+	 * ceiling leaves it empty rather than showing the Worker's own 20, which the
+	 * page never received.
+	 */
+	function showAutonomy(next: AgentAutonomy | null): void {
+		autonomy = next;
+		autonomyDaily = next === null || next.dailySmsCap === null ? '' : String(next.dailySmsCap);
 	}
 
 	/**
@@ -542,10 +573,14 @@
 
 		const sms = Number(autonomySms.trim());
 		const writes = Number(autonomyWrites.trim());
+		const daily = autonomyDaily.trim();
 		autonomyBusy = 'opening';
 		const result = await openAutonomy({
 			smsCap: sms,
 			writeCap: writes,
+			// Omitted only when the gateway reported no ceiling and the operator
+			// typed none: the page does not send a number nobody chose.
+			...(daily === '' ? {} : { dailySmsCap: Number(daily) }),
 			minutes: autonomyMinutes
 		});
 		autonomyBusy = null;
@@ -558,7 +593,7 @@
 		autonomyAck = false;
 		// The route may answer with the window or with nothing; a read is cheaper
 		// than a page that shows a window it guessed.
-		if (result.autonomy !== null) autonomy = result.autonomy;
+		if (result.autonomy !== null) showAutonomy(result.autonomy);
 		else await loadAgent();
 		announce('An autonomy window is open. The assistant can act without an Accept until it closes.');
 	}
@@ -575,7 +610,7 @@
 			return;
 		}
 		autonomyFailure = null;
-		if (result.autonomy !== null) autonomy = result.autonomy;
+		if (result.autonomy !== null) showAutonomy(result.autonomy);
 		else await loadAgent();
 		announce('The autonomy window is revoked. Any agent session it opened is stopped.');
 	}
@@ -1540,6 +1575,26 @@
 										Rules and other writes it may make in this window.
 									</p>
 								</div>
+
+								<!-- The ceiling that stops two short windows doubling a day:
+								     it is the deployment's, so it sits beside the window's own
+								     caps rather than inside the window's facts. -->
+								<div class="field">
+									<label class="label" for="autonomy-daily">Daily SMS cap</label>
+									<input
+										id="autonomy-daily"
+										class="input input-mono"
+										inputmode="numeric"
+										autocomplete="off"
+										bind:value={autonomyDaily}
+										placeholder={autonomy.dailySmsCap === null ? 'not reported' : ''}
+										disabled={!canOpenWindow}
+										aria-describedby="autonomy-daily-hint"
+									/>
+									<p class="hint" id="autonomy-daily-hint">
+										The deployment's whole day, not this window: two windows cannot double it.
+									</p>
+								</div>
 							</div>
 
 							<!-- The second step. The first is this box; the button below does
@@ -1582,11 +1637,19 @@
 								</button>
 								<p class="hint" aria-live="polite">
 									{#if !autonomyCapsValid}
-										Both caps are needed: they are what bounds the window.
+										{#if !dailyCapValid}
+											The daily cap needs a whole number from 0 to 1000: it bounds the deployment's own day.
+										{:else}
+											The SMS and write caps are needed: they are what bounds this window.
+										{/if}
 									{:else}
 										This opens a {windowLabel(autonomyMinutes)} window allowing
 										<span class="mono">{autonomySms.trim()}</span> SMS and
 										<span class="mono">{autonomyWrites.trim()}</span> writes, with no Accept in between.
+										{#if autonomyDaily.trim() !== ''}
+											Across the deployment, the day is capped at
+											<span class="mono">{autonomyDaily.trim()}</span> SMS.
+										{/if}
 									{/if}
 								</p>
 							</div>
@@ -2305,6 +2368,14 @@
 		.autonomy-runtime {
 			margin-left: 0;
 			flex-basis: 100%;
+		}
+
+		/* The window's controls take the console's 44px touch floor here too:
+		   a cap is a number typed on a phone, beside a select and the button
+		   that mints the window. */
+		.autonomy-form .input,
+		.autonomy-form .btn {
+			min-height: 44px;
 		}
 	}
 </style>

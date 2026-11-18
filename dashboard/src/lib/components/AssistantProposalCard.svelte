@@ -57,6 +57,24 @@
 	const accepts = $derived(proposalAcceptsRemotely(proposal.kind));
 
 	/**
+	 * Why this card exists, when the gateway said.
+	 *
+	 * `payload` is `unknown` and the marker is optional: a proposal the model
+	 * chose arrives from `/v1/admin/assistant/chat` with no `origin` at all, and
+	 * a gateway that predates the marker sends none either. Only the gateway's
+	 * exact word is read, so nothing becomes "prepared" by accident.
+	 */
+	const actRefused = $derived.by(() => {
+		const payload = proposal.payload;
+		return (
+			payload !== null &&
+			typeof payload === 'object' &&
+			!Array.isArray(payload) &&
+			(payload as Record<string, unknown>).origin === 'act_refused'
+		);
+	});
+
+	/**
 	 * A patch says which flow it belongs to, in its own payload, when it does.
 	 * Reading it here keeps the link honest: an editor opened for the wrong flow
 	 * would stage the patch against a document it does not fit.
@@ -140,6 +158,16 @@
 			changed.
 		</p>
 	{/if}
+
+	{#if actRefused}
+		<!-- Context for the action above, not a subtitle under the title: the card
+		     exists because an act was refused, not because the model chose to
+		     propose. A sentence, never a heading, and never a warning. -->
+		<p class="cause">
+			Prepared because the agent's own attempt was refused and no autonomy window covers it. Accepting it
+			is you applying the change by hand.
+		</p>
+	{/if}
 </li>
 
 <style>
@@ -219,6 +247,16 @@
 		font-size: 11px;
 		line-height: 1.45;
 		color: var(--df-text-meta);
+	}
+
+	/* The card's own footnote. Meta ink and the 11px floor: it explains the
+	   action above it, so it must not read as a second heading or a warning. */
+	.cause {
+		margin-top: 1px;
+		color: var(--df-text-meta);
+		font-size: 11px;
+		line-height: 1.45;
+		overflow-wrap: anywhere;
 	}
 
 	.proposal .btn {
