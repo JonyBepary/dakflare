@@ -30,7 +30,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_VERSION = '6.1.0';
 
 const HOME = os.homedir();
-const CONFIG_DIR = path.join(HOME, '.config', 'dakflare');
+const CONFIG_DIR = process.env.DAKFLARE_CONFIG
+  ? path.resolve(process.env.DAKFLARE_CONFIG)
+  : path.join(process.env.XDG_CONFIG_HOME || path.join(HOME, '.config'), 'dakflare');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const KEYSTORE_FILE = path.join(CONFIG_DIR, 'dakflare-release.jks');
 const KEYSTORE_PROPS = path.join(CONFIG_DIR, 'release-keystore.txt');
@@ -453,6 +455,7 @@ const COMMAND_SPECS = {
         note: 'approve: 1m, 5m, 15m, 30m, 1h, 1d, 7d or 30d; clamped per scope',
       },
       all: { type: 'boolean', note: 'agent-tokens: include revoked tokens' },
+      token: { type: 'string', note: 'grants: filter by agent token id' },
       live: { type: 'boolean', note: 'grants: only grants still inside their window' },
       state: { type: 'string', note: 'approvals: filter by state, e.g. PENDING' },
     },
@@ -488,10 +491,11 @@ const COMMAND_SPECS = {
     ],
   },
   flows: {
-    summary: 'Apply a flow document (apply)',
+    summary: 'Apply or heal a flow document (apply|heal)',
     effect: 'mutating',
-    usage: 'dakflare flows apply <file> [--dry-run] [--agent] | flows heal <id> --samples <file>',
+    usage: 'dakflare flows apply <file> [--id <id>] [--dry-run] [--agent] | flows heal <id> --samples <file>',
     flags: {
+      id: { type: 'string', note: 'flow id (positional arg alternative for apply/heal)' },
       file: { type: 'string', note: 'convenience alternative to the positional <file>' },
       'dry-run': { type: 'boolean', note: 'print the diff and change nothing' },
       force: {
@@ -499,6 +503,8 @@ const COMMAND_SPECS = {
         note: 'drop expected_previous_version from the document before writing',
       },
       samples: { type: 'string', note: 'heal: the {body, value} examples of the new template' },
+      group: { type: 'string', note: 'heal: capture-group name override' },
+      device: { type: 'string', note: 'heal: handset whose inbound history is re-checked' },
       node: { type: 'string', note: 'heal: which extract node, default the only one' },
       'corpus-limit': {
         type: 'number',
@@ -512,18 +518,36 @@ const COMMAND_SPECS = {
     ],
   },
   rules: {
-    summary: 'Apply or test auto-reply rules (apply|test)',
+    summary: 'List, write, update, delete or test auto-reply rules (list|apply|update|delete|test)',
     effect: 'mutating',
-    usage: 'dakflare rules <apply|test> [options]',
+    usage: 'dakflare rules <list|apply|update|delete|test> [options]',
     flags: {
+      id: { type: 'string', note: 'update|delete: rule id (alternative to positional <rule-id>)' },
       file: { type: 'string', note: 'apply: a rule or a {rules:[...]} document' },
       'dry-run': { type: 'boolean', note: 'apply: print the diff and change nothing' },
+      enabled: { type: 'boolean', note: 'update: enable the rule' },
+      disabled: { type: 'boolean', note: 'update: pause the rule without deleting it' },
+      name: { type: 'string', note: 'update: new display name' },
+      priority: { type: 'number', note: 'update: rule priority (integer)' },
+      'matcher-type': { type: 'string', note: 'update: exact|prefix|regex|any' },
+      'matcher-value': { type: 'string', note: 'update: sender pattern' },
+      'body-type': { type: 'string', note: 'update: exact|contains|regex|any' },
+      'body-value': { type: 'string', note: 'update: body pattern' },
+      reply: { type: 'string', note: 'update: reply template (empty disables reply)' },
+      cooldown: { type: 'number', note: 'update: per-sender cooldown in seconds' },
+      'max-per-hour': { type: 'number', note: 'update: maximum replies per hour' },
+      'sim-slot': { type: 'number', note: 'update: 0 (auto), 1 or 2' },
+      'allow-shortcode': { type: 'boolean', note: 'update: permit replying to shortcodes' },
+      'no-shortcode': { type: 'boolean', note: 'update: forbid replying to shortcodes' },
+      yes: { type: 'boolean', note: 'delete: skip confirmation prompt' },
       peer: { type: 'string', note: 'test: the E.164 sender to evaluate' },
       body: { type: 'string', note: 'test: the message body to evaluate' },
-      device: { type: 'string', note: 'test: evaluate as this device' },
+      device: { type: 'string', note: 'update|test: target device scope ("all" clears scope)' },
     },
     examples: [
+      'dakflare rules list --agent',
       'dakflare rules apply rules.json --dry-run',
+      'dakflare rules update rule_orders --disabled --agent',
       'dakflare rules test --peer +8801540196080 --body "PAID 500"',
     ],
   },
@@ -638,6 +662,7 @@ const COMMAND_SPECS = {
     effect: 'read',
     usage: 'dakflare trace <id> [--device <id>] [--agent]',
     flags: {
+      id: { type: 'string', note: 'message, command or approval id (alternative to positional <id>)' },
       device: { type: 'string', note: 'disambiguate a local id, which is per device' },
     },
     examples: [
@@ -827,6 +852,7 @@ function errorEnvelope(payload) {
       safe_to_retry:
         retryable &&
         (!MUTATING.has(CURRENT_COMMAND) ||
+          payload?.idempotent === true ||
           code === 'approval_required' ||
           code === 'agent_quota_exceeded'),
       ...(rule.remediation === undefined
@@ -919,7 +945,44 @@ const VALUE_FLAGS = new Set([
   'system1-model',
   'system1-base-url',
   'api-key',
+  'priority',
+  'matcher-type',
+  'matcher-value',
+  'body-type',
+  'body-value',
+  'reply',
+  'cooldown',
+  'sim-slot',
 ]);
+
+const KNOWN_BOOLEAN_FLAGS = new Set([
+  'json',
+  'agent',
+  'help',
+  'local',
+  'force',
+  'qr',
+  'yes',
+  'no-wait',
+  'dry-run',
+  'all',
+  'live',
+  'ndjson',
+  'system-one',
+  'enabled',
+  'disabled',
+  'allow-shortcode',
+  'no-shortcode',
+  'flow-v2',
+]);
+
+function looksLikeCliFlag(arg) {
+  if (!arg || !arg.startsWith('--') || arg === '--') return false;
+  const raw = arg.slice(2);
+  const eq = raw.indexOf('=');
+  const name = eq === -1 ? raw : raw.slice(0, eq);
+  return VALUE_FLAGS.has(name) || KNOWN_BOOLEAN_FLAGS.has(name);
+}
 
 function parseArgv(argv) {
   const flags = Object.create(null);
@@ -943,7 +1006,7 @@ function parseArgv(argv) {
       }
       const key = arg.slice(2);
       const next = argv[i + 1];
-      if (VALUE_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
+      if (VALUE_FLAGS.has(key) && next !== undefined && !looksLikeCliFlag(next)) {
         flags[key] = next;
         i += 1;
       } else {
@@ -1134,10 +1197,19 @@ function apiErrorBody(data, status) {
   return `HTTP ${status}`;
 }
 
+function httpStatusExitCode(status) {
+  if (status === 401 || status === 403) return 4;
+  if (status === 404) return 3;
+  if (status === 409) return 5;
+  if (status === 429 || status === 503) return 75;
+  return 1;
+}
+
 /** Convert a response into a useful message without ever including the token. */
 function requestFailure(what, result) {
   const detail = apiErrorBody(result.data, result.status);
-  return new CliError(`${what} failed: ${detail} (HTTP ${result.status})`, 1, {
+  const code = ERROR_RULES[detail]?.exit ?? httpStatusExitCode(result.status);
+  return new CliError(`${what} failed: ${detail} (HTTP ${result.status})`, code, {
     error: detail,
     status: result.status,
   });
@@ -1408,6 +1480,12 @@ async function initLocal(flags, json) {
   return 0;
 }
 
+function parseTokenFileContent(raw) {
+  const trimmed = String(raw ?? '').trim();
+  const envMatch = /^ADMIN_TOKEN=(.+)$/m.exec(trimmed);
+  return envMatch ? envMatch[1].trim() : trimmed;
+}
+
 async function commandInit(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('init');
@@ -1422,7 +1500,7 @@ async function commandInit(argv) {
   if (flags['token-file'] !== undefined) {
     const file = stringFlag(flags, 'token-file');
     try {
-      token = fs.readFileSync(file, 'utf8').trim();
+      token = parseTokenFileContent(fs.readFileSync(file, 'utf8'));
     } catch (error) {
       throw new CliError(`could not read --token-file ${file}: ${String(error?.message ?? error)}`, 2, {
         error: 'token_file',
@@ -2173,13 +2251,14 @@ const STATE_MACHINES = {
     },
   },
   device: {
-    states: ['live', 'synced', 'stale', 'offline', 'unknown'],
+    states: ['live', 'synced', 'stale', 'offline', 'unknown', 'revoked'],
     meanings: {
       live: 'Reachable now. An authenticated WebSocket or signed poll answered moments ago.',
       synced: 'Reachable on next poll. Answered a signed contact recently.',
       stale: 'May be asleep or backgrounded. Last signed contact is getting old.',
       offline: 'No signed contact within 24h, or carrier disabled.',
       unknown: 'No signed contact recorded yet.',
+      revoked: 'Revoked tombstone kept for message history; the handset must pair again.',
     },
   },
 };
@@ -2342,9 +2421,11 @@ async function waitForCommand(cfg, deviceId, commandId, { until, budgetMs, quiet
  * `SENT` means the radio took the message and the carrier has not confirmed it,
  * which is exactly what the landing page's "Not claimed" block says.
  */
-function verificationFor(command, { timedOut = false } = {}) {
+function verificationFor(command, { timedOut = false, deviceId = null } = {}) {
   const meta = stateMeta(command.state);
   const passed = command.state === 'DELIVERED' ? true : meta.terminal ? false : null;
+  const errorCode = typeof command.error_code === 'string' && command.error_code !== '' ? command.error_code : null;
+  const errorMessage = typeof command.error_message === 'string' && command.error_message !== '' ? command.error_message : null;
   const reason =
     COMMAND_STATES[command.state] === undefined
       ? 'state_unknown'
@@ -2355,24 +2436,28 @@ function verificationFor(command, { timedOut = false } = {}) {
           : command.state === 'SENT'
             ? 'radio_accepted_delivery_not_claimed'
             : command.state === 'FAILED'
-              ? 'refused'
+              ? errorCode ?? 'refused'
               : command.state === 'EXPIRED'
                 ? 'expired_before_collection'
                 : 'in_flight';
 
+  const deviceFlag = deviceId ? ` --device ${deviceId}` : '';
+  const modeFlag = MODE.agent ? ' --agent' : MODE.json ? ' --json' : '';
   return {
     passed,
     state: command.state,
     terminal: meta.terminal,
     reason,
+    ...(errorCode === null ? {} : { error_code: errorCode }),
+    ...(errorMessage === null ? {} : { error_message: errorMessage }),
     next_command:
       passed === true
         ? null
         : command.state === 'FAILED'
-          ? 'dakflare doctor --json'
+          ? `dakflare trace ${command.command_id}${deviceFlag}${modeFlag}`
           : command.state === 'EXPIRED'
             ? null
-            : `dakflare status ${command.command_id} --wait 60s --json`,
+            : `dakflare status ${command.command_id}${deviceFlag} --wait 60s${modeFlag}`,
   };
 }
 
@@ -2392,6 +2477,12 @@ function renderCommand(command, { deviceId, note }) {
   const meta = stateMeta(command.state);
   out(`${command.command_id}  ${command.state}`);
   out(`  meaning       ${meta.meaning}`);
+  if (command.state === 'FAILED' && (command.error_code || command.error_message)) {
+    const reason = [command.error_code, command.error_message].filter(Boolean).join(' — ');
+    out(`  reason        ${reason}`);
+  } else if (command.state === 'EXPIRED') {
+    out('  reason        handset did not collect this command before its TTL elapsed');
+  }
   if (command.to) out(`  to            ${command.to}`);
   out(`  device        ${deviceId}${note ? ` (${note})` : ''}`);
   if (Number.isFinite(command.created_at)) {
@@ -2402,7 +2493,7 @@ function renderCommand(command, { deviceId, note }) {
     const left = Math.round((command.expires_at - Date.now()) / 1000);
     out(`  expires       ${left > 0 ? `in ${left}s` : 'already'}`);
   }
-  const next = verificationFor(command).next_command;
+  const next = verificationFor(command, { deviceId }).next_command;
   if (next) out(`  next          ${next}`);
 }
 
@@ -2436,12 +2527,20 @@ async function commandSend(argv) {
     throw usage(`--idempotency-key must be 1 to ${MAX_IDEMPOTENCY_KEY_CHARS} characters`);
   }
 
-  const result = await api(cfg, 'POST', '/v1/sms/send', {
-    device_id: deviceId,
-    to,
-    body,
-    ...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
-  });
+  let result;
+  try {
+    result = await api(cfg, 'POST', '/v1/sms/send', {
+      device_id: deviceId,
+      to,
+      body,
+      ...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
+    });
+  } catch (error) {
+    if (error instanceof CliError && error.payload?.error === 'network' && idempotencyKey !== undefined) {
+      error.payload.idempotent = true;
+    }
+    throw error;
+  }
   if (result.status === 404 && result.data?.error === 'device_unknown') {
     throw new CliError(
       `device_unknown: "${deviceId}" is not in the D1 registry. Run \`dakflare devices\`.`,
@@ -2517,7 +2616,7 @@ async function commandSend(argv) {
     }
   }
 
-  const verification = verificationFor(command, { timedOut });
+  const verification = verificationFor(command, { timedOut, deviceId });
 
   if (json) {
     emitJson({
@@ -2535,6 +2634,9 @@ async function commandSend(argv) {
           command_id: commandId,
           replayed,
           state: command.state,
+          error_code: command.error_code ?? null,
+          error_message: command.error_message ?? null,
+          lifecycle: command.lifecycle ?? null,
           verification,
         }, MODE);
     process.exitCode = outcomeExitCode(command, timedOut);
@@ -2547,8 +2649,14 @@ async function commandSend(argv) {
   out(`  to            ${to}`);
   out(`  state         ${command.state}`);
   out(`  meaning       ${stateMeta(command.state).meaning}`);
+  if (command.state === 'FAILED' && (command.error_code || command.error_message)) {
+    const reason = [command.error_code, command.error_message].filter(Boolean).join(' — ');
+    out(`  reason        ${reason}`);
+  } else if (command.state === 'EXPIRED') {
+    out('  reason        handset did not collect this command before its TTL elapsed');
+  }
   if (verification.reason === 'timeout') {
-    out(`  not confirmed the command is still queued; check it again rather than sending again`);
+    out(`  not confirmed  the command is still in flight; check with status rather than sending again`);
   }
   if (verification.next_command) out(`  next          ${verification.next_command}`);
   return outcomeExitCode(command, timedOut);
@@ -2637,6 +2745,22 @@ async function commandUp(argv) {
   }
 
   runCf(['d1', 'migrations', 'apply', databaseId, '--remote'], workerDir, 'applying migrations');
+
+  const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
+  if (!fs.existsSync(dashboardEntry)) {
+    const built = spawnSync('npm', ['run', 'build:dashboard'], {
+      cwd: workerDir,
+      encoding: 'utf8',
+    });
+    if (built.error || built.status !== 0) {
+      throw new CliError(
+        `building console assets failed: ${(built.stderr || built.stdout || built.error?.message || '').trim()}`,
+        1,
+        { error: 'provision_failed', step: 'build:dashboard' }
+      );
+    }
+  }
+
   const deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
 
   // 5. Verify against the deployment, not against the exit status of a deploy.
@@ -2648,26 +2772,25 @@ async function commandUp(argv) {
       { error: 'provision_failed' }
     );
   }
-  const health = await fetchHealthFor(url);
+  const upToken = readUpAdminToken(workerDir);
+  const health = await fetchHealthFor(url, upToken);
 
   // 6. The owner account, then a pairing code. Both are what "installed" means:
   //    a deployment nobody can sign in to, or pair with, is not one.
-  const owner = await bootstrapOwner(url, email);
-  const pairing = await mintPairingCode(url);
+  const owner = await bootstrapOwner(url, email, upToken);
+  const pairing = await mintPairingCode(url, upToken);
 
   if (MODE.json) {
     emitJson(
       {
         ok: true,
         summary: `deployed ${url}`,
-        data: {
-          url,
-          database_id: databaseId,
-          kv_namespace_id: namespaceId,
-          healthy: health,
-          owner,
-          pairing,
-        },
+        url,
+        database_id: databaseId,
+        kv_namespace_id: namespaceId,
+        healthy: health,
+        owner,
+        pairing,
       },
       MODE
     );
@@ -2683,6 +2806,8 @@ async function commandUp(argv) {
     out(`  ${owner.link}`);
   } else if (owner.state === 'exists') {
     out('  owner         already exists; no invite minted');
+  } else if (owner.state === 'skipped' || owner.state === 'failed') {
+    out(`  owner         ${owner.state} (${owner.reason ?? `HTTP ${owner.status ?? '?'}`})`);
   }
   if (pairing?.code) {
     out('');
@@ -2812,11 +2937,30 @@ function readConfigUrl() {
   return typeof cfg?.url === 'string' && cfg.url !== '' ? cfg.url.replace(/\/+$/, '') : null;
 }
 
+function readUpAdminToken(workerDir) {
+  const saved = readConfig().cfg?.token;
+  if (typeof saved === 'string' && saved.trim() !== '') return saved.trim();
+  const varsFile = path.join(workerDir, '.dev.vars');
+  try {
+    if (fs.existsSync(varsFile)) {
+      const parsed = parseTokenFileContent(fs.readFileSync(varsFile, 'utf8'));
+      if (parsed !== '') return parsed;
+    }
+  } catch {
+    /* ignore unreadable .dev.vars */
+  }
+  return '';
+}
+
 /** One health read, without needing a config that points at the new deployment. */
-async function fetchHealthFor(url) {
+async function fetchHealthFor(url, token = '') {
   try {
     const response = await fetch(`${url}/v1/admin/health`, {
-      headers: { Accept: 'application/json', 'X-Dakflare-Client': 'cli' },
+      headers: {
+        Accept: 'application/json',
+        'X-Dakflare-Client': 'cli',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
     return response.status === 200 || response.status === 503;
@@ -2831,12 +2975,12 @@ async function fetchHealthFor(url) {
  * `auth bootstrap` refuses once an owner is present, which on a second `up` is
  * the correct and uninteresting outcome.
  */
-async function bootstrapOwner(url, email) {
+async function bootstrapOwner(url, email, fallbackToken = '') {
   const address = email ?? process.env.DAKFLARE_OWNER_EMAIL;
   if (address === undefined || address === '') {
     return { state: 'skipped', reason: 'no --email given' };
   }
-  const cfg = { url, token: readConfig().cfg?.token ?? '' };
+  const cfg = { url, token: readConfig().cfg?.token || fallbackToken || '' };
   if (cfg.token === '') return { state: 'skipped', reason: 'no admin token saved' };
 
   const result = await api(cfg, 'POST', '/v1/admin/bootstrap', { email: address, role: 'owner' });
@@ -2848,8 +2992,8 @@ async function bootstrapOwner(url, email) {
 }
 
 /** Mint one pairing code so the install ends with a phone-ready deployment. */
-async function mintPairingCode(url) {
-  const cfg = { url, token: readConfig().cfg?.token ?? '' };
+async function mintPairingCode(url, fallbackToken = '') {
+  const cfg = { url, token: readConfig().cfg?.token || fallbackToken || '' };
   if (cfg.token === '') return null;
   const result = await api(cfg, 'POST', '/v1/admin/pairing-code', {
     ttl_ms: DEFAULT_PAIR_TTL_S * 1000,
@@ -3014,8 +3158,9 @@ function printFlowV2Schema() {
   }
 
   if (MODE.json) {
-    // Deliberately not the envelope: `--json` promises the document.
-    out(raw.trimEnd());
+    // Deliberately not the envelope: `--json` promises the schema document,
+    // and `--agent` requires one compact single-line JSON document on stdout.
+    out(MODE.agent ? JSON.stringify(JSON.parse(raw)) : raw.trimEnd());
     return 0;
   }
 
@@ -3122,15 +3267,27 @@ const SUMMARY_BUILDERS = {
   dlq: (data) => `${(data.dead_letters ?? []).length} dead letters`,
   ws: (data) => `${(data.sockets ?? []).length} sockets`,
   rules: (data) =>
-    data.applied === true
-      ? `${(data.rules ?? []).length} rules applied`
-      : data.matches
-        ? `${(data.matches ?? []).length} rules evaluated`
-        : 'rules diffed, nothing written',
+    data.updated === true
+      ? `rule ${data.id ?? ''} updated`.trim()
+      : data.deleted === true
+        ? `rule ${data.id ?? ''} deleted`.trim()
+        : data.applied === true
+          ? `${(data.rules ?? []).length} rules applied`
+          : data.matches
+            ? `${(data.matches ?? []).length} rules evaluated`
+            : Array.isArray(data.rules)
+              ? `${data.rules.length} rules`
+              : 'rules diffed, nothing written',
   capabilities: (data) => `${(data.commands ?? []).length} commands`,
   describe: (data) => `${data.command ?? 'command'} described`,
   schema: (data) => `${data.command ?? 'command'} schema`,
   examples: (data) => `${(data.examples ?? []).length} examples`,
+  ai: (data) =>
+    data.models
+      ? `${data.models.length} models`
+      : data.provider
+        ? `provider ${data.provider}`
+        : 'AI check ok',
 };
 
 function summaryFor(command, data) {
@@ -3186,7 +3343,7 @@ async function commandStatus(argv) {
     command = await fetchCommand(cfg, deviceId, commandId);
   }
 
-  const verification = verificationFor(command, { timedOut });
+  const verification = verificationFor(command, { timedOut, deviceId });
 
   if (json) {
     emitJson({
@@ -3269,9 +3426,7 @@ async function commandAuth(argv) {
   if (sub === 'approve') return commandAuthApprove(rest);
   if (sub === 'reject') return commandAuthReject(rest);
   if (sub === 'grants') return commandAuthGrants(rest);
-  err(`dakflare: unknown auth subcommand "${sub}"`);
-  err('try `dakflare auth --help`');
-  return 2;
+  throw usage(`unknown auth subcommand "${sub}"`);
 }
 
 /**
@@ -3653,21 +3808,15 @@ async function commandMcp(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('mcp');
   if (sub === 'serve') return commandMcpServe(rest);
-  err(`dakflare: unknown mcp subcommand "${sub}"`);
-  err('try `dakflare mcp --help`');
-  return 2;
+  throw usage(`unknown mcp subcommand "${sub}"`);
 }
 
 /**
- * `mcp serve` — stdio JSON-RPC on one side, the Worker's `/v1/mcp` on the other.
+ * `mcp serve` — stdio JSON-RPC on one side, the Worker's `/mcp` on the other.
  *
  * Deliberately a bridge and not a second server: the tools, their schemas and
- * their answers are the Worker's. That is what makes "the CLI and the Worker
- * answer the same call identically" true by construction instead of something
- * two implementations have to keep in step.
- *
- * stdout carries only protocol messages. Diagnostics go to stderr, because a
- * stray line on stdout is a parse error for the client.
+ * their answers are the Worker's. Supports both 2025 Streamable HTTP (`initialize`
+ * + `Mcp-Session-Id` + live SSE frames) and stateless `params._meta` requests.
  */
 async function commandMcpServe(argv) {
   const { flags } = parseArgv(argv);
@@ -3699,6 +3848,15 @@ async function commandMcpServe(argv) {
   }
 
   const version = stringFlag(flags, 'version') ?? MCP_DEFAULT_VERSION;
+  let sessionId = null;
+
+  const isClientResponse = (msg) =>
+    msg &&
+    typeof msg === 'object' &&
+    msg.id !== undefined &&
+    msg.id !== null &&
+    msg.method === undefined &&
+    (msg.result !== undefined || msg.error !== undefined);
 
   const forward = async (message) => {
     const method = typeof message.method === 'string' ? message.method : '';
@@ -3706,8 +3864,10 @@ async function commandMcpServe(argv) {
     const headers = {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
       'MCP-Protocol-Version': typeof metaVersion === 'string' ? metaVersion : version,
-      'Mcp-Method': method,
+      ...(method ? { 'Mcp-Method': method } : {}),
+      ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
     };
     if (MCP_NAMED_METHODS.has(method) && typeof message?.params?.name === 'string') {
       headers['Mcp-Name'] = message.params.name;
@@ -3715,38 +3875,93 @@ async function commandMcpServe(argv) {
 
     let response;
     try {
-      response = await fetch(`${base}/v1/mcp`, {
+      response = await fetch(`${base}/mcp`, {
         method: 'POST',
         headers,
         body: JSON.stringify(message),
       });
     } catch (error) {
-      return {
-        jsonrpc: '2.0',
-        id: message.id ?? null,
-        error: { code: -32000, message: `cannot reach ${base}: ${String(error?.message ?? error)}` },
+      if (!isClientResponse(message) && message.id !== undefined) {
+        process.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id ?? null,
+            error: { code: -32000, message: `cannot reach ${base}: ${String(error?.message ?? error)}` },
+          })}\n`
+        );
+      }
+      return;
+    }
+
+    const incomingSession = response.headers.get('mcp-session-id');
+    if (incomingSession) sessionId = incomingSession;
+
+    if (response.status === 202 || response.status === 204) return;
+
+    const contentType = String(response.headers.get('content-type') ?? '').toLowerCase();
+    if (contentType.includes('text/event-stream') && response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let dataLines = [];
+
+      const flushEvent = () => {
+        if (dataLines.length === 0) return;
+        const payload = dataLines.join('\n').trim();
+        dataLines = [];
+        if (payload !== '' && payload !== '[DONE]') {
+          process.stdout.write(`${payload}\n`);
+        }
       };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf('\n')) !== -1) {
+          const rawLine = buffer.slice(0, nl).replace(/\r$/, '');
+          buffer = buffer.slice(nl + 1);
+          if (rawLine === '') {
+            flushEvent();
+          } else if (rawLine.startsWith('data:')) {
+            dataLines.push(rawLine.slice(5).trimStart());
+          }
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim() !== '') {
+        for (const rawLine of buffer.split(/\r?\n/)) {
+          if (rawLine.startsWith('data:')) dataLines.push(rawLine.slice(5).trimStart());
+        }
+      }
+      flushEvent();
+      return;
     }
 
     const text = await response.text();
+    if (text.trim() === '' || isClientResponse(message)) return;
     try {
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      if (message.id !== undefined) process.stdout.write(`${JSON.stringify(parsed)}\n`);
     } catch {
-      // A non-JSON answer is an HTTP failure in front of the endpoint (401, 429,
-      // 403). Surface it as a JSON-RPC error rather than dying: the client is
-      // told, and the bridge stays up.
-      return {
-        jsonrpc: '2.0',
-        id: message.id ?? null,
-        error: { code: -32000, message: `HTTP ${response.status}: ${text.slice(0, 200)}` },
-      };
+      if (message.id !== undefined) {
+        process.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id ?? null,
+            error: { code: -32000, message: `HTTP ${response.status}: ${text.slice(0, 200)}` },
+          })}\n`
+        );
+      }
     }
   };
 
-  // Line-delimited JSON-RPC. Notifications (no id) still get forwarded: the
-  // Worker answers what it answers and the client ignores an empty body.
+  // Line-delimited JSON-RPC. Requests execute sequentially, while client responses
+  // (e.g. answering an in-flight SSE elicitation/create) dispatch immediately.
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  const pending = [];
+  const inFlight = new Set();
+  let queue = Promise.resolve();
 
   rl.on('line', (line) => {
     const trimmed = line.trim();
@@ -3764,19 +3979,21 @@ async function commandMcpServe(argv) {
       );
       return;
     }
-    // Serialised on purpose: the protocol allows concurrency, but one line per
-    // request in one order out is far easier to debug, and a gateway call is
-    // quick. A work queue keeps the ordering while still allowing overlap.
-    const job = pending[pending.length - 1] ?? Promise.resolve();
-    const next = job.then(async () => {
-      const answer = await forward(message);
-      if (message.id !== undefined) process.stdout.write(`${JSON.stringify(answer)}\n`);
-    });
-    pending.push(next);
+
+    if (isClientResponse(message)) {
+      const p = forward(message).finally(() => inFlight.delete(p));
+      inFlight.add(p);
+      return;
+    }
+
+    const run = queue.then(() => forward(message));
+    const tracked = run.finally(() => inFlight.delete(tracked));
+    inFlight.add(tracked);
+    queue = run.catch(() => {});
   });
 
   await new Promise((resolve) => rl.on('close', resolve));
-  await Promise.all(pending);
+  await Promise.all(inFlight);
   return 0;
 }
 
@@ -3824,7 +4041,10 @@ async function commandTrace(argv) {
   }
 
   const command = trace.command;
-  if (command?.state) out(`  command state  ${command.state}`);
+  if (command?.state) {
+    const detail = [command.error_code, command.error_message].filter(Boolean).join(' — ');
+    out(`  command state  ${command.state}${detail ? ` (${detail})` : ''}`);
+  }
 
   const flows = trace.automation?.flows ?? [];
   if (flows.length > 0) {
@@ -3939,9 +4159,7 @@ async function commandWs(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('ws');
   if (sub !== 'inspect') {
-    err(`dakflare: unknown ws subcommand "${sub}"`);
-    err('try `dakflare ws --help`');
-    return 2;
+    throw usage(`unknown ws subcommand "${sub}"`);
   }
 
   const { flags } = parseArgv(rest);
@@ -4052,9 +4270,7 @@ async function commandExtract(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('extract');
   if (sub === 'synthesize') return commandExtractSynthesize(rest);
-  err(`dakflare: unknown extract subcommand "${sub}"`);
-  err('try `dakflare extract --help`');
-  return 2;
+  throw usage(`unknown extract subcommand "${sub}"`);
 }
 
 /**
@@ -4319,9 +4535,7 @@ async function commandFlows(argv) {
   if (!sub || sub === '--help' || sub === '-h') return printHelp('flows');
   if (sub === 'apply') return commandFlowsApply(rest);
   if (sub === 'heal') return commandFlowsHeal(rest);
-  err(`dakflare: unknown flows subcommand "${sub}"`);
-  err('try `dakflare flows --help`');
-  return 2;
+  throw usage(`unknown flows subcommand "${sub}"`);
 }
 
 /**
@@ -4346,9 +4560,10 @@ async function commandFlowsApply(argv) {
   if (graph === null) throw usage(`${file} has no graph: expected { graph } or { nodes, edges }`);
 
   const id =
-    typeof doc.id === 'string' && doc.id !== ''
+    stringFlag(flags, 'id') ??
+    (typeof doc.id === 'string' && doc.id !== ''
       ? doc.id
-      : path.basename(String(file)).replace(/\.json$/i, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+      : path.basename(String(file)).replace(/\.json$/i, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64));
   const name = typeof doc.name === 'string' && doc.name !== '' ? doc.name : id;
   const cfg = requireConfig();
 
@@ -4444,6 +4659,7 @@ const FLOW_V2_SCHEMA_PATH = path.join(__dirname, '..', 'schema', 'flow-v2.json')
  * exists, `flow test` refuses rather than scoring an imagined engine.
  */
 const FLOW_WASM_CANDIDATES = [
+  path.join(__dirname, '..', 'lib', 'flow.wasm'),
   path.join(__dirname, '..', '..', 'dashboard', 'src', 'lib', 'wasm', 'flow.wasm'),
   path.join(__dirname, '..', '..', 'worker', 'src', 'wasm', 'flow.wasm'),
   path.join(__dirname, '..', '..', 'dashboard', 'static', 'flow.wasm'),
@@ -4518,7 +4734,7 @@ function ndjson(writer) {
 /** `--ndjson` and `--json` are two answers to the same question; pick one. */
 function ndjsonEnabled(flags) {
   if (flags.ndjson !== true) return null;
-  if (MODE.json) throw usage('--ndjson and --json cannot be combined');
+  if (flags.json === true) throw usage('--ndjson and --json cannot be combined');
   return process.stdout;
 }
 
@@ -4588,6 +4804,11 @@ async function commandAsk(argv) {
   const pathname = '/v1/agent/synthesize';
 
   if (flags['dry-run'] === true) {
+    if (stream !== null) {
+      phase('understand', { intent, flow_id: flowId, dry_run: true });
+      phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
+      return 0;
+    }
     if (MODE.json) {
       emitJson(
         { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body } },
@@ -4595,9 +4816,7 @@ async function commandAsk(argv) {
       );
       return 0;
     }
-    phase('understand', { intent, flow_id: flowId, dry_run: true });
-    phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
-    if (stream === null) printDryRun(pathname, body);
+    printDryRun(pathname, body);
     return 0;
   }
 
@@ -4640,7 +4859,7 @@ async function commandAsk(argv) {
     phase('result', {
       faithful,
       approval_required: approvalRequired,
-      apply_token: displayApplyToken(applyToken),
+      apply_token: applyToken,
     });
 
     if (stream !== null) return 0;
@@ -4737,6 +4956,11 @@ async function commandFix(argv) {
   const pathname = '/v1/agent/diagnose';
 
   if (flags['dry-run'] === true) {
+    if (stream !== null) {
+      phase('understand', { flow_id: flowId, message_id: messageId ?? null, dry_run: true });
+      phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
+      return 0;
+    }
     if (MODE.json) {
       emitJson(
         { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body } },
@@ -4744,9 +4968,7 @@ async function commandFix(argv) {
       );
       return 0;
     }
-    phase('understand', { flow_id: flowId, message_id: messageId ?? null, dry_run: true });
-    phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
-    if (stream === null) printDryRun(pathname, body);
+    printDryRun(pathname, body);
     return 0;
   }
 
@@ -4836,7 +5058,11 @@ function callFlowWasm(wasm, fn, payload) {
   const bytes = new Uint8Array(wasm.exports.memory.buffer, outPtr + 4, length).slice();
   wasm.exports.dealloc(outPtr, 4 + length);
   wasm.exports.dealloc(inputPtr, input.byteLength);
-  return JSON.parse(new TextDecoder().decode(bytes));
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new CliError('flow engine returned malformed JSON', 1, { error: 'bad_response' });
+  }
 }
 
 /**
@@ -5466,7 +5692,7 @@ async function commandFlowApply(argv) {
     'POST',
     `/v1/admin/approvals/${encodeURIComponent(pending.id)}/approve`,
     { duration_s: 3_600 },
-    headers
+    { headers }
   );
 
   if (result.status === 409) {
@@ -5538,19 +5764,128 @@ async function commandFlow(argv) {
   if (!sub || sub === '--help' || sub === '-h') return printHelp('flow');
   if (sub === 'test') return commandFlowTest(rest);
   if (sub === 'apply') return commandFlowApply(rest);
-  err(`dakflare: unknown flow subcommand "${sub}"`);
-  err('try `dakflare flow --help`');
-  return 2;
+  throw usage(`unknown flow subcommand "${sub}"`);
 }
 
 async function commandRules(argv) {
   const [sub, ...rest] = argv;
   if (!sub || sub === '--help' || sub === '-h') return printHelp('rules');
+  if (sub === 'list') return commandRulesList(rest);
   if (sub === 'apply') return commandRulesApply(rest);
+  if (sub === 'update') return commandRulesUpdate(rest);
+  if (sub === 'delete') return commandRulesDelete(rest);
   if (sub === 'test') return commandRulesTest(rest);
-  err(`dakflare: unknown rules subcommand "${sub}"`);
-  err('try `dakflare rules --help`');
-  return 2;
+  throw usage(`unknown rules subcommand "${sub}"`);
+}
+
+/** `rules list`: auto-reply rules in priority order. */
+async function commandRulesList(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('rules');
+  assertCommandFlags(flags, 'rules');
+  const cfg = requireConfig();
+
+  const result = await api(cfg, 'GET', '/v1/admin/rules');
+  if (result.status !== 200) throw requestFailure('listing rules', result);
+  const rules = result.data?.rules ?? [];
+
+  if (MODE.json) {
+    emitJson({ ok: true, rules }, MODE);
+    return 0;
+  }
+  if (rules.length === 0) {
+    out('no rules configured');
+    return 0;
+  }
+  out(`Rules (${rules.length})`);
+  for (const rule of rules) {
+    const state = rule.enabled ? ok('enabled') : muted('paused ');
+    const scope = rule.device_id ? `device:${rule.device_id}` : 'all-devices';
+    out(`  ${String(rule.id).padEnd(28)} ${state}  p=${String(rule.priority ?? 0).padStart(3)}  ${scope}  ${rule.name ?? ''}`);
+  }
+  return 0;
+}
+
+/** `rules update <id> [options]`: patch an existing rule in place. */
+async function commandRulesUpdate(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('rules');
+  assertCommandFlags(flags, 'rules');
+  const id = stringFlag(flags, 'id') ?? rest[0];
+  if (!id) throw usage('dakflare rules update <rule-id> [--enabled | --disabled] [--name <n>] [--reply <t>]');
+  if (flags.enabled === true && flags.disabled === true) {
+    throw usage('--enabled and --disabled cannot be combined');
+  }
+
+  const patch = {};
+  if (flags.enabled === true) patch.enabled = true;
+  if (flags.disabled === true) patch.enabled = false;
+  const name = stringFlag(flags, 'name');
+  if (name !== undefined) patch.name = name;
+  const matcherType = stringFlag(flags, 'matcher-type');
+  if (matcherType !== undefined) patch.matcher_type = matcherType;
+  const matcherValue = stringFlag(flags, 'matcher-value');
+  if (matcherValue !== undefined) patch.matcher_value = matcherValue;
+  const bodyType = stringFlag(flags, 'body-type');
+  if (bodyType !== undefined) patch.body_type = bodyType;
+  const bodyValue = stringFlag(flags, 'body-value');
+  if (bodyValue !== undefined) patch.body_value = bodyValue;
+  const reply = stringFlag(flags, 'reply');
+  if (reply !== undefined) patch.reply_template = reply;
+  const device = stringFlag(flags, 'device');
+  if (device !== undefined) patch.device_id = device === '' || device === 'all' ? null : device;
+  for (const [flagKey, bodyKey] of [
+    ['priority', 'priority'],
+    ['cooldown', 'cooldown_s'],
+    ['max-per-hour', 'max_per_hour'],
+    ['sim-slot', 'sim_slot'],
+  ]) {
+    const raw = stringFlag(flags, flagKey);
+    if (raw !== undefined) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) throw usage(`--${flagKey} must be a number`);
+      patch[bodyKey] = value;
+    }
+  }
+  if (flags['allow-shortcode'] === true) patch.allow_shortcode = true;
+  if (flags['no-shortcode'] === true) patch.allow_shortcode = false;
+
+  if (Object.keys(patch).length === 0) {
+    throw usage('nothing to update: pass --enabled, --disabled, --name, --reply, or another rule field');
+  }
+
+  const cfg = requireConfig();
+  const result = await api(cfg, 'PUT', `/v1/admin/rules/${encodeURIComponent(id)}`, patch);
+  if (result.status !== 200) throw requestFailure(`update rule ${id}`, result);
+
+  if (MODE.json) {
+    emitJson({ ok: true, id, updated: true, rule: result.data?.rule ?? null }, MODE);
+    return 0;
+  }
+  out(ok(`Updated rule ${id}`));
+  return 0;
+}
+
+/** `rules delete <id> [--yes]`: remove a rule. */
+async function commandRulesDelete(argv) {
+  const { flags, rest } = parseArgv(argv);
+  if (flags.help) return printHelp('rules');
+  assertCommandFlags(flags, 'rules');
+  const id = stringFlag(flags, 'id') ?? rest[0];
+  if (!id) throw usage('dakflare rules delete <rule-id> [--yes]');
+  if (flags.yes !== true) {
+    const proceed = await confirm(`Delete rule ${id}?`);
+    if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+  }
+  const cfg = requireConfig();
+  const result = await api(cfg, 'DELETE', `/v1/admin/rules/${encodeURIComponent(id)}`);
+  if (result.status !== 200) throw requestFailure(`delete rule ${id}`, result);
+  if (MODE.json) {
+    emitJson({ ok: true, id, deleted: true }, MODE);
+    return 0;
+  }
+  out(`Deleted rule ${id}`);
+  return 0;
 }
 
 /** `rules apply <file>`: one rule, or `{ rules: [...] }`. */
@@ -6395,16 +6730,16 @@ async function commandAiProviders(argv) {
   if (result.status !== 200) throw aiFailure('read AI settings', result);
   const view = aiSettingsView(result.data);
 
-  if (MODE.json) emitJson({ ok: true, ...view }, MODE);
-  else {
+  const needsKey = aiNeedsKey(view);
+  if (MODE.json) {
+    emitJson({ ok: true, ...view, warnings: needsKey ? [aiKeyMissingMessage()] : [] }, MODE);
+  } else {
     out('AI settings');
     printAiSettings(view);
+    if (needsKey) err(aiKeyMissingMessage());
   }
 
-  if (aiNeedsKey(view)) {
-    err(aiKeyMissingMessage());
-    return exitCodeFor('ai_key_missing');
-  }
+  if (needsKey) return exitCodeFor('ai_key_missing');
   return 0;
 }
 
@@ -6491,16 +6826,16 @@ async function commandAiConfigure(argv) {
   if (result.status !== 200) throw aiFailure('write AI settings', result);
   const view = aiSettingsView(result.data);
 
-  if (MODE.json) emitJson({ ok: true, ...view }, MODE);
-  else {
+  const needsKey = aiNeedsKey(view);
+  if (MODE.json) {
+    emitJson({ ok: true, ...view, warnings: needsKey ? [aiKeyMissingMessage()] : [] }, MODE);
+  } else {
     out('AI settings updated');
     printAiSettings(view);
+    if (needsKey) err(aiKeyMissingMessage());
   }
 
-  if (aiNeedsKey(view)) {
-    err(aiKeyMissingMessage());
-    return exitCodeFor('ai_key_missing');
-  }
+  if (needsKey) return exitCodeFor('ai_key_missing');
   return 0;
 }
 
@@ -6655,9 +6990,7 @@ async function commandAi(argv) {
   if (sub === 'configure') return commandAiConfigure(rest);
   if (sub === 'models') return commandAiModels(rest);
   if (sub === 'test') return commandAiTest(rest);
-  err(`dakflare: unknown ai subcommand "${sub}"`);
-  err('try `dakflare ai --help`');
-  return 2;
+  throw usage(`unknown ai subcommand "${sub}"`);
 }
 
 /* ───────────────────────────── key fingerprint ───────────────────────────── */
@@ -6725,8 +7058,12 @@ async function commandKey(argv) {
   const keytool = keytoolBinary();
   const result = spawnSync(
     keytool,
-    ['-list', '-v', '-keystore', keystore, '-storepass', password, '-alias', alias],
-    { encoding: 'utf8', timeout: 15_000 }
+    ['-list', '-v', '-keystore', keystore, '-storepass:env', 'DAKFLARE_KEYSTORE_PASSWORD', '-alias', alias],
+    {
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: { ...process.env, DAKFLARE_KEYSTORE_PASSWORD: password },
+    }
   );
 
   if (result.error?.code === 'ENOENT') {
@@ -6781,24 +7118,33 @@ Usage: dakflare <command> [options]
   pair          mint a pairing code; --qr renders a terminal QR
   devices       list paired devices
   revoke        revoke one device (asks first; --yes to skip)
-  send          queue an outbound SMS through a paired phone
+  send          queue an SMS and follow it to the radio
   status        read one command's state; --wait follows it to the end
   up            provision the deployment: resources, deploy, owner, pairing
+  auth          accounts, invites, agent tokens, approvals, and authority grants
+  flows         \`flows apply\` and \`flows heal\` for v2 flow documents
+  rules         \`rules list|apply|update|delete|test\` for auto-reply rules
+  extract       \`extract synthesize\` for anchored capture regexes
+  trace         explain one message, command or approval id
+  alerts        list operator alerts
+  dlq           inspect a device's dead-letter queue
+  ws            \`ws inspect\` live handset WebSockets
+  mcp           \`mcp serve\` stdio bridge to Streamable HTTP /mcp
+  audit         tail the audit log
+  key           signing-key helpers: \`key fingerprint\`
+  ai            \`ai providers\`, \`ai configure\`, \`ai models\` and \`ai test\`
+  ask           ask for a flow patch; prints the score and the ag1_ handle
+  fix           the root-cause card for one flow failure
+  flow          \`flow test\` (local corpus) and \`flow apply\` (spend a handle)
   capabilities  every command, its effect and its flags
   describe      purpose, usage and flags for one command
   schema        the flag contract for one command, with types
   examples      real invocations for one command
-  audit         tail the audit log (phase 2; says so when the endpoint is absent)
-  key           signing-key helpers: \`key fingerprint\`
-  ai            \`ai providers\`, \`ai configure\` and \`ai test\` for the console assistant
-  ask           ask for a flow patch; prints the score and the ag1_ handle
-  fix           the root-cause card for one flow failure
-  flow          \`flow test\` (local corpus) and \`flow apply\` (spend a handle)
 
-Every command accepts --json. Each has its own --help.
+Every command accepts --json and --agent. Each has its own --help.
 
 Config: ${CONFIG_FILE} (mode 600), written by \`dakflare init\`.
-Exit:   0 ok · 1 failed check/request · 2 usage · 3 not found · 75 still in flight`,
+Exit:   0 ok · 1 failed · 2 usage · 3 not found · 4 permission · 5 conflict · 6 precondition · 75 retryable/in-flight`,
 
   init: `Usage: dakflare init [--url <url>] [--token <token> | --token-file <path>]
                      [--local [--force]] [--json]
@@ -7056,9 +7402,11 @@ answer was approval and 5 when it was not. A 401/403 exits 4.
 Note the difference from \`dakflare flows apply <file>\`: that writes a flow
 document, this spends authority.`,
 
-  flows: `Usage: dakflare flows apply <file> [--dry-run] [--agent]
+  flows: `Usage: dakflare flows apply <file> [--id <id>] [--dry-run] [--agent]
+       dakflare flows heal <id> --samples <file> [--group <name>] [--device <id>] [--dry-run]
 
   apply <file>    write one flow document and let the Worker compute its layout
+  heal <id>       re-check an extract pattern against historical inbound messages
 
 The file is { "id", "name", "graph", "device_id"?, "enabled"?,
 "expected_previous_version"? } or a bare { "nodes", "edges" } with --id and the
@@ -7074,9 +7422,12 @@ prints every issue with its path.
 This writes a DOCUMENT. \`dakflare flow apply --token <handle>\` is a different
 command: it spends the authority an \`ask\` handle names.`,
 
-  rules: `Usage: dakflare rules <apply|test> [options]
+  rules: `Usage: dakflare rules <list|apply|update|delete|test> [options]
 
+  list             list rules in priority order
   apply <file>     write one rule or a { "rules": [ ... ] } document
+  update <id>      patch one rule (--enabled|--disabled, --name, --reply, ...)
+  delete <id>      remove a rule (--yes to skip prompt)
   test --peer <e164> --body <text> [--device <id>]
                    evaluate every rule and say why each would or would not reply
 
@@ -7249,10 +7600,10 @@ async function main() {
 
   const run = COMMANDS[command];
   if (!run) {
-    err(`dakflare: unknown command "${command}"`);
-    err('try `dakflare --help`');
-    process.exitCode = 2;
-    return;
+    throw new CliError(`unknown command "${command}"; run \`dakflare --help\` or \`dakflare capabilities\``, 2, {
+      error: 'usage',
+      unknown_command: command,
+    });
   }
 
   const code = await run(rest);
@@ -7281,7 +7632,8 @@ try {
       err(`dakflare: ${error.message}`);
       if (error.code === 2) err('try `dakflare <command> --help`');
     }
-    process.exitCode = exitCodeFor(error.payload?.error ?? 'internal');
+    const mapped = ERROR_RULES[error.payload?.error]?.exit;
+    process.exitCode = mapped ?? (Number.isInteger(error.code) ? error.code : 1);
   } else {
     const detail = process.env.DAKFLARE_DEBUG ? String(error?.stack ?? error) : String(error?.message ?? error);
     if (json) emitJson({ ok: false, error: 'internal', message: detail }, MODE);

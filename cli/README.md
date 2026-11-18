@@ -67,9 +67,12 @@ and a rules write are capped at one day.
 
 | Command | Flags | What it does |
 |---|---|---|
-| `flows apply <file>` | `--dry-run --force` | write one flow document and print the structural diff |
-| `flows heal <id>` | `--samples --node --corpus-limit --dry-run` | re-check a new pattern against the real history; write it only if every old capture is unchanged |
+| `flows apply <file>` | `--id --dry-run --force` | write one flow document and print the structural diff |
+| `flows heal <id>` | `--samples --group --device --node --corpus-limit --dry-run` | re-check a new pattern against the real history; write it only if every old capture is unchanged |
+| `rules list` | `--agent` | list auto-reply rules in priority order |
 | `rules apply <file>` | `--dry-run` | write auto-reply rules |
+| `rules update <id>` | `--enabled --disabled --name --reply --cooldown --max-per-hour` | update or pause/resume an existing rule |
+| `rules delete <id>` | `--yes` | delete an auto-reply rule |
 | `rules test` | `--peer --body --device` | run the rules against one message |
 | `extract synthesize --samples <file>` | `--group --verify-d1-limit --device` | derive a regex from real messages and prove it |
 
