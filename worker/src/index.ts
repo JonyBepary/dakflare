@@ -766,7 +766,7 @@ export default {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(payload.headers ?? {}) },
             body: typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {}),
-            redirect: "error",
+            redirect: "manual",
             signal: AbortSignal.timeout(10_000),
           });
           if (!res.ok) {

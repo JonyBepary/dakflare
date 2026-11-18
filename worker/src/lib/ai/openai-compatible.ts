@@ -348,7 +348,7 @@ export function createOpenAiCompatibleAdapter(
           Authorization: `Bearer ${options.apiKey}`,
         },
         body: JSON.stringify(requestBody(options.model, messages, opts, stream)),
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {

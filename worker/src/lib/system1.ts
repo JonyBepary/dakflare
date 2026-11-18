@@ -483,7 +483,7 @@ async function askRemote(
           "content-type": "application/json",
         },
         body: JSON.stringify({ model, state: body.state, questions: body.questions }),
-        redirect: "error",
+        redirect: "manual",
         signal,
       }),
       rejectOnAbort(signal, provider),

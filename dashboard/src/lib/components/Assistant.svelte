@@ -139,6 +139,12 @@
 
 	/** `unknown` until the runtime read answers; `off` never opens a socket. */
 	let runtime = $state<'unknown' | 'on' | 'off'>('unknown');
+	/**
+	 * The in-flight runtime probe. An operator can type before the read lands, and
+	 * without this the first question of a session silently used the stateless
+	 * route even on a deployment with a runtime.
+	 */
+	let liveProbe: Promise<void> | null = null;
 	let linkState = $state<AgentLinkState>('idle');
 	let trouble = $state<AgentTrouble | null>(null);
 	/** The object's own name, from the `ready` frame. Shown as a title, not a claim. */
@@ -267,7 +273,8 @@
 		stageReady = workflowPatchSinkReady();
 		await tick();
 		field?.focus();
-		void startLive();
+		liveProbe = startLive();
+		void liveProbe;
 	}
 
 	/** One link, tuned for a panel: a few quick reconnects, then the stream. */
@@ -558,9 +565,12 @@
 	 * `reuseKey` is a retry's key: the same question, the same turn, so a runtime
 	 * that did receive the first attempt answers instead of running a second one.
 	 */
-	function runAsk(text: string, reuseKey?: string): void {
+	async function runAsk(text: string, reuseKey?: string): Promise<void> {
 		const next = text.trim();
 		if (next === '' || asking) return;
+		// The probe decides which path this turn takes, so an early ask waits for it.
+		if (runtime === 'unknown' && liveProbe !== null) await liveProbe;
+		if (!open) return;
 
 		question = next;
 		asked = next;
@@ -572,10 +582,10 @@
 		results = {};
 
 		if (runtime === 'on') {
-			void askLive(next, reuseKey);
+			await askLive(next, reuseKey);
 			return;
 		}
-		void askStateless(next);
+		await askStateless(next);
 	}
 
 	async function askStateless(text: string): Promise<void> {

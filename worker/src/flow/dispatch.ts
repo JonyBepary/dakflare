@@ -475,7 +475,7 @@ export async function dispatchFlows(
                   "X-Dakflare-Flow": workflow.id,
                 },
                 body: action.body || "{}",
-                redirect: "error",
+                redirect: "manual",
                 signal: AbortSignal.timeout(10_000),
               });
               executedWebhookOrDelay = true;

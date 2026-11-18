@@ -45,7 +45,7 @@ export class FlowExecutionWorkflow extends WorkflowEntrypoint<Env, FlowWorkflowP
                 "X-Dakflare-Flow": flowId,
               },
               body: typeof item.data.body === "string" ? item.data.body : JSON.stringify(item.data.body ?? {}),
-              redirect: "error",
+              redirect: "manual",
               signal: AbortSignal.timeout(10_000),
             });
             if (!res.ok) throw new Error(`Webhook failed: ${res.status}`);
