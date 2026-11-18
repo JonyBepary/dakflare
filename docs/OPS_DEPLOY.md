@@ -131,8 +131,9 @@ Five that have each cost this repository something:
   means "do not run the dashboard build first". Whatever is in `worker/public/admin` goes
   live, including a build another process left there. The guard described under Deploying is
   what makes this safe now; `deploy:worker` is the honest name for the same command.
-- **`cf deploy` exits `1` on a successful deploy, because of the Workflow trigger.** Since
-  the v7.0 workflow export, every deploy ends with:
+- **`cf deploy` can exit `1` on a deploy that worked, because of the Workflow trigger.**
+  Intermittently — three deploys in a row failed this way on 2026-11-18/19 and the next one
+  with identical config succeeded — a deploy ends with:
 
       Trigger configuration for "dakflare-worker" was only partially updated:
         Workflows:
@@ -141,11 +142,12 @@ Five that have each cost this repository something:
             - workflows.api.error.internal_server [code: 10001]
         Successful trigger changes were not rolled back.
 
+  The error is the API's, not the config's: `workflows.api.error.internal_server` is a 500.
   The Worker upload, the cron schedule and both queue triggers are applied before that
   step, and the workflow itself ends up bound: `cf workflows list` shows
   `script_name: dakflare-worker` with a `modified_on` inside the deploy minute. Measured
-  on 2026-11-19 with version `9675e667`: exit `1`, new routes answering `401` instead of
-  `404`, and the workflow listed and current. So the exit code is wrong, not the deploy.
+  on version `9675e667`: exit `1`, new routes answering `401` instead of `404`, and the
+  workflow listed and current. So when it happens the exit code is wrong, not the deploy.
   A release gate therefore reads the evidence, not the status: `npm run verify:deploy` in
   `worker/` checks the newest version id, four live routes (two of them answering `401`
   rather than `404`, which is how a route that exists differs from one that was never

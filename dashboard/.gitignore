@@ -21,3 +21,6 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# A build that is mid-flight has the workbenches here (worker/scripts/build-dashboard.mjs).
+.states-aside

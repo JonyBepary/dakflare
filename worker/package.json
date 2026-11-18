@@ -8,7 +8,7 @@
 	"scripts": {
 		"dev": "wrangler dev --local",
 		"dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
-		"build:dashboard": "npm --prefix ../dashboard ci --no-audit --no-fund && npm --prefix ../dashboard run build",
+		"build:dashboard": "node scripts/build-dashboard.mjs",
 		"deploy": "node scripts/assert-clean-dashboard.mjs && npm run build:dashboard && cf deploy",
 		"deploy:no-dashboard": "node scripts/assert-clean-dashboard.mjs && cf deploy",
 		"smoke": "./scripts/smoke.sh",

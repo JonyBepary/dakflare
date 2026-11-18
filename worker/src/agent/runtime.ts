@@ -660,7 +660,10 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       // the client can still resume the turn that produced this answer.
       try {
         connection.send(JSON.stringify(turnFrame(idempotencyKey, conversationId)));
-        connection.send(JSON.stringify({ type: "answer", text: replayedAnswer }));
+        // `replayed` on the frame is what lets the panel say "answered earlier, nothing ran
+        // twice". Without it a replayed socket turn is indistinguishable from a fresh one,
+        // which is the one thing the key exists to make visible.
+        connection.send(JSON.stringify({ type: "answer", text: replayedAnswer, replayed: true }));
       } catch {
         // The replayed answer is durable; a closed socket can resume.
       }
