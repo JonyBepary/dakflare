@@ -330,8 +330,7 @@
 		</section>
 
 		<p class="wake-note">
-			Wake mode is poll-only in this build. The phone answers on its next signed poll, and
-			Android may stop background work until the app is opened again.
+			The Android foreground service holds a live WebSocket when permitted and falls back to signed polling while the app runs.
 		</p>
 	{/if}
 </section>

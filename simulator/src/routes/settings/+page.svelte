@@ -467,8 +467,8 @@
 						<div class="fact">
 							<b>Pairing</b>
 							<span>
-								{app.pairedAt[device.device_id]
-									? `paired ${relativeTime(app.pairedAt[device.device_id])}`
+								{(app.pairedAt[device.device_id] ?? app.pairingAt[device.device_id])
+									? `paired ${relativeTime(app.pairedAt[device.device_id] ?? app.pairingAt[device.device_id])}`
 									: lastContact(app.contactAt[device.device_id], app.lastContactAt[device.device_id])
 										? 'signed contact answered'
 										: 'not recorded'}
@@ -527,8 +527,10 @@
 				</article>
 			{/each}
 			<p class="note">
-				Purge log clears the deployment copy only. The local thread is cleared from the
-				carrier panel in Flows.
+				Purge log clears the deployment copy only.
+				{#if import.meta.env.DEV}
+					The local thread is cleared from the carrier panel in Flows.
+				{/if}
 			</p>
 		{/if}
 		<Notice scope="devices" />
@@ -547,7 +549,7 @@
 			</div>
 			<div class="rowline">
 				<span class="label">Composer</span>
-				<span class="value mono">reply-only</span>
+				<span class="value mono">new message + reply</span>
 			</div>
 		</div>
 	</section>

@@ -680,7 +680,7 @@ pub fn synthesize_reference_clause(
     let optional = with_clause < bodies.len();
     let trailing = if period_count == with_clause { "\\." } else { "" };
     let pattern = format!(
-        "(?: {label} (?P<{group}>{REFERENCE_VALUE_CLASS}){trailing}){}",
+        "(?: {label} (?<{group}>{REFERENCE_VALUE_CLASS}){trailing}){}",
         if optional { "?" } else { "" }
     );
 
@@ -869,28 +869,56 @@ pub fn literal_segments(pattern: &str) -> Vec<LiteralSegment> {
 
 /* ------------------------------------------------------------------ pre-normalizer & bangla */
 
+fn normalize_char(ch: char) -> char {
+    match ch {
+        '\u{09E6}'..='\u{09EF}' => ((ch as u32 - 0x09E6) as u8 + b'0') as char,
+        // Fullwidth digits ０-９ (U+FF10..U+FF19)
+        '\u{FF10}'..='\u{FF19}' => ((ch as u32 - 0xFF10) as u8 + b'0') as char,
+        // Fullwidth Latin uppercase Ａ-Ｚ (U+FF21..U+FF3A)
+        '\u{FF21}'..='\u{FF3A}' => ((ch as u32 - 0xFF21) as u8 + b'A') as char,
+        // Fullwidth Latin lowercase ａ-ｚ (U+FF41..U+FF5A)
+        '\u{FF41}'..='\u{FF5A}' => ((ch as u32 - 0xFF41) as u8 + b'a') as char,
+        _ => ch,
+    }
+}
+
 /// Convert fullwidth Latin/digits and Bangla digits U+09E6..U+09EF (০..৯) to ASCII digits/letters.
 pub fn normalize_bangla_digits(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| match ch {
-            '\u{09E6}'..='\u{09EF}' => ((ch as u32 - 0x09E6) as u8 + b'0') as char,
-            // Fullwidth digits ０-９ (U+FF10..U+FF19)
-            '\u{FF10}'..='\u{FF19}' => ((ch as u32 - 0xFF10) as u8 + b'0') as char,
-            // Fullwidth Latin uppercase Ａ-Ｚ (U+FF21..U+FF3A)
-            '\u{FF21}'..='\u{FF3A}' => ((ch as u32 - 0xFF21) as u8 + b'A') as char,
-            // Fullwidth Latin lowercase ａ-ｚ (U+FF41..U+FF5A)
-            '\u{FF41}'..='\u{FF5A}' => ((ch as u32 - 0xFF41) as u8 + b'a') as char,
-            _ => ch,
-        })
-        .collect()
+    input.chars().map(normalize_char).collect()
+}
+
+fn is_bangla_word_separator(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '\u{0964}' // Devanagari/Bangla danda ।
+            | '\u{0965}' // Double danda ॥
+            | '\u{09FD}' // Bengali abbreviation sign ৽
+            | '\u{09F3}' // Bengali rupee/taka sign ৳
+            | '\u{2013}' // en dash –
+            | '\u{2014}' // em dash —
+            | '\u{2018}' // left single quote ‘
+            | '\u{2019}' // right single quote ’
+            | '\u{201C}' // left double quote “
+            | '\u{201D}' // right double quote ”
+            | '\u{2026}' // horizontal ellipsis …
+            | '\u{00AB}' // «
+            | '\u{00BB}' // »
+            | '\u{200B}' // zero-width space
+            | '\u{FEFF}' // BOM / zero-width no-break space
+            | '\u{FF01}'..='\u{FF0F}' // fullwidth ! .. /
+            | '\u{FF1A}'..='\u{FF20}' // fullwidth : .. @
+            | '\u{FF3B}'..='\u{FF40}' // fullwidth [ .. `
+            | '\u{FF5B}'..='\u{FF65}' // fullwidth { .. ･
+        )
 }
 
 /// Detect if text contains OTP, PIN, or verification code keywords in English or Bangla.
 /// Hardened per INFO-PBE-02: normalizes fullwidth characters and Bangla digits before matching,
 /// recognizes extended Bengali keywords, and uses word-boundary token checks to prevent false positives.
 pub fn is_otp_or_pin(input: &str) -> bool {
-    let normalized = normalize_bangla_digits(input).to_lowercase();
+    let normalized = normalize_sms_body(input).to_lowercase();
 
     // Bangla sensitive keywords
     if normalized.contains("ওটিপি")
@@ -904,8 +932,10 @@ pub fn is_otp_or_pin(input: &str) -> bool {
         return true;
     }
 
-    // Check single Bangla word 'পিন' on word boundary / whitespace
-    for token in normalized.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+    // Check single Bangla word 'পিন' on word boundary / separator.
+    // Do NOT use `!c.is_alphanumeric()` here because Bangla combining marks like
+    // U+09CD (virama '্') return false and would split conjunct words like "পিন্টু".
+    for token in normalized.split(is_bangla_word_separator) {
         if token == "পিন" {
             return true;
         }
@@ -1009,10 +1039,77 @@ fn slot_regex_for(slot_type: &str) -> &'static str {
     }
 }
 
+fn normalize_sms_body_with_raw_map(raw: &str) -> (String, Vec<usize>) {
+    let mut norm = String::with_capacity(raw.len());
+    let mut raw_to_norm = Vec::with_capacity(raw.encode_utf16().count() + 1);
+    let mut norm_char_len = 0usize;
+    let mut saw_non_ws = false;
+    let mut pending_space = false;
+
+    for ch in raw.chars() {
+        let u16_len = ch.len_utf16();
+        if ch.is_whitespace() {
+            if saw_non_ws {
+                pending_space = true;
+            }
+            for _ in 0..u16_len {
+                raw_to_norm.push(norm_char_len);
+            }
+        } else {
+            if pending_space {
+                norm.push(' ');
+                norm_char_len += 1;
+                pending_space = false;
+            }
+            for _ in 0..u16_len {
+                raw_to_norm.push(norm_char_len);
+            }
+            norm.push(normalize_char(ch));
+            norm_char_len += 1;
+            saw_non_ws = true;
+        }
+    }
+    raw_to_norm.push(norm_char_len);
+    (norm, raw_to_norm)
+}
+
+fn normalize_sms_body_with_raw_spans(body: &str) -> (String, Vec<(usize, usize)>) {
+    let mut norm = String::with_capacity(body.len());
+    let mut norm_char_to_raw_u16 = Vec::new();
+    let mut raw_u16 = 0usize;
+    let mut saw_non_ws = false;
+    let mut pending_ws: Option<(usize, usize)> = None;
+
+    for ch in body.chars() {
+        let u16_len = ch.len_utf16();
+        let ch_start = raw_u16;
+        let ch_end = raw_u16 + u16_len;
+        raw_u16 = ch_end;
+
+        if ch.is_whitespace() {
+            if saw_non_ws {
+                pending_ws = Some(match pending_ws {
+                    Some((s, _)) => (s, ch_end),
+                    None => (ch_start, ch_end),
+                });
+            }
+        } else {
+            if let Some(ws_span) = pending_ws.take() {
+                norm.push(' ');
+                norm_char_to_raw_u16.push(ws_span);
+            }
+            norm.push(normalize_char(ch));
+            norm_char_to_raw_u16.push((ch_start, ch_end));
+            saw_non_ws = true;
+        }
+    }
+    (norm, norm_char_to_raw_u16)
+}
+
 /// Synthesize a template from highlighted spans.
 pub fn synthesize_template(request: &TemplateRequest) -> Result<TemplateResult, SynthFailure> {
     let raw_sample = &request.sample_body;
-    let sample = normalize_sms_body(raw_sample);
+    let (sample, raw_to_norm) = normalize_sms_body_with_raw_map(raw_sample);
     let chars: Vec<char> = sample.chars().collect();
 
     if chars.is_empty() {
@@ -1022,17 +1119,26 @@ pub fn synthesize_template(request: &TemplateRequest) -> Result<TemplateResult, 
         });
     }
 
-    let mut spans = request.spans.clone();
-    spans.sort_by_key(|s| s.start);
+    // Spans arrive as UTF-16 code unit offsets into the raw sample body (browser JS / flow-v2);
+    // map them through `raw_to_norm` so leading/repeated whitespace and non-BMP emoji align cleanly.
+    let max_u16 = raw_to_norm.len() - 1;
+    let mut mapped_spans: Vec<(usize, usize, &TemplateSpan)> = request
+        .spans
+        .iter()
+        .map(|s| {
+            let start = raw_to_norm[s.start.min(max_u16)].min(chars.len());
+            let end = raw_to_norm[s.end.min(max_u16)].min(chars.len());
+            (start, end, s)
+        })
+        .collect();
+    mapped_spans.sort_by_key(|(start, _, _)| *start);
 
     let mut pattern = String::new();
     let mut trigger_phrases = Vec::new();
     let mut variables = Vec::new();
     let mut last_end = 0;
 
-    for span in &spans {
-        let s_start = span.start.min(chars.len());
-        let s_end = span.end.min(chars.len());
+    for &(s_start, s_end, span) in &mapped_spans {
         if s_start > s_end || s_start < last_end {
             continue; // Skip invalid or overlapping
         }
@@ -1176,7 +1282,7 @@ pub fn auto_suggest_spans_with_aliases(body: &str, aliases: &RoleAliases) -> Vec
 
 fn detect_spans(body: &str) -> Vec<TemplateSpan> {
     let mut spans = Vec::new();
-    let norm = normalize_bangla_digits(body);
+    let (norm, norm_char_to_raw_u16) = normalize_sms_body_with_raw_spans(body);
 
     // 1. Trigger phrases
     let triggers = [
@@ -1277,6 +1383,24 @@ fn detect_spans(body: &str) -> Vec<TemplateSpan> {
                 end: m.end(),
                 optional: false,
             });
+        }
+    }
+
+    // Map UTF-8 byte offsets in `norm` -> char offsets in `norm` -> raw UTF-16 offsets in `body`.
+    let mut byte_to_char = vec![0usize; norm.len() + 1];
+    let mut char_idx = 0usize;
+    for (byte_idx, _) in norm.char_indices() {
+        byte_to_char[byte_idx] = char_idx;
+        char_idx += 1;
+    }
+    byte_to_char[norm.len()] = char_idx;
+
+    for span in &mut spans {
+        let char_start = byte_to_char[span.start];
+        let char_end = byte_to_char[span.end];
+        if char_end > char_start {
+            span.start = norm_char_to_raw_u16[char_start].0;
+            span.end = norm_char_to_raw_u16[char_end - 1].1;
         }
     }
 
@@ -1446,11 +1570,18 @@ mod tests {
         assert!(is_otp_or_pin("আপনার গোপন নম্বর হলো ৫৪২১"));
         assert!(is_otp_or_pin("গোপন পিন কাউকে বলবেন না"));
         assert!(is_otp_or_pin("Your one-time password is 102938"));
+        assert!(is_otp_or_pin("আপনার পিন। ১২৩৪"));
+        assert!(is_otp_or_pin("আপনার পিন॥ ১২৩৪"));
+        assert!(is_otp_or_pin("পিন—১২৩৪"));
+        assert!(is_otp_or_pin("পিন：১২৩৪"));
+        assert!(is_otp_or_pin("গোপন\nপিন কাউকে বলবেন না"));
 
-        // Negative tests: words containing 'pin' or 'otp' as substrings should NOT trigger
+        // Negative tests: words containing 'pin', 'otp', or conjunct 'পিন' should NOT trigger
         assert!(!is_otp_or_pin("You have received Tk 800.00 from 01999999999. TrxID 8G56H7J8K9"));
         assert!(!is_otp_or_pin("In my opinion, we should proceed with shipping"));
         assert!(!is_otp_or_pin("Shopping at Pinpoint store"));
+        assert!(!is_otp_or_pin("পিন্টু আমাকে টাকা পাঠিয়েছে"));
+        assert!(!is_otp_or_pin("আপিন"));
     }
 
     #[test]
@@ -1506,7 +1637,7 @@ mod tests {
         assert_eq!(clause.without_clause, 1);
         assert_eq!(
             clause.pattern,
-            r"(?: Ref (?P<ref>[A-Za-z0-9 _-]{1,40})\.)?"
+            r"(?: Ref (?<ref>[A-Za-z0-9 _-]{1,40})\.)?"
         );
 
         // The clause is a real pattern, not a description of one. It is optional,
@@ -1601,5 +1732,113 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "aliased names must stay unique");
+    }
+
+    #[test]
+    fn synthesize_template_handles_bangla_and_emoji_utf16_offsets() {
+        // Emojis occupy 2 UTF-16 code units; Bangla letters occupy 3 UTF-8 bytes and 1 UTF-16 unit.
+        let body = "💰 টাকা 850.00 পেয়েছেন TrxID TX9988AA থেকে।";
+        let amount_start = body[..body.find("850.00").unwrap()].encode_utf16().count();
+        let amount_end = amount_start + "850.00".encode_utf16().count();
+        let trx_start = body[..body.find("TX9988AA").unwrap()].encode_utf16().count();
+        let trx_end = trx_start + "TX9988AA".encode_utf16().count();
+        let req = TemplateRequest {
+            sample_body: body.to_string(),
+            spans: vec![
+                TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "amount".to_string(),
+                    slot_type: Some("money_bdt".to_string()),
+                    start: amount_start,
+                    end: amount_end,
+                    optional: false,
+                },
+                TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "trx_id".to_string(),
+                    slot_type: Some("trx_id".to_string()),
+                    start: trx_start,
+                    end: trx_end,
+                    optional: false,
+                },
+            ],
+            additional_samples: vec![
+                "💰 টাকা 1,250.50 পেয়েছেন TrxID AB12CD34 থেকে।".to_string(),
+            ],
+        };
+        let res = synthesize_template(&req).expect("emoji + Bangla UTF-16 offsets should succeed");
+        assert_eq!(res.test_results[0].extracted.get("amount").map(String::as_str), Some("850.00"));
+        assert_eq!(res.test_results[0].extracted.get("trx_id").map(String::as_str), Some("TX9988AA"));
+        assert!(res.test_results[1].matched);
+    }
+
+    #[test]
+    fn synthesize_template_handles_leading_and_repeated_whitespace_with_emoji_and_bangla() {
+        // Challenger 1 Case C
+        let body = "   💰   টাকা   850.00   পেয়েছেন   TrxID   TX9988AA";
+        let amount_start = body[..body.find("850.00").unwrap()].encode_utf16().count();
+        let amount_end = amount_start + "850.00".encode_utf16().count();
+        let trx_start = body[..body.find("TX9988AA").unwrap()].encode_utf16().count();
+        let trx_end = trx_start + "TX9988AA".encode_utf16().count();
+        let req = TemplateRequest {
+            sample_body: body.to_string(),
+            spans: vec![
+                TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "amount".to_string(),
+                    slot_type: Some("money_bdt".to_string()),
+                    start: amount_start,
+                    end: amount_end,
+                    optional: false,
+                },
+                TemplateSpan {
+                    role: "extract".to_string(),
+                    name: "trx_id".to_string(),
+                    slot_type: Some("trx_id".to_string()),
+                    start: trx_start,
+                    end: trx_end,
+                    optional: false,
+                },
+            ],
+            additional_samples: vec![
+                "💰 টাকা 1,250.50 পেয়েছেন TrxID AB12CD34".to_string(),
+            ],
+        };
+        let res = synthesize_template(&req).expect("leading/repeated whitespace + emoji UTF-16 offsets should succeed");
+        assert!(res.test_results[0].matched, "pattern={}", res.pattern);
+        assert_eq!(res.test_results[0].extracted.get("amount").map(String::as_str), Some("850.00"));
+        assert_eq!(res.test_results[0].extracted.get("trx_id").map(String::as_str), Some("TX9988AA"));
+        assert!(res.test_results[1].matched);
+        assert_eq!(res.test_results[1].extracted.get("amount").map(String::as_str), Some("1250.50"));
+        assert_eq!(res.test_results[1].extracted.get("trx_id").map(String::as_str), Some("AB12CD34"));
+    }
+
+    #[test]
+    fn auto_suggest_spans_round_trips_into_synthesize_template_with_emojis_and_whitespace() {
+        // Challenger 1 Case E + multi-whitespace + Bangla digits variant
+        for body in [
+            "💰🎉 You have received Tk 800.00 from 01999999999. TrxID 8G56H7J8K9",
+            "   💰   You   have received Tk   800.00 from 01999999999. TrxID   8G56H7J8K9",
+            "🎉🚀 ক্যাশ ইন টাকা ১,৫০০.০০ নম্বর ০১৭১২৩৪৫৬৭৮ TrxID BK998877।",
+        ] {
+            let spans = auto_suggest_spans(body);
+            assert!(!spans.is_empty(), "expected spans for {body:?}");
+
+            // Verify every returned span slices cleanly as UTF-16 code units in `body`.
+            let utf16_units: Vec<u16> = body.encode_utf16().collect();
+            for span in &spans {
+                assert!(span.start < span.end && span.end <= utf16_units.len());
+                let sliced = String::from_utf16(&utf16_units[span.start..span.end]).unwrap();
+                assert!(!sliced.is_empty());
+            }
+
+            let req = TemplateRequest {
+                sample_body: body.to_string(),
+                spans,
+                additional_samples: vec![],
+            };
+            let res = synthesize_template(&req).expect("round-trip synthesis should succeed");
+            assert!(res.test_results[0].matched, "pattern={} body={:?}", res.pattern, body);
+        }
     }
 }

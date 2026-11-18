@@ -434,6 +434,9 @@
 										>
 											{sendStateWord(row.message.state)}
 										</span>
+										{#if row.message.state === 'failed' && row.message.last_error}
+											<span class="bubble-error">({row.message.last_error})</span>
+										{/if}
 									{/if}
 									<time datetime={new Date(row.message.created_at).toISOString()}>
 										{formatClock(row.message.created_at)}

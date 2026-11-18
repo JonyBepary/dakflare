@@ -20,6 +20,7 @@ use tauri::{Manager, State};
 /// Direct JNI surface for the Android `SmsReceiver`. Not compiled on desktop.
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
 mod socket;
 
 /// Android Keystore bridge for the identity vault. Not compiled on desktop.
@@ -323,7 +324,27 @@ async fn poll_device(
             serde_json::json!({ "ok": false, "error": error.to_string() })
         }
     };
-    let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "android"))]
+    let commands = {
+        let commands = client.poll(&[]).await.map_err(|e| e.to_string())?;
+        if !commands.as_array().map(|entries| entries.is_empty()).unwrap_or(true) {
+            if let Ok((captured, _)) =
+                dakflare_core::carrier::record_commands(&state.store, &device_id, &commands).await
+            {
+                for message in &captured {
+                    if let Some(local_id) = &message.local_id {
+                        let _ = dakflare_core::carrier::ack_command(&client, &state.store, &device_id, local_id).await;
+                        let _ = dakflare_core::report_command_state(&client, local_id, "sent").await;
+                        let _ = state.store.set_message_state(&message.id, "sent").await;
+                    }
+                }
+                let _ = dakflare_core::flush_pending(&state.store, &client, &device_id).await;
+            }
+        }
+        commands
+    };
+    #[cfg(target_os = "android")]
+    let commands = serde_json::json!([]);
     // The poll above is signed and was answered, so this is a real contact. The
     // Device frame reads this setting, never `devices.updated_at`.
     record_contact(&state, &device_id).await;
@@ -595,29 +616,40 @@ async fn carrier_drain(
     }
 
     let (client, _device) = client_for(&state, &device_id).await?;
-    let captured = drain_outbox(state.store.as_ref(), &client, &device_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    // The desktop carrier's radio is fake and accepts every send instantly, so
-    // acknowledging here is the honest equivalent of `SmsManager` returning
-    // without throwing. On Android the gateway acks from `SmsSender.resend`
-    // instead, after the real radio answers. A failed ack keeps the row's token,
-    // so the next send retries it.
-    for message in &captured {
-        if let Some(local_id) = &message.local_id {
-            let _ = dakflare_core::carrier::ack_command(
-                &client,
-                state.store.as_ref(),
-                &device_id,
-                local_id,
-            )
-            .await;
-        }
+    #[cfg(target_os = "android")]
+    {
+        // Real radio sends on Android are driven by GatewayService -> SmsSender;
+        // never auto-mark queued commands as SENT without invoking SmsManager.
+        let _ = flush_pending(state.store.as_ref(), &client, &device_id).await;
+        record_contact(&state, &device_id).await;
+        return Ok(Vec::new());
     }
-    // `drain_outbox` polls the deployment with this identity's key; the answer
-    // is contact even when it carried no commands.
-    record_contact(&state, &device_id).await;
-    Ok(captured)
+    #[cfg(not(target_os = "android"))]
+    {
+        let captured = drain_outbox(state.store.as_ref(), &client, &device_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        // The desktop carrier's radio is fake and accepts every send instantly, so
+        // acknowledging here is the honest equivalent of `SmsManager` returning
+        // without throwing. On Android the gateway acks from `SmsSender.resend`
+        // instead, after the real radio answers. A failed ack keeps the row's token,
+        // so the next send retries it.
+        for message in &captured {
+            if let Some(local_id) = &message.local_id {
+                let _ = dakflare_core::carrier::ack_command(
+                    &client,
+                    state.store.as_ref(),
+                    &device_id,
+                    local_id,
+                )
+                .await;
+            }
+        }
+        // `drain_outbox` polls the deployment with this identity's key; the answer
+        // is contact even when it carried no commands.
+        record_contact(&state, &device_id).await;
+        Ok(captured)
+    }
 }
 
 /* ---------------------------------------------------------------- compose */

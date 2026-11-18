@@ -27,6 +27,7 @@ export type Message = {
 	body: string;
 	state: string;
 	local_id: string | null;
+	last_error?: string | null;
 	created_at: number;
 };
 
@@ -699,6 +700,7 @@ class AppStore {
 				)}${flows?.ok ? ` · ${count(flows.count ?? 0, 'flow', 'flows')} cached` : ''}.`,
 				'ok'
 			);
+			await this.refreshSelected();
 			// A poll is the moment the deployment may have routed a new request
 			// to this phone, so refresh an open approval sheet with it.
 			if (this.approvalsLoaded) await this.loadApprovals(deviceId);

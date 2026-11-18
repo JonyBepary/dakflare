@@ -191,6 +191,12 @@ textarea {
 	margin: 0 auto;
 }
 
+.workbench-shell {
+	min-height: 100%;
+	width: 100%;
+	overflow-x: clip;
+}
+
 /* ---------------------------------------------------------------- type */
 
 h1,

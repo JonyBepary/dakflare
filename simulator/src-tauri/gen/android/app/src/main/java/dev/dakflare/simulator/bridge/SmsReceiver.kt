@@ -133,7 +133,7 @@ class SmsReceiver : BroadcastReceiver() {
                     context = context,
                     peer = sender,
                     body = body,
-                    deliveryKey = "${group.receivedAtMs}:$sender",
+                    deliveryKey = "${group.receivedAtMs}:$sender:${body.hashCode()}",
                 )
             }
 
@@ -169,13 +169,7 @@ class SmsReceiver : BroadcastReceiver() {
         }
 
         // Hard-block OTP / PIN messages from triggering auto-replies (INFO-PBE-02)
-        val normalizedBody = java.text.Normalizer.normalize(inboundBody, java.text.Normalizer.Form.NFKC)
-            .replace(Regex("[\\u09E6-\\u09EF]")) { (it.value[0].code - 0x09E6.toInt() + '0'.code).toChar().toString() }
-        val otpPattern = Regex(
-            "(?i)\\b(otp|pin|passcode|secret\\s+code|auth(entication)?\\s+code|verification\\s+code|security\\s+code|one[\\s-]time\\s+password)\\b|" +
-            "ওটিপি|গোলাপী\\s*পিন|গোপন\\s*(নম্বর|পিন)|ভেরিফিকেশন\\s*(কোড)?|সিকিউরিটি\\s*কোড|\\bপিন\\b"
-        )
-        if (otpPattern.containsMatchIn(normalizedBody)) {
+        if (isOtpOrPin(inboundBody)) {
             Log.w(TAG, "sender=${mask(sender)} reply suppressed (OTP/PIN security protection)")
             decline(appDir, deviceId, actions, "otp_pin_security_block")
             return
@@ -210,7 +204,7 @@ class SmsReceiver : BroadcastReceiver() {
             val targetSkip = skipReason(action.to)
             if (targetSkip != null) {
                 Log.i(TAG, "target skip=$targetSkip")
-                mark(appDir, deviceId, action.localId, "failed")
+                mark(appDir, deviceId, action.localId, "failed", targetSkip)
                 continue
             }
             try {
@@ -251,7 +245,7 @@ class SmsReceiver : BroadcastReceiver() {
                 // there is no way to learn the radio's verdict, so record the
                 // honest failure now. `failed` keeps it out of the mirror;
                 // M5.5's retry queue owns what happens next.
-                mark(appDir, deviceId, action.localId, "failed")
+                mark(appDir, deviceId, action.localId, "failed", error.javaClass.simpleName)
                 Log.e(TAG, "reply failed: ${error.javaClass.simpleName}")
                 continue
             }
@@ -283,12 +277,18 @@ class SmsReceiver : BroadcastReceiver() {
     ) {
         Log.i(TAG, "replies declined count=${actions.size} skip=$reason")
         for (action in actions) {
-            mark(appDir, deviceId, action.localId, "failed")
+            mark(appDir, deviceId, action.localId, "failed", reason)
         }
     }
 
-    private fun mark(appDir: String, deviceId: String, localId: String, state: String) {
-        if (!NativeBridge.markOutboundSafely(appDir, deviceId, localId, state)) {
+    private fun mark(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+        reason: String? = null,
+    ) {
+        if (!NativeBridge.markOutboundSafely(appDir, deviceId, localId, state, reason)) {
             // Class/name-free: markOutboundSafely already logged a class name
             // when it threw. Staying queued is the honest outcome.
             Log.w(TAG, "reply state not recorded; row stays queued")
@@ -436,9 +436,81 @@ class SmsReceiver : BroadcastReceiver() {
         val actions: List<Reply>,
     )
 
-    private companion object {
-        const val TAG = "DakFlareSms"
-        const val EXTRA_SUBSCRIPTION = "subscription"
-        const val MIN_DIGITS = 10
+    internal companion object {
+        private const val TAG = "DakFlareSms"
+        private const val EXTRA_SUBSCRIPTION = "subscription"
+        private const val MIN_DIGITS = 10
+        private const val BANGLA_PIN_WORD = "পিন"
+
+        private const val UNICODE_WS = "[\\s\\u0085\\u00A0\\u2007\\u202F\\u3000]"
+        private val BANGLA_DIGIT_REGEX = Regex("[\\u09E6-\\u09EF]")
+        private val OTP_KEYWORD_PATTERN = Regex(
+            "(?i)(?:^|[^\\p{L}\\p{N}])(otp|pin|passcodes?|secret$UNICODE_WS+codes?|auth(entication)?$UNICODE_WS+codes?|" +
+                "verification$UNICODE_WS+codes?|security$UNICODE_WS+codes?|one(?:$UNICODE_WS|-)+time$UNICODE_WS+passwords?)(?:$|[^\\p{L}\\p{N}])|" +
+                "ওটিপি|গোলাপী$UNICODE_WS*পিন|গোপন$UNICODE_WS*(নম্বর|পিন)|ভেরিফিকেশন$UNICODE_WS*(কোড)?|সিকিউরিটি$UNICODE_WS*কোড",
+        )
+
+        internal fun isOtpOrPin(inboundBody: String): Boolean {
+            val normalizedBody = java.text.Normalizer
+                .normalize(inboundBody, java.text.Normalizer.Form.NFKC)
+                .replace(BANGLA_DIGIT_REGEX) {
+                    (it.value[0].code - 0x09E6 + '0'.code).toChar().toString()
+                }
+            return OTP_KEYWORD_PATTERN.containsMatchIn(normalizedBody) ||
+                containsStandaloneBanglaPin(normalizedBody)
+        }
+
+        private fun containsStandaloneBanglaPin(body: String): Boolean {
+            var index = body.indexOf(BANGLA_PIN_WORD)
+            while (index >= 0) {
+                val leftOk = index == 0 || isBanglaWordSeparator(body[index - 1])
+                val after = index + BANGLA_PIN_WORD.length
+                val rightOk = after == body.length || isBanglaWordSeparator(body[after])
+                if (leftOk && rightOk) return true
+                index = body.indexOf(BANGLA_PIN_WORD, index + 1)
+            }
+            return false
+        }
+
+        private fun isBanglaWordSeparator(c: Char): Boolean =
+            c.isWhitespace() ||
+                c == '\u0085' ||
+                c == '\u00A0' ||
+                c == '\u2007' ||
+                c == '\u202F' ||
+                c == '\u3000' ||
+                isAsciiPunctuation(c) ||
+                when (c) {
+                    '\u0964', // Bangla/Devanagari danda ।
+                    '\u0965', // Double danda ॥
+                    '\u09FD', // Bengali abbreviation sign ৽
+                    '\u09F3', // Bengali taka sign ৳
+                    '\u2013', // en dash –
+                    '\u2014', // em dash —
+                    '\u2018', // left single quote ‘
+                    '\u2019', // right single quote ’
+                    '\u201C', // left double quote “
+                    '\u201D', // right double quote ”
+                    '\u2026', // horizontal ellipsis …
+                    '\u00AB', // «
+                    '\u00BB', // »
+                    '\u200B', // zero-width space
+                    '\uFEFF', // BOM / zero-width no-break space
+                    '\u2985', // left white parenthesis ⦅ (NFKC of U+FF5F)
+                    '\u2986', // right white parenthesis ⦆ (NFKC of U+FF60)
+                    '\u3001', // ideographic comma 、 (NFKC of U+FF64)
+                    '\u3002', // ideographic full stop 。 (NFKC of U+FF61)
+                    '\u300C', // left corner bracket 「 (NFKC of U+FF62)
+                    '\u300D', // right corner bracket 」 (NFKC of U+FF63)
+                    '\u30FB', // katakana middle dot ・ (NFKC of U+FF65)
+                    -> true
+                    else -> c in '\uFF01'..'\uFF0F' ||
+                        c in '\uFF1A'..'\uFF20' ||
+                        c in '\uFF3B'..'\uFF40' ||
+                        c in '\uFF5B'..'\uFF65'
+                }
+
+        private fun isAsciiPunctuation(c: Char): Boolean =
+            c in '!'..'/' || c in ':'..'@' || c in '['..'`' || c in '{'..'~'
     }
 }

@@ -13,7 +13,7 @@ use dakflare_flow::Action;
 
 use crate::db::{Message, Store, StoreError};
 use crate::flowrun::{RemoteFlow, run_flows};
-use crate::protocol::{Ack, DeviceClient, InboundMessage, OutboundReport, ProtocolError};
+use crate::protocol::{Ack, DeviceClient, InboundMessage, OutboundReport, ProtocolError, StatusUpdateItem};
 
 /// The JNI surface caps these before calling in; the core repeats the check so a
 /// future caller cannot bypass them.
@@ -83,7 +83,7 @@ pub async fn receive_offline(
     }
 
     let device_id = resolve_device(store, device_id).await?;
-    let local_id = offline_local_id(sender, received_at_ms);
+    let local_id = offline_local_id(sender, received_at_ms, body);
 
     // The common re-delivery path: the row is already there.
     if let Some(existing) = store.message_by_local_id(&device_id, &local_id).await? {
@@ -231,14 +231,16 @@ async fn resolve_device(store: &Store, requested: Option<&str>) -> Result<String
     }
 }
 
-/// Deterministic id from the PDU timestamp + sender. Same delivery (even a
-/// re-delivery) hashes to the same value; a different sender at the same
-/// millisecond does not.
-fn offline_local_id(sender: &str, received_at_ms: i64) -> String {
+/// Deterministic id from PDU timestamp, sender and body. Identical broadcast
+/// re-deliveries still coalesce, while two distinct SMS in the same millisecond
+/// from one sender stay distinct rows instead of colliding on UNIQUE(device_id, local_id).
+fn offline_local_id(sender: &str, received_at_ms: i64, body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(received_at_ms.to_le_bytes());
     hasher.update(b"\0");
     hasher.update(sender.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(body.as_bytes());
     let digest = hasher.finalize();
 
     let mut out = String::with_capacity(7 + 32);
@@ -451,14 +453,10 @@ pub async fn record_commands(
         // reported, which is what lets `report_command_state` address the
         // Worker's state machine without a second column, and lets the ack name
         // the same row the radio later sends.
+        let token_opt = (!claim_token.is_empty()).then_some(claim_token.as_str());
         let message = store
-            .record_message(device_id, "out", &to, &body, "queued", Some(&command_id))
+            .record_command_message(device_id, &to, &body, &command_id, token_opt)
             .await?;
-        if !claim_token.is_empty() {
-            store
-                .set_message_claim_token(device_id, &command_id, &claim_token)
-                .await?;
-        }
         recorded_ids.push(command_id);
         captured.push(message);
     }
@@ -522,10 +520,12 @@ pub async fn ack_command(
 ///
 /// Returns whether a report was sent. A rejected transition is a successful
 /// no-op (§6.1), so an already-terminal command is not an error.
-pub async fn report_command_state(
+pub async fn report_command_state_with_reason(
     client: &DeviceClient,
     local_id: &str,
     state: &str,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
 ) -> Result<bool, CarrierError> {
     let Some(status) = protocol_status(state) else {
         return Ok(false);
@@ -533,10 +533,29 @@ pub async fn report_command_state(
     if !looks_like_command_id(local_id) {
         return Ok(false);
     }
+    let clean_code = error_code.map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let clean_msg = error_message
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(280).collect());
     client
-        .report_status(&[(local_id.to_string(), status.to_string())])
+        .report_status_items(&[StatusUpdateItem {
+            command_id: local_id.to_string(),
+            status: status.to_string(),
+            claim_token: None,
+            error_code: clean_code,
+            error_message: clean_msg,
+        }])
         .await?;
     Ok(true)
+}
+
+pub async fn report_command_state(
+    client: &DeviceClient,
+    local_id: &str,
+    state: &str,
+) -> Result<bool, CarrierError> {
+    report_command_state_with_reason(client, local_id, state, None, None).await
 }
 
 fn protocol_status(state: &str) -> Option<&'static str> {
@@ -1486,5 +1505,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn offline_receive_distinguishes_distinct_bodies_within_same_second() {
+        let (_dir, store, device) = paired_store().await;
+        let received_at = 1_776_470_400_000;
+
+        let first = receive_offline(&store, None, "+15550001111", "MSG ONE", received_at)
+            .await
+            .unwrap();
+        let second = receive_offline(&store, None, "+15550001111", "MSG TWO", received_at)
+            .await
+            .unwrap();
+
+        assert_ne!(first.local_id, second.local_id);
+        assert_ne!(first.id, second.id);
+        assert_eq!(store.list_messages(&device.device_id, 10).await.unwrap().len(), 2);
     }
 }

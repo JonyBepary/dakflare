@@ -43,8 +43,10 @@ pub enum StoreError {
 
 /// Facts the native shell may report. Anything else is refused, so a caller
 /// cannot use the fact setter to overwrite a credential or the target URL.
-pub const DEVICE_FACT_KEYS: [&str; 6] = [
+pub const DEVICE_FACT_KEYS: [&str; 8] = [
     "self_number",
+    "configured_phone_number",
+    "phone_number",
     "sim_slot",
     "sim_carrier",
     "permissions",
@@ -175,6 +177,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // radio has accepted the send and the ack has been applied; NULL means
         // this row is not a command, or its lease was never captured.
         "ALTER TABLE messages ADD COLUMN claim_token TEXT",
+    ),
+    (
+        12,
+        // Timestamp of last retry handoff so overlapping gateway ticks cannot
+        // re-send an outbound row before its SENT broadcast lands.
+        "ALTER TABLE messages ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
     ),
 ];
 
@@ -891,6 +899,57 @@ impl Store {
             battery_optimized,
             default_sms_app,
         })
+    }
+
+    /// Insert or refresh one leased command row cleanly. If the same command is
+    /// re-delivered after lease expiry while still `queued`, update `claim_token`
+    /// instead of failing on `UNIQUE(device_id, local_id)`.
+    pub async fn record_command_message(
+        &self,
+        device_id: &str,
+        peer: &str,
+        body: &str,
+        local_id: &str,
+        claim_token: Option<&str>,
+    ) -> Result<Message, StoreError> {
+        let id = format!("msg{}", random_hex(12)?);
+        let now = now_ms()?;
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO messages
+                (id, device_id, direction, peer, body, state, local_id, claim_token, created_at)
+             VALUES (?, ?, 'out', ?, ?, 'queued', ?, ?, ?)
+             ON CONFLICT(device_id, local_id) DO UPDATE SET
+                claim_token = CASE
+                    WHEN messages.state = 'queued' THEN COALESCE(excluded.claim_token, messages.claim_token)
+                    ELSE messages.claim_token
+                END",
+            params![id, device_id, peer, body, local_id, claim_token, now],
+        )
+        .await?;
+        self.message_by_local_id(device_id, local_id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("command message missing after upsert".into()))
+    }
+
+    /// True if any inbound or outbound rows are waiting to be uploaded to the Worker.
+    pub async fn has_pending_flush(&self, device_id: &str) -> Result<bool, StoreError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT EXISTS(
+                    SELECT 1 FROM messages
+                     WHERE device_id = ?
+                       AND ((direction = 'in' AND state = 'received')
+                         OR (direction = 'out' AND mirrored = 0 AND state IN ('queued','sent','failed','delivered')))
+                 )",
+                params![device_id],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(row.get::<i64>(0)? != 0),
+            None => Ok(false),
+        }
     }
 
     /// Append a message to this device's local thread.
@@ -1632,16 +1691,26 @@ impl Store {
         local_id: &str,
         state: &str,
     ) -> Result<bool, StoreError> {
+        self.set_message_state_with_reason_by_local_id(device_id, local_id, state, None)
+            .await
+    }
+
+    pub async fn set_message_state_with_reason_by_local_id(
+        &self,
+        device_id: &str,
+        local_id: &str,
+        state: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, StoreError> {
         if !matches!(state, "queued" | "sent" | "failed" | "delivered") {
             return Err(StoreError::InvalidState(state.to_string()));
         }
 
-        // The native bridge calls `markOutbound(..., "failed")` for a platform
-        // result that is neither OK nor a retryable radio error. The result code
-        // is not on this path, so store the one truthful fact we have rather
-        // than fabricate a carrier message.
+        // Preserve explicit platform/safety reason when supplied; fall back to
+        // `"send_rejected"` rather than fabricate a carrier message.
         let last_error = if state == "failed" {
-            Some("send_rejected")
+            let trimmed = reason.map(str::trim).filter(|s| !s.is_empty());
+            Some(trimmed.unwrap_or("send_rejected").to_string())
         } else {
             None
         };
@@ -1919,9 +1988,9 @@ impl Store {
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ? AND direction = 'out' AND state = 'queued'
-                    AND attempts < 3 AND created_at < ?
+                    AND attempts < 3 AND created_at < ? AND retry_at <= ?
                   ORDER BY created_at ASC LIMIT ?",
-                params![device_id, cutoff, limit],
+                params![device_id, cutoff, cutoff, limit],
             )
             .await?;
 
@@ -1940,6 +2009,30 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// Atomically claim a queued outbound row for radio retry, setting `retry_at`
+    /// so concurrent gateway passes cannot hand off duplicates before the SENT receipt arrives.
+    pub async fn claim_outbound_retry(
+        &self,
+        device_id: &str,
+        local_id: &str,
+        now: i64,
+    ) -> Result<Option<Message>, StoreError> {
+        let cooldown_cutoff = now.saturating_sub(60_000);
+        let conn = self.connect().await?;
+        let affected = conn
+            .execute(
+                "UPDATE messages SET retry_at = ?
+                  WHERE device_id = ? AND local_id = ? AND direction = 'out'
+                    AND state = 'queued' AND (retry_at = 0 OR retry_at <= ?)",
+                params![now, device_id, local_id, cooldown_cutoff],
+            )
+            .await?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.message_by_local_id(device_id, local_id).await
     }
 
     pub async fn delete_device(&self, device_id: &str) -> Result<bool, StoreError> {
@@ -3823,6 +3916,113 @@ mod tests {
         assert_eq!(
             store.retention_status().await.unwrap().last_purge_at,
             Some(prompt)
+        );
+    }
+
+    #[tokio::test]
+    async fn command_upsert_preserves_state_and_claim_retry_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("sim.db")).await.unwrap();
+        let (device, _) = store
+            .create_device(NewDevice {
+                label: "retry",
+                platform: "android",
+                platform_id: None,
+                carrier: None,
+                sim_slot: 0,
+            })
+            .await
+            .unwrap();
+
+        assert!(!store.has_pending_flush(&device.device_id).await.unwrap());
+
+        // First lease recorded as queued with lease-1.
+        let first = store
+            .record_command_message(
+                &device.device_id,
+                "+15550001111",
+                "hi",
+                "cmd-1",
+                Some("lease-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.state, "queued");
+        assert!(store.has_pending_flush(&device.device_id).await.unwrap());
+
+        // Re-delivery after lease expiry refreshes the lease without throwing UNIQUE.
+        let released = store
+            .record_command_message(
+                &device.device_id,
+                "+15550001111",
+                "hi",
+                "cmd-1",
+                Some("lease-2"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(released.id, first.id);
+
+        // Once sent, a duplicate lease must not downgrade back to queued.
+        assert!(
+            store
+                .set_message_state_by_local_id(&device.device_id, "cmd-1", "sent")
+                .await
+                .unwrap()
+        );
+        let after_sent = store
+            .record_command_message(
+                &device.device_id,
+                "+15550001111",
+                "hi",
+                "cmd-1",
+                Some("lease-3"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after_sent.state, "sent");
+
+        // `configured_phone_number` and `phone_number` fact keys are accepted.
+        store
+            .set_device_fact("configured_phone_number", "+15550002222")
+            .await
+            .unwrap();
+        store
+            .set_device_fact("phone_number", "+15550003333")
+            .await
+            .unwrap();
+
+        // Atomic retry claim prevents two concurrent ticks from claiming twice within 60s.
+        store
+            .record_command_message(
+                &device.device_id,
+                "+15550004444",
+                "retry me",
+                "cmd-2",
+                None,
+            )
+            .await
+            .unwrap();
+        let msg = store
+            .message_by_local_id(&device.device_id, "cmd-2")
+            .await
+            .unwrap()
+            .unwrap();
+        let t0 = msg.created_at + 65_000;
+        assert!(
+            store
+                .claim_outbound_retry(&device.device_id, "cmd-2", t0)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .claim_outbound_retry(&device.device_id, "cmd-2", t0 + 1_000)
+                .await
+                .unwrap()
+                .is_none(),
+            "second claim inside cooldown window must return None"
         );
     }
 }

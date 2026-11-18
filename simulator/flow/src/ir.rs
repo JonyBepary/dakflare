@@ -357,18 +357,263 @@ pub fn template_names(template: &str) -> Vec<String> {
 
 /* ------------------------------------------------------------- validation */
 
+fn ipv4_is_blocked(a: u8, b: u8, c: u8) -> bool {
+    if a == 0 || a == 10 || a == 127 {
+        return true;
+    }
+    if a == 100 && (64..=127).contains(&b) {
+        return true;
+    }
+    if a == 169 && b == 254 {
+        return true;
+    }
+    if a == 172 && (16..=31).contains(&b) {
+        return true;
+    }
+    if a == 192 && b == 0 && (c == 0 || c == 2) {
+        return true;
+    }
+    if a == 192 && b == 88 && c == 99 {
+        return true;
+    }
+    if a == 192 && b == 168 {
+        return true;
+    }
+    if a == 198 && (b == 18 || b == 19) {
+        return true;
+    }
+    if a == 198 && b == 51 && c == 100 {
+        return true;
+    }
+    if a == 203 && b == 0 && c == 113 {
+        return true;
+    }
+    if a >= 224 {
+        return true;
+    }
+    false
+}
+
+fn ipv4_addr_is_blocked(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    ipv4_is_blocked(a, b, c)
+}
+
+fn ipv6_addr_is_blocked(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+    {
+        return true;
+    }
+
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return ipv4_addr_is_blocked(v4);
+    }
+
+    let seg = ip.segments();
+
+    // ::/96 deprecated IPv4-compatible IPv6 (e.g. ::127.0.0.1)
+    if seg[0..6] == [0, 0, 0, 0, 0, 0] {
+        return true;
+    }
+
+    // ::ffff:0:0:0/96 IPv4-translated (SIIT)
+    if seg[0..6] == [0, 0, 0, 0, 0xffff, 0] {
+        let a = (seg[6] >> 8) as u8;
+        let b = (seg[6] & 0xff) as u8;
+        let c = (seg[7] >> 8) as u8;
+        return ipv4_is_blocked(a, b, c);
+    }
+
+    // 64:ff9b::/96 NAT64 well-known prefix -> check embedded IPv4
+    if seg[0..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        let a = (seg[6] >> 8) as u8;
+        let b = (seg[6] & 0xff) as u8;
+        let c = (seg[7] >> 8) as u8;
+        return ipv4_is_blocked(a, b, c);
+    }
+
+    // 64:ff9b:1::/48 NAT64 local-use
+    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0x0001 {
+        return true;
+    }
+
+    // 100::/64 discard-only
+    if seg[0..4] == [0x0100, 0, 0, 0] {
+        return true;
+    }
+
+    // 2001::/32 Teredo, 2001:2::/48 Benchmarking, 2001:db8::/32 Documentation
+    if seg[0] == 0x2001 && (seg[1] == 0 || (seg[1] == 0x0002 && seg[2] == 0) || seg[1] == 0x0db8) {
+        return true;
+    }
+
+    // 2002::/16 6to4 -> check embedded IPv4
+    if seg[0] == 0x2002 {
+        let a = (seg[1] >> 8) as u8;
+        let b = (seg[1] & 0xff) as u8;
+        let c = (seg[2] >> 8) as u8;
+        return ipv4_is_blocked(a, b, c);
+    }
+
+    // fec0::/10 deprecated site-local
+    (seg[0] & 0xffc0) == 0xfec0
+}
+
+fn decode_percent_ascii(input: &str) -> Option<String> {
+    if !input.contains('%') {
+        return Some(input.to_string());
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn is_whatwg_number_label(label: &str) -> bool {
+    if label.is_empty() {
+        return false;
+    }
+    if let Some(hex) = label.strip_prefix("0x") {
+        return hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    label.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn parse_whatwg_ipv4(parts: &[&str]) -> Option<std::net::Ipv4Addr> {
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut nums = [0u64; 4];
+    for (idx, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            return None;
+        }
+        let val = if let Some(hex) = part.strip_prefix("0x") {
+            if hex.is_empty() {
+                0
+            } else {
+                u64::from_str_radix(hex, 16).ok()?
+            }
+        } else if part.len() > 1 && part.starts_with('0') {
+            u64::from_str_radix(&part[1..], 8).ok()?
+        } else {
+            part.parse::<u64>().ok()?
+        };
+        nums[idx] = val;
+    }
+
+    let n = parts.len();
+    for &val in &nums[..n - 1] {
+        if val > 255 {
+            return None;
+        }
+    }
+    let last = nums[n - 1];
+    let limit = 1u64 << (8 * (5 - n));
+    if last >= limit {
+        return None;
+    }
+
+    let ip_u32 = match n {
+        1 => last as u32,
+        2 => ((nums[0] as u32) << 24) | (last as u32),
+        3 => ((nums[0] as u32) << 24) | ((nums[1] as u32) << 16) | (last as u32),
+        4 => {
+            ((nums[0] as u32) << 24)
+                | ((nums[1] as u32) << 16)
+                | ((nums[2] as u32) << 8)
+                | (last as u32)
+        }
+        _ => return None,
+    };
+    Some(std::net::Ipv4Addr::from(ip_u32))
+}
+
 pub fn is_blocked_webhook_host(url: &str) -> bool {
     if !url.starts_with("https://") {
         return true;
     }
     let rest = &url["https://".len()..];
-    let host_part = rest
-        .split(&['/', ':', '?', '#'][..])
+    let authority = rest
+        .split(&['/', '\\', '?', '#'][..])
         .next()
-        .unwrap_or("")
+        .unwrap_or("");
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return true;
+    }
+
+    if authority.starts_with('[') {
+        let Some(end) = authority.find(']') else {
+            return true;
+        };
+        let after = &authority[end + 1..];
+        if !after.is_empty() {
+            let Some(port) = after.strip_prefix(':') else {
+                return true;
+            };
+            if !port.is_empty()
+                && (!port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().is_err())
+            {
+                return true;
+            }
+        }
+        let inner = &authority[1..end];
+        if inner.contains('%') {
+            return true;
+        }
+        return match inner.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) => ipv6_addr_is_blocked(ip),
+            Err(_) => true,
+        };
+    }
+
+    let raw_host = match authority.split_once(':') {
+        Some((h, port)) => {
+            if !port.is_empty()
+                && (!port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().is_err())
+            {
+                return true;
+            }
+            h
+        }
+        None => authority,
+    };
+    let Some(decoded_host) = decode_percent_ascii(raw_host) else {
+        return true;
+    };
+    if decoded_host.contains(&['@', '/', '\\', '?', '#'][..]) {
+        return true;
+    }
+    let host = decoded_host
+        .strip_suffix('.')
+        .unwrap_or(&decoded_host)
         .to_ascii_lowercase();
-    let host = host_part.trim();
-    if host.is_empty() {
+    if host.is_empty()
+        || host.contains('[')
+        || host.contains(']')
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         return true;
     }
 
@@ -380,49 +625,29 @@ pub fn is_blocked_webhook_host(url: &str) -> bool {
         return true;
     }
 
-    // Check IPv4
     let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() == 4 {
-        if let (Ok(a), Ok(b), Ok(c), Ok(d)) = (
-            parts[0].parse::<u16>(),
-            parts[1].parse::<u16>(),
-            parts[2].parse::<u16>(),
-            parts[3].parse::<u16>(),
-        ) {
-            if a > 255 || b > 255 || c > 255 || d > 255 {
-                return true;
-            }
-            let (a, b) = (a as u8, b as u8);
-            if a == 0 || a == 10 || a == 127 {
-                return true;
-            }
-            if a == 169 && b == 254 {
-                return true;
-            }
-            if a == 172 && (16..=31).contains(&b) {
-                return true;
-            }
-            if a == 192 && b == 168 {
-                return true;
-            }
-            if a == 100 && (64..=127).contains(&b) {
-                return true;
-            }
-            return false;
-        }
+    if parts.iter().any(|p| p.is_empty()) {
+        return true;
     }
 
-    // Check IPv6
-    if host.starts_with('[') && host.ends_with(']') {
-        let inner = &host[1..host.len() - 1];
-        if inner == "::1"
-            || inner == "0:0:0:0:0:0:0:1"
-            || inner.starts_with("fe80:")
-            || inner.starts_with("fc00:")
-            || inner.starts_with("fd")
+    // WHATWG URL rule: if the final label is numeric/hex, the host must be a
+    // valid 1..=4-part IPv4 address (never a DNS hostname).
+    if let Some(&last) = parts.last()
+        && is_whatwg_number_label(last)
+    {
+        if parts.len() == 1 {
+            return true;
+        }
+        if parts
+            .iter()
+            .any(|p| p.starts_with("0x") || (p.len() > 1 && p.starts_with('0')))
         {
             return true;
         }
+        return match parse_whatwg_ipv4(&parts) {
+            Some(ip) => ipv4_addr_is_blocked(ip),
+            None => true,
+        };
     }
 
     false

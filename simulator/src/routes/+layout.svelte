@@ -11,6 +11,10 @@
 
 	let { children } = $props();
 
+	const isWorkbench = $derived(
+		(page.url.pathname as string) === '/states' || page.url.pathname.startsWith('/states/')
+	);
+
 	// A conversation is a push below Threads, so it swaps the dock for the reply
 	// composer: one bottom bar at a time, and the composer sits above the
 	// keyboard instead of a dock floating over it. The new-message form is a
@@ -33,6 +37,7 @@
 	);
 
 	onMount(() => {
+		if (isWorkbench) return;
 		// Boot first, then take a link that launched the app (a SENDTO intent
 		// is captured before the webview exists). A link that arrives while the
 		// app is running is taken when the Activity regains focus.
@@ -53,28 +58,34 @@
 	});
 </script>
 
-<!-- A sibling of the shell, not a child: the gate is fixed to the viewport so
-     it is not clipped by the phone frame, and it never sits inside the grid
-     that lays out the topbar, the scroll area and the dock. -->
-<PermissionGate />
-
-<div class="app">
-	<header class="topbar">
-		<span class="wordmark">DAKFLARE</span>
-		<span class="topbar-meta" data-offline={!app.backendAvailable && !app.loading.boot}>
-			{status}
-		</span>
-	</header>
-
-	<main class="app-main">
-		<Notice scope="boot" />
-		<Notice scope="data" />
+{#if isWorkbench}
+	<div class="workbench-shell">
 		{@render children()}
-	</main>
+	</div>
+{:else}
+	<!-- A sibling of the shell, not a child: the gate is fixed to the viewport so
+	     it is not clipped by the phone frame, and it never sits inside the grid
+	     that lays out the topbar, the scroll area and the dock. -->
+	<PermissionGate />
 
-	{#if replyable}
-		<Composer />
-	{:else if !conversation && !composing}
-		<Dock />
-	{/if}
-</div>
+	<div class="app">
+		<header class="topbar">
+			<span class="wordmark">DAKFLARE</span>
+			<span class="topbar-meta" data-offline={!app.backendAvailable && !app.loading.boot}>
+				{status}
+			</span>
+		</header>
+
+		<main class="app-main">
+			<Notice scope="boot" />
+			<Notice scope="data" />
+			{@render children()}
+		</main>
+
+		{#if replyable}
+			<Composer />
+		{:else if !conversation && !composing}
+			<Dock />
+		{/if}
+	</div>
+{/if}

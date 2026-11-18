@@ -302,7 +302,9 @@
 			<span class="empty-icon"><Icon name="threads" size={26} /></span>
 			<h2 id="no-thread">No messages yet</h2>
 			<p>Messages to this SIM show up here. Replies go out in the same thread.</p>
-			<a class="text-link" href="/flows">Inject a test message from Flows</a>
+			{#if import.meta.env.DEV}
+				<a class="text-link" href="/flows">Inject a test message from Flows</a>
+			{/if}
 		</section>
 	{:else}
 		<ol class="threads" aria-label="Threads, newest first">

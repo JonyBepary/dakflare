@@ -86,6 +86,15 @@ object NativeBridge {
         state: String,
     ): String
 
+    @JvmStatic
+    external fun markOutboundWithError(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+        reason: String?,
+    ): String
+
     /**
      * Mark one reply row `delivered` from a carrier delivery report.
      *
@@ -157,6 +166,16 @@ object NativeBridge {
         deviceId: String,
         localId: String,
         state: String,
+    ): String
+
+    @JvmStatic
+    external fun reportStatusWithError(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+        errorCode: String?,
+        errorMessage: String?,
     ): String
 
     /**
@@ -429,12 +448,18 @@ object NativeBridge {
         deviceId: String,
         localId: String,
         state: String,
+        reason: String? = null,
     ): Boolean {
         if (loadFailure != null) return false
         if (deviceId.isEmpty() || localId.isEmpty()) return false
 
         return try {
-            isOk(markOutbound(appDir, deviceId, localId, state))
+            val raw = if (reason != null) {
+                markOutboundWithError(appDir, deviceId, localId, state, reason)
+            } else {
+                markOutbound(appDir, deviceId, localId, state)
+            }
+            isOk(raw)
         } catch (error: UnsatisfiedLinkError) {
             Log.e(TAG, "markOutbound symbol missing: ${error.javaClass.simpleName}")
             false
@@ -608,12 +633,19 @@ object NativeBridge {
         deviceId: String,
         localId: String,
         state: String,
+        errorCode: String? = null,
+        errorMessage: String? = null,
     ): Boolean {
         if (loadFailure != null) return false
         if (appDir.isEmpty() || deviceId.isEmpty() || localId.isEmpty()) return false
 
         return try {
-            val parsed = JSONObject(reportStatus(appDir, deviceId, localId, state))
+            val raw = if (errorCode != null || errorMessage != null) {
+                reportStatusWithError(appDir, deviceId, localId, state, errorCode, errorMessage)
+            } else {
+                reportStatus(appDir, deviceId, localId, state)
+            }
+            val parsed = JSONObject(raw)
             if (!parsed.optBoolean("ok")) {
                 Log.w(TAG, "reportStatus refused: ${parsed.optString("error")}")
                 false

@@ -16,7 +16,8 @@ use dakflare_core::{
     Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
     StoreError, Target,
     carrier::{ack_command, drain_outbox, flush_pending},
-    is_device_fact_key, receive_and_reply, reply_local_id, report_command_state, sync_flows,
+    is_device_fact_key, receive_and_reply, reply_local_id, report_command_state_with_reason,
+    sync_flows,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -133,7 +134,28 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     local_id: JString,
     state: JString,
 ) -> jstring {
-    let json = mark_guarded(&mut env, &app_dir, &device_id, &local_id, &state);
+    let json = mark_with_error_guarded(&mut env, &app_dir, &device_id, &local_id, &state, None);
+    to_jstring(&mut env, json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutboundWithError(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+    state: JString,
+    reason: JString,
+) -> jstring {
+    let json = mark_with_error_guarded(
+        &mut env,
+        &app_dir,
+        &device_id,
+        &local_id,
+        &state,
+        Some(&reason),
+    );
     to_jstring(&mut env, json)
 }
 
@@ -597,7 +619,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
         match read_status_inputs(&mut env, &app_dir, &device_id, &local_id, &state) {
             Ok((app_dir, device_id, local_id, state)) => {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    report_status_blocking(&app_dir, &device_id, &local_id, &state)
+                    report_status_blocking(&app_dir, &device_id, &local_id, &state, None, None)
                 })) {
                     Ok(Ok(reported)) => serde_json::json!({
                         "ok": true,
@@ -617,6 +639,57 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
         Ok(json) => json,
         Err(_) => {
             eprintln!("[jni] reportStatus panicked before storage");
+            error_json("storage")
+        }
+    };
+    to_jstring(&mut env, json)
+}
+
+/// Variant of `reportStatus` carrying optional machine-readable `error_code` and `error_message`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportStatusWithError(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+    local_id: JString,
+    state: JString,
+    error_code: JString,
+    error_message: JString,
+) -> jstring {
+    let json = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let code_opt = (!error_code.is_null()).then(|| java_string(&mut env, &error_code).ok()).flatten().filter(|s| !s.is_empty());
+        let msg_opt = (!error_message.is_null()).then(|| java_string(&mut env, &error_message).ok()).flatten().filter(|s| !s.is_empty());
+        match read_status_inputs(&mut env, &app_dir, &device_id, &local_id, &state) {
+            Ok((app_dir, device_id, local_id, state)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    report_status_blocking(
+                        &app_dir,
+                        &device_id,
+                        &local_id,
+                        &state,
+                        code_opt.as_deref(),
+                        msg_opt.as_deref(),
+                    )
+                })) {
+                    Ok(Ok(reported)) => serde_json::json!({
+                        "ok": true,
+                        "reported": reported,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] reportStatusWithError panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] reportStatusWithError panicked before storage");
             error_json("storage")
         }
     };
@@ -899,22 +972,25 @@ fn guarded(
 
 /// The state-mark path has the same two panic guards as the inbound path: a
 /// panic must never cross JNI, and every result is JSON.
-fn mark_guarded(
+fn mark_with_error_guarded(
     env: &mut JNIEnv,
     app_dir: &JString,
     device_id: &JString,
     local_id: &JString,
     state: &JString,
+    reason: Option<&JString>,
 ) -> String {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reason_opt = reason
+            .filter(|r| !r.is_null())
+            .and_then(|r| java_string(env, r).ok())
+            .filter(|s| !s.is_empty());
         match read_mark_inputs(env, app_dir, device_id, local_id, state) {
             Ok((app_dir, device_id, local_id, state)) => {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mark_blocking(&app_dir, &device_id, &local_id, &state)
+                    mark_blocking(&app_dir, &device_id, &local_id, &state, reason_opt.as_deref())
                 })) {
                     Ok(Ok(true)) => serde_json::json!({ "ok": true }).to_string(),
-                    // The id does not name an outbound row: a re-delivery with
-                    // no reply, or a stale action. Honest no-op, not storage.
                     Ok(Ok(false)) => error_json("not_found"),
                     Ok(Err(code)) => error_json(code),
                     Err(_) => {
@@ -1227,10 +1303,16 @@ fn mark_blocking(
     device_id: &str,
     local_id: &str,
     state: &str,
+    reason: Option<&str>,
 ) -> Result<bool, &'static str> {
     let store = open_store_blocking(app_dir)?;
-    tauri::async_runtime::block_on(store.set_message_state_by_local_id(device_id, local_id, state))
-        .map_err(map_store_error)
+    tauri::async_runtime::block_on(store.set_message_state_with_reason_by_local_id(
+        device_id,
+        local_id,
+        state,
+        reason,
+    ))
+    .map_err(map_store_error)
 }
 
 fn mark_delivered_blocking(
@@ -1280,17 +1362,18 @@ fn retry_row_blocking(
     local_id: &str,
 ) -> Result<Option<RetryRow>, &'static str> {
     let store = open_store_blocking(app_dir)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .map_err(|_| "storage")?;
     tauri::async_runtime::block_on(async {
         let Some(message) = store
-            .message_by_local_id(device_id, local_id)
+            .claim_outbound_retry(device_id, local_id, now)
             .await
             .map_err(|_| "storage")?
         else {
             return Ok(None);
         };
-        if message.direction != "out" || message.state != "queued" {
-            return Ok(None);
-        }
         let sim_slot = store
             .get_setting("sim_slot")
             .await
@@ -1373,6 +1456,14 @@ pub(crate) fn signed_client_blocking(
 /// Flush everything the deployment has not accepted yet.
 fn flush_blocking(app_dir: &str, device_id: &str) -> Result<Flushed, &'static str> {
     let store = open_store_blocking(app_dir)?;
+    let has_work = tauri::async_runtime::block_on(store.has_pending_flush(device_id))
+        .map_err(|_| "storage")?;
+    if !has_work {
+        return Ok(Flushed {
+            inbound: 0,
+            outbound: 0,
+        });
+    }
     let client = signed_client_blocking(&store, device_id)?;
 
     let flushed = tauri::async_runtime::block_on(flush_pending(&store, &client, device_id))
@@ -1393,11 +1484,28 @@ fn report_status_blocking(
     device_id: &str,
     local_id: &str,
     state: &str,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
 ) -> Result<bool, &'static str> {
     let store = open_store_blocking(app_dir)?;
+    if state == "failed" && (error_code.is_some() || error_message.is_some()) {
+        let local_reason = error_message.or(error_code);
+        let _ = tauri::async_runtime::block_on(store.set_message_state_with_reason_by_local_id(
+            device_id,
+            local_id,
+            state,
+            local_reason,
+        ));
+    }
     let client = signed_client_blocking(&store, device_id)?;
-    tauri::async_runtime::block_on(report_command_state(&client, local_id, state))
-        .map_err(map_network_error)
+    tauri::async_runtime::block_on(report_command_state_with_reason(
+        &client,
+        local_id,
+        state,
+        error_code,
+        error_message,
+    ))
+    .map_err(map_network_error)
 }
 
 /// Acknowledge one command after the radio accepted it. A row with no stored

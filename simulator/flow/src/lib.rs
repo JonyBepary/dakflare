@@ -390,6 +390,11 @@ pub fn run(input: &RunInput) -> RunResult {
             }
 
             "webhook" => {
+                if prose_synth::is_otp_or_pin(&input.message.body) {
+                    result.outcome = "halted".into();
+                    result.steps.push(step(current, "blocked: message contains sensitive OTP or PIN"));
+                    return result;
+                }
                 let data: WebhookData = match serde_json::from_value(current.data.clone()) {
                     Ok(data) => data,
                     Err(e) => return fail(result, format!("webhook data: {e}")),
@@ -404,6 +409,11 @@ pub fn run(input: &RunInput) -> RunResult {
             }
 
             "send_sms" => {
+                if prose_synth::is_otp_or_pin(&input.message.body) {
+                    result.outcome = "halted".into();
+                    result.steps.push(step(current, "blocked: message contains sensitive OTP or PIN"));
+                    return result;
+                }
                 let data: SendSmsData = match serde_json::from_value(current.data.clone()) {
                     Ok(data) => data,
                     Err(e) => return fail(result, format!("send_sms data: {e}")),
@@ -958,6 +968,118 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn otp_pin_message_halts_before_webhook_without_extract() {
+        let g = graph(json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "h1", "type": "webhook", "data": { "url": "https://hooks.example.com/sms", "body": "{{body}}" } },
+                { "id": "e1", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "h1" },
+                { "id": "b", "source": "h1", "target": "e1" }
+            ]
+        }));
+        let res = run_with(g.clone(), "+15550001111", "Your verification code is 492011");
+        assert_eq!(res.outcome, "halted");
+        assert!(res.actions.is_empty());
+        assert!(res.steps.iter().any(|s| s.detail.contains("sensitive OTP or PIN")));
+
+        let res_danda = run_with(g.clone(), "+15550001111", "আপনার পিন। ১২৩৪");
+        assert_eq!(res_danda.outcome, "halted");
+        assert!(res_danda.actions.is_empty());
+        assert!(res_danda.steps.iter().any(|s| s.detail.contains("sensitive OTP or PIN")));
+
+        let res_benign = run_with(g, "+15550001111", "পিন্টু আমাকে টাকা পাঠিয়েছে");
+        assert_eq!(res_benign.outcome, "delivered");
+        assert_eq!(res_benign.actions.len(), 1);
+    }
+
+    #[test]
+    fn reference_clause_synthesis_passes_flow_ir_validator() {
+        let clause = prose_synth::synthesize_reference_clause(
+            &[
+                "Payment Tk 100.00 sent. Ref CUS512. Thank you.".to_string(),
+                "Payment Tk 100.00 sent. Ref test payment. Thank you.".to_string(),
+            ],
+            Some("ref"),
+        )
+        .expect("clause synthesized");
+        assert!(!clause.pattern.contains("(?P<"));
+        let validated = ir::validate(&json!({
+            "nodes": [
+                { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                { "id": "x1", "type": "extract", "data": { "source": "body", "pattern": format!("Payment Tk 100\\.00 sent\\.{}", clause.pattern) } },
+                { "id": "e1", "type": "stop", "data": {} }
+            ],
+            "edges": [
+                { "id": "a", "source": "t1", "target": "x1" },
+                { "id": "b", "source": "x1", "target": "e1" }
+            ]
+        }));
+        assert!(validated.is_ok(), "synthesized reference pattern must pass flow IR validator: {validated:?}");
+    }
+
+    #[test]
+    fn ssrf_bypass_hosts_are_blocked() {
+        for bad in [
+            "https://safe.example@127.0.0.1/hook",
+            "https://[::ffff:127.0.0.1]/hook",
+            "https://[::]/hook",
+            "https://localhost./hook",
+            "https://2130706433/hook",
+            "https://0x7f000001/hook",
+            // Challenger 1 reproduced SSRF bypasses
+            "https://127.1/h",
+            "https://127.0.1/h",
+            "https://[0000::1]/h",
+            "https://[0000:0000:0000:0000:0000:0000:0000:0001]/h",
+            "https://[0:0:0:0:0:ffff:127.0.0.1]/h",
+            "https://[0:0:0:0:0:ffff:7f00:1]/h",
+            // IPv4 shorthands, octal/hex, percent-encoding, backslash, malformed
+            "https://10.1/h",
+            "https://192.168.1/h",
+            "https://169.254.43518/h",
+            "https://0177.1/h",
+            "https://0x7f.1/h",
+            "https://127.0x1/h",
+            "https://127%2e0%2e0%2e1/h",
+            "https://local%68ost/h",
+            "https://127.0.0.1\\h",
+            "https://127.0.0.256/h",
+            "https://1.2.3.4.5/h",
+            // Special IPv6 ranges & zone IDs
+            "https://[::127.0.0.1]/h",
+            "https://[64:ff9b::127.0.0.1]/h",
+            "https://[64:ff9b:1::1]/h",
+            "https://[2002:7f00:0001::]/h",
+            "https://[2001:db8::1]/h",
+            "https://[2001::1]/h",
+            "https://[2001:2::1]/h",
+            "https://[100::1]/h",
+            "https://[fec0::1]/h",
+            "https://[::ffff:0:127.0.0.1]/h",
+            "https://[fe80::1%25eth0]/h",
+            "https://[fc00::1]/h",
+            "https://[fd12:3456::1]/h",
+            "https://[2606:4700:4700::1111]evil/h",
+        ] {
+            assert!(ir::is_blocked_webhook_host(bad), "expected {bad} to be blocked");
+        }
+        for good in [
+            "https://hooks.example.com/sms",
+            "https://api.merchant-store.com:8443/v1/webhook?token=abc",
+            "https://8.8.8.8/hook",
+            "https://[2606:4700:4700::1111]/hook",
+            "https://01.example.com/hook",
+            "https://0x-app.example.com/hook",
+            "https://example.test/hook",
+        ] {
+            assert!(!ir::is_blocked_webhook_host(good), "expected {good} to be allowed");
         }
     }
 }

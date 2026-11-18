@@ -91,6 +91,10 @@ class SendStatusReceiver : BroadcastReceiver() {
                                     "state=${outcome?.state ?: "unknown"} " +
                                     "attempts=${outcome?.attempts ?: -1}",
                             )
+                            if (outcome?.state == "failed") {
+                                val (errCode, errMsg) = failureReason(result)
+                                report(appDir, deviceId, localId, "failed", errCode, errMsg)
+                            }
                             // No provider row: nothing left the phone.
                         }
 
@@ -103,7 +107,8 @@ class SendStatusReceiver : BroadcastReceiver() {
                             )
                             Log.i(TAG, "send status id=$localId result=$result state=failed stored=$stored")
                             Log.i(TAG, "provider write skipped state=failed")
-                            report(appDir, deviceId, localId, "failed")
+                            val (errCode, errMsg) = failureReason(result)
+                            report(appDir, deviceId, localId, "failed", errCode, errMsg)
                         }
                     }
 
@@ -166,8 +171,23 @@ class SendStatusReceiver : BroadcastReceiver() {
      * report leaves the command where it was for the next receipt or tick. The
      * id is logged only on success, and it is a command id, never a body.
      */
-    private fun report(appDir: String, deviceId: String, localId: String, state: String) {
-        if (NativeBridge.reportStatusSafely(appDir, deviceId, localId, state)) {
+    private fun failureReason(result: Int): Pair<String, String> = when (result) {
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "radio_off" to "Cellular radio is off after retry exhaustion"
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "no_service" to "No cellular service after retry exhaustion"
+        SmsManager.RESULT_ERROR_NULL_PDU -> "null_pdu" to "Carrier rejected empty or malformed PDU"
+        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "limit_exceeded" to "Android SMS dispatch rate limit exceeded"
+        else -> "generic_failure" to "SmsManager rejected send (result=$result)"
+    }
+
+    private fun report(
+        appDir: String,
+        deviceId: String,
+        localId: String,
+        state: String,
+        errorCode: String? = null,
+        errorMessage: String? = null,
+    ) {
+        if (NativeBridge.reportStatusSafely(appDir, deviceId, localId, state, errorCode, errorMessage)) {
             Log.i(TAG, "command status id=$localId state=$state reported")
         }
     }

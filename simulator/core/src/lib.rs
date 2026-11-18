@@ -14,7 +14,7 @@ pub mod protocol;
 
 pub use carrier::{
     CarrierError, Flushed, Injected, drain_outbox, flush_pending, inject_inbound,
-    report_command_state,
+    report_command_state, report_command_state_with_reason,
     receive_and_reply, receive_offline, reply_local_id, sync_flows,
 };
 pub use compose::{
@@ -36,6 +36,6 @@ pub use identity::{
 pub use keyvault::{KEYSTORE_PREFIX, KeyCipher, KeyVaultError, UNLOCK_ERROR};
 pub use protocol::{
     Approval, ApprovalGrant, ApprovalTarget, DeviceClient, InboundMessage, PairLink, PairLinkError,
-    PairRequest, ProtocolError, SignedHeaders, Target, canonical_string, parse_pair_link,
-    sign_request,
+    PairRequest, ProtocolError, SignedHeaders, StatusUpdateItem, Target, canonical_string,
+    parse_pair_link, sign_request,
 };

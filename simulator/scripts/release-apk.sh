@@ -66,14 +66,14 @@ export DAKFLARE_KEYSTORE DAKFLARE_KEYSTORE_PASSWORD DAKFLARE_KEY_ALIAS DAKFLARE_
 
 # Fail before the (long) Rust build if the password does not open this key.
 if ! "${JAVA_HOME:-/usr}/bin/keytool" -list -keystore "$DAKFLARE_KEYSTORE" \
-  -storepass "$DAKFLARE_KEYSTORE_PASSWORD" -alias "$DAKFLARE_KEY_ALIAS" >/dev/null 2>&1; then
+  -storepass:env DAKFLARE_KEYSTORE_PASSWORD -alias "$DAKFLARE_KEY_ALIAS" >/dev/null 2>&1; then
   die "cannot open $DAKFLARE_KEYSTORE with alias $DAKFLARE_KEY_ALIAS; wrong password or alias"
 fi
 
 say "Signing key"
 printf 'keystore: %s\nalias:    %s\n' "$DAKFLARE_KEYSTORE" "$DAKFLARE_KEY_ALIAS"
 "${JAVA_HOME:-/usr}/bin/keytool" -list -v -keystore "$DAKFLARE_KEYSTORE" \
-  -storepass "$DAKFLARE_KEYSTORE_PASSWORD" -alias "$DAKFLARE_KEY_ALIAS" \
+  -storepass:env DAKFLARE_KEYSTORE_PASSWORD -alias "$DAKFLARE_KEY_ALIAS" \
   | grep -E "Owner:|Valid from:|SHA256:|Subject Public Key Algorithm:" | sed 's/^/  /'
 
 BUILD_TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"

@@ -367,6 +367,19 @@ fn approval_path(id: &str, action: &str) -> Result<String, ProtocolError> {
     Ok(format!("/v1/device/approvals/{id}/{action}"))
 }
 
+/// One delivery/failure status report for `POST /v1/sms/status/batch`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusUpdateItem {
+    pub command_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
 impl DeviceClient {
     pub fn new(
         target: Target,
@@ -607,6 +620,16 @@ impl DeviceClient {
         Ok(())
     }
 
+    /// `POST /v1/sms/status/batch` — report status transitions (with optional
+    /// failure diagnostics and claim token) for commands this device collected.
+    pub async fn report_status_items(
+        &self,
+        updates: &[StatusUpdateItem],
+    ) -> Result<Value, ProtocolError> {
+        self.signed_post("/v1/sms/status/batch", json!({ "updates": updates }))
+            .await
+    }
+
     /// `POST /v1/sms/status/batch` — report a terminal state for commands this
     /// device collected.
     ///
@@ -616,12 +639,17 @@ impl DeviceClient {
         &self,
         updates: &[(String, String)],
     ) -> Result<Value, ProtocolError> {
-        let payload: Vec<Value> = updates
+        let items: Vec<StatusUpdateItem> = updates
             .iter()
-            .map(|(command_id, status)| json!({ "command_id": command_id, "status": status }))
+            .map(|(command_id, status)| StatusUpdateItem {
+                command_id: command_id.clone(),
+                status: status.clone(),
+                claim_token: None,
+                error_code: None,
+                error_message: None,
+            })
             .collect();
-        self.signed_post("/v1/sms/status/batch", json!({ "updates": payload }))
-            .await
+        self.report_status_items(&items).await
     }
 
     /// `POST /v1/sms/incoming/batch` — upload messages and acknowledge commands.
