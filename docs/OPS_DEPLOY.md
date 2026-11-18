@@ -106,7 +106,7 @@ pipeline that applies one on every push will eventually apply one nobody read.
 
 ## Traps when scripting `cf`
 
-Three that have each cost this repository something:
+Four that have each cost this repository something:
 
 - **An aborted destructive command exits `0`.** In a non-interactive session a delete without
   `--force` prints `Aborted.` to stderr and returns success. A script that trusts the exit status
@@ -118,6 +118,26 @@ Three that have each cost this repository something:
   sets one (it asks for the value, so the key never reaches argv). `cf` still cannot stream logs.
   Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
   `npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
+
+- **`cf deploy` exits `1` on a successful deploy, because of the Workflow trigger.** Since
+  the v7.0 workflow export, every deploy ends with:
+
+      Trigger configuration for "dakflare-worker" was only partially updated:
+        Workflows:
+      - Workflow "flow-execution-workflow": A request to the Cloudflare API
+        (/accounts/<id>/workflows/flow-execution-workflow) failed.
+            - workflows.api.error.internal_server [code: 10001]
+        Successful trigger changes were not rolled back.
+
+  The Worker upload, the cron schedule and both queue triggers are applied before that
+  step, and the workflow itself ends up bound: `cf workflows list` shows
+  `script_name: dakflare-worker` with a `modified_on` inside the deploy minute. Measured
+  on 2026-11-19 with version `9675e667`: exit `1`, new routes answering `401` instead of
+  `404`, and the workflow listed and current. So the exit code is wrong, not the deploy.
+  A release gate must confirm three things instead of the status — the new version id in
+  `cf workers deployments list`, the newest route answering `401` rather than `404`, and
+  `modified_on` on `cf workflows list`. Re-running `cf workers triggers deploy` alone
+  exits `0` and changes nothing, which is a safe second opinion when in doubt.
 
 ## Rolling back
 
