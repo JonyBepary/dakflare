@@ -169,7 +169,6 @@
 	let autonomyFailure = $state<Failure | null>(null);
 	let autonomyLoading = $state(true);
 	let autonomyBusy = $state<'opening' | 'revoking' | null>(null);
-	let autonomyError = $state<string | null>(null);
 
 	/** The deliberate second step: nothing is minted until this is ticked. */
 	let autonomyAck = $state(false);
@@ -514,7 +513,6 @@
 	 */
 	async function loadAgent(): Promise<void> {
 		autonomyLoading = true;
-		autonomyError = null;
 		const [runtimeRead, autonomyRead] = await Promise.all([readAgentRuntime(), readAutonomy()]);
 
 		if (runtimeRead.status === 'ok') {
@@ -540,16 +538,10 @@
 	 * a button whose label names the length of the window it opens.
 	 */
 	async function openWindow(): Promise<void> {
-		if (autonomyBusy !== null || !autonomyAck || !canOpenWindow) return;
+		if (autonomyBusy !== null || !autonomyAck || !canOpenWindow || !autonomyCapsValid) return;
 
 		const sms = Number(autonomySms.trim());
 		const writes = Number(autonomyWrites.trim());
-		if (!Number.isInteger(sms) || sms < 0 || !Number.isInteger(writes) || writes < 0) {
-			autonomyError = 'Both caps are whole numbers, zero or more. A window with no cap is not a cap.';
-			return;
-		}
-
-		autonomyError = null;
 		autonomyBusy = 'opening';
 		const result = await openAutonomy({
 			smsCap: sms,
@@ -826,21 +818,17 @@
 						which; this one could not read it.
 					{/if}
 				</Notice>
-			{:else}
-				<Notice tone="warn" title="The settings could not be read">
-					The gateway answered, but not with a document this console understands. Nothing was changed.
-				</Notice>
-			{/if}
 
-			{#if loadFailure?.kind === 'unavailable' || loadFailure?.kind === 'error'}
-				<div class="command">
-					<code>{KEY_COMMAND}</code>
-					<CopyButton value={KEY_COMMAND} iconOnly label="Copy the key command" />
-				</div>
-				<p class="hint">
-					Run it against this deployment and paste the key at the prompt: the command asks for the value,
-					so the key never reaches argv or a shell history, and it is never sent to this page.
-				</p>
+				{#if loadFailure.kind === 'unavailable' || loadFailure.kind === 'error'}
+					<div class="command">
+						<code>{KEY_COMMAND}</code>
+						<CopyButton value={KEY_COMMAND} iconOnly label="Copy the key command" />
+					</div>
+					<p class="hint">
+						Run it against this deployment and paste the key at the prompt: the command asks for the value,
+						so the key never reaches argv or a shell history, and it is never sent to this page.
+					</p>
+				{/if}
 			{/if}
 
 			<button type="button" class="btn btn-sm" style="margin-top: 12px" onclick={() => void load()}>
@@ -1399,16 +1387,14 @@
 				{#if autonomy === null}
 					{#if autonomyLoading}
 						<p class="state-line" data-tone="muted" role="status">Reading the autonomy window.</p>
-					{:else}
+					{:else if autonomyFailure}
 						<p
 							class="state-line"
-							data-tone={autonomyFailure === null || autonomyFailure.kind === 'unavailable'
+							data-tone={autonomyFailure.kind === 'unavailable'
 								? 'muted'
 								: failureTone(autonomyFailure)}
 						>
-							{#if autonomyFailure === null}
-								The gateway did not report an autonomy window, so this page will not describe one.
-							{:else if autonomyFailure.kind === 'unavailable'}
+							{#if autonomyFailure.kind === 'unavailable'}
 								This gateway has no autonomy route, so no window can be opened or read here. The
 								assistant still proposes, and every write still waits for an Accept.
 							{:else}
@@ -1568,9 +1554,6 @@
 
 							{#if autonomyBlocked !== null}
 								<p class="hint autonomy-blocked">{autonomyBlocked}</p>
-							{/if}
-							{#if autonomyError !== null}
-								<p class="field-error" role="alert">{autonomyError}</p>
 							{/if}
 							{#if autonomyFailure !== null}
 								<p class="state-line" data-tone={failureTone(autonomyFailure)}>

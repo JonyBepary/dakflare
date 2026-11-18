@@ -32,14 +32,18 @@ const KNOWN_STATES = new Set(['queued', 'sent', 'failed', 'delivered']);
 export function replyFateOf(
 	message: Pick<Message, 'reply_state' | 'reply_error'>
 ): ReplyFate | null {
-	const state = message.reply_state;
-	if (!state) return null;
+	const raw = message.reply_state?.trim().toLowerCase();
+	if (!raw) return null;
+	const state = raw === 'dispatched' ? 'queued' : raw === 'expired' ? 'failed' : raw;
 	if (!KNOWN_STATES.has(state)) {
 		return { state: 'unknown', error: message.reply_error ?? null };
 	}
 	return {
 		state: state as ReplyFateState,
-		error: state === 'failed' ? (message.reply_error ?? null) : null
+		error:
+			state === 'failed'
+				? (message.reply_error ?? (raw === 'expired' ? 'expired' : null))
+				: null
 	};
 }
 

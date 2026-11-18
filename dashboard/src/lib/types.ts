@@ -203,6 +203,9 @@ export interface DeviceCommand {
 	body: string;
 	priority: string;
 	state: CommandState | string;
+	sim_slot?: number;
+	error_code?: string | null;
+	error_message?: string | null;
 	created_at: number;
 	expires_at: number;
 }

@@ -168,6 +168,9 @@
 	 * removing the last way in would be an account without a first factor.
 	 */
 	const pwOnlyFactor = $derived(passkeys !== null && passkeys.length === 0);
+	const hasOpenSecurityForm = $derived(
+		enrolment !== null || pwOpen || pwRemoveOpen || mintOpen
+	);
 
 	const unsupported: Record<
 		'missing' | 'no-secret' | 'disabled',
@@ -181,7 +184,7 @@
 		'no-secret': {
 			title: 'Two-factor is switched off on this deployment',
 			body: 'The auth mount answers 503 because the Worker has no signing secret yet. A TOTP secret is encrypted with that secret, so nothing can be stored until it is set.',
-			fix: 'wrangler secret put BETTER_AUTH_SECRET'
+			fix: 'cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text'
 		},
 		disabled: {
 			title: 'Authenticator codes are disabled here',
@@ -784,7 +787,7 @@
 				<div class="factor-body">
 					<Notice tone="warn" title={unavailableCopy.title}>{unavailableCopy.body}</Notice>
 					{#if unavailableCopy.fix}
-						{#if unavailableCopy.fix.startsWith('wrangler')}
+						{#if unavailableCopy.fix.startsWith('cf ') || unavailableCopy.fix.startsWith('wrangler')}
 							<div class="command">
 								<code>{unavailableCopy.fix}</code>
 								<CopyButton value={unavailableCopy.fix} iconOnly label="Copy command" />
@@ -986,7 +989,7 @@
 					<div class="factor-actions">
 						<button
 							type="button"
-							class="btn btn-primary btn-sm"
+							class="btn {hasOpenSecurityForm ? '' : 'btn-primary'} btn-sm"
 							onclick={() => void startEnrolment()}
 							disabled={enrolling}
 							aria-busy={enrolling}
@@ -1112,8 +1115,12 @@
 							so a password can be neither stored nor checked. The mode is on; the secret is missing.
 						</Notice>
 						<div class="command">
-							<code>wrangler secret put AUTH_PEPPER</code>
-							<CopyButton value="wrangler secret put AUTH_PEPPER" iconOnly label="Copy command" />
+							<code>cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text</code>
+							<CopyButton
+								value="cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text"
+								iconOnly
+								label="Copy command"
+							/>
 						</div>
 					</div>
 				{:else}
@@ -1154,7 +1161,9 @@
 							<div class="factor-actions">
 								<button
 									type="button"
-									class="btn btn-primary btn-sm"
+									class="btn {!hasOpenSecurityForm && enabled && passwordSet !== true
+										? 'btn-primary'
+										: ''} btn-sm"
 									onclick={() => void openPasswordForm()}
 									disabled={pwSaving || pwRemoveBusy}
 								>
@@ -1414,7 +1423,9 @@
 					{#if !mintOpen}
 						<button
 							type="button"
-							class="btn btn-primary btn-sm"
+							class="btn {!hasOpenSecurityForm && enabled && passwordSet === true
+								? 'btn-primary'
+								: ''} btn-sm"
 							onclick={openMint}
 							disabled={invitesLoading}
 						>
@@ -1855,7 +1866,9 @@
 	}
 
 	.enrol-cancel {
-		display: block;
+		display: inline-flex;
+		align-items: center;
+		min-height: 28px;
 		margin-top: var(--s-3);
 		font-size: 12px;
 	}
@@ -2201,7 +2214,8 @@
 
 		.invite-bar .btn,
 		.cell-actions .btn,
-		.invite-message .btn {
+		.invite-message .btn,
+		.enrol-cancel {
 			min-height: 48px;
 		}
 

@@ -1013,8 +1013,8 @@ function closeTrouble(event: CloseEvent, opened: boolean): Omit<AgentTrouble, 'a
 	const code = event.code > 0 ? event.code : null;
 	const detail = code === null ? null : `close ${code}`;
 
-	// The two reasons the Worker closes with that a retry cannot fix.
-	if (reason === 'agent_schema_ahead' || reason === 'agent_runtime_off') {
+	// Reasons the Worker closes with that a client retry cannot fix.
+	if (code === 4001 || reason === 'agent_schema_ahead' || reason === 'agent_runtime_off') {
 		return { stage: 'upgrade', reason, detail, code, retryable: false };
 	}
 

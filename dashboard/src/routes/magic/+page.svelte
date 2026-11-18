@@ -62,7 +62,11 @@
 		return ROUTES.overview;
 	});
 
-	const newLink = `${ROUTES.login}?door=magic`;
+	const newLink = $derived(
+		nextTarget !== ROUTES.overview
+			? `${ROUTES.login}?door=magic&next=${encodeURIComponent(nextTarget)}`
+			: `${ROUTES.login}?door=magic`
+	);
 
 	onMount(() => {
 		token = readMagicToken(page.url.searchParams);

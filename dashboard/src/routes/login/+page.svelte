@@ -1129,9 +1129,9 @@
 							Set it, then reload this page.
 						</p>
 						<div class="command">
-							<code>wrangler secret put BETTER_AUTH_SECRET</code>
+							<code>cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text</code>
 							<CopyButton
-								value="wrangler secret put BETTER_AUTH_SECRET"
+								value="cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text"
 								iconOnly
 								label="Copy command"
 							/>
@@ -1331,7 +1331,7 @@
 							</button>
 						</div>
 						<p id="token-hint" class="hint">
-							Set with <code>wrangler secret put ADMIN_TOKEN</code> on the Worker.
+							Set with <code>cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text</code>.
 						</p>
 					</div>
 
@@ -1591,8 +1591,12 @@
 	}
 
 	.login-alternate {
-		display: block;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 28px;
 		margin: var(--s-3) auto 0;
+		padding: 0 var(--s-2);
 		font-size: 12px;
 	}
 

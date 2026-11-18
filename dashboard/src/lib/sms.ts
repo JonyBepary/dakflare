@@ -169,3 +169,62 @@ export function encodingHint(measure: SmsMeasure): string {
 		? 'Bangla and emoji are UCS-2: 70 characters fit in one message, 67 in each part after that.'
 		: 'GSM-7: 160 characters fit in one message, 153 in each part after that.';
 }
+
+export interface NonGsmChar {
+	char: string;
+	index: number;
+	suggestedReplacement?: string;
+}
+
+export interface SmsBodyInspection {
+	measure: SmsMeasure;
+	capacity: number;
+	hasBangla: boolean;
+	nonGsmChars: NonGsmChar[];
+}
+
+const GSM_SAFE_REPLACEMENTS: Record<string, string> = {
+	'\u2019': "'",
+	'\u2018': "'",
+	'\u201c': '"',
+	'\u201d': '"',
+	'\u2013': '-',
+	'\u2014': '-',
+	'\u2026': '...',
+	'\u2022': '*',
+	'\u00a0': ' '
+};
+
+export function sanitizeGsm7Text(body: string): string {
+	let result = body;
+	for (const [nonGsm, replacement] of Object.entries(GSM_SAFE_REPLACEMENTS)) {
+		result = result.replaceAll(nonGsm, replacement);
+	}
+	return result;
+}
+
+/** Inspect SMS segment budget and flag non-GSM-7 characters using one canonical measurement. */
+export function inspectSmsBody(body: string): SmsBodyInspection {
+	const measure = measureSms(body);
+	const capacity = smsCapacity(measure);
+	const nonGsmChars: NonGsmChar[] = [];
+	let hasBangla = false;
+	let index = 0;
+
+	for (const ch of body) {
+		const code = ch.codePointAt(0) ?? 0;
+		if (code >= 0x0980 && code <= 0x09ff) {
+			hasBangla = true;
+		}
+		if (!GSM_BASIC.has(ch) && !GSM_EXTENDED.has(ch)) {
+			nonGsmChars.push({
+				char: ch,
+				index,
+				suggestedReplacement: GSM_SAFE_REPLACEMENTS[ch]
+			});
+		}
+		index += ch.length;
+	}
+
+	return { measure, capacity, hasBangla, nonGsmChars };
+}

@@ -38,7 +38,7 @@ const VERDICTS: Record<string, VerdictWords> = {
 	failed: {
 		label: 'Failed',
 		tone: 'danger',
-		note: 'The reply reached the phone and the send did not go through.'
+		note: 'The send did not go through.'
 	},
 	suppressed_cooldown: {
 		label: 'Held by a cooldown',
@@ -210,10 +210,18 @@ export function traceLineage(trace: TraceResult): LineageRow[] {
 	if (command !== null) {
 		const id = text(command.command_id);
 		if (id !== null) {
+			const durableCmd = durable !== null && typeof durable.command === 'object' && durable.command !== null
+				? (durable.command as Record<string, unknown>)
+				: null;
+			const reason =
+				text(command.error_message) ??
+				text(command.error_code) ??
+				(durableCmd ? text(durableCmd.error_message) ?? text(durableCmd.error_code) : null);
+			const stateLabel = stateWord(text(command.state));
 			rows.push({
 				label: 'Command',
 				value: id,
-				note: stateWord(text(command.state))
+				note: [stateLabel, reason].filter(Boolean).join(' — ') || null
 			});
 		}
 	}

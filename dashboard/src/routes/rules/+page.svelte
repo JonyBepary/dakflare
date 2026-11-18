@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { createRule, deleteRule, describeError, getDevices, getRules } from '$lib/api';
-	import type { BodyType, Device, MatcherType, Rule } from '$lib/types';
+	import { createRule, deleteRule, describeError, getDevices, getRules, updateRule } from '$lib/api';
+	import { isRevoked, type BodyType, type Device, type MatcherType, type Rule } from '$lib/types';
 	import { utf8Bytes } from '$lib/format';
 	import { deviceLabel, deviceOptionLabel, devicePrimary } from '$lib/presence';
 	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
@@ -114,6 +114,7 @@
 	let flash = $state<string | null>(null);
 
 	let formOpen = $state(false);
+	let editingId = $state<string | null>(null);
 	let form = $state<FormModel>(defaultForm());
 	let fieldErrors = $state<Record<string, string>>({});
 	let formError = $state<string | null>(null);
@@ -122,10 +123,18 @@
 
 	let listTestOpen = $state(false);
 	let listTestScope = $state('');
+	let listTestInitialPeer = $state('');
+	let listTestInitialBody = $state('');
+	let listTestInitialDevice = $state('');
+
+	let togglingId = $state<string | null>(null);
+	let expandedReplies = $state<Set<string>>(new Set());
 
 	let deleteTarget = $state<Rule | null>(null);
 	let deleting = $state(false);
 	let deleteError = $state<string | null>(null);
+
+	const activeDevices = $derived(devices.filter((device) => !isRevoked(device)));
 
 	const matcherHint = $derived(MATCHERS.find((item) => item.value === form.matcher_type) ?? MATCHERS[0]);
 	const bodyHint = $derived(BODY_TYPES.find((item) => item.value === form.body_type) ?? BODY_TYPES[0]);
@@ -240,16 +249,59 @@
 	}
 
 	function openForm() {
+		resetForm();
 		formOpen = true;
 		listTestOpen = false;
-		formError = null;
+		void tick().then(() => document.getElementById('rule-name')?.focus());
+	}
+
+	async function editRule(rule: Rule) {
+		editingId = rule.id;
+		form = {
+			name: rule.name,
+			device_id: rule.device_id ?? '',
+			enabled: Boolean(rule.enabled),
+			priority: rule.priority,
+			matcher_type: (MATCHERS.some((matcher) => matcher.value === rule.matcher_type)
+				? rule.matcher_type
+				: 'exact') as MatcherType,
+			matcher_value: rule.matcher_value,
+			body_type: (BODY_TYPES.some((bodyType) => bodyType.value === rule.body_type)
+				? rule.body_type
+				: 'keyword') as BodyType,
+			body_value: rule.body_value,
+			reply_template: rule.reply_template,
+			cooldown_s: rule.cooldown_s,
+			max_per_hour: rule.max_per_hour,
+			sim_slot: rule.sim_slot,
+			allow_shortcode: Boolean(rule.allow_shortcode)
+		};
 		fieldErrors = {};
+		formError = null;
+		flash = null;
 		limitsOpen = false;
+		listTestOpen = false;
+		formOpen = true;
+		await tick();
+		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		document
+			.getElementById('rule-form')
+			?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+		document.getElementById('rule-name')?.focus();
+	}
+
+	function closeForm() {
+		formOpen = false;
+		resetForm();
 	}
 
 	async function openListTest(rule: Rule) {
 		formOpen = false;
+		editingId = null;
 		listTestScope = rule.device_id ?? '';
+		listTestInitialPeer = '';
+		listTestInitialBody = '';
+		listTestInitialDevice = '';
 		listTestOpen = true;
 		await tick();
 		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -259,10 +311,36 @@
 	}
 
 	function resetForm() {
+		editingId = null;
 		form = defaultForm();
 		fieldErrors = {};
 		formError = null;
 		limitsOpen = false;
+	}
+
+	function toggleReplyExpand(ruleId: string): void {
+		const next = new Set(expandedReplies);
+		if (next.has(ruleId)) next.delete(ruleId);
+		else next.add(ruleId);
+		expandedReplies = next;
+	}
+
+	async function toggleRuleEnabled(rule: Rule): Promise<void> {
+		if (togglingId) return;
+		togglingId = rule.id;
+		flash = null;
+		try {
+			const nextEnabled = !rule.enabled;
+			await updateRule(rule.id, { enabled: nextEnabled });
+			rules = rules.map((entry) =>
+				entry.id === rule.id ? { ...entry, enabled: nextEnabled ? 1 : 0 } : entry
+			);
+			flash = nextEnabled ? `Enabled “${rule.name}”.` : `Paused “${rule.name}”.`;
+		} catch (failure) {
+			error = describeError(failure);
+		} finally {
+			togglingId = null;
+		}
 	}
 
 	function validate(): boolean {
@@ -319,7 +397,7 @@
 		submitting = true;
 		try {
 			const name = form.name.trim();
-			await createRule({
+			const payload = {
 				name,
 				device_id: form.device_id || null,
 				enabled: form.enabled,
@@ -333,8 +411,14 @@
 				max_per_hour: Math.trunc(form.max_per_hour),
 				sim_slot: Math.trunc(form.sim_slot),
 				allow_shortcode: form.allow_shortcode
-			});
-			flash = `Rule “${name}” saved${form.device_id ? ` for ${scopeName(form.device_id)}` : ' as a global rule'}.`;
+			};
+			if (editingId) {
+				await updateRule(editingId, payload);
+				flash = `Rule “${name}” updated${form.device_id ? ` for ${scopeName(form.device_id)}` : ' as a global rule'}.`;
+			} else {
+				await createRule(payload);
+				flash = `Rule “${name}” saved${form.device_id ? ` for ${scopeName(form.device_id)}` : ' as a global rule'}.`;
+			}
 			formOpen = false;
 			resetForm();
 			await loadRules();
@@ -365,11 +449,27 @@
 	onMount(() => {
 		void loadRules(true);
 		void loadDevices();
-		if (page.url.searchParams.get('new') === '1') openForm();
+		const params = page.url.searchParams;
+		const testSender = params.get('test_sender')?.trim() ?? '';
+		const testBody = params.get('test_body') ?? '';
+		const testDevice = params.get('device')?.trim() ?? '';
+		if (testSender || testBody) {
+			listTestInitialPeer = testSender;
+			listTestInitialBody = testBody;
+			listTestInitialDevice = testDevice;
+			listTestScope = '';
+			listTestOpen = true;
+			formOpen = false;
+		} else if (params.get('new') === '1') {
+			openForm();
+		}
 	});
 </script>
 
-{#snippet ruleSentence(rule: SentenceSource)}
+{#snippet ruleSentence(rule: SentenceSource, expandId?: string)}
+	{@const trimmedReply = rule.reply_template.trim()}
+	{@const isLong = trimmedReply.length > 80}
+	{@const isExpanded = expandId ? expandedReplies.has(expandId) : true}
 	<p class="sentence">
 		<span class="lead">From</span>
 		{#if senderLead(rule)}<span class="lead">{senderLead(rule)}</span>{/if}
@@ -377,11 +477,19 @@
 		<span class="lead">{bodyLead(rule)}</span>
 		<span class="tok mono">{bodyToken(rule)}</span>
 		<span class="arrow" aria-hidden="true">→</span><span class="sr-only">then </span>
-		{#if rule.reply_template.trim()}
+		{#if trimmedReply}
 			<span class="lead">reply</span>
-			<span class="tok mono reply" class:is-long={rule.reply_template.trim().length > 80}
-				>{rule.reply_template.trim()}</span
-			>
+			<span class="tok mono reply" class:is-long={isLong && !isExpanded}>{trimmedReply}</span>
+			{#if expandId && isLong}
+				<button
+					type="button"
+					class="link-btn reply-toggle"
+					aria-expanded={isExpanded}
+					onclick={() => toggleReplyExpand(expandId)}
+				>
+					{isExpanded ? 'Show less' : 'Show full reply'}
+				</button>
+			{/if}
 		{:else}
 			<span class="no-reply">no reply</span>
 		{/if}
@@ -411,7 +519,7 @@
 		<button
 			type="button"
 			class="btn {formOpen ? '' : 'btn-primary'}"
-			onclick={() => (formOpen ? (formOpen = false) : openForm())}
+			onclick={() => (formOpen ? closeForm() : openForm())}
 			aria-expanded={formOpen}
 			aria-controls="rule-form"
 		>
@@ -434,24 +542,24 @@
 				<section class="card span-12 editor" id="rule-form" aria-labelledby="rule-form-heading">
 					<div class="editor-head">
 						<div>
-							<h2 id="rule-form-heading" class="editor-title">New rule</h2>
+							<h2 id="rule-form-heading" class="editor-title">{editingId ? 'Edit rule' : 'New rule'}</h2>
 							<p class="editor-note">One reply, rate-limited per rule and device.</p>
 						</div>
 						<div class="editor-actions">
 							<button
 								type="submit"
 								form="rule-form-body"
-								class="btn btn-primary btn-sm"
+								class="btn btn-sm"
 								disabled={submitting}
 								aria-busy={submitting}
 							>
 								{#if submitting}<Spinner />{:else}<Icon name="check" size={12} />{/if}
-								Save rule
+								{editingId ? 'Save changes' : 'Save rule'}
 							</button>
 							<button
 								type="button"
 								class="btn btn-sm"
-								onclick={() => (formOpen = false)}
+								onclick={closeForm}
 								disabled={submitting}
 							>
 								Cancel
@@ -506,9 +614,12 @@
 											aria-describedby="rule-scope-hint"
 										>
 											<option value="">Global, every device</option>
-											{#each devices as device (device.device_id)}
+											{#each activeDevices as device (device.device_id)}
 												<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 											{/each}
+											{#if form.device_id && !activeDevices.some((device) => device.device_id === form.device_id)}
+												<option value={form.device_id}>{scopeName(form.device_id)} (revoked)</option>
+											{/if}
 										</select>
 										<p class="hint" id="rule-scope-hint">
 											A global rule sees the whole fleet; a scoped rule only sees that device.
@@ -804,18 +915,22 @@
 									aria-busy={submitting}
 								>
 									{#if submitting}<Spinner />{:else}<Icon name="check" size={14} />{/if}
-									Save rule
+									{editingId ? 'Save changes' : 'Save rule'}
 								</button>
 								<button
 									type="button"
 									class="btn btn-ghost"
-									onclick={() => (formOpen = false)}
+									onclick={closeForm}
 									disabled={submitting}
 								>
 									Cancel
 								</button>
 								<span class="spacer"></span>
-								<span class="hint">Saving with an existing name creates a second rule.</span>
+								<span class="hint">
+									{editingId
+										? 'Updates this rule in place.'
+										: 'Saving with an existing name creates a second rule.'}
+								</span>
 							</div>
 						</form>
 					</div>
@@ -861,7 +976,7 @@
 						title="No rules yet"
 						description="A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically."
 					>
-						<button type="button" class="btn btn-primary" onclick={openForm}>
+						<button type="button" class="btn {formOpen ? '' : 'btn-primary'}" onclick={openForm}>
 							<Icon name="plus" size={14} /> Create the first rule
 						</button>
 					</EmptyState>
@@ -896,7 +1011,7 @@
 											<Badge tone="muted">paused</Badge>
 										{/if}
 									</div>
-									{@render ruleSentence(rule)}
+									{@render ruleSentence(rule, rule.id)}
 									<p class="rule-meta">
 										<span class="mono meta-item">{limitsLine(rule)}</span>
 										{#if rule.device_id}
@@ -908,6 +1023,29 @@
 								</div>
 
 								<div class="rule-actions">
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => void toggleRuleEnabled(rule)}
+										disabled={togglingId === rule.id}
+										aria-busy={togglingId === rule.id}
+										aria-label={`${rule.enabled ? 'Pause' : 'Resume'} rule ${rule.name}`}
+									>
+										{#if togglingId === rule.id}
+											<Spinner />
+										{:else}
+											<Icon name={rule.enabled ? 'pause' : 'play'} size={12} />
+										{/if}
+										{rule.enabled ? 'Pause' : 'Resume'}
+									</button>
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => void editRule(rule)}
+										aria-label={`Edit rule ${rule.name}`}
+									>
+										<Icon name="sliders" size={12} /> Edit
+									</button>
 									<button
 										type="button"
 										class="btn btn-ghost btn-sm"
@@ -944,6 +1082,9 @@
 							rules={rules}
 							devices={devices}
 							scope={listTestScope}
+							initialPeer={listTestInitialPeer}
+							initialBody={listTestInitialBody}
+							initialDevice={listTestInitialDevice}
 							startOpen
 							onclose={() => (listTestOpen = false)}
 						/>
@@ -1081,6 +1222,16 @@
 		overflow: hidden;
 		max-width: 68ch;
 		vertical-align: top;
+	}
+
+	.reply-toggle {
+		display: inline-flex;
+		align-items: center;
+		min-height: 24px;
+		padding: 0 4px;
+		margin-left: 2px;
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
 	}
 
 	.arrow {

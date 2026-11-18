@@ -5,7 +5,7 @@
 	font-style: normal;
 	font-weight: 400 800;
 	font-display: swap;
-	src: url('/fonts/nunito-var.woff2') format('woff2');
+	src: url('/admin/fonts/nunito-var.woff2') format('woff2');
 }
 
 /* ==========================================================================
@@ -153,14 +153,14 @@
 
 	--df-text-primary: light-dark(var(--df-p-umber-900), var(--df-p-mist-50));
 	--df-text-secondary: light-dark(var(--df-p-umber-500), var(--df-p-mist-300));
-	--df-text-meta: light-dark(var(--df-p-umber-400), var(--df-p-mist-500));
+	--df-text-meta: light-dark(var(--df-p-umber-400), var(--df-p-mist-400));
 
 	--df-border-hairline: light-dark(var(--df-p-cream-400), #3d352c);
 	/* The input's fill equals the card, so this edge is its only boundary. At
-	   the old #d3c4ac it measured 1.68:1 and the field read as borderless. The
-	   phone's pair is #94897a at 3.38:1 on #fffdf8 and #786b5c at 3.37:1 on
-	   #161a22 (3.11:1 on the #262019 card, 3.63:1 on the #14110e field). */
-	--df-border-control: light-dark(#94897a, #786b5c);
+	   the old #d3c4ac it measured 1.68:1 and in dark #786b5c measured 2.71:1 on wells.
+	   #887968 in light (4.15:1 on card, 3.53:1 on well) and #8f806e in dark
+	   (4.21:1 on card, 3.67:1 on well) clear WCAG 2.2 AA 3:1 everywhere. */
+	--df-border-control: light-dark(var(--df-p-cream-600), #8f806e);
 	/* A hover edge one step past control. This name was referenced by the
 	   workflow editor before it existed, so those declarations silently fell
 	   back to `currentColor`. */

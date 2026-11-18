@@ -106,6 +106,7 @@
 		const [device, id] = trackerKey.split('\u0000');
 		if (!device || !id) return;
 		let cancelled = false;
+		let done = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const started = Date.now();
 
@@ -124,19 +125,24 @@
 		traceLoading = false;
 		traceRun += 1;
 
+		function scheduleNext() {
+			if (cancelled || done || document.visibilityState === 'hidden') return;
+			timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+		}
+
 		async function poll() {
+			if (cancelled || done) return;
 			try {
 				const next = await getCommand(device, id);
 				if (cancelled) return;
 				command = next;
 				error = null;
 				const index = commandStepIndex(next?.state);
-				// FAILED can only follow DISPATCHED or SENT. When the first
-				// response already says FAILED, mark the earliest possible failure
-				// stage rather than pretending PENDING failed.
-				const reached = next?.state === 'FAILED' ? Math.max(index, 2) : index;
+				// Never fabricate DISPATCHED on pre-phone failures (e.g. PENDING -> FAILED).
+				const reached = Math.max(index, 0);
 				if (reached > furthest) furthest = reached;
 				if (next === null || isTerminalCommand(next.state)) {
+					done = true;
 					finished = true;
 					return;
 				}
@@ -146,17 +152,36 @@
 			}
 
 			if (Date.now() - started >= POLL_WINDOW_MS) {
+				done = true;
 				finished = true;
 				timedOut = true;
 				return;
 			}
-			timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+			scheduleNext();
 		}
 
+		const onVisibilityChange = () => {
+			if (cancelled || done) return;
+			if (document.visibilityState === 'hidden') {
+				if (timer) {
+					clearTimeout(timer);
+					timer = undefined;
+				}
+			} else {
+				if (timer) {
+					clearTimeout(timer);
+					timer = undefined;
+				}
+				void poll();
+			}
+		};
+
+		document.addEventListener('visibilitychange', onVisibilityChange);
 		void poll();
 
 		return () => {
 			cancelled = true;
+			document.removeEventListener('visibilitychange', onVisibilityChange);
 			if (timer) clearTimeout(timer);
 		};
 	});

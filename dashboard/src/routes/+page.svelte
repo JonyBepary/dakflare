@@ -7,7 +7,7 @@
 		getDevices,
 		getHealth
 	} from '$lib/api';
-	import type { Device, DeviceStatus, Health } from '$lib/types';
+	import { isRevoked, type Device, type DeviceStatus, type Health } from '$lib/types';
 	import {
 		devicePresence,
 		devicePrimary,
@@ -52,8 +52,9 @@
 
 	const REFRESH_MS = 30_000;
 
+	const activeDevices = $derived(devices.filter((device) => !isRevoked(device)));
 	const fleetStates = $derived(
-		devices.map((device) =>
+		activeDevices.map((device) =>
 			devicePresence(device, fleetStatuses[device.device_id]?.ws_connected === true)
 		)
 	);
@@ -63,14 +64,14 @@
 	const fleetTone = $derived.by<'ok' | 'warn' | 'danger' | 'muted'>(() => {
 		if (fleetLoading) return 'muted';
 		if (fleetError) return 'warn';
-		if (devices.length === 0) return 'muted';
+		if (activeDevices.length === 0) return 'muted';
 		if (answering === 0) return 'danger';
-		if (answering < devices.length) return 'warn';
+		if (answering < activeDevices.length) return 'warn';
 		return 'ok';
 	});
 
 	const fleetBreakdown = $derived.by(() => {
-		if (fleetError || fleetLoading || devices.length === 0) return '';
+		if (fleetError || fleetLoading || activeDevices.length === 0) return '';
 		const order: DevicePresence[] = ['live', 'synced', 'stale', 'offline', 'unknown'];
 		return order
 			.filter((state) => fleetCounts[state] > 0)
@@ -78,8 +79,8 @@
 			.join(' · ');
 	});
 
-	const visibleDevices = $derived(devices.slice(0, DEVICE_ROWS));
-	const remainingDevices = $derived(Math.max(0, devices.length - visibleDevices.length));
+	const visibleDevices = $derived(activeDevices.slice(0, DEVICE_ROWS));
+	const remainingDevices = $derived(Math.max(0, activeDevices.length - visibleDevices.length));
 
 	const openAlerts = $derived(health?.open_alerts ?? health?.counts?.open_alerts ?? 0);
 	// `open_alerts` collapses to 0 when the count query failed. Do not print that
@@ -178,13 +179,15 @@
 		try {
 			const list = await getDevices();
 			const pairs = await Promise.all(
-				list.map(async (device) => {
-					try {
-						return [device.device_id, await getDeviceStatus(device.device_id)] as const;
-					} catch {
-						return [device.device_id, null] as const;
-					}
-				})
+				list
+					.filter((device) => !isRevoked(device))
+					.map(async (device) => {
+						try {
+							return [device.device_id, await getDeviceStatus(device.device_id)] as const;
+						} catch {
+							return [device.device_id, null] as const;
+						}
+					})
 			);
 			devices = list;
 			fleetStatuses = Object.fromEntries(pairs);
@@ -216,16 +219,18 @@
 	}
 
 	let acknowledgingAll = $state(false);
+	let ackError = $state<string | null>(null);
 
 	async function handleAcknowledgeAll(): Promise<void> {
 		if (acknowledgingAll) return;
 		acknowledgingAll = true;
+		ackError = null;
 		try {
 			await acknowledgeAllAlerts();
 			window.dispatchEvent(new CustomEvent(ALERTS_CHANGED_EVENT));
 			await loadHealth();
-		} catch (err) {
-			console.error('Failed to acknowledge alerts:', err);
+		} catch (failure) {
+			ackError = describeError(failure);
 		} finally {
 			acknowledgingAll = false;
 		}
@@ -437,9 +442,9 @@
 							<span class="metric-quiet">…</span>
 						{:else if fleetError}
 							<span class="metric-quiet">—</span>
-						{:else if devices.length > 0}
+						{:else if activeDevices.length > 0}
 							{formatCount(answering)}<span class="metric-total"
-								>/ {formatCount(devices.length)}</span
+								>/ {formatCount(activeDevices.length)}</span
 							>
 						{:else}
 							{formatCount(answering)}
@@ -453,8 +458,8 @@
 							<button type="button" class="link-btn" onclick={() => void loadFleet()}>
 								Try again
 							</button>
-						{:else if devices.length === 0}
-							No device is paired yet.
+						{:else if activeDevices.length === 0}
+							No active device is paired yet.
 						{:else}
 							{fleetBreakdown}
 						{/if}
@@ -500,8 +505,8 @@
 				<section class="card span-8" aria-labelledby="devices-heading">
 					<div class="card-head">
 						<h2 id="devices-heading" class="card-title">Devices</h2>
-						{#if !fleetLoading && !fleetError && devices.length > 0}
-							<Badge tone="muted">{formatCount(devices.length)} paired</Badge>
+						{#if !fleetLoading && !fleetError && activeDevices.length > 0}
+							<Badge tone="muted">{formatCount(activeDevices.length)} paired</Badge>
 						{/if}
 						<a class="card-link" href={ROUTES.devices}>All devices</a>
 					</div>
@@ -520,7 +525,7 @@
 								<Icon name="refresh" size={13} /> Try again
 							</button>
 						</div>
-					{:else if devices.length === 0}
+					{:else if activeDevices.length === 0}
 						<EmptyState
 							icon="smartphone"
 							title="No devices paired yet"
@@ -599,6 +604,11 @@
 								{acknowledgingAll ? 'Acknowledging…' : 'Acknowledge all'}
 							</button>
 						</div>
+						{#if ackError}
+							<div style="margin-top: 10px">
+								<Notice tone="danger" title="Could not acknowledge">{ackError}</Notice>
+							</div>
+						{/if}
 					{:else if !alertsKnown}
 						<h2 id="alerts-heading" class="card-title">Alert state not reported</h2>
 						<p class="card-note">
@@ -1086,6 +1096,11 @@
 
 		.devrow :global(.presence) {
 			grid-column: 2;
+		}
+
+		.ack-all-btn {
+			min-height: 44px;
+			padding: 0 var(--df-p-space-3);
 		}
 	}
 </style>

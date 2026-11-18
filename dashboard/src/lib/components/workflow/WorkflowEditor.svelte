@@ -1,18 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount, setContext, tick } from 'svelte';
 	import { beforeNavigate, goto, replaceState } from '$app/navigation';
-	import {
-		Background,
-		BackgroundVariant,
-		Controls,
-		MiniMap,
-		SvelteFlow,
-		type Connection,
-		type EdgeTypes,
-		type NodeTypes,
-		type Viewport
-	} from '@xyflow/svelte';
-	import '@xyflow/svelte/dist/style.css';
+	import type { Connection, Viewport } from '@xyflow/svelte';
 	import '$lib/workflow/workflow.css';
 
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -22,23 +11,11 @@
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import FlowPalette from '$lib/components/workflow/FlowPalette.svelte';
-	import FlowBridge from '$lib/components/workflow/FlowBridge.svelte';
 	import NodeInspector from '$lib/components/workflow/NodeInspector.svelte';
 	import SimulationPanel from '$lib/components/workflow/SimulationPanel.svelte';
 	import SourceSheet, { type ApplyResult } from '$lib/components/workflow/SourceSheet.svelte';
 	import ValidationList from '$lib/components/workflow/ValidationList.svelte';
 	import WorkflowSettings from '$lib/components/workflow/WorkflowSettings.svelte';
-	import ConditionNode from '$lib/components/workflow/ConditionNode.svelte';
-	import DelayNode from '$lib/components/workflow/DelayNode.svelte';
-	import ExtractNode from '$lib/components/workflow/ExtractNode.svelte';
-	import FlowEdgeComponent from '$lib/components/workflow/FlowEdge.svelte';
-	import SendSmsNode from '$lib/components/workflow/SendSmsNode.svelte';
-	import SetVarNode from '$lib/components/workflow/SetVarNode.svelte';
-	import StopNode from '$lib/components/workflow/StopNode.svelte';
-	import SwitchNode from '$lib/components/workflow/SwitchNode.svelte';
-	import TriggerNode from '$lib/components/workflow/TriggerNode.svelte';
-	import UnsupportedNode from '$lib/components/workflow/UnsupportedNode.svelte';
-	import WebhookNode from '$lib/components/workflow/WebhookNode.svelte';
 	import StepFinder, { type AgentProposal } from '$lib/components/workflow/StepFinder.svelte';
 	import {
 		visibleTitle,
@@ -86,25 +63,6 @@
 	import { runWasmFlow } from '$lib/workflow/wasm-engine';
 
 	let { id }: { id: string } = $props();
-
-	const NODE_TYPES: NodeTypes = {
-		trigger: TriggerNode,
-		extract: ExtractNode,
-		set_var: SetVarNode,
-		condition: ConditionNode,
-		switch: SwitchNode,
-		delay: DelayNode,
-		webhook: WebhookNode,
-		send_sms: SendSmsNode,
-		stop: StopNode,
-		// A kind this build does not know still gets a card, so it survives a load
-		// and is written back unchanged on save.
-		unsupported: UnsupportedNode
-	};
-
-	const EDGE_TYPES: EdgeTypes = {
-		smoothstep: FlowEdgeComponent
-	};
 
 	/** Below this a card's own copy stops being readable, so the map never goes there. */
 	const MIN_ZOOM = 0.7;
@@ -176,6 +134,11 @@
 		edges: FlowEdge[];
 		name: string;
 		enabled: boolean;
+		deviceId: string;
+		channel: string;
+		priority: number;
+		cooldownS: number;
+		maxPerHour: number;
 		sig: string;
 	}
 
@@ -215,7 +178,17 @@
 	let burstAt = 0;
 
 	function snapshotSig(): string {
-		return JSON.stringify({ nodes, edges, name, enabled });
+		return JSON.stringify({
+			nodes,
+			edges,
+			name,
+			enabled,
+			deviceId,
+			channel,
+			priority,
+			cooldownS,
+			maxPerHour
+		});
 	}
 
 	function pushHistory() {
@@ -227,6 +200,11 @@
 			edges: JSON.parse(JSON.stringify(edges)) as FlowEdge[],
 			name,
 			enabled,
+			deviceId,
+			channel,
+			priority,
+			cooldownS,
+			maxPerHour,
 			sig
 		};
 		const next = history.slice(0, historyIndex + 1);
@@ -290,6 +268,11 @@
 		edges = JSON.parse(JSON.stringify(snapshot.edges)) as FlowEdge[];
 		name = snapshot.name;
 		enabled = snapshot.enabled;
+		deviceId = snapshot.deviceId;
+		channel = snapshot.channel;
+		priority = snapshot.priority;
+		cooldownS = snapshot.cooldownS;
+		maxPerHour = snapshot.maxPerHour;
 		touched = true;
 		isUndoingOrRedoing = false;
 		if (simResult) clearSimulation();
@@ -333,6 +316,11 @@
 			edges: JSON.parse(JSON.stringify(edges)) as FlowEdge[],
 			name,
 			enabled,
+			deviceId,
+			channel,
+			priority,
+			cooldownS,
+			maxPerHour,
 			sig: snapshotSig()
 		};
 	}
@@ -1511,6 +1499,24 @@
 
 	/* ------------------------------------------------------------ simulation */
 
+	function wasmOutcomeSummary(
+		outcome: 'delivered' | 'filtered' | 'halted' | 'no_trigger' | 'error' | 'partial',
+		smsCount: number,
+		errorText?: string | null
+	): string {
+		if (outcome === 'delivered' || outcome === 'partial') {
+			return smsCount > 0
+				? `Matches sample — preview would queue ${smsCount} SMS`
+				: 'Matches sample — preview completes';
+		}
+		if (outcome === 'no_trigger') return 'Does not match the trigger';
+		if (outcome === 'filtered') return 'Filtered out before replying';
+		if (outcome === 'halted') {
+			return errorText ? 'Stopped by safety check' : 'Stopped before queueing a reply';
+		}
+		return 'Preview stopped with an error';
+	}
+
 	async function runSimulation(input: SimulationInput) {
 		try {
 			const graph = toGraph(nodes, edges);
@@ -1518,13 +1524,40 @@
 			const visited = wasmRes.steps.map((s) => s.node_id);
 			simNodeIds = new Set(visited);
 			const edgeSet = new Set<string>();
-			for (let i = 0; i < visited.length - 1; i++) {
-				const from = visited[i];
-				const to = visited[i + 1];
-				const edge = edges.find((e) => e.source === from && e.target === to);
+			for (let i = 0; i < wasmRes.steps.length - 1; i++) {
+				const step = wasmRes.steps[i];
+				const from = step.node_id;
+				const to = wasmRes.steps[i + 1].node_id;
+				let expectedHandle: string | null = null;
+				if (step.kind === 'condition') {
+					if (step.detail === 'true branch' || step.detail.startsWith('true ')) {
+						expectedHandle = 'true';
+					} else if (step.detail === 'false branch' || step.detail.startsWith('false ')) {
+						expectedHandle = 'false';
+					}
+				} else if (step.kind === 'switch') {
+					const arrow = step.detail.lastIndexOf(' -> ');
+					if (arrow !== -1) expectedHandle = step.detail.slice(arrow + 4).trim();
+				}
+				const edge =
+					expectedHandle !== null
+						? edges.find(
+								(e) =>
+									e.source === from &&
+									e.target === to &&
+									(e.sourceHandle ?? '') === expectedHandle
+							)
+						: edges.find((e) => e.source === from && e.target === to);
 				if (edge) edgeSet.add(edge.id);
 			}
 			simEdgeIds = edgeSet;
+			const smsActions = wasmRes.actions
+				.filter((a) => a.type === 'send_sms')
+				.map((a) => ({
+					nodeId: '',
+					to: (a as { to: string }).to,
+					body: (a as { body: string }).body
+				}));
 			simResult = {
 				entered: wasmRes.matched,
 				outcome:
@@ -1533,21 +1566,15 @@
 						: wasmRes.outcome === 'partial'
 							? 'delivered'
 							: wasmRes.outcome,
-				summary: wasmRes.outcome === 'delivered' ? 'Reply delivered via flow.wasm' : wasmRes.outcome,
+				summary: wasmOutcomeSummary(wasmRes.outcome, smsActions.length, wasmRes.error),
 				visitedNodes: visited,
 				visitedEdges: [...edgeSet],
 				variables: wasmRes.variables,
-				sms: wasmRes.actions
-					.filter((a) => a.type === 'send_sms')
-					.map((a) => ({
-						nodeId: '',
-						to: (a as { to: string }).to,
-						body: (a as { body: string }).body
-					})),
+				sms: smsActions,
 				steps: wasmRes.steps.map((s) => ({
 					nodeId: s.node_id,
 					tone: s.kind === 'error' ? 'danger' : 'ok',
-					text: `${s.kind}: ${s.detail}`
+					text: s.detail || s.kind
 				})),
 				warnings: wasmRes.error ? [wasmRes.error] : []
 			};
@@ -1642,6 +1669,11 @@
 		selectOnly(null);
 	}
 
+	function openSettingsFocus() {
+		openSettings();
+		void tick().then(() => document.getElementById('wf-name')?.focus());
+	}
+
 	/* --------------------------------------------------- scroll bookkeeping */
 
 	let lastInspectorId: string | null = null;
@@ -1678,7 +1710,10 @@
 
 <p class="sr-only" role="status" aria-live="polite">{announce}</p>
 
-<div class="page editor-page">
+<div
+	class="page editor-page"
+	inert={sourceOpen || finderOpen || leavePrompt !== null ? true : undefined}
+>
 	<PageHeader eyebrow="Automation" title={pageTitle} description={pageDescription}>
 		{#if !loading && !notFound && !loadError}
 			<a
@@ -1734,6 +1769,10 @@
 						onreveal={(nodeId) => {
 							checksOpen = false;
 							void reveal(nodeId, { focusField: true });
+						}}
+						onsettings={() => {
+							checksOpen = false;
+							openSettingsFocus();
 						}}
 						onclose={() => (checksOpen = false)}
 					/>
@@ -1911,7 +1950,7 @@
 			</div>
 		</div>
 
-		<div class="work-panel" inert={sourceOpen || finderOpen ? true : undefined}>
+		<div class="work-panel">
 			<div class="work-bar">
 				<div class="surface-switch" role="group" aria-label="Editor surface">
 					<button
@@ -1937,6 +1976,16 @@
 						Map
 					</button>
 				</div>
+
+				<input
+					id="wf-inline-name"
+					class="input wf-inline-name"
+					aria-label="Workflow name"
+					placeholder="Untitled workflow"
+					value={name}
+					oninput={(event) => updateSettings({ name: event.currentTarget.value })}
+					autocomplete="off"
+				/>
 
 				<span class="chip" data-tone={saveState.tone} role="status" aria-live="polite">
 					{saveState.text}
@@ -2157,51 +2206,33 @@
 							pointerAt = { x: event.clientX, y: event.clientY };
 						}}
 					>
-						<SvelteFlow
-							bind:nodes
-							bind:edges
-							bind:viewport
-							edgesFocusable={false}
-							nodeTypes={NODE_TYPES}
-							edgeTypes={EDGE_TYPES}
-							minZoom={MIN_ZOOM}
-							maxZoom={1.8}
-							snapGrid={[16, 16]}
-							deleteKey={staged ? [] : ['Backspace', 'Delete']}
-							nodesDraggable={staged === null}
-							nodesConnectable={staged === null}
-							defaultMarkerColor={null}
-							attributionPosition="bottom-center"
-							onbeforeconnect={beforeConnect}
-							onconnect={afterConnect}
-							onconnectend={connectEnded}
-							isValidConnection={isValidConnection}
-							ondelete={handleDelete}
-							onmoveend={rememberViewport}
-							onpaneclick={() => (settingsOpen = false)}
-							onnodedragstop={() => {
-								touch();
-							}}
-						>
-							<FlowBridge
-								fit={!savedViewport && !framedOnce && selectedNode === null}
-								focusId={nodes.find((n) => n.type === 'trigger')?.id ?? null}
+						{#await import('./WorkflowCanvas.svelte')}
+							<div class="canvas-loading" aria-busy="true" aria-live="polite">
+								<Spinner />
+								<span>Loading map…</span>
+							</div>
+						{:then { default: WorkflowCanvas }}
+							<WorkflowCanvas
+								bind:nodes
+								bind:edges
+								bind:viewport
+								bind:framedOnce
 								minZoom={MIN_ZOOM}
-								onframed={() => (framedOnce = true)}
+								staged={staged !== null}
+								{savedViewport}
+								focusId={nodes.find((n) => n.type === 'trigger')?.id ?? null}
+								onbeforeconnect={beforeConnect}
+								onconnect={afterConnect}
+								onconnectend={connectEnded}
+								{isValidConnection}
+								ondelete={handleDelete}
+								onmoveend={rememberViewport}
+								onpaneclick={() => (settingsOpen = false)}
+								onnodedragstop={() => {
+									touch();
+								}}
 							/>
-							<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
-							<Controls position="bottom-left" />
-							<MiniMap
-								position="bottom-right"
-								width={160}
-								height={110}
-								pannable
-								zoomable
-								nodeBorderRadius={3}
-								nodeColor="var(--df-text-meta)"
-								nodeStrokeColor="transparent"
-							/>
-						</SvelteFlow>
+						{/await}
 
 						{#if nodes.length === 0}
 							<div class="canvas-empty">
@@ -2580,6 +2611,25 @@
 		flex: 1;
 	}
 
+	.wf-inline-name {
+		width: clamp(140px, 20vw, 240px);
+		height: 30px;
+		min-height: 30px;
+		padding-block: 3px;
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+	}
+
+	.canvas-loading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--df-p-space-2);
+		height: 100%;
+		color: var(--df-text-meta);
+		font-size: var(--df-p-text-sm);
+	}
+
 	.surface-switch {
 		display: inline-flex;
 		align-items: center;
@@ -2624,7 +2674,7 @@
 
 	.canvas-shell {
 		position: relative;
-		height: clamp(520px, calc(100vh - 300px), 900px);
+		height: clamp(520px, calc(100dvh - 300px), 900px);
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-lg);
 		overflow: hidden;
@@ -2702,7 +2752,7 @@
 	   turn the page into a two-and-a-half-thousand-pixel ribbon, or the surface
 	   switch and the add button scroll away from the work. */
 	.steps-shell {
-		height: clamp(420px, calc(100vh - 300px), 900px);
+		height: clamp(420px, calc(100dvh - 300px), 900px);
 		overflow-y: auto;
 		overscroll-behavior: contain;
 		scroll-padding-block: var(--df-p-space-3);
@@ -3286,7 +3336,7 @@
 		border-radius: 3px;
 		font-family: var(--df-p-font-mono);
 		font-size: 9px;
-		opacity: 0.72;
+		color: var(--df-text-meta);
 	}
 
 	.ghost-problems {

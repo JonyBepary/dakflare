@@ -37,6 +37,9 @@
 		| 'unarchive'
 		| 'undo'
 		| 'redo'
+		| 'pause'
+		| 'play'
+		| 'sliders'
 		| 'keyboard'
 		| 'sparkles';
 </script>
@@ -191,6 +194,13 @@
 	{:else if name === 'redo'}
 		<path d="M21 7v6h-6" />
 		<path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
+	{:else if name === 'pause'}
+		<rect x="6" y="4.5" width="4" height="15" rx="1" />
+		<rect x="14" y="4.5" width="4" height="15" rx="1" />
+	{:else if name === 'play'}
+		<path d="M7 5.5 18.5 12 7 18.5V5.5Z" />
+	{:else if name === 'sliders'}
+		<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4" />
 	{/if}
 </svg>
 

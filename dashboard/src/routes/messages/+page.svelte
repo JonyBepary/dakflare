@@ -1,10 +1,18 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { describeError, getDevices, getDeviceStatus, getMessages, getRules } from '$lib/api';
+	import {
+		describeError,
+		getDevices,
+		getDeviceStatus,
+		getMessages,
+		getRules,
+		sendSms
+	} from '$lib/api';
 	import { consoleCounts } from '$lib/console-counts.svelte';
-	import { formatCount } from '$lib/format';
-	import type { Device, DeviceStatus, Message, Rule } from '$lib/types';
+	import { formatAbsolute, formatCount, formatRelative } from '$lib/format';
+	import { currentTime, subscribeClock } from '$lib/live-clock.svelte';
+	import { isRevoked, type Device, type DeviceStatus, type Message, type Rule } from '$lib/types';
 	import {
 		deviceOptionLabel,
 		devicePresence,
@@ -14,8 +22,8 @@
 	} from '$lib/presence';
 	import { answerOf, answerPhrase } from '$lib/answers';
 	import { replyFatesOf } from '$lib/replies';
-	import { formatAbsolute, formatRelative } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
+	import Badge from '$lib/components/Badge.svelte';
 	import CommandTracker from '$lib/components/CommandTracker.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -55,9 +63,11 @@
 	let newIds = $state<Set<string>>(new Set());
 	let direction = $state('all');
 	let lastUpdatedAt = $state<number | null>(null);
-	let clock = $state(Date.now());
+	const clock = $derived(currentTime());
 	let trackers = $state<Set<string>>(new Set());
+	let trackedCommands = $state<Record<string, string>>({});
 	let linked = $state<string | null>(null);
+	let followNote = $state<string | null>(null);
 	let linkedTimer: ReturnType<typeof setTimeout> | undefined;
 	let liveInFlight = false;
 	let lastLivePoll = 0;
@@ -68,6 +78,7 @@
 	let composeButton = $state<HTMLButtonElement | null>(null);
 
 	const selectedDevice = $derived(devices.find((device) => device.device_id === selected) ?? null);
+	const hasActiveDevice = $derived(devices.some((device) => !isRevoked(device)));
 	const selectedPresence = $derived(
 		selectedDevice
 			? devicePresence(selectedDevice, deviceStatus?.ws_connected === true)
@@ -119,6 +130,7 @@
 			loading = true;
 			messagesError = null;
 			pageError = null;
+			followNote = null;
 		} else {
 			loadingMore = true;
 			pageError = null;
@@ -145,7 +157,6 @@
 			hasMore = result.messages.length >= result.limit && added > 0;
 			stalled = !reset && result.messages.length >= result.limit && added === 0;
 			lastUpdatedAt = Date.now();
-			clock = Date.now();
 		} catch (failure) {
 			if (version === logVersion && target === selected) {
 				if (reset) {
@@ -196,7 +207,6 @@
 			];
 			newIds = new Set(fresh.map((message) => message.id));
 			lastUpdatedAt = Date.now();
-			clock = Date.now();
 
 			// Prepending shifts the document. If the operator is reading further
 			// down, give the page back the height it just gained instead of moving
@@ -221,7 +231,8 @@
 	}
 
 	async function loadStatus(): Promise<void> {
-		if (!selected) {
+		const target = devices.find((device) => device.device_id === selected);
+		if (!selected || (target && isRevoked(target))) {
 			deviceStatus = null;
 			return;
 		}
@@ -230,6 +241,14 @@
 		} catch {
 			deviceStatus = null;
 		}
+	}
+
+	async function resendMessage(rowId: string, to: string, body: string): Promise<void> {
+		const targetDevice = messages.find((message) => message.id === rowId)?.device_id ?? selected;
+		if (!targetDevice) return;
+		const result = await sendSms({ device_id: targetDevice, to, body });
+		trackedCommands = { ...trackedCommands, [rowId]: result.command_id };
+		void loadMessages(true);
 	}
 
 	function syncUrl(): void {
@@ -245,7 +264,9 @@
 		messages = [];
 		expanded = new Set();
 		trackers = new Set();
+		trackedCommands = {};
 		newIds = new Set();
+		followNote = null;
 		lastUpdatedAt = null;
 		hasMore = false;
 		stalled = false;
@@ -260,7 +281,7 @@
 		refreshing = true;
 		await loadDevices();
 		if (selected && !devices.some((device) => device.device_id === selected)) {
-			selected = devices[0]?.device_id ?? '';
+			selected = devices.find((device) => !isRevoked(device))?.device_id ?? devices[0]?.device_id ?? '';
 		}
 		if (selected) {
 			await loadMessages(true);
@@ -282,12 +303,19 @@
 	 * linking to nothing. The mark fades on its own; it is not a selection.
 	 */
 	async function followReply(messageId: string): Promise<void> {
+		followNote = null;
 		if (direction === 'in') direction = 'all';
-		linked = messageId;
 		await tick();
 		if (linkedTimer) clearTimeout(linkedTimer);
 		const row = document.getElementById(`msg-${messageId}`);
-		if (!row) return;
+		if (!row) {
+			linked = null;
+			followNote = hasMore
+				? 'That reply is older than the messages loaded so far.'
+				: 'That reply is not in the loaded history.';
+			return;
+		}
+		linked = messageId;
 		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 		row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
 		row.focus({ preventScroll: true });
@@ -297,8 +325,10 @@
 	}
 
 	async function openCompose(): Promise<void> {
-		if (devices.length === 0) return;
-		if (!composeDevice) composeDevice = selected;
+		if (!hasActiveDevice) return;
+		if (!composeDevice || !devices.some((device) => device.device_id === composeDevice && !isRevoked(device))) {
+			composeDevice = devices.find((device) => !isRevoked(device))?.device_id ?? '';
+		}
 		composeOpen = true;
 		await tick();
 		// An instant jump: the motion set has no scroll animation.
@@ -317,6 +347,7 @@
 	}
 
 	onMount(() => {
+		const stopClock = subscribeClock();
 		void loadRuleNames();
 		let interval: ReturnType<typeof setInterval> | undefined;
 		let mounted = true;
@@ -325,13 +356,14 @@
 			await loadDevices();
 			if (!mounted || devicesError || devices.length === 0) return;
 			const requested = page.url.searchParams.get('device');
+			const fallbackActive = devices.find((device) => !isRevoked(device)) ?? devices[0];
 			selected =
 				requested && devices.some((device) => device.device_id === requested)
 					? requested
-					: devices[0].device_id;
+					: fallbackActive.device_id;
 			syncUrl();
-			composeDevice = selected;
-			if (page.url.searchParams.get('compose') === '1') composeOpen = true;
+			composeDevice = (selectedDevice && !isRevoked(selectedDevice) ? selected : fallbackActive.device_id);
+			if (page.url.searchParams.get('compose') === '1' && hasActiveDevice) composeOpen = true;
 			await loadMessages(true);
 			if (!mounted) return;
 			void loadStatus();
@@ -339,16 +371,14 @@
 
 			interval = setInterval(() => {
 				if (document.visibilityState !== 'visible') return;
-				clock = Date.now();
 				if (Date.now() - lastLivePoll < LIVE_POLL_MS) return;
 				lastLivePoll = Date.now();
 				void pollNewMessages();
-			}, 1_000);
+			}, LIVE_POLL_MS);
 		})();
 
 		const onVisible = () => {
 			if (document.visibilityState !== 'visible') return;
-			clock = Date.now();
 			lastLivePoll = 0;
 			void pollNewMessages();
 		};
@@ -356,6 +386,7 @@
 
 		return () => {
 			mounted = false;
+			stopClock();
 			if (interval) clearInterval(interval);
 			if (linkedTimer) clearTimeout(linkedTimer);
 			document.removeEventListener('visibilitychange', onVisible);
@@ -375,10 +406,10 @@
 	>
 		<button
 			type="button"
-			class="btn btn-primary"
+			class="btn {composeOpen ? '' : 'btn-primary'}"
 			bind:this={composeButton}
 			onclick={() => void openCompose()}
-			disabled={loadingDevices || devices.length === 0}
+			disabled={loadingDevices || !hasActiveDevice}
 			aria-expanded={composeOpen}
 			aria-controls={composeOpen ? 'compose-panel' : undefined}
 		>
@@ -489,7 +520,11 @@
 						</label>
 					</div>
 					<span class="toolbar-sep" aria-hidden="true"></span>
-					{#if selectedDevice}
+					{#if selectedDevice && isRevoked(selectedDevice)}
+						<span class="link-state" title="This device was revoked; historical messages remain readable.">
+							<Badge tone="muted">Revoked</Badge>
+						</span>
+					{:else if selectedDevice}
 						<span class="link-state" title="Socket plus authenticated contact">
 							<PresenceChip
 								presence={selectedPresence}
@@ -562,9 +597,44 @@
 						description="The loaded window has messages in the other direction. Switch to All, or load older messages."
 					/>
 				{:else}
+					{#if followNote}
+						<div class="follow-note">
+							<Notice tone="info">
+								<div class="row" style="gap: 10px; align-items: center; flex-wrap: wrap;">
+									<span>{followNote}</span>
+									{#if hasMore}
+										<button
+											type="button"
+											class="btn btn-sm"
+											onclick={() => void loadMessages(false)}
+											disabled={loadingMore}
+										>
+											{#if loadingMore}<Spinner />{:else}<Icon name="chevron-down" size={12} />{/if}
+											Load older
+										</button>
+									{/if}
+									<button
+										type="button"
+										class="btn btn-ghost btn-sm"
+										onclick={() => (followNote = null)}
+									>
+										Dismiss
+									</button>
+								</div>
+							</Notice>
+						</div>
+					{/if}
 					<ul class="log">
 						{#each visibleMessages as message (message.id)}
 							{@const outbound = message.direction === 'out'}
+							{@const trackerCommandId =
+								trackedCommands[message.id] ?? (outbound ? message.id : (message.reply_command_id ?? null))}
+							{@const canTrackDelivery = Boolean(trackerCommandId)}
+							{@const rowDevice = devices.find((device) => device.device_id === message.device_id)}
+							{@const resendHandler =
+								rowDevice && !isRevoked(rowDevice)
+									? (to: string, body: string) => resendMessage(message.id, to, body)
+									: undefined}
 							{@const isLong = message.body.length > 200}
 							{@const isExpanded = expanded.has(message.id)}
 							{@const isNew = newIds.has(message.id)}
@@ -613,7 +683,7 @@
 											{isExpanded ? 'Show less' : 'Show full message'}
 										</button>
 									{/if}
-									{#if answer || (fate && (outbound || failedReply)) || (message.reply_command_id && !outbound)}
+									{#if answer || (fate && (outbound || failedReply)) || !outbound || canTrackDelivery}
 										<div class="msg-meta">
 											{#if answer}
 												<span class="answer" data-source={answerSource}>{answer}</span>
@@ -633,28 +703,39 @@
 													/>
 												</span>
 											{/if}
-											{#if message.reply_command_id && !outbound}
+											{#if !outbound || canTrackDelivery}
 												<span class="spacer"></span>
-												<button
-													type="button"
-													class="link-btn track-btn"
-													onclick={() => toggleTracker(message.id)}
-													aria-expanded={trackers.has(message.id)}
-													aria-controls={trackers.has(message.id)
-														? `tracker-${message.id}`
-														: undefined}
-												>
-													<Icon name="activity" size={11} />
-													{trackers.has(message.id) ? 'Hide delivery' : 'Delivery'}
-												</button>
+												{#if !outbound}
+													<a
+														class="link-btn track-btn rule-test-link"
+														href={`${ROUTES.rules}?test_sender=${encodeURIComponent(message.peer)}&test_body=${encodeURIComponent(message.body)}&device=${encodeURIComponent(message.device_id)}`}
+													>
+														<Icon name="filter" size={11} /> Test in Rules
+													</a>
+												{/if}
+												{#if canTrackDelivery}
+													<button
+														type="button"
+														class="link-btn track-btn"
+														onclick={() => toggleTracker(message.id)}
+														aria-expanded={trackers.has(message.id)}
+														aria-controls={trackers.has(message.id)
+															? `tracker-${message.id}`
+															: undefined}
+													>
+														<Icon name="activity" size={11} />
+														{trackers.has(message.id) ? 'Hide delivery' : 'Delivery'}
+													</button>
+												{/if}
 											{/if}
 										</div>
 									{/if}
-									{#if trackers.has(message.id) && message.reply_command_id}
+									{#if trackers.has(message.id) && trackerCommandId}
 										<div class="reply-tracker" id={`tracker-${message.id}`}>
 											<CommandTracker
 												deviceId={message.device_id}
-												commandId={message.reply_command_id}
+												commandId={trackerCommandId}
+												onResend={resendHandler}
 											/>
 										</div>
 									{/if}
@@ -1018,6 +1099,27 @@
 	.device-foot-name {
 		font-weight: 500;
 		color: var(--df-text-secondary);
+	}
+
+	.follow-note {
+		padding: var(--df-p-space-3) var(--df-p-space-4) 0;
+	}
+
+	@media (max-width: 720px) {
+		.device-picker .input {
+			height: 44px;
+			min-height: 44px;
+		}
+
+		.dir-filter .seg-item span {
+			min-height: 44px;
+			height: auto;
+			padding-inline: var(--df-p-space-3);
+		}
+
+		.track-btn {
+			min-height: 44px;
+		}
 	}
 
 	@media (max-width: 620px) {

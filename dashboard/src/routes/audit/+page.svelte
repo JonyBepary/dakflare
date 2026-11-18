@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { describeError, getAudit } from '$lib/api';
 	import { formatAbsolute, formatCount, formatRelative } from '$lib/format';
+	import { currentTime, subscribeClock } from '$lib/live-clock.svelte';
 	import { ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
 	import type { AuditEvent } from '$lib/types';
@@ -29,17 +30,37 @@
 	let stalled = $state(false);
 	let expanded = $state<Set<string>>(new Set());
 
+	type AuditCategory = 'all' | 'auth' | 'device' | 'message' | 'automation' | 'agent' | 'security';
+
+	const CATEGORIES: ReadonlyArray<{ value: AuditCategory; label: string }> = [
+		{ value: 'all', label: 'All activity' },
+		{ value: 'auth', label: 'Sign-in & keys' },
+		{ value: 'device', label: 'Devices' },
+		{ value: 'message', label: 'Messages' },
+		{ value: 'automation', label: 'Rules & flows' },
+		{ value: 'agent', label: 'Agent' },
+		{ value: 'security', label: 'Security' }
+	];
+
+	function parseCategory(raw: string | null): AuditCategory {
+		return CATEGORIES.find((entry) => entry.value === raw)?.value ?? 'all';
+	}
+
 	/** Applied filters; the drafts are what the inputs hold until Apply. */
 	let actor = $state('');
 	let action = $state('');
+	let category = $state<AuditCategory>('all');
+	let q = $state('');
 	let actorDraft = $state('');
 	let actionDraft = $state('');
+	let categoryDraft = $state<AuditCategory>('all');
+	let qDraft = $state('');
 	let lastUpdatedAt = $state<number | null>(null);
-	let clock = $state(Date.now());
+	const clock = $derived(currentTime());
 
 	let version = 0;
 
-	const filtered = $derived(actor !== '' || action !== '');
+	const filtered = $derived(actor !== '' || action !== '' || category !== 'all' || q !== '');
 	const allowed = $derived(session.canViewSecurity);
 
 	/** Action names already in hand, offered as a hint. Never invented. */
@@ -68,7 +89,9 @@
 				limit: PAGE_SIZE,
 				...(before === undefined ? {} : { before }),
 				...(actor === '' ? {} : { actor }),
-				...(action === '' ? {} : { action })
+				...(action === '' ? {} : { action }),
+				...(category === 'all' ? {} : { category }),
+				...(q === '' ? {} : { q })
 			});
 			if (current !== version) return;
 
@@ -83,7 +106,6 @@
 				stalled = result.events.length >= result.limit && fresh.length === 0;
 			}
 			lastUpdatedAt = Date.now();
-			clock = Date.now();
 		} catch (failure) {
 			if (current === version) error = describeError(failure);
 		} finally {
@@ -103,6 +125,8 @@
 	async function applyFilters(): Promise<void> {
 		actor = actorDraft.trim();
 		action = actionDraft.trim();
+		category = categoryDraft;
+		q = qDraft.trim();
 		expanded = new Set();
 		syncUrl();
 		await load(true);
@@ -111,13 +135,17 @@
 	async function clearFilters(): Promise<void> {
 		actorDraft = '';
 		actionDraft = '';
+		categoryDraft = 'all';
+		qDraft = '';
 		await applyFilters();
 	}
 
 	function syncUrl(): void {
 		const params = new URLSearchParams();
+		if (category !== 'all') params.set('category', category);
 		if (actor !== '') params.set('actor', actor);
 		if (action !== '') params.set('action', action);
+		if (q !== '') params.set('q', q);
 		const query = params.toString();
 		history.replaceState(history.state, '', query === '' ? ROUTES.audit : `${ROUTES.audit}?${query}`);
 	}
@@ -146,16 +174,17 @@
 
 	onMount(() => {
 		const params = page.url.searchParams;
+		categoryDraft = parseCategory(params.get('category'));
 		actorDraft = params.get('actor') ?? '';
 		actionDraft = params.get('action') ?? '';
+		qDraft = params.get('q') ?? '';
+		category = categoryDraft;
 		actor = actorDraft.trim();
 		action = actionDraft.trim();
+		q = qDraft.trim();
 		void load(true);
 
-		const interval = setInterval(() => {
-			if (document.visibilityState === 'visible') clock = Date.now();
-		}, 1_000);
-		return () => clearInterval(interval);
+		return subscribeClock();
 	});
 </script>
 
@@ -202,6 +231,19 @@
 					}}
 				>
 					<div class="filter">
+						<label class="label" for="filter-category">Category</label>
+						<select
+							id="filter-category"
+							class="input"
+							bind:value={categoryDraft}
+							onchange={() => void applyFilters()}
+						>
+							{#each CATEGORIES as option (option.value)}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+					</div>
+					<div class="filter">
 						<label class="label" for="filter-actor">Actor</label>
 						<input
 							id="filter-actor"
@@ -228,6 +270,18 @@
 								<option value={name}></option>
 							{/each}
 						</datalist>
+					</div>
+					<div class="filter">
+						<label class="label" for="filter-q">Search</label>
+						<input
+							id="filter-q"
+							type="search"
+							class="input"
+							bind:value={qDraft}
+							placeholder="subject, IP or detail"
+							autocomplete="off"
+							spellcheck="false"
+						/>
 					</div>
 					<div class="filter-actions">
 						<button type="submit" class="btn btn-primary btn-sm" disabled={loading}>
@@ -285,7 +339,7 @@
 				<EmptyState
 					icon="filter"
 					title="No entries match these filters"
-					description="The log answered, and nothing in it matches both filters. Clear them to see everything recorded."
+					description="The log answered, and nothing in it matches these filters. Clear them to see everything recorded."
 				>
 					<button type="button" class="btn btn-primary" onclick={() => void clearFilters()}>
 						Clear filters
@@ -446,7 +500,7 @@
 	}
 
 	.filter .input {
-		width: 190px;
+		width: 168px;
 		height: 32px;
 		min-height: 32px;
 		padding-block: var(--df-p-space-1);

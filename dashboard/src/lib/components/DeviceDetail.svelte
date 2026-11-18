@@ -23,6 +23,7 @@
 	import { COPIED_WORKFLOWS_ACTION, copiedFlowsFor, type CopiedFlows } from '$lib/copied-flows';
 	import { archivedAt, isArchived } from '$lib/device-archive';
 	import {
+		commandFailureReason,
 		commandStateLabel,
 		commandStateNote,
 		commandStateTone,
@@ -157,11 +158,34 @@
 		return `dlog-${uid}-${id}`;
 	}
 
+	let followNote = $state<string | null>(null);
+	let expandedCmds = $state<Set<string>>(new Set());
+	let expandedMsgs = $state<Set<string>>(new Set());
+
+	function toggleExpandedCmd(id: string): void {
+		const next = new Set(expandedCmds);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		expandedCmds = next;
+	}
+
+	function toggleExpandedMsg(id: string): void {
+		const next = new Set(expandedMsgs);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		expandedMsgs = next;
+	}
+
 	async function followReply(id: string): Promise<void> {
+		followNote = null;
 		linked = id;
 		await tick();
 		const row = document.getElementById(messageRowId(id));
-		if (!row) return;
+		if (!row) {
+			followNote = 'That reply is older than the latest 20 messages loaded here.';
+			linked = null;
+			return;
+		}
 		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 		// Scroll the drawer's body, never the dialog: scrolling the dialog would
 		// carry its header (and the device's name) out of view.
@@ -641,7 +665,8 @@
 				<div class="action-row">
 					<button
 						type="button"
-						class="btn btn-primary btn-sm"
+						class="btn btn-sm"
+						class:btn-primary={!sendOpen}
 						onclick={() => {
 							onmint?.(deviceId);
 							onclose();
@@ -742,6 +767,9 @@
 					{:else}
 						<ul class="cmd-list">
 							{#each commands as command (command.command_id)}
+								{@const cmdBody = command.body || '(empty message)'}
+								{@const cmdExpanded = expandedCmds.has(command.command_id)}
+								{@const cmdLong = cmdBody.length > 90}
 								<li class="cmd-row">
 									<div class="cmd-head">
 										<span class="mono cmd-peer">{command.to_e164 || '(no recipient)'}</span>
@@ -767,7 +795,34 @@
 											{command.command_id in trackedCommands ? 'Hide' : 'Track'}
 										</button>
 									</div>
-									<p class="cmd-body">{command.body || '(empty message)'}</p>
+									<p class="cmd-body" class:is-expanded={cmdExpanded} title={cmdLong ? cmdBody : undefined}>
+										{cmdBody}
+									</p>
+									{#if cmdLong}
+										<button
+											type="button"
+											class="link-btn expand-inline"
+											onclick={() => toggleExpandedCmd(command.command_id)}
+											aria-expanded={cmdExpanded}
+										>
+											{cmdExpanded ? 'Show less' : 'Show full message'}
+										</button>
+									{/if}
+									{#if command.state === 'FAILED' || command.state === 'EXPIRED'}
+										<p class="field-error cmd-failure">
+											{commandFailureReason({
+												command_id: command.command_id,
+												to: command.to_e164,
+												body: command.body,
+												priority: command.priority,
+												state: command.state,
+												error_code: command.error_code ?? null,
+												error_message: command.error_message ?? null,
+												created_at: command.created_at,
+												expires_at: command.expires_at
+											})}
+										</p>
+									{/if}
 									{#if command.command_id in trackedCommands}
 										<div class="cmd-tracker" id={`cmd-tracker-${command.command_id}`}>
 											<CommandTracker
@@ -827,6 +882,9 @@
 							: 'Inbound SMS appears after the phone syncs. Anything you queue here appears immediately.'}
 					/>
 				{:else}
+					{#if followNote}
+						<Notice tone="info" title="Reply not in this slice">{followNote}</Notice>
+					{/if}
 					<ul class="dlog">
 						{#each messages as message (message.id)}
 							{@const outbound = message.direction === 'out'}
@@ -834,6 +892,9 @@
 							{@const answerSource = answerOf(message)}
 							{@const fate = fates.get(message.id) ?? null}
 							{@const failedReply = !outbound && fate?.state === 'failed'}
+							{@const msgBody = message.body || '(empty message)'}
+							{@const msgExpanded = expandedMsgs.has(message.id)}
+							{@const msgLong = msgBody.length > 140}
 							<li
 								id={messageRowId(message.id)}
 								class="dlog-row"
@@ -853,7 +914,17 @@
 											<RelativeTime value={message.received_at} />
 										</span>
 									</div>
-									<p class="dlog-body">{message.body || '(empty message)'}</p>
+									<p class="dlog-body" class:is-expanded={msgExpanded}>{msgBody}</p>
+									{#if msgLong}
+										<button
+											type="button"
+											class="link-btn expand-inline"
+											onclick={() => toggleExpandedMsg(message.id)}
+											aria-expanded={msgExpanded}
+										>
+											{msgExpanded ? 'Show less' : 'Show full message'}
+										</button>
+									{/if}
 									{#if answer}
 										<p class="dlog-answer" data-source={answerSource}>
 											{answer}
@@ -1431,6 +1502,23 @@
 		text-overflow: ellipsis;
 	}
 
+	.cmd-body.is-expanded {
+		white-space: pre-wrap;
+		overflow: visible;
+		overflow-wrap: anywhere;
+	}
+
+	.cmd-failure {
+		margin-top: 2px;
+		font-size: var(--df-p-text-xs);
+	}
+
+	.expand-inline {
+		font-size: var(--df-p-text-xs);
+		padding: 4px 0;
+		min-height: 24px;
+	}
+
 	.cmd-track-btn {
 		font-size: var(--df-p-text-xs);
 	}
@@ -1528,6 +1616,14 @@
 		line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
+	}
+
+	.dlog-body.is-expanded {
+		display: block;
+		-webkit-line-clamp: unset;
+		line-clamp: unset;
+		overflow: visible;
+		white-space: pre-wrap;
 	}
 
 	.dlog-answer {

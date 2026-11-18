@@ -206,7 +206,7 @@
 			<div>
 				<dt>Flow id</dt>
 				<dd class="id-line">
-					<span class="mono">{workflowId}</span>
+					<span class="mono" title={workflowId}>{workflowId}</span>
 					<CopyButton value={workflowId} label="Copy workflow id" iconOnly />
 				</dd>
 			</div>

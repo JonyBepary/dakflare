@@ -7,6 +7,7 @@
 	 * Every row names the step it is about and takes you to that step's first
 	 * field, so a problem is two clicks from being fixed.
 	 */
+	import { onMount } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import { metaFor, type EditorIssue, type FlowNode } from '$lib/workflow/graph';
 	import { visibleTitle } from './agent-patch';
@@ -15,17 +16,24 @@
 		issues,
 		nodes,
 		onreveal,
+		onsettings = null,
 		onclose
 	}: {
 		issues: EditorIssue[];
 		nodes: FlowNode[];
 		/** Selects the step and focuses its first field. */
 		onreveal: (nodeId: string) => void;
+		/** Opens flow settings (e.g. name / device scope) for flow-level checks. */
+		onsettings?: (() => void) | null;
 		onclose: () => void;
 	} = $props();
 
 	let panelEl = $state<HTMLDivElement | null>(null);
 	let expanded = $state(false);
+
+	onMount(() => {
+		panelEl?.focus();
+	});
 
 	const visible = $derived(expanded ? issues : issues.slice(0, 6));
 	const hiddenCount = $derived(Math.max(issues.length - visible.length, 0));
@@ -110,6 +118,17 @@
 							title="Go to this step"
 						>
 							<span class="issue-mark" class:field={issue.kind === 'field'}>{stepName(issue)}</span>
+							<span class="issue-text">{issue.message}</span>
+							<Icon name="arrow-up-right" size={16} />
+						</button>
+					{:else if onsettings}
+						<button
+							type="button"
+							class="issue"
+							onclick={() => onsettings()}
+							title="Go to flow settings"
+						>
+							<span class="issue-mark" class:field={issue.kind === 'field'}>Flow</span>
 							<span class="issue-text">{issue.message}</span>
 							<Icon name="arrow-up-right" size={16} />
 						</button>

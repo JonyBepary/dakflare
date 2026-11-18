@@ -195,12 +195,22 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 		if (response.status === 401 && !silentAuth && path !== SESSION_PATH) {
 			unauthorizedHandler?.();
 		}
+		const retryAfter = readRetryAfter(response, payload);
+		const serverMsg = extractField(payload, 'message');
 		const fallback = `Request failed (${response.status}).`;
 		const details =
-			payload && typeof payload === 'object'
-				? ((payload as Record<string, unknown>).details ?? null)
+			payload && typeof payload === 'object' && 'details' in payload
+				? (payload as Record<string, unknown>).details
 				: null;
-		throw new ApiError(code ? (CODE_MESSAGES[code] ?? fallback) : fallback, response.status, code, details, null, null, payload);
+		throw new ApiError(
+			code ? (CODE_MESSAGES[code] ?? serverMsg ?? fallback) : (serverMsg ?? fallback),
+			response.status,
+			code,
+			details,
+			retryAfter,
+			serverMsg,
+			payload
+		);
 	}
 
 	return { data: payload as T, status: response.status };
@@ -406,6 +416,8 @@ export interface AuditQuery {
 	before?: number;
 	actor?: string;
 	action?: string;
+	category?: string;
+	q?: string;
 }
 
 export function getAudit(query: AuditQuery = {}): Promise<AuditResult> {
@@ -413,6 +425,8 @@ export function getAudit(query: AuditQuery = {}): Promise<AuditResult> {
 	if (query.before !== undefined) params.set('before', String(query.before));
 	if (query.actor) params.set('actor', query.actor);
 	if (query.action) params.set('action', query.action);
+	if (query.category && query.category !== 'all') params.set('category', query.category);
+	if (query.q) params.set('q', query.q);
 	return get<AuditResult>(`/v1/admin/audit?${params.toString()}`);
 }
 
@@ -713,6 +727,19 @@ export async function createRule(input: RuleInput): Promise<{ ok: boolean; id: s
 		method: 'POST',
 		body: JSON.stringify(input)
 	});
+}
+
+export async function updateRule(
+	ruleId: string,
+	input: Partial<RuleInput> & { enabled?: boolean }
+): Promise<{ ok: boolean; id: string; rule?: Rule }> {
+	return get<{ ok: boolean; id: string; rule?: Rule }>(
+		`/v1/admin/rules/${encodeURIComponent(ruleId)}`,
+		{
+			method: 'PUT',
+			body: JSON.stringify(input)
+		}
+	);
 }
 
 export async function deleteRule(ruleId: string): Promise<{ ok: boolean; deleted: number }> {

@@ -687,7 +687,7 @@
 			{#if refreshing}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
 			Refresh
 		</button>
-		<button type="button" class="btn btn-primary" onclick={() => void openMint('enroll')}>
+		<button type="button" class="btn {mintOpen ? '' : 'btn-primary'}" onclick={() => void openMint('enroll')}>
 			<Icon name="key" size={14} /> Mint pairing code
 		</button>
 	</PageHeader>
@@ -813,7 +813,7 @@
 					<div class="form-foot">
 						<button
 							type="submit"
-							class="btn btn-primary"
+							class="btn {waitState === 'paired' || waitState === 'expired' ? '' : 'btn-primary'}"
 							disabled={minting || Boolean(scopeError)}
 							aria-busy={minting}
 						>
@@ -1020,7 +1020,7 @@
 					title="No devices paired yet"
 					description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
 				>
-					<button type="button" class="btn btn-primary" onclick={() => void openMint('enroll')}>
+					<button type="button" class="btn {mintOpen ? '' : 'btn-primary'}" onclick={() => void openMint('enroll')}>
 						<Icon name="key" size={14} /> Mint a pairing code
 					</button>
 				</EmptyState>

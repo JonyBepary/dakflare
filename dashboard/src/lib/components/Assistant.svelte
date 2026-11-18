@@ -81,6 +81,7 @@
 	} from '$lib/agent-socket';
 	import { announce } from '$lib/announce.svelte';
 	import { BASE, ROUTES } from '$lib/paths';
+	import { session } from '$lib/session.svelte';
 	import AssistantProposalCard, { type ProposalResult } from './AssistantProposalCard.svelte';
 	import Icon from './Icon.svelte';
 	import Spinner from './Spinner.svelte';
@@ -934,7 +935,11 @@
 						<p class="detail mono">{outcome.failure.detail}</p>
 					{/if}
 					<p class="state quiet">
-						An owner sets the model and the chat key. <a href="{BASE}/security/ai">AI settings</a>
+						{#if session.canViewSecurity}
+							An owner sets the model and the chat key. <a href="{BASE}/security/ai">AI settings</a>
+						{:else}
+							Ask an owner or admin to set the model and chat key.
+						{/if}
 					</p>
 				{:else if outcome.failure.kind === 'exhausted' && outcome.failure.day}
 					<p class="detail mono">day {outcome.failure.day}</p>
@@ -1467,6 +1472,22 @@
 			left: 12px;
 			width: auto;
 			bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+		}
+
+		.close {
+			width: 44px;
+			height: 44px;
+			margin-top: -8px;
+			margin-right: -8px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.launcher {
+			transition: none;
+		}
+		.launcher:active {
+			transform: none;
 		}
 	}
 

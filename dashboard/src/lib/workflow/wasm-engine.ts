@@ -93,6 +93,14 @@ async function loadWasm(): Promise<WasmExports> {
 		if (!res.ok) {
 			throw new Error(`Failed to load flow.wasm from ${wasmUrl}: ${res.status}`);
 		}
+		if (typeof WebAssembly.instantiateStreaming === 'function') {
+			try {
+				const streamed = await WebAssembly.instantiateStreaming(res.clone(), {});
+				return streamed.instance.exports as unknown as WasmExports;
+			} catch {
+				// Fall back to ArrayBuffer when a server serves flow.wasm without application/wasm.
+			}
+		}
 		const buffer = await res.arrayBuffer();
 		const instantiated = await WebAssembly.instantiate(buffer, {});
 		return instantiated.instance.exports as unknown as WasmExports;

@@ -28,7 +28,17 @@
 
 	let sender = $state(untrack(() => seedSender));
 	let body = $state(untrack(() => seedBody));
+	let senderDirty = $state(false);
+	let bodyDirty = $state(false);
 	let running = $state(false);
+
+	$effect(() => {
+		if (!senderDirty) sender = seedSender;
+	});
+
+	$effect(() => {
+		if (!bodyDirty) body = seedBody;
+	});
 
 	const nodeMap = $derived(new Map(nodes.map((node) => [node.id, node])));
 	const captured = $derived(
@@ -95,6 +105,7 @@
 				id="sim-sender"
 				class="input input-mono"
 				bind:value={sender}
+				oninput={() => (senderDirty = true)}
 				aria-label="Sample sender"
 				placeholder="+15551234567"
 				autocomplete="off"
@@ -113,6 +124,7 @@
 				class="input"
 				rows="2"
 				bind:value={body}
+				oninput={() => (bodyDirty = true)}
 				aria-label="Sample message"
 				placeholder="ORDER A-1042"
 				spellcheck="false"

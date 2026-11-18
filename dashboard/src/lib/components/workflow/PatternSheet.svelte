@@ -3151,8 +3151,10 @@
 	.var-x {
 		display: grid;
 		place-items: center;
-		width: 22px;
-		height: 22px;
+		min-width: 24px;
+		min-height: 24px;
+		width: 24px;
+		height: 24px;
 		border: 0;
 		border-radius: var(--df-p-radius-xs);
 		background: transparent;

@@ -31,6 +31,10 @@
 
 	ui.screenToFlowPosition = (point) => screenToFlowPosition(point);
 
+	function prefersReducedMotion(): boolean {
+		return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+	}
+
 	ui.revealNode = (id, options) => {
 		const node = getNode(id);
 		if (!node) return;
@@ -40,7 +44,7 @@
 		const inset = (options?.rightInset ?? 0) / 2 / Math.max(zoom, 0.01);
 		void setCenter(node.position.x + 107 + inset, node.position.y + 42, {
 			zoom,
-			duration: 240
+			duration: prefersReducedMotion() ? 0 : 240
 		});
 	};
 
@@ -66,7 +70,7 @@
 	}
 
 	ui.fitAll = () => {
-		void frame(200);
+		void frame(prefersReducedMotion() ? 0 : 200);
 	};
 
 	onMount(() => {

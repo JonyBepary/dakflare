@@ -41,6 +41,7 @@
 	let gutter = $state<HTMLDivElement | null>(null);
 	let closeButton = $state<HTMLButtonElement | null>(null);
 	let wasOpen = false;
+	let returnFocus: HTMLElement | null = null;
 
 	const lines = $derived(
 		Array.from({ length: draft.split('\n').length }, (_, index) => index + 1)
@@ -49,6 +50,8 @@
 	$effect(() => {
 		if (open && !wasOpen) {
 			wasOpen = true;
+			returnFocus =
+				document.activeElement instanceof HTMLElement ? document.activeElement : null;
 			draft = json;
 			editing = false;
 			error = null;
@@ -57,6 +60,9 @@
 			void tick().then(() => closeButton?.focus());
 		} else if (!open && wasOpen) {
 			wasOpen = false;
+			const target = returnFocus;
+			returnFocus = null;
+			void tick().then(() => target?.focus());
 		}
 	});
 
@@ -431,8 +437,11 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.source-sheet {
+		.source-sheet,
+		.switch-track,
+		.switch-track > span {
 			animation: none;
+			transition: none;
 		}
 	}
 </style>

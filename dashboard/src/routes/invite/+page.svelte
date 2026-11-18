@@ -144,8 +144,12 @@
 			Set it, then open the link again.
 		</p>
 		<div class="command">
-			<code>wrangler secret put BETTER_AUTH_SECRET</code>
-			<CopyButton value="wrangler secret put BETTER_AUTH_SECRET" iconOnly label="Copy command" />
+			<code>cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text</code>
+			<CopyButton
+				value="cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text"
+				iconOnly
+				label="Copy command"
+			/>
 		</div>
 		<p class="hint">
 			<code>dakflare</code> will set this for you in a later release. Until then the command above
@@ -175,7 +179,7 @@
 		<div class="row" style="margin-top: 12px">
 			<button
 				type="button"
-				class="link-btn"
+				class="link-btn gate-alt-btn"
 				onclick={() => {
 					elsewhere = null;
 					error = null;
@@ -316,11 +320,19 @@
 
 	/* The link is the only way across to the passkey door: give it a control's
 	   height rather than a line of text's. */
-	.gate-foot-link a {
+	.gate-foot-link a,
+	.gate-alt-btn {
 		display: inline-flex;
 		align-items: center;
 		min-height: 32px;
 		padding: 0 var(--s-2);
+	}
+
+	@media (max-width: 720px) {
+		.gate-foot-link a,
+		.gate-alt-btn {
+			min-height: 44px;
+		}
 	}
 
 	@media (max-width: 420px) {

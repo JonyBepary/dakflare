@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { describeError, getDevices, sendSms } from '$lib/api';
-	import type { Device } from '$lib/types';
+	import { isArchived } from '$lib/device-archive';
+	import { isRevoked, type Device } from '$lib/types';
 	import { deviceOptionLabel } from '$lib/presence';
 	import { encodingHint, encodingLabel, measureSms, smsCapacity } from '$lib/sms';
 	import CommandTracker from './CommandTracker.svelte';
@@ -46,7 +47,9 @@
 
 	let toInput = $state<HTMLInputElement | null>(null);
 
-	const options = $derived(providedDevices ?? fleet);
+	const options = $derived(
+		(providedDevices ?? fleet).filter((device) => !isRevoked(device) && !isArchived(device))
+	);
 	const awaitingFleet = $derived(fleetLoading && providedDevices === undefined);
 	const recipient = $derived(to.trim());
 	// Measured the way the carrier measures it: a Bangla body is 70 per message,

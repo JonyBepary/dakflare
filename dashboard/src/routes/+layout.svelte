@@ -1,8 +1,9 @@
 <script lang="ts">
 	import '../app.css';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import { readAutonomy, revokeAutonomy, type AgentAutonomy } from '$lib/agent-socket';
 	import { deleteSession, setUnauthorizedHandler, signOutAccount } from '$lib/api';
 	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
 	import { announcer } from '$lib/announce.svelte';
@@ -87,6 +88,15 @@
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');
 	let loggingOut = $state(false);
 	let topbarNav = $state<HTMLElement | null>(null);
+	let autonomy = $state<AgentAutonomy | null>(null);
+	let revokingAutonomy = $state(false);
+	let autonomyVersion = 0;
+
+	let shortcutsOpen = $state(false);
+	let pendingPrefix = $state<'g' | null>(null);
+	let prefixTimer: ReturnType<typeof setTimeout> | undefined;
+	let shortcutReturnFocus: HTMLElement | null = null;
+	let shortcutsCloseBtn = $state<HTMLButtonElement | null>(null);
 
 	const isLogin = $derived(
 		page.url.pathname === ROUTES.login || page.url.pathname === `${ROUTES.login}/`
@@ -123,12 +133,122 @@
 
 	const activeLabel = $derived(nav.find(isActive)?.label ?? 'Console');
 
+	async function refreshAutonomy(): Promise<void> {
+		if (!session.canViewSecurity) {
+			autonomy = null;
+			return;
+		}
+		const version = ++autonomyVersion;
+		const outcome = await readAutonomy();
+		if (version !== autonomyVersion) return;
+		if (outcome.status === 'ok') {
+			autonomy = outcome.autonomy;
+		}
+	}
+
+	async function handleRevokeAutonomy(): Promise<void> {
+		if (revokingAutonomy) return;
+		revokingAutonomy = true;
+		const version = ++autonomyVersion;
+		const result = await revokeAutonomy();
+		revokingAutonomy = false;
+		if (result.status === 'ok') {
+			if (version === autonomyVersion) autonomy = result.autonomy;
+			announcer.announce('Autonomy window revoked.');
+			return;
+		}
+		await refreshAutonomy();
+	}
+
+	function openShortcuts(): void {
+		if (shortcutsOpen) return;
+		shortcutReturnFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		shortcutsOpen = true;
+		pendingPrefix = null;
+		void tick().then(() => shortcutsCloseBtn?.focus());
+	}
+
+	function closeShortcuts(): void {
+		if (!shortcutsOpen) return;
+		shortcutsOpen = false;
+		const target = shortcutReturnFocus;
+		shortcutReturnFocus = null;
+		void tick().then(() => target?.focus());
+	}
+
+	function toggleShortcuts(): void {
+		if (shortcutsOpen) closeShortcuts();
+		else openShortcuts();
+	}
+
+	function handleGlobalKeydown(event: KeyboardEvent): void {
+		if (shortcutsOpen && event.key === 'Escape') {
+			event.preventDefault();
+			closeShortcuts();
+			return;
+		}
+		if (
+			boot !== 'ready' ||
+			isPreauth ||
+			event.defaultPrevented ||
+			event.ctrlKey ||
+			event.metaKey ||
+			event.altKey ||
+			event.isComposing
+		) {
+			return;
+		}
+		const el = event.target instanceof HTMLElement ? event.target : null;
+		if (
+			el &&
+			(el.isContentEditable ||
+				el.closest(
+					'input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="dialog"], dialog[open]'
+				))
+		) {
+			return;
+		}
+		if (event.key === '?') {
+			event.preventDefault();
+			toggleShortcuts();
+			return;
+		}
+		const lower = event.key.toLowerCase();
+		if (pendingPrefix === 'g') {
+			pendingPrefix = null;
+			if (prefixTimer) clearTimeout(prefixTimer);
+			const targets: Record<string, string | undefined> = {
+				o: ROUTES.overview,
+				d: ROUTES.devices,
+				m: ROUTES.messages,
+				r: ROUTES.rules,
+				w: ROUTES.workflows,
+				a: session.canViewSecurity ? ROUTES.approvals : undefined
+			};
+			const dest = targets[lower];
+			if (dest) {
+				event.preventDefault();
+				void goto(dest);
+			}
+			return;
+		}
+		if (lower === 'g' && !event.shiftKey) {
+			pendingPrefix = 'g';
+			if (prefixTimer) clearTimeout(prefixTimer);
+			prefixTimer = setTimeout(() => {
+				pendingPrefix = null;
+			}, 900);
+		}
+	}
+
 	/**
 	 * One refresh path for the rail. The approvals count is human-only, so the
 	 * extra read runs only when this session can see the Approvals screen.
 	 */
 	function refreshCounts(): void {
 		void consoleCounts.refresh(session.canViewSecurity);
+		void refreshAutonomy();
 	}
 
 	/** The rail's section for the current page: the header names where you are. */
@@ -229,6 +349,7 @@
 		return () => {
 			setUnauthorizedHandler(null);
 			clearInterval(timer);
+			if (prefixTimer) clearTimeout(prefixTimer);
 			document.removeEventListener('visibilitychange', onVisible);
 			window.removeEventListener(ALERTS_CHANGED_EVENT, onAlertsChanged);
 		};
@@ -260,6 +381,8 @@
 <svelte:head>
 	<meta name="robots" content="noindex, nofollow" />
 </svelte:head>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
 
 <!-- The one polite live region: it exists before any notice text does, in
      every branch, so writing into it is announced. -->
@@ -363,6 +486,16 @@
 				</div>
 
 				<div class="topbar-actions">
+					<button
+						type="button"
+						class="btn btn-icon btn-sm"
+						onclick={toggleShortcuts}
+						aria-label="Keyboard shortcuts"
+						aria-expanded={shortcutsOpen}
+						title="Keyboard shortcuts (?)"
+					>
+						<Icon name="keyboard" size={16} />
+					</button>
 					<ThemeToggle />
 					<button
 						type="button"
@@ -390,6 +523,39 @@
 				{/each}
 			</nav>
 
+			{#if autonomy?.enabled}
+				<div class="autonomy-banner" role="region" aria-label="Agent autonomy window">
+					<div class="autonomy-banner-inner">
+						<span class="autonomy-banner-copy">
+							<Icon name="zap" size={14} />
+							<strong>Autonomy open</strong>
+							{#if autonomy.mine === false}
+								<span>· opened by <span class="mono">{autonomy.actor ?? 'another operator'}</span></span>
+							{:else}
+								<span>· assistant can act without Ask-for-Accept</span>
+							{/if}
+							{#if autonomy.expiresAt !== null}
+								<span>· ends <RelativeTime value={autonomy.expiresAt} /></span>
+							{/if}
+						</span>
+						<span class="autonomy-banner-actions">
+							<a class="link-btn autonomy-banner-link" href={ROUTES.ai}>Settings</a>
+							{#if autonomy.mine !== false}
+								<button
+									type="button"
+									class="btn btn-sm"
+									onclick={() => void handleRevokeAutonomy()}
+									disabled={revokingAutonomy}
+									aria-busy={revokingAutonomy}
+								>
+									{#if revokingAutonomy}<Spinner />{:else}Revoke{/if}
+								</button>
+							{/if}
+						</span>
+					</div>
+				</div>
+			{/if}
+
 			<AlertBanner />
 
 			<main class="main" id="main" tabindex="-1">
@@ -397,6 +563,49 @@
 			</main>
 		</div>
 	</div>
+
+	{#if shortcutsOpen}
+		<div class="shortcuts-backdrop">
+			<button
+				type="button"
+				class="shortcuts-scrim"
+				tabindex="-1"
+				aria-label="Close keyboard shortcuts"
+				onclick={closeShortcuts}
+			></button>
+			<div
+				class="card shortcuts-modal"
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="shortcuts-title"
+				tabindex="-1"
+			>
+				<div class="shortcuts-head">
+					<h2 id="shortcuts-title">Keyboard shortcuts</h2>
+					<button
+						type="button"
+						class="btn btn-ghost btn-sm"
+						bind:this={shortcutsCloseBtn}
+						onclick={closeShortcuts}
+					>
+						Close
+					</button>
+				</div>
+				<dl class="shortcuts-list">
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>o</kbd></dt><dd>Overview</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>d</kbd></dt><dd>Devices</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>m</kbd></dt><dd>Messages</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>r</kbd></dt><dd>Rules</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>w</kbd></dt><dd>Workflows</dd></div>
+					{#if session.canViewSecurity}
+						<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>a</kbd></dt><dd>Approvals</dd></div>
+					{/if}
+					<div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Open or close this list</dd></div>
+					<div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close dialogs</dd></div>
+				</dl>
+			</div>
+		</div>
+	{/if}
 
 	<!-- One floating control, outside the scroll: the panel is a sibling of the
 	     shell so its fixed position is measured against the window, not a card. -->
@@ -474,5 +683,133 @@
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--df-text-secondary);
+	}
+
+	.autonomy-banner {
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
+	}
+
+	.autonomy-banner-inner {
+		width: 100%;
+		max-width: var(--df-p-layout-page-max);
+		margin: 0 auto;
+		padding: var(--df-p-space-2) var(--df-c-shell-gutter);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		font-size: var(--df-p-text-xs);
+	}
+
+	.autonomy-banner-copy {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+	}
+
+	.autonomy-banner-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--df-p-space-3);
+	}
+
+	.autonomy-banner-link {
+		min-height: 28px;
+		display: inline-flex;
+		align-items: center;
+		color: var(--df-state-warn-ink);
+	}
+
+	.shortcuts-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 60;
+		display: grid;
+		place-items: center;
+		padding: var(--df-p-space-4);
+	}
+
+	.shortcuts-scrim {
+		position: fixed;
+		inset: 0;
+		border: 0;
+		padding: 0;
+		background: color-mix(in srgb, var(--df-text-primary) 42%, transparent);
+		cursor: default;
+	}
+
+	.shortcuts-modal {
+		position: relative;
+		z-index: 1;
+		width: 100%;
+		max-width: 420px;
+		padding: var(--df-p-space-5);
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-4);
+	}
+
+	.shortcuts-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+	}
+
+	.shortcuts-head h2 {
+		margin: 0;
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+	}
+
+	.shortcuts-list {
+		margin: 0;
+		display: grid;
+		gap: var(--df-p-space-2);
+	}
+
+	.shortcut-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		padding: var(--df-p-space-2) 0;
+		border-bottom: 1px solid var(--df-border-hairline);
+		font-size: var(--df-p-text-sm);
+	}
+
+	.shortcut-row:last-child {
+		border-bottom: 0;
+	}
+
+	.shortcut-row dt {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--df-p-space-1);
+	}
+
+	.shortcut-row kbd {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-xs);
+		padding: 2px 6px;
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+		color: var(--df-text-primary);
+	}
+
+	.shortcut-row dd {
+		margin: 0;
+		color: var(--df-text-secondary);
+	}
+
+	@media (max-width: 720px) {
+		.autonomy-banner-link {
+			min-height: 44px;
+		}
 	}
 </style>

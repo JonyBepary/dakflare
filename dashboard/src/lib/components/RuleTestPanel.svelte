@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { describeError, testRules } from '$lib/api';
-	import type { Device, Rule, RuleTestMatch } from '$lib/types';
+	import { isRevoked, type Device, type Rule, type RuleTestMatch } from '$lib/types';
 	import { deviceLabel, deviceOptionLabel, devicePrimary } from '$lib/presence';
 	import Icon from './Icon.svelte';
 	import Notice from './Notice.svelte';
@@ -12,6 +12,9 @@
 		scope = '',
 		draftNotice = false,
 		startOpen = false,
+		initialPeer = '',
+		initialBody = '',
+		initialDevice = '',
 		onclose
 	}: {
 		rules: Rule[];
@@ -19,6 +22,9 @@
 		scope?: string;
 		draftNotice?: boolean;
 		startOpen?: boolean;
+		initialPeer?: string;
+		initialBody?: string;
+		initialDevice?: string;
 		onclose?: () => void;
 	} = $props();
 
@@ -29,6 +35,9 @@
 	let testDevice = $state('');
 	let peer = $state('');
 	let body = $state('');
+	let lastInitialPeer = $state('');
+	let lastInitialBody = $state('');
+	let lastInitialDevice = $state('');
 	let running = $state(false);
 	let error = $state<string | null>(null);
 	let matches = $state<RuleTestMatch[] | null>(null);
@@ -37,6 +46,26 @@
 		if (startOpen) open = true;
 	});
 
+	$effect(() => {
+		if (initialPeer && initialPeer !== lastInitialPeer) {
+			lastInitialPeer = initialPeer;
+			peer = initialPeer;
+		}
+		if (initialBody && initialBody !== lastInitialBody) {
+			lastInitialBody = initialBody;
+			body = initialBody;
+		}
+		if (
+			initialDevice &&
+			initialDevice !== lastInitialDevice &&
+			availableDevices.some((device) => device.device_id === initialDevice)
+		) {
+			lastInitialDevice = initialDevice;
+			testDevice = initialDevice;
+		}
+	});
+
+	const availableDevices = $derived(devices.filter((device) => !isRevoked(device)));
 	const scoped = $derived(scope.trim() !== '');
 	const scopedDevice = $derived(
 		scope ? (devices.find((device) => device.device_id === scope) ?? null) : null
@@ -69,8 +98,8 @@
 			if (testDevice !== scope) testDevice = scope;
 			return;
 		}
-		const current = devices.some((device) => device.device_id === testDevice);
-		if (!current) testDevice = devices[0]?.device_id ?? '';
+		const current = availableDevices.some((device) => device.device_id === testDevice);
+		if (!current) testDevice = availableDevices[0]?.device_id ?? '';
 	});
 
 	// A changed scope invalidates the last result; never show reasons from a
@@ -201,9 +230,9 @@
 								<span class="mono">{scope}</span>
 							{/if}
 						</div>
-					{:else if devices.length > 0}
+					{:else if availableDevices.length > 0}
 						<select class="input input-mono" bind:value={testDevice} aria-label="Device to test against">
-							{#each devices as device (device.device_id)}
+							{#each availableDevices as device (device.device_id)}
 								<option value={device.device_id}>{deviceOptionLabel(device)}</option>
 							{/each}
 						</select>

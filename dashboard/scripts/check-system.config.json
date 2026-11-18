@@ -67,6 +67,7 @@
 		"src/lib/components/workflow/ValidationList.svelte",
 		"src/lib/components/workflow/VariableHints.svelte",
 		"src/lib/components/workflow/WebhookNode.svelte",
+		"src/lib/components/workflow/WorkflowCanvas.svelte",
 		"src/lib/components/workflow/WorkflowEditor.svelte",
 		"src/lib/components/workflow/WorkflowSettings.svelte",
 

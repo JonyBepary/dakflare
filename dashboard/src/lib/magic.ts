@@ -135,10 +135,12 @@ function waitSentence(retryAfter: number | null): string {
  *   - 5xx / no answer → `unavailable` (a link may not have been sent)
  */
 export async function requestMagicLink(email: string, next?: string): Promise<void> {
+	const cleanNext =
+		next && next.startsWith('/admin/') && !next.startsWith('//') ? next : undefined;
 	try {
 		await authJson<{ ok?: boolean }>('/v1/auth/magic-link', {
 			method: 'POST',
-			body: { email }
+			body: cleanNext ? { email, next: cleanNext } : { email }
 		});
 	} catch (error) {
 		if (!(error instanceof ApiError)) {

@@ -4,7 +4,7 @@
 	import VariableHints from './VariableHints.svelte';
 	import { visibleTitle } from './agent-patch';
 	import PatternSheet from './PatternSheet.svelte';
-	import { measureSmsSegments, sanitizeGsm7Text } from '$lib/workflow/sms-encoding';
+	import { encodingLabel, inspectSmsBody, sanitizeGsm7Text } from '$lib/sms';
 	import type {
 		BodyMode,
 		ConditionData,
@@ -758,35 +758,40 @@
 				{/if}
 
 				{#if sms.body}
-					{@const metrics = measureSmsSegments(sms.body)}
-					<div class="sms-meter-card {metrics.encoding === 'UCS-2' ? 'is-ucs2' : 'is-gsm7'}">
+					{@const inspection = inspectSmsBody(sms.body)}
+					{@const measure = inspection.measure}
+					{@const sanitized = sanitizeGsm7Text(sms.body)}
+					{@const sanitizedMeasure =
+						sanitized !== sms.body ? inspectSmsBody(sanitized).measure : null}
+					{@const savedSegments =
+						sanitizedMeasure && sanitizedMeasure.segments < measure.segments
+							? measure.segments - sanitizedMeasure.segments
+							: 0}
+					<div class="sms-meter-card {measure.encoding === 'ucs2' ? 'is-ucs2' : 'is-gsm7'}">
 						<div class="meter-row">
-							<span class="meter-badge {metrics.encoding === 'UCS-2' ? 'badge-ucs2' : 'badge-gsm7'}">
-								{metrics.encoding} {metrics.hasBangla ? '(Bangla)' : ''}
+							<span class="meter-badge {measure.encoding === 'ucs2' ? 'badge-ucs2' : 'badge-gsm7'}">
+								{encodingLabel(measure)}{inspection.hasBangla ? ' (Bangla)' : ''}
 							</span>
 							<span class="meter-stat">
-								{metrics.unitsUsed} / {metrics.unitsLimit} chars
+								{measure.units} / {inspection.capacity} chars
 							</span>
 							<span class="meter-stat">
-								<strong>{metrics.segments}</strong> SMS segment{metrics.segments > 1 ? 's' : ''}
-							</span>
-							<span class="meter-cost">
-								~৳{metrics.estimatedCostBdt.toFixed(2)}
+								<strong>{measure.segments}</strong> SMS {measure.segments === 1 ? 'segment' : 'segments'}
 							</span>
 						</div>
 
-						{#if metrics.nonGsmChars.length > 0 && !metrics.hasBangla}
+						{#if inspection.nonGsmChars.length > 0 && !inspection.hasBangla && savedSegments > 0}
 							<div class="trap-warning">
 								<span>
-									<Icon name="alert" size={16} /> Downgraded to 70-char UCS-2 by character:
-									<strong>'{metrics.nonGsmChars[0].char}'</strong>
+									<Icon name="alert" size={16} /> Switched to 70-char UCS-2 by character:
+									<strong>'{inspection.nonGsmChars[0].char}'</strong>
 								</span>
 								<button
 									type="button"
 									class="btn-sanitize"
-									onclick={() => onupdate({ body: sanitizeGsm7Text(sms.body ?? '') })}
+									onclick={() => onupdate({ body: sanitized })}
 								>
-									Sanitize to GSM-7 (Save 1 Segment)
+									Convert to GSM-7 (saves {savedSegments} {savedSegments === 1 ? 'segment' : 'segments'})
 								</button>
 							</div>
 						{/if}
@@ -1342,5 +1347,11 @@
 	.btn-sanitize:hover {
 		background: color-mix(in srgb, var(--df-state-warn-bg) 80%, var(--df-state-warn-ink));
 		color: var(--df-state-warn-ink);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.btn-workbench-toggle {
+			transition: none;
+		}
 	}
 </style>

@@ -150,6 +150,8 @@
 	);
 
 	let controller: AbortController | null = null;
+	let returnFocus: HTMLElement | null = null;
+	let wasOpen = false;
 
 	function resetPhases() {
 		phases = { understand: 'idle', propose: 'idle', verify: 'idle' };
@@ -165,14 +167,25 @@
 		resetPhases();
 	}
 
+	function dismiss() {
+		const target = returnFocus;
+		returnFocus = null;
+		onclose();
+		void tick().then(() => target?.focus());
+	}
+
 	$effect(() => {
-		if (open) {
+		if (open && !wasOpen) {
+			wasOpen = true;
+			returnFocus =
+				document.activeElement instanceof HTMLElement ? document.activeElement : null;
 			query = startMode === 'agent' ? '> ' : '';
 			cursor = 0;
 			resetAgent();
 			// The dialog renders on the tick after `open` flips.
 			void tick().then(() => inputEl?.focus());
-		} else {
+		} else if (!open && wasOpen) {
+			wasOpen = false;
 			controller?.abort();
 			controller = null;
 		}
@@ -183,6 +196,7 @@
 	function pick(index: number) {
 		const hit = matches[index];
 		if (!hit) return;
+		returnFocus = null;
 		onpick(hit.node.id);
 	}
 
@@ -289,7 +303,7 @@
 				leaveAgent();
 				return;
 			}
-			onclose();
+			dismiss();
 			return;
 		}
 
@@ -373,7 +387,7 @@
 </script>
 
 {#if open}
-	<div class="finder-scrim" role="presentation" onclick={onclose}></div>
+	<div class="finder-scrim" role="presentation" onclick={dismiss}></div>
 	<div
 		class="finder"
 		class:is-agent={agentMode}
@@ -772,14 +786,25 @@
 	.mode-exit {
 		display: grid;
 		place-items: center;
-		width: 20px;
-		height: 20px;
+		width: 24px;
+		height: 24px;
+		min-width: 24px;
+		min-height: 24px;
 		flex: none;
 		padding: 0;
 		border: 1px solid var(--df-border-hairline);
 		border-radius: var(--df-p-radius-xs);
 		background: var(--df-surface-card);
 		color: var(--df-text-meta);
+	}
+
+	@media (max-width: 720px) {
+		.mode-exit {
+			width: 44px;
+			height: 44px;
+			min-width: 44px;
+			min-height: 44px;
+		}
 	}
 
 	.mode-exit:hover {
@@ -1006,7 +1031,7 @@
 	}
 
 	.phase[data-state='idle'] {
-		opacity: 0.55;
+		color: var(--df-text-meta);
 	}
 
 	.phase-mark {
