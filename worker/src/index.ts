@@ -19,7 +19,7 @@ import { handleWs } from "./routes/ws";
 import { handleIncomingBatch, handleMessagesList, handleMessagesPurge } from "./routes/incoming";
 import { handlePoll } from "./routes/poll";
 import { handleCommandStatus, handleStatusBatch } from "./routes/status";
-import { handleRulesGet, handleRulesPost, handleRulesTest } from "./routes/rules";
+import { handleRulePut, handleRulesGet, handleRulesPost, handleRulesTest } from "./routes/rules";
 import {
   handleAiModels,
 
@@ -74,6 +74,7 @@ import {
   handleDeviceApprovals,
 } from "./routes/device-approvals";
 import { handleStreamableMcp } from "./mcp/http";
+import { handleMcpRequest } from "./mcp/server";
 import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
 import { routeAgentRequest } from "agents/routing";
 import { AssistantAgent } from "./agent/runtime";
@@ -122,7 +123,15 @@ import { handleResetUser } from "./routes/reset-user";
 import { handleCreateInvite, handleDeleteInvite, handleListInvites } from "./routes/invites";
 import { handleAuditList } from "./routes/audit";
 import { err } from "./lib/errors";
-import { readJsonBoundedResult } from "./lib/body";
+import { readBodyBounded, readJsonBoundedResult } from "./lib/body";
+import {
+  auditLockout,
+  checkAuthLockout,
+  clearAuthFailures,
+  clientIp,
+  lockoutResponse,
+  recordAuthFailure,
+} from "./lib/auth-limits";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 
 export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent };
@@ -198,6 +207,8 @@ export interface Env {
   TOKENLAB_API_KEY?: string;
   /** Daily prompt+completion token ceiling for chat and the connectivity probe. */
   AI_DAILY_TOKEN_BUDGET?: string;
+  /** Optional comma-separated origin allowlist for custom AI base URLs. */
+  ALLOWED_AI_ORIGINS?: string;
   /** R2 bucket for multi-channel media storage and presigned download links. */
   MEDIA_BUCKET?: R2Bucket;
   /** Cloudflare Queue for reliable asynchronous outbound webhook delivery. */
@@ -205,7 +216,7 @@ export interface Env {
   /** Cloudflare Workflow for multi-step execution with sleeping, retries and approvals. */
   FLOW_WORKFLOW?: Workflow<FlowWorkflowParams>;
   /**
-   * Admin bearer token. Comes from `.dev.vars` locally or `wrangler secret put`
+   * Admin bearer token. Comes from `.dev.vars` locally or `cf workers secrets update`
    * remotely; it is deliberately NOT in `[vars]`. When unset, `withAdmin` fails
    * closed with 401 (see the comment there).
    */
@@ -324,7 +335,7 @@ type DeviceHandler = (
  * Fail closed: if `ADMIN_TOKEN` is unset, every admin route answers 401. In local
  * dev without a non-dev token that means `wrangler dev` alone is not enough —
  * create `worker/.dev.vars` (see `.dev.vars.example`) or set the token with
- * `wrangler secret put ADMIN_TOKEN`.
+ * `cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
  *
  * Note: §8 defines the code set for the DEVICE protocol only, so an admin auth
  * failure uses its own body and keeps `err()` strictly within §8.
@@ -380,7 +391,7 @@ async function withAdmin(
  * negotiate this endpoint. It is the same credential the CLI holds, and the
  * `agent_tokens` table is what an OAuth front door would read anyway.
  */
-async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
+async function handleMcpRoute(req: Request, env: Env, pathname: string): Promise<Response> {
   const bearer = readBearer(req);
   if (bearer === null) return mcpChallenge(req, "missing bearer token");
 
@@ -399,15 +410,20 @@ async function handleMcpRoute(req: Request, env: Env): Promise<Response> {
 
   await recordTokenUse(env, token.id);
 
-  return handleStreamableMcp(req, env, {
+  const actor = {
     userId: null,
     label: `agent:${token.name}`,
-    role: "agent",
+    role: "agent" as const,
     canGrantOwner: false,
     agentTokenId: token.id,
     agentDeviceId: token.device_id,
     agentScopes: token.scopes,
-  });
+  };
+
+  if (pathname === "/v1/mcp") {
+    return handleMcpRequest(req, env, actor);
+  }
+  return handleStreamableMcp(req, env, actor);
 }
 
 /**
@@ -588,10 +604,10 @@ function recordDeviceContact(ctx: ExecutionContext, env: Env, deviceId: string):
         const now = Date.now();
         const [unarchived] = await env.DB.batch([
           env.DB.prepare(
-            `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL`
+            `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL AND revoked_at IS NULL`
           ).bind(deviceId),
           env.DB.prepare(
-            `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ?`
+            `UPDATE devices SET last_seen = ? WHERE device_id = ? AND last_seen < ? AND revoked_at IS NULL`
           ).bind(now, deviceId, now - 60_000),
           // The device answering is the condition clearing. Resolving here rather
           // than in the alert task means it happens on the first contact, not at
@@ -750,6 +766,7 @@ export default {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(payload.headers ?? {}) },
             body: typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {}),
+            redirect: "error",
             signal: AbortSignal.timeout(10_000),
           });
           if (!res.ok) {
@@ -819,8 +836,21 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
           (request.headers.get("Upgrade") ?? "").toLowerCase() !== "websocket" &&
           /\/streams\/[^/]+$/.test(requestPath);
         if (streamRead) {
-          const origin = isTrustedOrigin(request, env);
-          if (!origin.ok) return Response.json({ error: `agent_${origin.reason}` }, { status: 403 });
+          const originHeader = request.headers.get("Origin");
+          if (originHeader !== null) {
+            const origin = isTrustedOrigin(request, env);
+            if (!origin.ok) return Response.json({ error: `agent_${origin.reason}` }, { status: 403 });
+          } else {
+            const fetchSite = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
+            if (
+              fetchSite !== undefined &&
+              fetchSite !== "" &&
+              fetchSite !== "same-origin" &&
+              fetchSite !== "none"
+            ) {
+              return Response.json({ error: "agent_origin_untrusted" }, { status: 403 });
+            }
+          }
           const headers = new Headers(request.headers);
           if (request.headers.get("X-Dakflare-Client") === "cli") {
             const authorized = await withAdmin(
@@ -830,6 +860,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
             );
             if (!authorized.ok) return authorized;
             headers.delete("x-dakflare-actor");
+            headers.delete("x-dakflare-user-id");
             headers.set("x-dakflare-actor", machineActor().label);
             headers.set("x-dakflare-actor-role", machineActor().role);
             return new Request(request, { headers });
@@ -839,7 +870,9 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
           });
           if (!guard.ok) return guard.response;
           headers.delete("x-dakflare-actor");
-          headers.set("x-dakflare-actor", guard.user.id);
+          headers.delete("x-dakflare-user-id");
+          headers.set("x-dakflare-actor", guard.user.email);
+          headers.set("x-dakflare-user-id", guard.user.id);
           headers.set("x-dakflare-actor-role", guard.user.role);
           return new Request(request, { headers });
         }
@@ -867,7 +900,9 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         // value this Worker just proved.
         const headers = new Headers(request.headers);
         headers.delete("x-dakflare-actor");
-        headers.set("x-dakflare-actor", guard.user.id);
+        headers.delete("x-dakflare-user-id");
+        headers.set("x-dakflare-actor", guard.user.email);
+        headers.set("x-dakflare-user-id", guard.user.id);
         headers.set("x-dakflare-actor-role", guard.user.role);
         return new Request(request, { headers });
       };
@@ -904,7 +939,9 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     /* ---- Multi-Channel Webhooks (v7.0) -------------------------------- */
     if (pathname === "/v1/channels/telegram/webhook") {
       if (method !== "POST") return new Response("Method not allowed", { status: 405 });
-      const rawBody = await req.text();
+      const bounded = await readBodyBounded(req, MAX_BODY_BYTES);
+      if (!bounded.ok) return err("payload_too_large", 413);
+      const rawBody = bounded.text;
       const plugin = getChannelPlugin("telegram");
       if (!plugin) return Response.json({ error: "not_found" }, { status: 404 });
       const verified = await plugin.verifyWebhook(req, rawBody, env);
@@ -969,14 +1006,22 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         const token = url.searchParams.get("hub.verify_token");
         const challenge = url.searchParams.get("hub.challenge");
         const expectedToken = (env as unknown as Record<string, string | undefined>).WHATSAPP_VERIFY_TOKEN;
-        if (mode === "subscribe" && expectedToken && token === expectedToken) {
+        const enc = new TextEncoder();
+        if (
+          mode === "subscribe" &&
+          expectedToken &&
+          token !== null &&
+          timingSafeEqual(enc.encode(token), enc.encode(expectedToken))
+        ) {
           return new Response(challenge ?? "", { status: 200 });
         }
         return new Response("Forbidden", { status: 403 });
       }
 
       if (method === "POST") {
-        const rawBody = await req.text();
+        const bounded = await readBodyBounded(req, MAX_BODY_BYTES);
+        if (!bounded.ok) return err("payload_too_large", 413);
+        const rawBody = bounded.text;
         const plugin = getChannelPlugin("whatsapp");
         if (!plugin) return Response.json({ error: "not_found" }, { status: 404 });
         const verified = await plugin.verifyWebhook(req, rawBody, env);
@@ -1056,10 +1101,10 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     // session, DELETE ends it. `/mcp` is the spec path; `/v1/mcp` stays for the
     // tokens already deployed against it.
     if (
-      (method === "POST" || method === "GET" || method === "DELETE") &&
-      (pathname === "/v1/mcp" || pathname === "/mcp")
+      (method === "POST" && pathname === "/v1/mcp") ||
+      ((method === "POST" || method === "GET" || method === "DELETE") && pathname === "/mcp")
     ) {
-      return handleMcpRoute(req, env);
+      return handleMcpRoute(req, env, pathname);
     }
 
     /* ---- Better Auth: /api/auth/* ------------------------------------- */
@@ -1310,8 +1355,8 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     // caller could not already read from /v1/messages.
     const traceMatch = pathname.match(/^\/v1\/admin\/trace\/([^/]+)$/);
     if (method === "GET" && traceMatch) {
-      return withAdminAccess(req, env, "read", "read trace", (_actor) =>
-        handleTrace(env, traceMatch[1], url)
+      return withAdminAccess(req, env, "read", "read trace", (actor) =>
+        handleTrace(env, traceMatch[1], url, actor)
       );
     }
     if (method === "GET" && pathname === "/v1/admin/dlq") {
@@ -1460,9 +1505,19 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         handleRulesTest(req, env)
       );
     }
-    const ruleDeleteMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
-    if (method === "DELETE" && ruleDeleteMatch) {
-      const ruleId = decodeURIComponent(ruleDeleteMatch[1]);
+    const ruleMatch = pathname.match(/^\/v1\/admin\/rules\/([^/]+)$/);
+    if (method === "PUT" && ruleMatch) {
+      return withAdminAccess(req, env, "write", "save rules", (actor) =>
+        handleRulePut(req, env, ruleMatch[1], actor)
+      );
+    }
+    if (method === "DELETE" && ruleMatch) {
+      let ruleId: string;
+      try {
+        ruleId = decodeURIComponent(ruleMatch[1]);
+      } catch {
+        return err("bad_request", 400);
+      }
       return withAdminAccess(req, env, "write", "delete rules", (actor) =>
         handleRuleDelete(env, ruleId, actor)
       );
@@ -1512,6 +1567,12 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
         handleRulesPost(req, env, actor)
       );
     }
+    const v1RuleMatch = pathname.match(/^\/v1\/rules\/([^/]+)$/);
+    if (method === "PUT" && v1RuleMatch) {
+      return withAdminAccess(req, env, "write", "save rules", (actor) =>
+        handleRulePut(req, env, v1RuleMatch[1], actor)
+      );
+    }
     if (method === "POST" && pathname === "/v1/sms/send") {
       return withAdminAccess(req, env, "write", "send SMS", (actor) =>
         handleSend(req, env, actor)
@@ -1534,12 +1595,9 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
             { status: 404 }
           );
         }
-        let body: Record<string, unknown>;
-        try {
-          body = (await req.json()) as Record<string, unknown>;
-        } catch {
-          return Response.json({ error: "bad_request" }, { status: 400 });
-        }
+        const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+        if (!parsed.ok) return err(parsed.reason);
+        const body = parsed.value;
         const to = String(body.to || "");
         const messageBody = String(body.body || "");
         if (!to || !messageBody) {
@@ -1719,6 +1777,33 @@ async function runRetention(env: Env): Promise<void> {
     .bind(cutoff)
     .run();
 
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const proposalCutoff = nowMs - 86_400_000;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM extract_misses WHERE at < ?`).bind(cutoff),
+      env.DB.prepare(`DELETE FROM webhook_deliveries WHERE received_at < ?`).bind(cutoff),
+      env.DB.prepare(
+        `DELETE FROM session
+          WHERE (typeof("expiresAt") IN ('integer', 'real') AND "expiresAt" < ?1)
+             OR (typeof("expiresAt") = 'text' AND "expiresAt" < ?2)`
+      ).bind(nowMs, nowIso),
+      env.DB.prepare(
+        `DELETE FROM verification
+          WHERE (typeof("expiresAt") IN ('integer', 'real') AND "expiresAt" < ?1)
+             OR (typeof("expiresAt") = 'text' AND "expiresAt" < ?2)`
+      ).bind(nowMs, nowIso),
+      env.DB.prepare(`DELETE FROM invite WHERE expires_at < ?`).bind(cutoff),
+      env.DB.prepare(
+        `DELETE FROM approval_requests WHERE expires_at < ? AND state != 'PENDING'`
+      ).bind(cutoff),
+      env.DB.prepare(`DELETE FROM assistant_proposals WHERE expires_at < ?`).bind(proposalCutoff),
+    ]);
+  } catch {
+    // Non-fatal if an older database schema lacks one of the auxiliary tables.
+  }
+
   console.log(
     `[retention] days=${days} messages=${deleted} pairing_codes=${Number(
       codes.meta?.changes ?? 0
@@ -1734,6 +1819,8 @@ function unauthorized(): Response {
 
 /* ---- session cookie helpers ------------------------------------------ */
 
+const ADMIN_SESSION_KEYS = new Map<string, Promise<CryptoKey>>();
+
 /**
  * Session key derivation.
  *
@@ -1741,11 +1828,19 @@ function unauthorized(): Response {
  * `ADMIN_TOKEN` invalidates every outstanding session without a revocation list.
  * The label keeps the derivation domain-separated from any other use of the token.
  */
-async function sessionKey(adminToken: string): Promise<CryptoKey> {
-  const digest = await sha256(`dakflare-session-v1\n${adminToken}`);
-  return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, [
-    "sign",
-  ]);
+function sessionKey(adminToken: string): Promise<CryptoKey> {
+  let cached = ADMIN_SESSION_KEYS.get(adminToken);
+  if (cached === undefined) {
+    if (ADMIN_SESSION_KEYS.size >= 8) ADMIN_SESSION_KEYS.clear();
+    cached = (async () => {
+      const digest = await sha256(`dakflare-session-v1\n${adminToken}`);
+      return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, [
+        "sign",
+      ]);
+    })();
+    ADMIN_SESSION_KEYS.set(adminToken, cached);
+  }
+  return cached;
 }
 
 /**
@@ -1821,9 +1916,12 @@ function sessionCookie(value: string, maxAgeSeconds: number, secure: boolean): s
  * useful limiter key).
  */
 async function handleSessionCreate(req: Request, env: Env): Promise<Response> {
-  const ip = req.headers.get("CF-Connecting-IP") ?? "local";
+  const ip = clientIp(req);
+  const lockoutBefore = await checkAuthLockout(env, { email: "admin-session", ip });
+  if (lockoutBefore.locked) return lockoutResponse(lockoutBefore);
+
   if (env.ADMIN_LIMITER) {
-    const { success } = await env.ADMIN_LIMITER.limit({ key: `login:${ip}` });
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `login:${ip ?? "local"}` });
     if (!success) return err("rate_limited", 429);
   }
 
@@ -1838,10 +1936,19 @@ async function handleSessionCreate(req: Request, env: Env): Promise<Response> {
 
   const providedDigest = await sha256(token);
   const expectedDigest = await sha256(expected);
-  if (!timingSafeEqual(providedDigest, expectedDigest)) return unauthorized();
+  if (!timingSafeEqual(providedDigest, expectedDigest)) {
+    const after = await recordAuthFailure(env, { email: "admin-session", ip });
+    if (after.locked) {
+      await auditLockout(env, req, { email: "admin-session", factor: "admin_token", lockout: after });
+      return lockoutResponse(after);
+    }
+    return unauthorized();
+  }
+
+  await clearAuthFailures(env, "admin-session");
 
   // The only place ADMIN_TOKEN becomes a session. Rotation itself happens via
-  // `wrangler secret put` (a Worker cannot set its own secret), so this is the
+  // `cf workers secrets update` (a Worker cannot set its own secret), so this is the
   // auditable event: the machine credential was used (AUTH_PLAN §5, §8).
   await writeAudit(env, {
     action: "token.used",

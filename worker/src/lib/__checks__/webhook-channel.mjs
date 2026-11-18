@@ -122,6 +122,7 @@ const human = {
 
 const answers = [];
 const env = {
+  AGENT_RUNTIME: "on",
   DB: makeD1(),
   ADMIN_TOKEN: "check-secret",
   // Sealing uses its own key: a webhook secret must not be derivable from a
@@ -321,6 +322,13 @@ let hookId = "";
   );
   check("an oversized body is refused", oversized.status === 413, String(oversized.status));
   check("an oversized body runs no turn", answers.length === 1);
+}
+
+{
+  const runtimeOff = { ...env, AGENT_RUNTIME: "off" };
+  const body = JSON.stringify({ message: "runtime off" });
+  const offResponse = await handleWebhookIngress(ingress(body, "delivery-runtime-off"), runtimeOff, hookId);
+  check("AGENT_RUNTIME=off returns 503", offResponse.status === 503, String(offResponse.status));
 }
 
 {

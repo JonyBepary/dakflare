@@ -201,6 +201,7 @@ export type ConnectorState =
 
 export interface DeviceLifecycleInput {
   archived_at: number | null;
+  revoked_at?: number | null;
   ws_connected: boolean;
   last_seen_at: number | null;
   now?: number;
@@ -216,10 +217,18 @@ export function computeDeviceLifecycle(input: DeviceLifecycleInput): {
 } {
   const now = input.now ?? Date.now();
 
+  if (input.revoked_at !== undefined && input.revoked_at !== null) {
+    return {
+      state: "REVOKED",
+      substate: "device_revoked",
+      is_online: false,
+    };
+  }
+
   if (input.archived_at !== null) {
     return {
       state: "REVOKED",
-      substate: "device_archived_or_revoked",
+      substate: "device_archived",
       is_online: false,
     };
   }

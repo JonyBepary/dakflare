@@ -16,10 +16,10 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
  * ## Two configs on purpose
  *
  *   cloudflare.config.ts  ← `cf` (deploy, resources, `cf d1 migrations apply`)
- *   wrangler.toml         ← `wrangler dev`, `wrangler secret put`, `wrangler tail`
+ *   wrangler.toml         ← `wrangler dev`, `wrangler tail`
  *
- * `cf` cannot set a single secret yet and cannot stream logs; Cloudflare's own migration
- * guide says to run those with `npx wrangler`. Keeping wrangler.toml also preserves the
+ * `cf` sets secrets (`cf workers secrets update <NAME> --worker dakflare-worker --type secret_text`)
+ * but cannot stream logs (`npx wrangler tail`). Keeping wrangler.toml also preserves the
  * local-first conformance lane, which depends on `wrangler dev --local` with Durable Object
  * SQLite, hibernating sockets and alarms.
  *
@@ -95,7 +95,7 @@ export default defineConfig({
 			// `ai_settings.system1_model` (workers-ai or openai-compatible),
 			// changed from the console, not vars.
 			// TOKENLAB_* are env defaults used only while `ai_settings` has no row.
-			// The provider key is a Worker secret (`wrangler secret put`), never a
+			// The provider key is a Worker secret (`cf workers secrets update`), never a
 			// var or a D1 row: AI_PROVIDER_API_KEY, with AI_CHAT_API_KEY and
 			// TOKENLAB_API_KEY as fallbacks.
 			TOKENLAB_BASE_URL: bindings.text("https://api.tokenlab.amd.com/v1"),

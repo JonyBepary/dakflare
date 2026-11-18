@@ -699,23 +699,26 @@ export async function handleRotatePepper(req: Request, env: Env): Promise<Respon
       },
       ...meta,
     });
-    return json({
-      ok: true,
-      installed: false,
-      active_version: ring.active.version,
-      next_version: next.version,
-      // The exact secret value to install. The Worker cannot set its own secret.
-      ring: next.raw,
-      migrated: 0,
-      pending: counts.pending,
-      by_version: counts.by_version,
-      total: counts.total,
-      malformed: counts.malformed,
-      missing_pepper: counts.missing_pepper,
-      note:
-        "Install `ring` with `wrangler secret put AUTH_PEPPER`, then call this endpoint again. " +
-        "Rows re-wrap on their next sign-in; nothing is rewritten here.",
-    });
+    return Response.json(
+      {
+        ok: true,
+        installed: false,
+        active_version: ring.active.version,
+        next_version: next.version,
+        // The exact secret value to install. The Worker cannot set its own secret.
+        ring: next.raw,
+        migrated: 0,
+        pending: counts.pending,
+        by_version: counts.by_version,
+        total: counts.total,
+        malformed: counts.malformed,
+        missing_pepper: counts.missing_pepper,
+        note:
+          "Install `ring` with `cf workers secrets update AUTH_PEPPER`, then call this endpoint again. " +
+          "Rows re-wrap on their next sign-in; nothing is rewritten here.",
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   }
 
   if (installedVersion !== ring.active.version) {
@@ -741,19 +744,22 @@ export async function handleRotatePepper(req: Request, env: Env): Promise<Respon
     ...meta,
   });
 
-  return json({
-    ok: true,
-    installed: true,
-    active_version: ring.active.version,
-    ring: ring.raw,
-    migrated: 0,
-    pending: counts.pending,
-    by_version: counts.by_version,
-    total: counts.total,
-    malformed: counts.malformed,
-    missing_pepper: counts.missing_pepper,
-    note:
-      "Ring confirmed. Rows at older versions re-wrap on their next sign-in; " +
-      "drop the oldest pepper only when pending reaches 0.",
-  });
+  return Response.json(
+    {
+      ok: true,
+      installed: true,
+      active_version: ring.active.version,
+      ring: ring.raw,
+      migrated: 0,
+      pending: counts.pending,
+      by_version: counts.by_version,
+      total: counts.total,
+      malformed: counts.malformed,
+      missing_pepper: counts.missing_pepper,
+      note:
+        "Ring confirmed. Rows at older versions re-wrap on their next sign-in; " +
+        "drop the oldest pepper only when pending reaches 0.",
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }

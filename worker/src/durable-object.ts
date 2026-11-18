@@ -46,6 +46,7 @@ import {
   MAX_OUTBOUND_COMMANDS,
   type TimingConfig,
   MAX_IDEMPOTENCY_KEY_CHARS,
+  MAX_FCM_TOKEN_CHARS,
 } from "./lib/config";
 import { carriesRetiredAckKey, parseAcks } from "./lib/acks";
 import { SIGNATURE_BYTES, utf8Bytes } from "./auth/canonical";
@@ -92,12 +93,16 @@ interface CommandRow {
   idempotency_key: string | null;
   /** 1 or 2, or 0 for "no preference". */
   sim_slot: number;
+  /** Why a FAILED command failed; null until (and unless) it fails. */
+  error_code?: string | null;
+  error_message?: string | null;
 }
 
 interface ScheduledTaskRow {
   id: string;
   kind: string;
   payload: string;
+  run_at?: number;
   /** Consecutive failures. Past `MAX_TASK_ATTEMPTS` the row is dead-lettered. */
   attempts: number;
 }
@@ -149,6 +154,7 @@ const AUTO_RESPONSE_FUTURE_SKEW_MS = 60_000;
 
 export class DeviceGateway extends DurableObject<Env> {
   private timingsCache: TimingConfig | null = null;
+  private publicKeyCache: { spki: string; key: CryptoKey } | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -179,7 +185,9 @@ export class DeviceGateway extends DurableObject<Env> {
           idempotency_key TEXT,
           claim_token TEXT,
           lease_until INTEGER,
-          sim_slot   INTEGER NOT NULL DEFAULT 0
+          sim_slot   INTEGER NOT NULL DEFAULT 0,
+          error_code TEXT,
+          error_message TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_commands_state ON commands(state, priority, created_at);
 
@@ -247,6 +255,8 @@ export class DeviceGateway extends DurableObject<Env> {
         `ALTER TABLE commands ADD COLUMN claim_token TEXT`,
         `ALTER TABLE commands ADD COLUMN lease_until INTEGER`,
         `ALTER TABLE commands ADD COLUMN sim_slot INTEGER NOT NULL DEFAULT 0`,
+        `ALTER TABLE commands ADD COLUMN error_code TEXT`,
+        `ALTER TABLE commands ADD COLUMN error_message TEXT`,
       ]) {
         try {
           ctx.storage.sql.exec(statement);
@@ -262,6 +272,10 @@ export class DeviceGateway extends DurableObject<Env> {
       ctx.storage.sql.exec(
         `CREATE INDEX IF NOT EXISTS idx_commands_dispatch
            ON commands(state, lease_until, priority, created_at)`
+      );
+      ctx.storage.sql.exec(
+        `CREATE INDEX IF NOT EXISTS idx_commands_created
+           ON commands(created_at DESC, command_id DESC)`
       );
 
       // Hibernation-safe ping/pong: answered by the edge without waking the DO.
@@ -429,13 +443,20 @@ export class DeviceGateway extends DurableObject<Env> {
 
     let verified = false;
     try {
-      const publicKey = await crypto.subtle.importKey(
-        "spki",
-        base64ToBytes(deviceRows[0].public_key_spki) ?? new Uint8Array(0),
-        { name: "ECDSA", namedCurve: "P-256" },
-        false,
-        ["verify"]
-      );
+      const spki = deviceRows[0].public_key_spki;
+      let publicKey: CryptoKey;
+      if (this.publicKeyCache !== null && this.publicKeyCache.spki === spki) {
+        publicKey = this.publicKeyCache.key;
+      } else {
+        publicKey = await crypto.subtle.importKey(
+          "spki",
+          base64ToBytes(spki) ?? new Uint8Array(0),
+          { name: "ECDSA", namedCurve: "P-256" },
+          false,
+          ["verify"]
+        );
+        this.publicKeyCache = { spki, key: publicKey };
+      }
       // Workers' crypto.subtle.verify for ECDSA consumes RAW IEEE P1363
       // (`r || s`, 64 bytes) — not ASN.1 DER. §3.1 is the client's obligation.
       verified = await crypto.subtle.verify(
@@ -552,6 +573,7 @@ export class DeviceGateway extends DurableObject<Env> {
       Date.now()
     );
 
+    this.publicKeyCache = null;
     if (rotating) this.evictPreviousKeyHolder();
 
     return Response.json({ ok: true });
@@ -566,6 +588,7 @@ export class DeviceGateway extends DurableObject<Env> {
    * let the old holder keep operating.
    */
   private evictPreviousKeyHolder(): void {
+    this.publicKeyCache = null;
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.close(1000, "rekeyed");
@@ -594,6 +617,7 @@ export class DeviceGateway extends DurableObject<Env> {
    * nonces and the schedule have to go too, and every live socket closed.
    */
   private handleRevoke(): Response {
+    this.publicKeyCache = null;
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.close(1000, "revoked");
@@ -831,7 +855,9 @@ export class DeviceGateway extends DurableObject<Env> {
       return err("bad_request", 400);
     }
     const claimToken = typeof parsed.claim_token === "string" ? parsed.claim_token : undefined;
-    const applied = this.transition(commandId, status, claimToken);
+    const errorCode = typeof parsed.error_code === "string" ? parsed.error_code : undefined;
+    const errorMessage = typeof parsed.error_message === "string" ? parsed.error_message : undefined;
+    const applied = this.transition(commandId, status, claimToken, errorCode, errorMessage);
     return Response.json({ applied: applied ? 1 : 0, rejected: applied ? 0 : 1 });
   }
 
@@ -841,8 +867,16 @@ export class DeviceGateway extends DurableObject<Env> {
     const updates = Array.isArray(parsed.updates) ? parsed.updates : null;
     if (!updates) return err("bad_request", 400);
 
+    this.ensureOfflineWatch();
+
     let applied = 0;
     let rejected = 0;
+    const appliedUpdates: Array<{
+      command_id: string;
+      status: string;
+      error_code?: string;
+      error_message?: string;
+    }> = [];
     for (const entry of updates) {
       if (!entry || typeof entry !== "object") {
         rejected++;
@@ -856,11 +890,22 @@ export class DeviceGateway extends DurableObject<Env> {
       // `DISPATCHED` is reportable here too, and it is the one status that needs
       // the lease token, so the batch carries it when the device sends it.
       const claimToken = typeof row.claim_token === "string" ? row.claim_token : undefined;
-      if (this.transition(row.command_id, row.status, claimToken)) applied++;
-      else rejected++;
+      const errorCode = typeof row.error_code === "string" ? row.error_code : undefined;
+      const errorMessage = typeof row.error_message === "string" ? row.error_message : undefined;
+      if (this.transition(row.command_id, row.status, claimToken, errorCode, errorMessage)) {
+        applied++;
+        appliedUpdates.push({
+          command_id: row.command_id,
+          status: row.status,
+          ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+          ...(errorMessage !== undefined ? { error_message: errorMessage } : {}),
+        });
+      } else {
+        rejected++;
+      }
     }
     // §6.1: rejected transitions are successful no-ops, so this is still a 200.
-    return Response.json({ applied, rejected });
+    return Response.json({ applied, rejected, applied_updates: appliedUpdates });
   }
 
   private handleDeviceStatus(): Response {
@@ -892,8 +937,8 @@ export class DeviceGateway extends DurableObject<Env> {
 
     const commandRows = this.ctx.storage.sql
       .exec(
-        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at,
-                claim_token, lease_until, idempotency_key
+        `SELECT command_id, to_e164, priority, state, created_at, expires_at,
+                claim_token, lease_until, idempotency_key, error_code, error_message
            FROM commands WHERE command_id = ?`,
         id
       )
@@ -1008,7 +1053,8 @@ export class DeviceGateway extends DurableObject<Env> {
     if (!commandId) return err("bad_request", 400);
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
+        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at,
+                error_code, error_message
            FROM commands WHERE command_id = ?`,
         commandId
       )
@@ -1024,6 +1070,8 @@ export class DeviceGateway extends DurableObject<Env> {
         state: row.state,
         created_at: row.created_at,
         expires_at: row.expires_at,
+        error_code: row.error_code ?? null,
+        error_message: row.error_message ?? null,
       },
     });
   }
@@ -1041,7 +1089,8 @@ export class DeviceGateway extends DurableObject<Env> {
 
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at
+        `SELECT command_id, to_e164, body, priority, state, created_at, expires_at,
+                sim_slot, error_code, error_message
            FROM commands
           ORDER BY created_at DESC, command_id DESC
           LIMIT ?`,
@@ -1058,6 +1107,9 @@ export class DeviceGateway extends DurableObject<Env> {
         state: row.state,
         created_at: row.created_at,
         expires_at: row.expires_at,
+        sim_slot: Number(row.sim_slot ?? 0),
+        error_code: row.error_code ?? null,
+        error_message: row.error_message ?? null,
       })),
     });
   }
@@ -1072,30 +1124,58 @@ export class DeviceGateway extends DurableObject<Env> {
    * needs proof of ownership. A command that was never leased has no token at
    * all, so an ack for it is refused instead of trusted.
    */
-  private transition(commandId: string, targetStatus: string, claimToken?: string): boolean {
+  private transition(
+    commandId: string,
+    targetStatus: string,
+    claimToken?: string,
+    errorCode?: string,
+    errorMessage?: string
+  ): boolean {
     const allowed = ALLOWED_PREDECESSORS[targetStatus];
     if (!allowed || allowed.length === 0) return false;
 
+    const assignments = ["state = ?"];
+    const params: unknown[] = [targetStatus];
+
+    // The phone's failure reason is written in the same UPDATE as the state, so a
+    // reader never sees FAILED without it. Other transitions leave the columns
+    // untouched; they are only ever set on the way into FAILED.
+    if (targetStatus === "FAILED") {
+      assignments.push("error_code = ?", "error_message = ?");
+      params.push(errorCode ?? null, errorMessage ?? null);
+    }
+
     const guards = ["command_id = ?", `state IN (${allowed.map(() => "?").join(", ")})`];
-    const params: unknown[] = [targetStatus, commandId, ...allowed];
+    params.push(commandId, ...allowed);
 
     if (targetStatus === "DISPATCHED") {
       if (typeof claimToken !== "string" || claimToken === "") return false;
       guards.push("claim_token = ?");
       params.push(claimToken);
+    } else if (typeof claimToken === "string" && claimToken !== "") {
+      guards.push("(claim_token IS NULL OR claim_token = ?)");
+      params.push(claimToken);
+    }
+    if (targetStatus === "EXPIRED") {
+      guards.push("expires_at <= ?");
+      params.push(Date.now());
     }
 
     const cursor = this.ctx.storage.sql.exec(
-      `UPDATE commands SET state = ? WHERE ${guards.join(" AND ")}`,
+      `UPDATE commands SET ${assignments.join(", ")} WHERE ${guards.join(" AND ")}`,
       ...params
     );
     if (cursor.rowsWritten === 0) return false;
 
     // A settled transition no longer needs its timers. `LEASED` is the only state
     // that keeps them, and `PENDING` is the state a lease was released into.
-    // Settled terminal states also cancel background expiry alarms to prevent redundant wake-ups.
+    // `SENT` cannot expire either (`PENDING|LEASED|DISPATCHED -> EXPIRED`), so
+    // cancel expiry alarms on `SENT` and terminal states alike.
     if (targetStatus !== "LEASED" && targetStatus !== "PENDING") {
-      this.cancelLeaseTimers(commandId, TERMINAL_COMMAND_STATES.has(targetStatus));
+      this.cancelLeaseTimers(
+        commandId,
+        TERMINAL_COMMAND_STATES.has(targetStatus) || targetStatus === "SENT"
+      );
     }
     this.broadcastState(commandId, targetStatus);
     return true;
@@ -1257,7 +1337,12 @@ export class DeviceGateway extends DurableObject<Env> {
     const attachment = readAttachment(ws);
 
     if (data.op === "hello") {
-      if (typeof data.fcm_token === "string" && data.fcm_token !== "" && attachment.deviceId) {
+      if (
+        typeof data.fcm_token === "string" &&
+        data.fcm_token !== "" &&
+        data.fcm_token.length <= MAX_FCM_TOKEN_CHARS &&
+        attachment.deviceId
+      ) {
         this.ctx.storage.sql.exec(
           `UPDATE devices SET fcm_token = ?, updated_at = ? WHERE device_id = ?`,
           data.fcm_token,
@@ -1494,19 +1579,25 @@ export class DeviceGateway extends DurableObject<Env> {
       // backstop, so a quiet object does not accumulate expired nonces forever.
       this.ctx.storage.sql.exec(`DELETE FROM nonces WHERE exp < ?`, Date.now());
 
-      const cutoff = Date.now() - this.timings.retentionDays * 86_400_000;
+      const now = Date.now();
+      const cutoff = now - this.timings.retentionDays * 86_400_000;
       const pruned = this.ctx.storage.sql.exec(
-        `DELETE FROM commands WHERE state IN ('DELIVERED','FAILED','EXPIRED') AND created_at < ?`,
-        cutoff
+        `DELETE FROM commands
+          WHERE (state IN ('DELIVERED','FAILED','EXPIRED') AND created_at < ?)
+             OR (state = 'SENT' AND created_at < ? AND expires_at < ?)`,
+        cutoff,
+        cutoff,
+        now
       );
       if (pruned.rowsWritten > 0) {
         console.log(`[retention] pruned ${pruned.rowsWritten} terminal commands`);
       }
+      this.ctx.storage.sql.exec(`DELETE FROM dead_letters WHERE failed_at < ?`, cutoff);
 
       const due = this.ctx.storage.sql
         .exec(
-          `SELECT id, kind, payload FROM scheduled_tasks WHERE run_at <= ? ORDER BY run_at ASC`,
-          Date.now()
+          `SELECT id, kind, payload, run_at FROM scheduled_tasks WHERE run_at <= ? ORDER BY run_at ASC`,
+          now
         )
         .toArray() as unknown as ScheduledTaskRow[];
 
@@ -1546,9 +1637,17 @@ export class DeviceGateway extends DurableObject<Env> {
           continue;
         }
         // A task that rescheduled itself has already replaced its own row; only
-        // completed work is dequeued.
+        // completed work is dequeued (match both id and snapshotted run_at).
         if (outcome === "consumed") {
-          this.ctx.storage.sql.exec(`DELETE FROM scheduled_tasks WHERE id = ?`, task.id);
+          if (typeof task.run_at === "number") {
+            this.ctx.storage.sql.exec(
+              `DELETE FROM scheduled_tasks WHERE id = ? AND run_at = ?`,
+              task.id,
+              task.run_at
+            );
+          } else {
+            this.ctx.storage.sql.exec(`DELETE FROM scheduled_tasks WHERE id = ?`, task.id);
+          }
         }
       }
     } finally {

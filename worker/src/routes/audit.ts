@@ -25,6 +25,8 @@ export async function handleAuditList(env: Env, requestUrl: URL): Promise<Respon
 
   const action = requestUrl.searchParams.get("action");
   const actor = requestUrl.searchParams.get("actor");
+  const category = requestUrl.searchParams.get("category")?.trim().toLowerCase() ?? "";
+  const query = requestUrl.searchParams.get("q")?.trim() ?? "";
   const beforeRaw = Number(requestUrl.searchParams.get("before"));
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
 
@@ -37,6 +39,25 @@ export async function handleAuditList(env: Env, requestUrl: URL): Promise<Respon
   if (actor !== null && actor !== "") {
     where.push(`(actor_user = ? OR actor_label = ?)`);
     binds.push(actor, actor);
+  }
+  if (category !== "") {
+    const categoryClauses: Record<string, string> = {
+      auth: `(action LIKE 'auth.%' OR action LIKE 'sign_in.%' OR action LIKE 'totp.%' OR action LIKE 'password.%' OR action LIKE 'invite.%' OR action LIKE 'magic.%' OR action LIKE 'user.%')`,
+      device: `action LIKE 'device.%'`,
+      message: `(action LIKE 'message.%' OR action LIKE 'sms.%' OR action LIKE 'channel.%')`,
+      automation: `(action LIKE 'rule.%' OR action LIKE 'workflow.%' OR action LIKE 'workflows.%' OR action LIKE 'flow.%')`,
+      agent: `(action LIKE 'agent.%' OR action LIKE 'agent_token.%' OR action LIKE 'authority.%' OR action LIKE 'ai.%' OR action LIKE 'webhook.%' OR action LIKE 'mcp.%')`,
+      security: `(action LIKE 'pepper.%' OR action LIKE 'totp.%' OR action LIKE 'auth.lockout%' OR action LIKE 'authority.%' OR action LIKE 'agent_token.%' OR action LIKE 'password.%')`,
+    };
+    const clause = categoryClauses[category];
+    if (clause !== undefined) where.push(clause);
+  }
+  if (query !== "") {
+    const escaped = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+    where.push(
+      `(action LIKE ? ESCAPE '\\' OR COALESCE(subject, '') LIKE ? ESCAPE '\\' OR COALESCE(actor_label, '') LIKE ? ESCAPE '\\')`
+    );
+    binds.push(escaped, escaped, escaped);
   }
   if (before !== null) {
     where.push(`at < ?`);

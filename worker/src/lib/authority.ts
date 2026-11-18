@@ -598,6 +598,8 @@ export async function findLiveGrant(
   const rows = await env.DB.prepare(
     `SELECT ${GRANT_COLUMNS} FROM authority_grants
       WHERE agent_token_id = ? AND scope = ? AND revoked_at IS NULL AND expires_at > ?
+        AND (json_extract(target_json, '$.max_uses') IS NULL
+             OR use_count < CAST(json_extract(target_json, '$.max_uses') AS INTEGER))
       ORDER BY expires_at DESC
       LIMIT 50`
   )

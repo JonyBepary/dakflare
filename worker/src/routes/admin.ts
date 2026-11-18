@@ -55,18 +55,20 @@ export async function handleDeviceRevoke(
   // phone's history). Messages stay: they are the fleet's delivery record.
   const [d1] = await env.DB.batch([
     env.DB.prepare(
-      `UPDATE devices SET public_key = '', fcm_token = NULL, revoked_at = ?, archived_at = NULL WHERE device_id = ?`
+      `UPDATE devices SET public_key = '', fcm_token = NULL, revoked_at = COALESCE(revoked_at, ?), archived_at = NULL WHERE device_id = ? AND revoked_at IS NULL`
     ).bind(Date.now(), deviceId),
     env.DB.prepare(`DELETE FROM alerts WHERE device_id = ?`).bind(deviceId),
     env.DB.prepare(`DELETE FROM flow_runs WHERE device_id = ?`).bind(deviceId),
   ]);
 
-  await writeAudit(env, {
-    action: "device.revoked",
-    actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
-    subject: deviceId,
-    detail: { tombstoned: true },
-  });
+  if (Number(d1.meta?.changes ?? 0) > 0) {
+    await writeAudit(env, {
+      action: "device.revoked",
+      actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
+      subject: deviceId,
+      detail: { tombstoned: true },
+    });
+  }
 
   return Response.json({ ok: true, tombstoned: true });
 }
@@ -116,12 +118,12 @@ async function setDeviceArchived(
 
   const result = archived
     ? await env.DB.prepare(
-        `UPDATE devices SET archived_at = ? WHERE device_id = ? AND archived_at IS NULL`
+        `UPDATE devices SET archived_at = ? WHERE device_id = ? AND archived_at IS NULL AND revoked_at IS NULL`
       )
         .bind(Date.now(), deviceId)
         .run()
     : await env.DB.prepare(
-        `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL`
+        `UPDATE devices SET archived_at = NULL WHERE device_id = ? AND archived_at IS NOT NULL AND revoked_at IS NULL`
       )
         .bind(deviceId)
         .run();
@@ -130,10 +132,11 @@ async function setDeviceArchived(
 
   // Read back rather than trusting the input: an archive of an already-archived
   // device keeps the ORIGINAL timestamp, and the caller should see that value.
-  const row = await env.DB.prepare(`SELECT archived_at FROM devices WHERE device_id = ?`)
+  const row = await env.DB.prepare(`SELECT archived_at, revoked_at FROM devices WHERE device_id = ?`)
     .bind(deviceId)
-    .first<{ archived_at: number | null }>();
+    .first<{ archived_at: number | null; revoked_at: number | null }>();
   if (!row) return Response.json({ error: "not_found" }, { status: 404 });
+  if (row.revoked_at !== null) return Response.json({ error: "device_revoked" }, { status: 409 });
 
   if (changed) {
     await writeAudit(env, {

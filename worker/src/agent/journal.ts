@@ -60,7 +60,7 @@ export function canonicalJson(value: unknown): string {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
-async function sha256Hex(text: string): Promise<string> {
+export async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -82,6 +82,21 @@ export class Journal {
 
   currentTurn(): { session: string; turn: number } {
     return { session: this.#session, turn: this.#turn };
+  }
+
+  /** Return a concurrency-safe handle bound to one `(session, turn)`. */
+  forTurn(session: string, turn: number): Journal {
+    return {
+      setTurn: () => {},
+      currentTurn: () => ({ session, turn }),
+      deriveKey: (callId: string) => this.deriveKey(callId),
+      nextTurn: (s: string) => this.nextTurn(s),
+      forTurn: (s: string, t: number) => this.forTurn(s, t),
+      reserve: (input: ReserveInput) => this.#reserveFor(session, turn, input),
+      complete: (callId: string, result: ToolResult) => this.complete(callId, result),
+      fail: (callId: string, result: ToolResult) => this.fail(callId, result),
+      finishTurn: (s: string, t: number) => this.finishTurn(s, t),
+    } as unknown as Journal;
   }
 
   /**
@@ -110,10 +125,12 @@ export class Journal {
    * refusal names that rather than pretending the call is new.
    */
   async reserve(input: ReserveInput): Promise<Reservation> {
+    return this.#reserveFor(this.#session, this.#turn, input);
+  }
+
+  async #reserveFor(session: string, turn: number, input: ReserveInput): Promise<Reservation> {
     const argsHash = await sha256Hex(canonicalJson(input.args));
     const now = Date.now();
-    const session = this.#session;
-    const turn = this.#turn;
 
     const write = (): CallRow | undefined => {
       const existing = this.#storage.sql

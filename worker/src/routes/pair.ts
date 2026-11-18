@@ -121,12 +121,15 @@ export async function handleAdminPairingCode(req: Request, env: Env): Promise<Re
     ).bind(pairingCode, expiresAt, deviceId, purpose),
   ]);
 
-  return Response.json({
-    pairing_code: pairingCode,
-    expires_at: expiresAt,
-    device_id: deviceId,
-    purpose,
-  });
+  return Response.json(
+    {
+      pairing_code: pairingCode,
+      expires_at: expiresAt,
+      device_id: deviceId,
+      purpose,
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /** `POST /v1/device/pair` — bootstrap a device (authenticated by the pairing code alone). */
@@ -425,8 +428,10 @@ export async function handleDevicesList(env: Env, requestUrl: URL): Promise<Resp
 
   const devices = rawDevices.map((d) => ({
     ...d,
+    fcm_token: d.fcm_token ? "present" : null,
     lifecycle: computeDeviceLifecycle({
       archived_at: d.archived_at,
+      revoked_at: d.revoked_at,
       ws_connected: false,
       last_seen_at: d.last_seen,
     }),

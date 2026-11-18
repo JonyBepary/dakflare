@@ -49,6 +49,24 @@ export async function createSessionForUser(
   };
 }
 
+const SESSION_SIGN_KEYS = new Map<string, Promise<CryptoKey>>();
+
+function getSessionSignKey(secret: string): Promise<CryptoKey> {
+  let cached = SESSION_SIGN_KEYS.get(secret);
+  if (cached === undefined) {
+    if (SESSION_SIGN_KEYS.size >= 8) SESSION_SIGN_KEYS.clear();
+    cached = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    SESSION_SIGN_KEYS.set(secret, cached);
+  }
+  return cached;
+}
+
 /**
  * `<name>=<signed value>; Max-Age=…` — the attributes come from the live auth
  * context, never from a literal here.
@@ -63,13 +81,7 @@ export async function signedCookieHeader(
   const secret = env.BETTER_AUTH_SECRET;
   if (secret === undefined || secret === "") return null;
 
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const key = await getSessionSignKey(secret);
   const signature = new Uint8Array(
     await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(token))
   );

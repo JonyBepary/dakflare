@@ -17,6 +17,24 @@ import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 
 const WINDOW_DURATION_MS = 24 * 60 * 60 * 1000;
 
+const WHATSAPP_VERIFY_KEYS = new Map<string, Promise<CryptoKey>>();
+
+function getWhatsAppVerifyKey(secret: string): Promise<CryptoKey> {
+  let cached = WHATSAPP_VERIFY_KEYS.get(secret);
+  if (cached === undefined) {
+    if (WHATSAPP_VERIFY_KEYS.size >= 8) WHATSAPP_VERIFY_KEYS.clear();
+    cached = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    WHATSAPP_VERIFY_KEYS.set(secret, cached);
+  }
+  return cached;
+}
+
 export class WhatsAppCloudChannelPlugin implements ChannelPlugin {
   readonly id = "builtin:whatsapp";
   readonly name = "WhatsApp Business Cloud API";
@@ -31,13 +49,7 @@ export class WhatsAppCloudChannelPlugin implements ChannelPlugin {
     if (expectedHex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(expectedHex)) return false;
 
     const enc = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"]
-    );
+    const key = await getWhatsAppVerifyKey(secret);
 
     const sigBytes = new Uint8Array(
       expectedHex.match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) ?? []

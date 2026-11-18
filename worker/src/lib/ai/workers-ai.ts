@@ -153,9 +153,28 @@ function readUsage(raw: unknown): WorkersAiUsage | undefined {
 function inputMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
   return messages.map((message) => {
     if (message.role === "tool") {
-      // Workers AI's `RoleScopedChatInput` has role "tool" and an optional
-      // `name`; it has no `tool_call_id` field.
-      return { role: "tool", content: message.content, name: message.name ?? "" };
+      // Workers AI's `RoleScopedChatInput` supports role "tool", optional `name`,
+      // and OpenAI-compatible models also read `tool_call_id`.
+      return {
+        role: "tool",
+        content: message.content,
+        name: message.name ?? "",
+        ...(message.toolCallId !== undefined ? { tool_call_id: message.toolCallId } : {}),
+      };
+    }
+    if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: message.content,
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.name,
+            arguments: call.arguments,
+          },
+        })),
+      };
     }
     return { role: message.role, content: message.content };
   });
@@ -267,10 +286,46 @@ export function createWorkersAiAdapter(
           return;
         }
         if (parsed === null || typeof parsed !== "object") return;
-        const record = parsed as WorkersAiResult;
+        const record = parsed as WorkersAiResult & {
+          choices?: Array<{ delta?: { content?: unknown; tool_calls?: unknown } }>;
+        };
         if (typeof record.response === "string" && record.response !== "") {
           text += record.response;
           onEvent({ type: "token", text: record.response });
+        }
+        const delta = record.choices?.[0]?.delta;
+        if (delta && typeof delta === "object") {
+          if (typeof delta.content === "string" && delta.content !== "") {
+            text += delta.content;
+            onEvent({ type: "token", text: delta.content });
+          }
+          if (Array.isArray(delta.tool_calls)) {
+            delta.tool_calls.forEach((rawEntry, index) => {
+              if (rawEntry === null || typeof rawEntry !== "object") return;
+              const entry = rawEntry as {
+                index?: unknown;
+                id?: unknown;
+                function?: { name?: unknown; arguments?: unknown };
+              };
+              const callIndex =
+                typeof entry.index === "number" && Number.isInteger(entry.index) && entry.index >= 0
+                  ? entry.index
+                  : index;
+              while (accumulated.length <= callIndex) {
+                accumulated.push({ id: `call_${accumulated.length}`, name: "", arguments: "" });
+              }
+              const target = accumulated[callIndex];
+              if (typeof entry.id === "string" && entry.id !== "") target.id = entry.id;
+              if (entry.function && typeof entry.function === "object") {
+                if (typeof entry.function.name === "string" && entry.function.name !== "") {
+                  target.name = entry.function.name;
+                }
+                if (typeof entry.function.arguments === "string") {
+                  target.arguments += entry.function.arguments;
+                }
+              }
+            });
+          }
         }
         const chunkUsage = readUsage(parsed);
         if (chunkUsage !== undefined) usage = chunkUsage;

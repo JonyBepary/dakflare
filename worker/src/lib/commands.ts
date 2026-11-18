@@ -17,6 +17,7 @@ export interface OutboundCommandInput {
   body: string;
   priority: string;
   expiresAt: number;
+  simSlot?: number;
   /**
    * Dedupe key. When the Durable Object already has a command for this key it
    * returns that command instead of creating a second one, and `replayed` says
@@ -58,6 +59,7 @@ export async function enqueueOutboundCommand(
         body: command.body,
         priority: command.priority,
         expires_at: command.expiresAt,
+        sim_slot: command.simSlot ?? 0,
         idempotency_key: command.idempotencyKey ?? null,
       }),
     });
@@ -105,20 +107,32 @@ export async function persistOutboundMessage(
   deviceId: string,
   commandId: string,
   to: string,
-  body: string
+  body: string,
+  channel = "sms"
 ): Promise<void> {
   try {
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, device_id, local_id, direction, peer, body, received_at, auto_reply)
-       VALUES (?, ?, ?, 'out', ?, ?, ?, 0)
+         (id, device_id, local_id, direction, peer, body, received_at, auto_reply, channel)
+       VALUES (?, ?, ?, 'out', ?, ?, ?, 0, ?)
        ON CONFLICT(device_id, local_id) DO NOTHING`
     )
-      .bind(commandId, deviceId, commandId, to, body, Date.now())
+      .bind(commandId, deviceId, commandId, to, body, Date.now(), channel)
       .run();
   } catch (error) {
     // The command is already queued in the DO; a bookkeeping failure must not
     // turn a successful send into a 500.
     console.error(`[command] outbound message persist failed: ${String(error)}`);
   }
+}
+
+const RE_OTP_PIN =
+  /(?:\b(?:otp|pin|passcode|secret\s+code|auth(?:entication)?\s+code|verification\s+code|security\s+code|one[\s-]time\s+password)\b|ওটিপি|গোলাপী\s*পিন|গোপন\s*(?:নম্বর|পিন)|ভেরিফিকেশন\s*(?:কোড)?|সিকিউরিটি\s*কোড|\bপিন\b)/iu;
+
+/** Detect sensitive OTP or PIN bodies that must never trigger automations or webhooks. */
+export function isOtpOrPinMessage(rawBody: string): boolean {
+  const normalized = (rawBody || "")
+    .normalize("NFKC")
+    .replace(/[\u09E6-\u09EF]/g, (ch) => String(ch.charCodeAt(0) - 0x09e6));
+  return RE_OTP_PIN.test(normalized);
 }

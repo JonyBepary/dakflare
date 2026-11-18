@@ -13,6 +13,7 @@
 import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { parseAcks } from "../lib/acks";
+import { MAX_FCM_TOKEN_CHARS } from "../lib/config";
 import { readPending } from "./incoming";
 
 export async function handlePoll(
@@ -37,7 +38,11 @@ export async function handlePoll(
   if (acks === null) return err("bad_request", 400);
 
   const fcmToken =
-    typeof data.fcm_token === "string" && data.fcm_token !== "" ? data.fcm_token : null;
+    typeof data.fcm_token === "string" &&
+    data.fcm_token !== "" &&
+    data.fcm_token.length <= MAX_FCM_TOKEN_CHARS
+      ? data.fcm_token
+      : null;
 
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
 
@@ -47,6 +52,17 @@ export async function handlePoll(
       headers: { "Content-Type": "application/json", "X-Device-Id": deviceId },
       body: JSON.stringify({ acks, fcm_token: fcmToken }),
     });
+    if (fcmToken !== null) {
+      try {
+        await env.DB.prepare(
+          `UPDATE devices SET fcm_token = ? WHERE device_id = ? AND revoked_at IS NULL AND (fcm_token IS NULL OR fcm_token != ?)`
+        )
+          .bind(fcmToken, deviceId, fcmToken)
+          .run();
+      } catch {
+        // Non-fatal D1 mirror; DO owns wake token.
+      }
+    }
   }
 
   const commands = await readPending(stub);

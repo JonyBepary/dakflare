@@ -346,55 +346,115 @@ export function validateIr(raw: unknown): IrValidation {
 
 type TemplateSink = Array<{ name: string; index: number }>;
 
-export function isBlockedWebhookHost(url: string): boolean {
-  if (!url.startsWith("https://")) return true;
-  const rest = url.slice("https://".length);
-  const hostPart = rest.split(/[/:?#]/)[0].toLowerCase().trim();
-  if (hostPart === "") return true;
+function ipv4OctetsFromNormalized(hostname: string): [number, number, number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+  if (!m) return null;
+  const parts = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return [parts[0], parts[1], parts[2], parts[3]];
+}
 
-  // Localhost and internal domain suffixes
+function isPrivateIpv4Octets(a: number, b: number, c: number): boolean {
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true; // 192.0.0.0/24, 192.0.2.0/24
+  if (a === 192 && b === 88 && c === 99) return true; // 192.88.99.0/24 deprecated 6to4
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 TEST-NET-3
+  if (a >= 224) return true; // multicast & reserved (224.0.0.0/4+)
+  return false;
+}
+
+export function isLoopbackHostname(rawHostname: string): boolean {
+  const clean = rawHostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "").split("%")[0];
+  if (clean === "localhost" || clean.endsWith(".localhost") || clean === "::1" || clean === "0:0:0:0:0:0:0:1") {
+    return true;
+  }
+  const octets = ipv4OctetsFromNormalized(clean);
+  if (octets && octets[0] === 127) return true;
+  if (clean === "::ffff:7f00:1" || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(clean)) return true;
+  return false;
+}
+
+export function isPrivateOrInternalHost(rawHostname: string): boolean {
+  const host = rawHostname.toLowerCase().trim().replace(/\.+$/, "");
+  if (host === "") return true;
+
+  // Reject single-label non-public integer/hex hosts or explicit octal components.
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (bare === "" || bare.includes("@")) return true;
+
   if (
-    hostPart === "localhost" ||
-    hostPart.endsWith(".localhost") ||
-    hostPart.endsWith(".internal") ||
-    hostPart.endsWith(".local")
+    bare === "localhost" ||
+    bare.endsWith(".localhost") ||
+    bare.endsWith(".internal") ||
+    bare.endsWith(".local")
   ) {
     return true;
   }
 
-  // IPv4 check
-  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostPart);
-  if (ipv4Match) {
-    const a = Number(ipv4Match[1]);
-    const b = Number(ipv4Match[2]);
-    const c = Number(ipv4Match[3]);
-    const d = Number(ipv4Match[4]);
-    if (a > 255 || b > 255 || c > 255 || d > 255) return true;
-    if (a === 0) return true; // 0.0.0.0/8
-    if (a === 10) return true; // 10.0.0.0/8
-    if (a === 127) return true; // 127.0.0.0/8
-    if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local / Metadata
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 192 && b === 168) return true; // 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 Carrier CGNAT
-    return false;
+  if (/^(?:\d+|0x[0-9a-f]+)$/i.test(bare)) return true;
+
+  const octets = ipv4OctetsFromNormalized(bare);
+  if (octets) {
+    return isPrivateIpv4Octets(octets[0], octets[1], octets[2]);
   }
 
-  // IPv6 bracketed check
-  if (hostPart.startsWith("[") && hostPart.endsWith("]")) {
-    const inner = hostPart.slice(1, -1);
+  // IPv6 normalized form inside URL brackets
+  if (host.startsWith("[") && host.endsWith("]")) {
+    const v6 = bare.split("%")[0].toLowerCase();
     if (
-      inner === "::1" ||
-      inner === "0:0:0:0:0:0:0:1" ||
-      inner.startsWith("fe80:") ||
-      inner.startsWith("fc00:") ||
-      inner.startsWith("fd")
+      v6 === "::" ||
+      v6 === "::1" ||
+      v6 === "0:0:0:0:0:0:0:0" ||
+      v6 === "0:0:0:0:0:0:0:1" ||
+      v6.startsWith("fc") ||
+      v6.startsWith("fd") ||
+      v6.startsWith("fe8") ||
+      v6.startsWith("fe9") ||
+      v6.startsWith("fea") ||
+      v6.startsWith("feb") ||
+      v6.startsWith("ff")
     ) {
+      return true;
+    }
+    if (v6.startsWith("::ffff:")) {
+      const suffix = v6.slice("::ffff:".length);
+      const dotted = ipv4OctetsFromNormalized(suffix);
+      if (dotted) return isPrivateIpv4Octets(dotted[0], dotted[1], dotted[2]);
+      const hexGroups = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(suffix);
+      if (hexGroups) {
+        const hi = parseInt(hexGroups[1], 16);
+        const lo = parseInt(hexGroups[2], 16);
+        const a = (hi >> 8) & 0xff;
+        const b = hi & 0xff;
+        const c = (lo >> 8) & 0xff;
+        return isPrivateIpv4Octets(a, b, c);
+      }
       return true;
     }
   }
 
   return false;
+}
+
+export function isBlockedWebhookHost(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return true;
+  }
+  if (parsed.protocol !== "https:") return true;
+  if (parsed.username !== "" || parsed.password !== "") return true;
+  if (!parsed.hostname) return true;
+  return isPrivateOrInternalHost(parsed.hostname);
 }
 
 function validateNodeData(

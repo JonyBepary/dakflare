@@ -387,7 +387,10 @@ for (const key of ["crons", "observability"]) {
 // Checked unconditionally: a shape error is not drift, and the earlier placement
 // inside this branch meant it was never evaluated on a clean run, which is exactly
 // when it is needed.
-const exportIssues = exportProblems(path.join(ROOT, "wrangler.toml"));
+const exportIssues = [
+  ...exportProblems(path.join(ROOT, "wrangler.toml")),
+  ...exportProblems(path.join(ROOT, "wrangler.template.toml")),
+];
 
 // Workflows must be the same set in every config, or one deployment path silently
 // lacks a binding the code uses.

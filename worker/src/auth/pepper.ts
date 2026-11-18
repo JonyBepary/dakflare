@@ -127,7 +127,7 @@ export function pepperHmacKey(ring: PepperRing, entry: PepperEntry): Promise<Cry
  *
  * `nextVersion` is max+1 rather than count+1, so a ring that skipped a number
  * (v5,v3) does not accidentally reuse one. The value is returned as the exact
- * string an operator puts in `wrangler secret put AUTH_PEPPER`; the Worker
+ * string an operator sets via `cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text`; the Worker
  * itself can never write its own secret, which is why rotation is a two-step
  * operation (see `auth/password-routes.ts`).
  */

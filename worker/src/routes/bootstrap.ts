@@ -82,5 +82,8 @@ export async function handleBootstrap(req: Request, env: Env): Promise<Response>
   });
 
   // The raw token appears here and nowhere else, ever.
-  return Response.json({ ok: true, id, email, role: "owner", expires_at: expiresAt, token });
+  return Response.json(
+    { ok: true, id, email, role: "owner", expires_at: expiresAt, token },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }

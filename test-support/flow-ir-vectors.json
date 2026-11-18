@@ -849,5 +849,69 @@
         }
       ]
     }
+  },
+  {
+    "name": "webhook rejects userinfo SSRF bypass",
+    "ok": false,
+    "contains": "loopback, private, or metadata",
+    "graph": {
+      "nodes": [
+        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+        { "id": "h1", "type": "webhook", "data": { "url": "https://safe.example@127.0.0.1/hook", "body": "leak" } },
+        { "id": "e1", "type": "stop", "data": {} }
+      ],
+      "edges": [
+        { "id": "a", "source": "t1", "target": "h1" },
+        { "id": "b", "source": "h1", "target": "e1" }
+      ]
+    }
+  },
+  {
+    "name": "webhook rejects IPv4-mapped IPv6 loopback",
+    "ok": false,
+    "contains": "loopback, private, or metadata",
+    "graph": {
+      "nodes": [
+        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+        { "id": "h1", "type": "webhook", "data": { "url": "https://[::ffff:127.0.0.1]/hook", "body": "leak" } },
+        { "id": "e1", "type": "stop", "data": {} }
+      ],
+      "edges": [
+        { "id": "a", "source": "t1", "target": "h1" },
+        { "id": "b", "source": "h1", "target": "e1" }
+      ]
+    }
+  },
+  {
+    "name": "webhook rejects unspecified IPv6 and trailing-dot localhost",
+    "ok": false,
+    "contains": "loopback, private, or metadata",
+    "graph": {
+      "nodes": [
+        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+        { "id": "h1", "type": "webhook", "data": { "url": "https://[::]/hook", "body": "leak" } },
+        { "id": "e1", "type": "stop", "data": {} }
+      ],
+      "edges": [
+        { "id": "a", "source": "t1", "target": "h1" },
+        { "id": "b", "source": "h1", "target": "e1" }
+      ]
+    }
+  },
+  {
+    "name": "webhook rejects integer IPv4 SSRF bypass",
+    "ok": false,
+    "contains": "loopback, private, or metadata",
+    "graph": {
+      "nodes": [
+        { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+        { "id": "h1", "type": "webhook", "data": { "url": "https://2130706433/hook", "body": "leak" } },
+        { "id": "e1", "type": "stop", "data": {} }
+      ],
+      "edges": [
+        { "id": "a", "source": "t1", "target": "h1" },
+        { "id": "b", "source": "h1", "target": "e1" }
+      ]
+    }
   }
 ]

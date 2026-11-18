@@ -528,11 +528,12 @@ export async function readAutonomyStatus(
   )
     .bind(day)
     .first<UsageRow>();
+  const enabled = row !== null && Number(row.enabled) === 1 && Number(row.expires_at) > now;
   return {
-    enabled: row !== null && Number(row.enabled) === 1 && Number(row.expires_at) > now,
+    enabled,
     sms_cap: Number(row?.sms_cap ?? 0),
     write_cap: Number(row?.write_cap ?? 0),
-    expires_at: row === null ? null : Number(row.expires_at),
+    expires_at: enabled ? Number(row.expires_at) : null,
     updated_by: row?.updated_by ?? null,
     actor: typeof row?.actor === "string" ? row.actor : null,
     usage: {

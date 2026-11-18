@@ -42,6 +42,11 @@ import { writeAudit } from "../audit";
 import { canonicalTargetJson, clampGrantDuration, createGrant, type GrantTarget } from "../lib/authority";
 import { getAuth, TOTP_DIGITS, TOTP_PERIOD } from "../auth/settings";
 import {
+  checkAuthLockout,
+  clearAuthFailures,
+  recordAuthFailure,
+} from "../lib/auth-limits";
+import {
   ElicitationFailure,
   JSON_RPC,
   type ElicitationAnswer,
@@ -242,6 +247,24 @@ async function findTotpSecret(env: Env, actor: AdminActor): Promise<TwoFactorSec
  * decoded. Verification is `createOTP(secret, { digits, period }).verify`, the
  * same call the two-factor plugin makes.
  */
+const RECENT_TOTP_USES = new Map<string, number>();
+
+function isRecentTotpReuse(key: string, now: number): boolean {
+  for (const [entryKey, expiresAt] of RECENT_TOTP_USES) {
+    if (expiresAt <= now) RECENT_TOTP_USES.delete(entryKey);
+  }
+  const existing = RECENT_TOTP_USES.get(key);
+  return existing !== undefined && existing > now;
+}
+
+function markTotpUsed(key: string, now: number): void {
+  if (RECENT_TOTP_USES.size >= 256) {
+    const oldest = RECENT_TOTP_USES.keys().next();
+    if (!oldest.done) RECENT_TOTP_USES.delete(oldest.value);
+  }
+  RECENT_TOTP_USES.set(key, now + TOTP_PERIOD * 1000 * 3);
+}
+
 export async function verifyDeploymentTotp(env: Env, actor: AdminActor, code: string): Promise<boolean> {
   if (!/^\d{6}$/.test(code)) return false;
 
@@ -251,13 +274,28 @@ export async function verifyDeploymentTotp(env: Env, actor: AdminActor, code: st
   const row = await findTotpSecret(env, actor);
   if (row === null) return false;
 
+  const now = Date.now();
+  const lockoutEmail = `mcp-totp:${row.userId}`;
+  const before = await checkAuthLockout(env, { email: lockoutEmail, ip: "mcp" });
+  if (before.locked) return false;
+
+  const replayKey = `${row.userId}:${code}`;
+  if (isRecentTotpReuse(replayKey, now)) return false;
+
   try {
     const ctx = await auth.$context;
     const decrypted = await symmetricDecrypt({ key: ctx.secretConfig, data: row.secret });
     const secret = decrypted.startsWith("base32:")
       ? base32.decode(decrypted.slice("base32:".length).toUpperCase())
       : decrypted;
-    return await createOTP(secret, { digits: TOTP_DIGITS, period: TOTP_PERIOD }).verify(code);
+    const ok = await createOTP(secret, { digits: TOTP_DIGITS, period: TOTP_PERIOD }).verify(code);
+    if (!ok) {
+      await recordAuthFailure(env, { email: lockoutEmail, ip: "mcp" });
+      return false;
+    }
+    markTotpUsed(replayKey, now);
+    await clearAuthFailures(env, lockoutEmail);
+    return true;
   } catch {
     // A malformed row or a rotated secret is a failed verification, never a
     // pass and never a 500 that tells the caller which part broke.

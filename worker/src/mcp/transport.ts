@@ -219,6 +219,7 @@ export class SessionStore {
 
 interface PendingElicitation {
   id: string;
+  actorKey: string | null;
   createdAt: number;
   resolve: (answer: ElicitationAnswer) => void;
   reject: (error: Error) => void;
@@ -251,7 +252,11 @@ export class ElicitationRegistry {
     return this._map.size;
   }
 
-  create(now: number, timeoutMs: number): { id: string; promise: Promise<ElicitationAnswer> } {
+  create(
+    now: number,
+    timeoutMs: number,
+    actorKey: string | null = null
+  ): { id: string; promise: Promise<ElicitationAnswer> } {
     if (this._map.size >= MAX_ELICITATIONS) {
       const oldest = this._map.keys().next();
       if (oldest.done !== true) {
@@ -268,6 +273,7 @@ export class ElicitationRegistry {
     const promise = new Promise<ElicitationAnswer>((resolve, reject) => {
       const entry: PendingElicitation = {
         id,
+        actorKey,
         createdAt: now,
         resolve,
         reject,
@@ -283,9 +289,10 @@ export class ElicitationRegistry {
   }
 
   /** Resolve a pending request from a client's JSON-RPC response. */
-  settle(id: string, message: JsonRpcMessage): boolean {
+  settle(id: string, message: JsonRpcMessage, actorKey: string | null = null): boolean {
     const entry = this._map.get(id);
     if (entry === undefined) return false;
+    if (entry.actorKey !== null && actorKey !== entry.actorKey) return false;
     this._map.delete(id);
     if (entry.timer !== null) clearTimeout(entry.timer);
 
@@ -346,6 +353,7 @@ export interface StreamableDeps {
   tools: ToolDescriptor[];
   serverInfo: { name: string; version: string };
   elicitation?: ElicitationDriver;
+  actorKey?: string | null;
   elicitationTimeoutMs?: number;
   /** Shared across requests in the isolate; defaults are created per call. */
   sessions?: SessionStore;
@@ -580,7 +588,7 @@ async function handlePost(
   if (onlyClientResponses) {
     let settled = 0;
     for (const message of messages) {
-      if (elicitations.settle(String(message.id), message)) settled += 1;
+      if (elicitations.settle(String(message.id), message, deps.actorKey ?? null)) settled += 1;
     }
     if (settled === 0) {
       return httpError(400, JSON_RPC.INVALID_REQUEST, "Invalid Request: no elicitation is waiting for that id");
@@ -695,7 +703,7 @@ async function runOne(
   const { message, spec } = entry;
 
   if (isClientResponse(message)) {
-    elicitations.settle(String(message.id), message);
+    elicitations.settle(String(message.id), message, deps.actorKey ?? null);
     return null;
   }
   if (isNotification(message)) return null;
@@ -758,7 +766,11 @@ async function runOne(
           if (emit === undefined) {
             return rpcError(id, JSON_RPC.INTERNAL_ERROR, "Internal error: elicitation needs a stream");
           }
-          const { id: elicitId, promise } = elicitations.create(now, timeoutMs);
+          const { id: elicitId, promise } = elicitations.create(
+            now,
+            timeoutMs,
+            deps.actorKey ?? null
+          );
           emit({
             jsonrpc: "2.0",
             id: elicitId,

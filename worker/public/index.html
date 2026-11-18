@@ -2714,9 +2714,9 @@ npx wrangler kv namespace create KV
 npx wrangler d1 migrations apply sms_gateway --remote
 
 <span class="cm"># 2 · the three secrets</span>
-npx wrangler secret put ADMIN_TOKEN --name dakflare-worker
-npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
-npx wrangler secret put AUTH_PEPPER --name dakflare-worker
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
 
 <span class="cm"># 3 · deploy and point the CLI at it</span>
 npm run deploy
@@ -2745,9 +2745,9 @@ npx wrangler d1 migrations apply sms_gateway --remote</pre>
 
           <div class="term-group">
             <p class="term-k"><span class="c">#</span> 2 · the three secrets</p>
-            <pre class="mono" tabindex="0" aria-label="Commands to set the three secrets">npx wrangler secret put ADMIN_TOKEN --name dakflare-worker
-npx wrangler secret put BETTER_AUTH_SECRET --name dakflare-worker
-npx wrangler secret put AUTH_PEPPER --name dakflare-worker</pre>
+            <pre class="mono" tabindex="0" aria-label="Commands to set the three secrets">npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text</pre>
           </div>
 
           <div class="term-group">

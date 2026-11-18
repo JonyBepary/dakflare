@@ -111,17 +111,20 @@ export async function handleAgentTokenMint(
     ...requestMeta(req),
   });
 
-  return Response.json({
-    id: minted.minted.id,
-    name,
-    // Shown once. `agent-tokens` lists the same row without it.
-    token: minted.minted.token,
-    scopes: minted.minted.record.scopes,
-    device_id: deviceId,
-    max_per_hour: maxPerHour,
-    expires_at: minted.minted.record.expires_at,
-    created_at: minted.minted.record.created_at,
-  });
+  return Response.json(
+    {
+      id: minted.minted.id,
+      name,
+      // Shown once. `agent-tokens` lists the same row without it.
+      token: minted.minted.token,
+      scopes: minted.minted.record.scopes,
+      device_id: deviceId,
+      max_per_hour: maxPerHour,
+      expires_at: minted.minted.record.expires_at,
+      created_at: minted.minted.record.created_at,
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /** `GET /v1/admin/agent-tokens` — what exists, without any secret. */

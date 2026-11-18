@@ -38,6 +38,7 @@ interface CommandPayload {
   body: string;
   priority: string;
   expires_at: number;
+  sim_slot?: number;
 }
 
 /** `POST /v1/sms/send` (admin) — enqueue exactly one outbound SMS. */
@@ -58,6 +59,8 @@ export async function handleSend(
   if (to.length > MAX_PEER_CHARS) return err("bad_request", 400);
   if (typeof body !== "string") return err("bad_request", 400);
   if (body.length > MAX_BODY_CHARS) return err("bad_request", 400);
+  const simSlot = parseSimSlot(input.sim_slot);
+  if (simSlot === null) return err("bad_request", 400);
 
   // An unregistered device_id resolves to a brand-new Durable Object that no
   // device will ever poll, so the command would sit PENDING until it expired
@@ -113,6 +116,7 @@ export async function handleSend(
       priority,
       expiresAt,
       idempotencyKey,
+      ...(simSlot !== undefined ? { simSlot } : {}),
     });
   } catch (error) {
     console.error(`[send] enqueue failed: ${String(error)}`);
@@ -190,12 +194,15 @@ export async function handleSendBatch(
     if (item.idempotency_key !== undefined && item.idempotency_key !== null) {
       return err("idempotency_key_not_supported_in_batch", 400);
     }
+    const simSlot = parseSimSlot(item.sim_slot);
+    if (simSlot === null) return err("bad_request", 400);
     prepared.push({
       command_id: crypto.randomUUID(),
       to,
       body,
       priority: readPriority(item.priority),
       expires_at: now + clampExpiresInS(item.expires_in_s) * 1000,
+      ...(simSlot !== undefined ? { sim_slot: simSlot } : {}),
     });
   }
 
@@ -260,6 +267,14 @@ export async function handleSendBatch(
 function readPriority(value: unknown): string {
   if (value === "high" || value === "normal" || value === "low") return value;
   return "normal";
+}
+
+function parseSimSlot(value: unknown): number | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 2) {
+    return null;
+  }
+  return value;
 }
 
 /**

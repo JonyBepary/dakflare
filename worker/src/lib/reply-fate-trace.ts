@@ -134,10 +134,23 @@ export async function traceMessage(env: Env, input: TraceInput): Promise<TraceRe
 
   if (message !== null) {
     const deviceId = message.device_id;
-    const commandId = message.reply_command_id ?? message.id;
+    const commandId =
+      message.direction === "out"
+        ? (message.reply_command_id ?? message.id)
+        : message.reply_command_id;
 
-    const durable = await readDurableObject(env, deviceId, commandId, warnings);
-    const commandState = readCommandState(durable, commandId) ?? null;
+    const durable =
+      commandId === null ? null : await readDurableObject(env, deviceId, commandId, warnings);
+    const commandState =
+      commandId === null ? null : (readCommandState(durable, commandId) ?? null);
+    const durableCommand =
+      durable !== null && typeof durable.command === "object" && durable.command !== null
+        ? (durable.command as Record<string, unknown>)
+        : null;
+    const errorCode =
+      typeof durableCommand?.error_code === "string" ? durableCommand.error_code : null;
+    const errorMessage =
+      typeof durableCommand?.error_message === "string" ? durableCommand.error_message : null;
 
     const flowRuns = await env.DB.prepare(
       `SELECT flow_id, flow_version, outcome, created_at
@@ -169,7 +182,11 @@ export async function traceMessage(env: Env, input: TraceInput): Promise<TraceRe
         why.push(`decided at ${new Date(detail.as_of).toISOString()}`);
       }
     }
-    if (message.reply_error) why.push(`the phone reported: ${message.reply_error}`);
+    if (message.reply_error) {
+      why.push(`the phone reported: ${message.reply_error}`);
+    } else if (commandState === "FAILED" && (errorMessage || errorCode)) {
+      why.push(`the phone reported: ${errorMessage ?? errorCode}`);
+    }
 
     return {
       id,
@@ -195,13 +212,21 @@ export async function traceMessage(env: Env, input: TraceInput): Promise<TraceRe
       command:
         durable === null || commandId === null
           ? null
-          : { command_id: commandId, state: commandState },
+          : {
+              command_id: commandId,
+              state: commandState,
+              error_code: errorCode,
+              error_message: errorMessage,
+            },
       automation: {
-        rules: message.reply_ref === null ? [] : [{ rule_id: message.reply_ref }],
+        rules:
+          message.reply_source === "rule" && message.reply_ref !== null
+            ? [{ rule_id: message.reply_ref }]
+            : [],
         flows: flowRuns.results ?? [],
       },
       approval: null,
-      audit: await readAudit(env, commandId),
+      audit: commandId === null ? [] : await readAudit(env, commandId),
       durable_object: durable,
       warnings,
     };
@@ -212,20 +237,37 @@ export async function traceMessage(env: Env, input: TraceInput): Promise<TraceRe
     const durable = await readDurableObject(env, input.deviceId, id, warnings);
     const state = readCommandState(durable, id);
     if (state !== null) {
+      const durableCommand =
+        durable !== null && typeof durable.command === "object" && durable.command !== null
+          ? (durable.command as Record<string, unknown>)
+          : null;
+      const errorCode =
+        typeof durableCommand?.error_code === "string" ? durableCommand.error_code : null;
+      const errorMessage =
+        typeof durableCommand?.error_message === "string" ? durableCommand.error_message : null;
       const fate = deriveFate({
         pending_approval: false,
         reply_command_state: state,
         auto_reply: false,
         suppressed: null,
       });
+      const why = [...fate.why];
+      if (state === "FAILED" && (errorMessage || errorCode)) {
+        why.push(`the phone reported: ${errorMessage ?? errorCode}`);
+      }
       return {
         id,
         kind: "command",
         device_id: input.deviceId,
         verdict: fate.verdict,
-        why: fate.why,
+        why,
         message: null,
-        command: { command_id: id, state },
+        command: {
+          command_id: id,
+          state,
+          error_code: errorCode,
+          error_message: errorMessage,
+        },
         automation: { rules: [], flows: [] },
         approval: null,
         audit: await readAudit(env, id),

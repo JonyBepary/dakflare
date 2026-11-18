@@ -91,7 +91,10 @@ export async function handleCreateInvite(
   });
 
   // The raw token appears here and nowhere else, ever.
-  return Response.json({ id, email, role, expires_at: expiresAt, token });
+  return Response.json(
+    { id, email, role, expires_at: expiresAt, token },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /** `GET /v1/admin/invites` — pending and spent invites (never the token hash). */

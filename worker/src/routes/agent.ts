@@ -268,7 +268,7 @@ const PLAN_QUERIES: Record<
           `SELECT id, device_id, peer, reply_state, reply_command_id, received_at
              FROM messages
             WHERE direction = 'out'
-              AND (reply_state IS NULL OR reply_state NOT IN ('DELIVERED', 'FAILED', 'EXPIRED'))
+              AND (reply_state IS NULL OR LOWER(reply_state) NOT IN ('delivered', 'failed', 'expired'))
               AND received_at < ?
             ORDER BY received_at ASC LIMIT ${MAX_TELEMETRY_ROWS}`
         )

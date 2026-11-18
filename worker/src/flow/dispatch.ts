@@ -13,14 +13,16 @@
 
 import type { Env } from "../index";
 import { runFlow } from "./engine";
-import { enqueueOutboundCommand } from "../lib/commands";
+import { enqueueOutboundCommand, isOtpOrPinMessage, persistOutboundMessage } from "../lib/commands";
 import { isBlockedWebhookHost } from "../lib/flow-ir";
+import { getChannelPlugin } from "../channels";
 
 export interface AcceptedMessage {
   localId: string;
   sender: string;
   body: string;
   receivedAt: number;
+  autoReply?: number;
 }
 
 export interface DeviceRunState {
@@ -101,6 +103,10 @@ async function recordExtractMiss(
     body: string;
   }
 ): Promise<void> {
+  // `extract_misses.device_id` references `devices(device_id)`; synthetic channel
+  // emitters (`channel:telegram`, `channel:whatsapp`) have no devices row.
+  if (input.deviceId.startsWith("channel:")) return;
+
   const field = captureGroupOf(input.graph, input.nodeId);
   const now = Date.now();
 
@@ -297,6 +303,7 @@ export async function dispatchFlows(
 
   // Device-first: skip any (message, flow, version) the device already ran to completion.
   const ranByDevice = await alreadyRun(env, deviceId, messages);
+  const webhookAuthCache = new Map<string, boolean>();
 
   let runs = 0;
   let enqueued = 0;
@@ -311,6 +318,9 @@ export async function dispatchFlows(
     }
 
     for (const message of messages) {
+      if (isOtpOrPinMessage(message.body)) {
+        continue;
+      }
       const key = runKey(message.localId, workflow.id, Number(workflow.version));
       if (ranByDevice.completed.has(key)) {
         continue;
@@ -361,15 +371,44 @@ export async function dispatchFlows(
       if (!result.matched || (result.outcome !== "delivered" && result.outcome !== "partial")) continue;
 
       let executedWebhookOrDelay = false;
+      let passedHandsetBoundary = !isPartial;
       for (let actionIndex = 0; actionIndex < result.actions.length; actionIndex++) {
         const action = result.actions[actionIndex];
         if (action.type === "send_sms") {
-          // If the handset already executed partially, it sent the SMS locally.
-          // Never send a duplicate SMS.
-          if (isPartial) {
+          // If the handset already executed partially, it sent SMS steps BEFORE
+          // the first delay/webhook boundary. Any send_sms AFTER that boundary
+          // was never reached on the handset and must run on the Worker.
+          if (!passedHandsetBoundary) {
             continue;
           }
           if (!action.to || !action.body) continue;
+
+          if (deviceId.startsWith("channel:")) {
+            const channelName = deviceId.slice("channel:".length) || channel;
+            const plugin = getChannelPlugin(channelName);
+            if (!plugin) continue;
+            const delivery = await plugin.sendOutbound({ to: action.to, body: action.body }, env);
+            if (delivery.success) {
+              enqueued += 1;
+              const outId = crypto.randomUUID();
+              await persistOutboundMessage(env, deviceId, outId, action.to, action.body, channelName);
+              try {
+                await env.DB.prepare(
+                  `UPDATE messages
+                      SET auto_reply = 1, reply_source = 'flow',
+                          reply_ref = ?, reply_command_id = ?
+                    WHERE device_id = ? AND local_id = ?`
+                )
+                  .bind(workflow.id, outId, deviceId, message.localId)
+                  .run();
+              } catch (err) {
+                console.error(
+                  `[flow] could not record reply for ${message.localId}: ${String(err)}`
+                );
+              }
+            }
+            continue;
+          }
 
           const commandId = crypto.randomUUID();
           const queued = await enqueueOutboundCommand(env, {
@@ -398,12 +437,18 @@ export async function dispatchFlows(
             }
           }
         } else if (action.type === "webhook") {
+          passedHandsetBoundary = true;
           if (!action.url) continue;
           if (isBlockedWebhookHost(action.url)) {
             console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' blocked (private / SSRF destination)`);
             continue;
           }
-          const authorized = await isAuthorizedWebhookUrl(env, action.url, workflow.id);
+          const cacheKey = `${workflow.id}\0${action.url}`;
+          let authorized = webhookAuthCache.get(cacheKey);
+          if (authorized === undefined) {
+            authorized = await isAuthorizedWebhookUrl(env, action.url, workflow.id);
+            webhookAuthCache.set(cacheKey, authorized);
+          }
           if (!authorized) {
             console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' refused (not authorized in webhooks table or grants)`);
             continue;
@@ -430,6 +475,7 @@ export async function dispatchFlows(
                   "X-Dakflare-Flow": workflow.id,
                 },
                 body: action.body || "{}",
+                redirect: "error",
                 signal: AbortSignal.timeout(10_000),
               });
               executedWebhookOrDelay = true;
@@ -438,6 +484,7 @@ export async function dispatchFlows(
             }
           }
         } else if (action.type === "delay") {
+          passedHandsetBoundary = true;
           if (action.seconds > 0 && action.seconds <= 5) {
             await new Promise((resolve) => setTimeout(resolve, action.seconds * 1000));
             executedWebhookOrDelay = true;
@@ -450,8 +497,9 @@ export async function dispatchFlows(
                 data: act as unknown as Record<string, unknown>,
               }));
 
+              const wfInstanceId = await safeWorkflowInstanceId(workflow.id, message.localId);
               await env.FLOW_WORKFLOW.create({
-                id: `wf_${workflow.id}_${message.localId}_${Date.now()}`,
+                id: wfInstanceId,
                 params: {
                   deviceId,
                   flowId: workflow.id,
@@ -490,4 +538,14 @@ export async function dispatchFlows(
   }
 
   return enqueued;
+}
+
+/** Bounded ≤ 52-char identifier for Cloudflare Workflows (`^[a-zA-Z0-9_-]{1,64}$`). */
+async function safeWorkflowInstanceId(flowId: string, localId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${flowId}:${localId}:${Date.now()}:${crypto.randomUUID()}`)
+  );
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `wf_${hex.slice(0, 48)}`;
 }

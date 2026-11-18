@@ -112,8 +112,8 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
           })
         ),
       }),
-      run: async (args, environment, actor) => {
-        const query = args.archived === true ? "?archived=1" : "";
+      run: async (args, environment, _actor) => {
+        const query = args.archived === true ? "?include_archived=1" : "";
         const { status, data } = await callRoute(
           (request) => handleDevicesList(environment, new URL(request.url)),
           "GET",
@@ -121,12 +121,18 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         );
         if (status !== 200) return refusal(status, data);
         const devices = (data.devices ?? []) as Array<Record<string, unknown>>;
+        const mapped = devices.map((row) => ({
+          device_id: String(row.device_id ?? ""),
+          label: typeof row.label === "string" ? row.label : null,
+          last_seen: typeof row.last_seen === "number" ? row.last_seen : null,
+          fcm: Boolean(row.fcm_token),
+        }));
         return {
           text:
-            devices.length === 0
+            mapped.length === 0
               ? "No handsets are paired."
-              : devices.map((row) => `${row.device_id}${row.label ? ` (${row.label})` : ""}`).join("\n"),
-          structured: { devices },
+              : mapped.map((row) => `${row.device_id}${row.label ? ` (${row.label})` : ""}`).join("\n"),
+          structured: { devices: mapped },
         };
       },
     },
@@ -207,12 +213,24 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         );
         if (status !== 200) return refusal(status, data);
         const command = (data.command ?? null) as Record<string, unknown> | null;
+        const mapped =
+          command === null
+            ? null
+            : {
+                command_id: String(command.command_id ?? ""),
+                state: String(command.state ?? ""),
+                ...(typeof command.to === "string"
+                  ? { to: command.to }
+                  : typeof command.to_e164 === "string"
+                    ? { to: command.to_e164 }
+                    : {}),
+              };
         return {
           text:
-            command === null
+            mapped === null
               ? "No such command on that handset."
-              : `${command.command_id} is ${command.state}.`,
-          structured: { command },
+              : `${mapped.command_id} is ${mapped.state}.`,
+          structured: { command: mapped },
         };
       },
     },
@@ -306,11 +324,6 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
             verdict: trace.verdict,
             kind: trace.kind,
             why: trace.why,
-            device_id: trace.device_id,
-            message: trace.message,
-            command: trace.command,
-            automation: trace.automation,
-            approval: trace.approval,
           },
         };
       },

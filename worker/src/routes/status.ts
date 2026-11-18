@@ -40,6 +40,31 @@ interface StatusUpdate {
   status: string;
   /** Required by the Durable Object for `DISPATCHED`, ignored for the rest. */
   claim_token?: string;
+  /** Why a `FAILED` command failed. Stored only on `FAILED`. */
+  error_code?: string;
+  /** Human-readable companion to `error_code`, at most 280 characters. */
+  error_message?: string;
+}
+
+/** §6: a machine-readable failure reason, lower snake case. */
+const ERROR_CODE_PATTERN = /^[a-z0-9_]{1,64}$/;
+
+/** §6: the free-text reason is trimmed and capped; overlong values are ignored. */
+const MAX_ERROR_MESSAGE_LENGTH = 280;
+
+/**
+ * Validate the optional failure reason. A malformed value is dropped, never a
+ * reason to reject the whole batch: the status itself is still useful.
+ */
+function parseErrorCode(value: unknown): string | undefined {
+  return typeof value === "string" && ERROR_CODE_PATTERN.test(value) ? value : undefined;
+}
+
+function parseErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.length > MAX_ERROR_MESSAGE_LENGTH) return undefined;
+  return trimmed;
 }
 
 export async function handleStatusBatch(
@@ -86,6 +111,8 @@ export async function handleStatusBatch(
       command_id: commandId,
       status,
       claim_token: typeof claimToken === "string" && claimToken !== "" ? claimToken : undefined,
+      error_code: parseErrorCode(row.error_code),
+      error_message: parseErrorMessage(row.error_message),
     });
   }
 
@@ -105,11 +132,53 @@ export async function handleStatusBatch(
     return Response.json({ error: "internal_error" }, { status: 500 });
   }
 
-  const result = (await res.json().catch(() => null)) as
-    | { applied?: unknown; rejected?: unknown }
-    | null;
+  const result = (await res.json().catch(() => null)) as {
+    applied?: unknown;
+    rejected?: unknown;
+    applied_updates?: Array<{
+      command_id: string;
+      status: string;
+      error_code?: string;
+      error_message?: string;
+    }>;
+  } | null;
   const applied = typeof result?.applied === "number" ? result.applied : 0;
   const rejected = typeof result?.rejected === "number" ? result.rejected : 0;
+  const appliedUpdates = Array.isArray(result?.applied_updates) ? result.applied_updates : [];
+
+  if (appliedUpdates.length > 0) {
+    const mirrorReplyState: Record<string, string> = {
+      DISPATCHED: "queued",
+      SENT: "sent",
+      DELIVERED: "delivered",
+      FAILED: "failed",
+      EXPIRED: "failed",
+    };
+    try {
+      await env.DB.batch(
+        appliedUpdates.map((u) => {
+          const mappedState = mirrorReplyState[u.status] ?? u.status.toLowerCase();
+          let replyError: string | null = null;
+          if (u.status === "FAILED") {
+            const combined = [u.error_code, u.error_message].filter(Boolean).join(": ");
+            replyError = combined ? combined.slice(0, 200) : null;
+          } else if (u.status === "EXPIRED") {
+            replyError = "expired";
+          }
+          return env.DB.prepare(
+            `UPDATE messages
+                SET reply_state = ?,
+                    reply_error = CASE WHEN ? IN ('FAILED', 'EXPIRED') THEN ? ELSE reply_error END
+              WHERE device_id = ?
+                AND direction = 'out'
+                AND id = ?`
+          ).bind(mappedState, u.status, replyError, deviceId, u.command_id);
+        })
+      );
+    } catch {
+      // Non-fatal mirror; the DO owns command state and trace joins both.
+    }
+  }
 
   // §6.1: applied and rejected both exit 200. A rejected transition is a
   // successful no-op, never an error.

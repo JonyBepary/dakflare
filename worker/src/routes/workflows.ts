@@ -23,8 +23,9 @@ import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
 import { MAX_BODY_BYTES } from "../lib/config";
 import { RE_DEVICE_ID } from "../auth/canonical";
-import { findLiveGrant, requestApproval } from "../lib/authority";
+import { findLiveGrant, consumeGrantUse, requestApproval } from "../lib/authority";
 import { approvalResponse } from "../lib/agent-send";
+import { canonicalJson, sha256Hex } from "../agent/journal";
 import {
   MAX_WORKFLOW_NAME_CHARS,
   RE_WORKFLOW_ID,
@@ -232,14 +233,19 @@ export async function handleWorkflowPut(
   const input = parsed.value;
 
   if (actor?.role === "agent" && actor.agentTokenId) {
+    const graphHash =
+      input.graph !== null && typeof input.graph === "object" && !Array.isArray(input.graph)
+        ? await sha256Hex(canonicalJson(input.graph))
+        : "";
     const live = await findLiveGrant(env, actor.agentTokenId, "flow_deploy_prod", {
       flow_id: id,
+      ...(graphHash !== "" ? { body_hash: graphHash } : {}),
     });
-    if (live === null) {
+    if (live === null || !(await consumeGrantUse(env, live.id))) {
       const approval = await requestApproval(env, {
         agentTokenId: actor.agentTokenId,
         scope: "flow_deploy_prod",
-        target: { flow_id: id },
+        target: { flow_id: id, ...(graphHash !== "" ? { body_hash: graphHash } : {}) },
         reason: typeof input.reason === "string" ? input.reason.slice(0, 200) : "Deploy workflow",
       });
       return approvalResponse(approval);
@@ -401,7 +407,7 @@ export async function handleWorkflowDelete(
     const live = await findLiveGrant(env, actor.agentTokenId, "flow_deploy_prod", {
       flow_id: id,
     });
-    if (live === null) {
+    if (live === null || !(await consumeGrantUse(env, live.id))) {
       const approval = await requestApproval(env, {
         agentTokenId: actor.agentTokenId,
         scope: "flow_deploy_prod",

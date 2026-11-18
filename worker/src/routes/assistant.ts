@@ -276,9 +276,13 @@ export async function handleAiSettingsPut(
     return badRequest(`model must be at most ${MAX_MODEL_CHARS} characters`);
   }
 
+  const urlOptions = {
+    authBaseUrl: env.AUTH_BASE_URL,
+    allowedOrigins: env.ALLOWED_AI_ORIGINS,
+  };
   let baseUrl: string | null = null;
   if (provider === "openai-compatible") {
-    const checked = validateBaseUrl(input.baseUrl);
+    const checked = validateBaseUrl(input.baseUrl, urlOptions);
     if (!checked.ok) return badRequest(checked.message);
     baseUrl = checked.value;
   } else if (typeof input.baseUrl === "string" && input.baseUrl.trim() !== "") {
@@ -318,7 +322,7 @@ export async function handleAiSettingsPut(
 
     if (system1.baseUrl !== undefined && system1.baseUrl !== null) {
       if (provider === "openai-compatible") {
-        const checked = validateBaseUrl(system1.baseUrl);
+        const checked = validateBaseUrl(system1.baseUrl, urlOptions);
         if (!checked.ok) return badRequest(`system1.${checked.message}`);
         system1BaseUrl = checked.value;
       } else if (typeof system1.baseUrl === "string" && system1.baseUrl.trim() !== "") {

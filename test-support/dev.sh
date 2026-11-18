@@ -15,7 +15,8 @@
 # database a real phone will pair against.
 #
 # Overridable: WORKER_PORT, STUB_PORT, ACK_TIMEOUT_MS, LEASE_MS, OFFLINE_ALERT_MS,
-# STALE_SOCKET_MS.
+# STALE_SOCKET_MS, AUTH_PEPPER, AUTH_LOCKOUT_WINDOW_SECONDS, AUTH_PASSWORD_MODE,
+# AUTH_BASE_URL, AUTH_TRUSTED_ORIGINS.
 #
 #   ./test-support/dev.sh
 #
@@ -85,6 +86,27 @@ SA_JSON="$(node -e '
 echo "[dev.sh] applying D1 migration ($MIGRATE_DB $MIGRATE_FLAG)"
 ( cd "$WORKER_DIR" && npx wrangler d1 migrations apply "$MIGRATE_DB" "$MIGRATE_FLAG" >/dev/null 2>&1 ) || true
 
+EXTRA_VARS=()
+if [ -n "${AUTH_PEPPER:-}" ]; then
+  EXTRA_VARS+=(--var "AUTH_PEPPER:$AUTH_PEPPER")
+fi
+if [ -n "${AUTH_LOCKOUT_WINDOW_SECONDS:-}" ]; then
+  EXTRA_VARS+=(--var "AUTH_LOCKOUT_WINDOW_SECONDS:$AUTH_LOCKOUT_WINDOW_SECONDS")
+fi
+if [ -n "${AUTH_PASSWORD_MODE:-}" ]; then
+  EXTRA_VARS+=(--var "AUTH_PASSWORD_MODE:$AUTH_PASSWORD_MODE")
+fi
+if [ -n "${AUTH_BASE_URL:-}" ]; then
+  EXTRA_VARS+=(--var "AUTH_BASE_URL:$AUTH_BASE_URL")
+elif [ "$WORKER_PORT" != "8787" ]; then
+  EXTRA_VARS+=(--var "AUTH_BASE_URL:http://127.0.0.1:$WORKER_PORT")
+fi
+if [ -n "${AUTH_TRUSTED_ORIGINS:-}" ]; then
+  EXTRA_VARS+=(--var "AUTH_TRUSTED_ORIGINS:$AUTH_TRUSTED_ORIGINS")
+elif [ "$WORKER_PORT" != "8787" ]; then
+  EXTRA_VARS+=(--var "AUTH_TRUSTED_ORIGINS:http://127.0.0.1:$WORKER_PORT")
+fi
+
 echo "[dev.sh] starting Worker on :$WORKER_PORT ($MODE_LABEL, ACK_TIMEOUT_MS=$ACK_TIMEOUT_MS, LEASE_MS=$LEASE_MS)"
 export HARNESS_ACK_TIMEOUT_MS="$ACK_TIMEOUT_MS"
 export HARNESS_LEASE_MS="$LEASE_MS"
@@ -97,7 +119,8 @@ export HARNESS_LEASE_MS="$LEASE_MS"
     --var "STALE_SOCKET_MS:$STALE_SOCKET_MS" \
     --var "FCM_BASE_URL:http://127.0.0.1:$STUB_PORT" \
     --var "GOOGLE_TOKEN_URL:http://127.0.0.1:$STUB_PORT/token" \
-    --var "FCM_SERVICE_ACCOUNT_JSON:$SA_JSON"
+    --var "FCM_SERVICE_ACCOUNT_JSON:$SA_JSON" \
+    "${EXTRA_VARS[@]}"
 ) &
 PIDS+=($!)
 

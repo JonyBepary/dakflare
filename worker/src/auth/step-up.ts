@@ -76,14 +76,26 @@ export function expiredStepUpCookie(secure: boolean): string {
   return `${STEP_UP_COOKIE}=; Max-Age=0; Path=/${secure ? "; Secure" : ""}`;
 }
 
+const STEP_UP_KEYS = new Map<string, Promise<CryptoKey>>();
+
+function getStepUpKey(secret: string): Promise<CryptoKey> {
+  let cached = STEP_UP_KEYS.get(secret);
+  if (cached === undefined) {
+    if (STEP_UP_KEYS.size >= 8) STEP_UP_KEYS.clear();
+    cached = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    STEP_UP_KEYS.set(secret, cached);
+  }
+  return cached;
+}
+
 async function hmac(secret: string, value: string): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const key = await getStepUpKey(secret);
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
 }
 

@@ -251,14 +251,24 @@ export async function runTurn(
   const systemPrompt = buildSystemPrompt(tools, opts.autonomyNote);
   let turns = 0;
   let executed = 0;
+  const workingHistory: ChatMessage[] = [...history];
 
   for (let turn = firstTurn; turn <= maxTurns; turn++) {
     if (signal.aborted) {
       return { answer: "aborted", turns, calls: executed, stopped: "aborted" };
     }
 
-    opts.journal.setTurn(sessionId, turn);
-    const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...history];
+    const turnJournal =
+      typeof (opts.journal as { forTurn?: unknown }).forTurn === "function"
+        ? (opts.journal as { forTurn: (s: string, t: number) => typeof opts.journal }).forTurn(
+            sessionId,
+            turn
+          )
+        : (() => {
+            opts.journal.setTurn(sessionId, turn);
+            return opts.journal;
+          })();
+    const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...workingHistory];
     const promptText = messages.map((entry) => entry.content).join("\n");
 
     let result: ModelReply;
@@ -312,13 +322,18 @@ export async function runTurn(
 
     turns += 1;
 
+    // Charged per model call, before any nudge continue or reply interpretation.
+    // The counter is the agent's, not the console chat budget.
+    await opts.budget.chargeTokens(billed(result, promptText));
+
     // A model that answers "I'll check…" without a tool call has done nothing.
-    // One nudge, bounded, only when no tool has run yet in this turn.
+    // One nudge, bounded, only when no tool has run yet in this turn; keep it on
+    // a transient working list rather than mutating caller history mid-flight.
     const promises = /^\s*(i('| wi)ll|let me|checking|looking|i am going to|i'm going to)\b/i.test(
       result.text.trim()
     );
     if (promises && (result.toolCalls?.length ?? 0) === 0 && executed === 0) {
-      messages.push({
+      workingHistory.push({
         role: "user",
         content:
           "You answered that you would look, but no tool was called. Call the tool now, " +
@@ -326,10 +341,6 @@ export async function runTurn(
       });
       continue;
     }
-
-    // Charged per model call, before the reply is interpreted. The counter is
-    // the agent's, not the console chat budget.
-    await opts.budget.chargeTokens(billed(result, promptText));
 
     // A streaming adapter may have returned an empty `text` if it only counted
     // deltas; the deltas it emitted are the same answer.
@@ -354,7 +365,9 @@ export async function runTurn(
 
     // The assistant message carries the calls so each `tool` result below has
     // a matching `tool_call_id` in the next request.
-    history.push({ role: "assistant", content: replyText, toolCalls });
+    const assistantMsg: ChatMessage = { role: "assistant", content: replyText, toolCalls };
+    history.push(assistantMsg);
+    workingHistory.push(assistantMsg);
     emit({
       type: "calls",
       calls: toolCalls.map((call) => ({
@@ -397,7 +410,7 @@ export async function runTurn(
               env,
               actor,
               callId,
-              journal: opts.journal,
+              journal: turnJournal,
               budget: opts.budget,
               signal,
             };
@@ -415,12 +428,14 @@ export async function runTurn(
         }
       }
 
-      history.push({
+      const toolMsg: ChatMessage = {
         role: "tool",
         toolCallId: call.id,
         name: call.name,
         content: JSON.stringify(toolResult),
-      });
+      };
+      history.push(toolMsg);
+      workingHistory.push(toolMsg);
       emit({ type: "tool", tool: call.name, ok: toolResult.ok, result: toolResult });
     }
 

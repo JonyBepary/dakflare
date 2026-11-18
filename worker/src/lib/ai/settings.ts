@@ -27,6 +27,7 @@ import {
   isChatProviderKind,
   type ChatProviderKind,
 } from "./types";
+import { isLoopbackHostname, isPrivateOrInternalHost } from "../flow-ir";
 
 /** The model each provider uses when no model is configured. */
 export const DEFAULT_MODELS: Readonly<Record<ChatProviderKind, string>> = {
@@ -89,12 +90,39 @@ export interface AiSettingsEnv {
   AI_CHAT_BASE_URL?: string;
   AI_CHAT_API_KEY?: string;
   AI_DAILY_TOKEN_BUDGET?: string;
+  AUTH_BASE_URL?: string;
+  ALLOWED_AI_ORIGINS?: string;
   /**
    * System One defaults, used ONLY when there is no `ai_settings` row. The row
    * wins: `system1_model` / `system1_base_url` are what a console edit changes.
    */
   TOKENLAB_BASE_URL?: string;
   TOKENLAB_SYSTEM1_MODEL?: string;
+}
+
+export interface ValidateBaseUrlOptions {
+  authBaseUrl?: string;
+  allowedOrigins?: string;
+}
+
+function allowLocalLoopback(authBaseUrl?: string): boolean {
+  const trimmed = (authBaseUrl ?? "").trim().toLowerCase();
+  return trimmed === "" || trimmed.startsWith("http://");
+}
+
+function parseAllowedOrigins(raw?: string): Set<string> | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const set = new Set<string>();
+  for (const part of raw.split(",")) {
+    const trimmed = part.trim().replace(/\/+$/, "");
+    if (trimmed === "") continue;
+    try {
+      set.add(new URL(trimmed).origin);
+    } catch {
+      // ignore malformed entry
+    }
+  }
+  return set.size > 0 ? set : null;
 }
 
 interface AiSettingsRow {
@@ -120,7 +148,8 @@ export function stripTrailingSlash(value: string): string {
  * a secret in a settings response.
  */
 export function validateBaseUrl(
-  value: unknown
+  value: unknown,
+  options: ValidateBaseUrlOptions = {}
 ): { ok: true; value: string } | { ok: false; message: string } {
   if (typeof value !== "string" || value.trim() === "") {
     return { ok: false, message: "baseUrl is required for openai-compatible" };
@@ -134,13 +163,17 @@ export function validateBaseUrl(
   if (parsed.username !== "" || parsed.password !== "") {
     return { ok: false, message: "baseUrl must not carry credentials" };
   }
-  const loopback =
-    parsed.hostname === "localhost" ||
-    parsed.hostname === "127.0.0.1" ||
-    parsed.hostname === "[::1]" ||
-    parsed.hostname === "::1";
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
-    return { ok: false, message: "baseUrl must be https, or http on localhost" };
+  const loopback = isLoopbackHostname(parsed.hostname);
+  const devLoopbackAllowed = loopback && allowLocalLoopback(options.authBaseUrl);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && devLoopbackAllowed)) {
+    return { ok: false, message: "baseUrl must be https, or http on localhost in local dev" };
+  }
+  if (!devLoopbackAllowed && isPrivateOrInternalHost(parsed.hostname)) {
+    return { ok: false, message: "baseUrl must not target private or internal hosts" };
+  }
+  const allowedOrigins = parseAllowedOrigins(options.allowedOrigins);
+  if (allowedOrigins !== null && !allowedOrigins.has(parsed.origin)) {
+    return { ok: false, message: "baseUrl origin is not permitted by ALLOWED_AI_ORIGINS" };
   }
   if (parsed.search !== "" || parsed.hash !== "") {
     return { ok: false, message: "baseUrl must not carry a query or fragment" };
@@ -156,16 +189,21 @@ export function validateBaseUrl(
  */
 function envBase(
   rawBase: string,
-  label: string
+  label: string,
+  options: ValidateBaseUrlOptions
 ): { baseUrl: string | null; error?: string } {
   if (rawBase === "") return { baseUrl: null };
-  const checked = validateBaseUrl(rawBase);
+  const checked = validateBaseUrl(rawBase, options);
   if (checked.ok) return { baseUrl: checked.value };
   return { baseUrl: null, error: `${label} is invalid: ${checked.message}` };
 }
 
 /** Settings from env, used when no row exists. */
 export function envSettings(env: AiSettingsEnv): AiSettings {
+  const urlOptions: ValidateBaseUrlOptions = {
+    authBaseUrl: env.AUTH_BASE_URL,
+    allowedOrigins: env.ALLOWED_AI_ORIGINS,
+  };
   const providerFromEnv = env.AI_CHAT_PROVIDER;
   const provider = isChatProviderKind(providerFromEnv)
     ? providerFromEnv
@@ -180,7 +218,7 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
   let baseUrlError: string | undefined;
   let baseUrl: string | null = null;
   if (provider === "openai-compatible" && rawBase !== "") {
-    const checked = envBase(rawBase, "AI_CHAT_BASE_URL");
+    const checked = envBase(rawBase, "AI_CHAT_BASE_URL", urlOptions);
     baseUrl = checked.baseUrl;
     baseUrlError = checked.error;
   }
@@ -205,7 +243,7 @@ export function envSettings(env: AiSettingsEnv): AiSettings {
     if (configuredModel !== "") system1Model = configuredModel;
 
     if (rawSystem1Base !== "") {
-      const checked = envBase(rawSystem1Base, "TOKENLAB_BASE_URL");
+      const checked = envBase(rawSystem1Base, "TOKENLAB_BASE_URL", urlOptions);
       system1BaseUrl = checked.baseUrl;
       system1BaseInherited = false;
       system1BaseInherited = false;
@@ -255,10 +293,14 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
   // edited by hand, and a plain-http origin would receive the bearer key in the
   // clear. The stored values get the same rule the env path applies, and a
   // failure reads as "no base URL" plus an error, never as a usable origin.
+  const urlOptions: ValidateBaseUrlOptions = {
+    authBaseUrl: env.AUTH_BASE_URL,
+    allowedOrigins: env.ALLOWED_AI_ORIGINS,
+  };
   let baseUrl: string | null = null;
   let baseUrlError: string | undefined;
   if (provider === "openai-compatible" && row.base_url !== null && row.base_url !== "") {
-    const checked = validateBaseUrl(stripTrailingSlash(row.base_url));
+    const checked = validateBaseUrl(stripTrailingSlash(row.base_url), urlOptions);
     if (checked.ok) {
       baseUrl = checked.value;
     } else {
@@ -288,7 +330,7 @@ export async function readSettings(env: AiSettingsEnv): Promise<AiSettings> {
     if (storedSystem1Base === null) {
       system1BaseUrl = baseUrl;
     } else {
-      const checked = validateBaseUrl(storedSystem1Base);
+      const checked = validateBaseUrl(storedSystem1Base, urlOptions);
       if (checked.ok) {
         system1BaseUrl = checked.value;
         system1BaseInherited = false;

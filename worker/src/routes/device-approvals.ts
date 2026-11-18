@@ -137,7 +137,15 @@ export async function handleDeviceApprovalApprove(
           : decided.error === "not_pending"
             ? 409
             : 400;
-    return Response.json({ error: decided.error, message: decided.message }, { status });
+    return Response.json(
+      {
+        error: decided.error,
+        message: decided.message,
+        ...(decided.decided_by !== undefined ? { decided_by: decided.decided_by } : {}),
+        ...(decided.decided_at !== undefined ? { decided_at: decided.decided_at } : {}),
+      },
+      { status }
+    );
   }
 
   if (decided.grant !== null) await armGrantExpiry(env, decided.grant);
@@ -203,7 +211,15 @@ export async function handleDeviceApprovalReject(
           : decided.error === "not_pending"
             ? 409
             : 400;
-    return Response.json({ error: decided.error, message: decided.message }, { status });
+    return Response.json(
+      {
+        error: decided.error,
+        message: decided.message,
+        ...(decided.decided_by !== undefined ? { decided_by: decided.decided_by } : {}),
+        ...(decided.decided_at !== undefined ? { decided_at: decided.decided_at } : {}),
+      },
+      { status }
+    );
   }
 
   await writeAudit(env, {

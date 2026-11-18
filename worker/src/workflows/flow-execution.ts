@@ -2,7 +2,8 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { Env } from "../index";
 import { isBlockedWebhookHost } from "../lib/flow-ir";
 import { isAuthorizedWebhookUrl } from "../flow/dispatch";
-import { enqueueOutboundCommand } from "../lib/commands";
+import { enqueueOutboundCommand, persistOutboundMessage } from "../lib/commands";
+import { getChannelPlugin } from "../channels";
 
 export interface FlowWorkflowParams {
   deviceId?: string;
@@ -20,7 +21,7 @@ export interface FlowWorkflowParams {
 
 export class FlowExecutionWorkflow extends WorkflowEntrypoint<Env, FlowWorkflowParams> {
   override async run(event: WorkflowEvent<FlowWorkflowParams>, step: WorkflowStep): Promise<void> {
-    const { deviceId, flowId, pendingSteps } = event.payload;
+    const { deviceId, flowId, localId, pendingSteps } = event.payload;
     for (let i = 0; i < pendingSteps.length; i++) {
       const item = pendingSteps[i];
       if (item.type === "delay") {
@@ -44,6 +45,7 @@ export class FlowExecutionWorkflow extends WorkflowEntrypoint<Env, FlowWorkflowP
                 "X-Dakflare-Flow": flowId,
               },
               body: typeof item.data.body === "string" ? item.data.body : JSON.stringify(item.data.body ?? {}),
+              redirect: "error",
               signal: AbortSignal.timeout(10_000),
             });
             if (!res.ok) throw new Error(`Webhook failed: ${res.status}`);
@@ -54,14 +56,29 @@ export class FlowExecutionWorkflow extends WorkflowEntrypoint<Env, FlowWorkflowP
           const to = String(item.data.to || "");
           const body = String(item.data.body || "");
           if (!to || !body || !deviceId) return;
-          await enqueueOutboundCommand(this.env, {
+          if (deviceId.startsWith("channel:")) {
+            const channelName = deviceId.slice("channel:".length);
+            const plugin = getChannelPlugin(channelName);
+            if (!plugin) return;
+            const sent = await plugin.sendOutbound({ to, body }, this.env);
+            if (!sent.success) {
+              throw new Error(`Channel send failed: ${sent.errorCode ?? "unknown"}`);
+            }
+            await persistOutboundMessage(this.env, deviceId, crypto.randomUUID(), to, body, channelName);
+            return;
+          }
+          const queued = await enqueueOutboundCommand(this.env, {
             deviceId,
             commandId: crypto.randomUUID(),
             to,
             body,
             priority: "normal",
             expiresAt: Date.now() + 86_400_000,
+            idempotencyKey: `wf:${flowId}:${localId}:${i}:${item.nodeId}`.slice(0, 128),
           });
+          if (!queued.ok) {
+            throw new Error(`Failed to enqueue workflow SMS for ${deviceId}`);
+          }
         });
       }
     }

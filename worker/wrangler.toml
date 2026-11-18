@@ -3,7 +3,7 @@
 #
 # ---------------------------------------------------------------------------
 # Secrets: this file MUST stay free of secrets. ADMIN_TOKEN and
-# FCM_SERVICE_ACCOUNT_JSON come from `.dev.vars` locally or `wrangler secret put`
+# FCM_SERVICE_ACCOUNT_JSON come from `.dev.vars` locally or `cf workers secrets update`
 # remotely. A missing ADMIN_TOKEN fails closed: every admin route answers 401.
 #
 # PRODUCTION DATA: every binding in THIS file is local. `wrangler dev` therefore
@@ -214,7 +214,7 @@ AUTH_PASSWORD_MODE = "client-derived"
 # Magic-link factor (AUTH_PLAN §1, factor 2). The routes are always mounted, but
 # `/v1/auth/mode` reports `magic_link:false` and no mail is sent unless a sender
 # is configured. RESEND_API_KEY is a Worker secret, never a var here:
-#   wrangler secret put RESEND_API_KEY
+#   cf workers secrets update RESEND_API_KEY --worker dakflare-worker --type secret_text
 # The sandbox sender (onboarding@resend.dev) is fine until a domain exists.
 MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
 # Token lifetime in seconds (default 900 = 15 minutes). Clamped to [1, 3600];
@@ -229,7 +229,7 @@ MAGIC_LINK_TTL_SECONDS = "900"
 # with. The Rate Limiting bindings cannot express this window (10/60 s only).
 AUTH_LOCKOUT_WINDOW_SECONDS = "900"
 # AUTH_PEPPER is a Worker secret, never a var here:
-#   wrangler secret put AUTH_PEPPER     # v2:<b64-32>,v1:<b64-32>
+#   cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text     # v2:<b64-32>,v1:<b64-32>
 # Redirectable so the harness can point FCM at a local stub instead of Google.
 FCM_BASE_URL = "https://fcm.googleapis.com"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -245,7 +245,7 @@ MESSAGE_RETENTION_DAYS = "90"
 # row wins once an operator saves settings. The origin must include the version
 # segment, because the adapter appends /systemone. The key is a Worker secret,
 # never a var and never a D1 value:
-#   wrangler secret put AI_PROVIDER_API_KEY   # canonical
+#   cf workers secrets update AI_PROVIDER_API_KEY --worker dakflare-worker --type secret_text   # canonical
 #   # AI_CHAT_API_KEY and TOKENLAB_API_KEY are read as fallbacks, in that order.
 TOKENLAB_BASE_URL = "https://api.tokenlab.amd.com/v1"
 # The wire model System One is asked for when the row names none. Local

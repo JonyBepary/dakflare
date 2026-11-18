@@ -28,7 +28,7 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
-import { enqueueOutboundCommand } from "../lib/commands";
+import { enqueueOutboundCommand, isOtpOrPinMessage } from "../lib/commands";
 import {
   evaluateRules,
   type RuleHit,
@@ -464,14 +464,9 @@ export async function handleIncomingBatch(
     // A message is answered at most once by automation, so the local ids a rule
     // replied to are removed from the flow fallback below.
     // Hard-block OTP / PIN messages from triggering automations or external flows (INFO-PBE-02).
-    const isOtpOrPinMessage = (rawBody: string): boolean => {
-      const normalized = (rawBody || "")
-        .normalize("NFKC")
-        .replace(/[\u09E6-\u09EF]/g, (ch) => String(ch.charCodeAt(0) - 0x09e6));
-      const RE_OTP_PIN = /(?:\b(?:otp|pin|passcode|secret\s+code|auth(?:entication)?\s+code|verification\s+code|security\s+code|one[\s-]time\s+password)\b|ওটিপি|গোলাপী\s*পিন|গোপন\s*(?:নম্বর|পিন)|ভেরিফিকেশন\s*(?:কোড)?|সিকিউরিটি\s*কোড|\bপিন\b)/iu;
-      return RE_OTP_PIN.test(normalized);
-    };
-    let flowMessages = acceptedMessages.filter((msg) => !isOtpOrPinMessage(msg.body));
+    let flowMessages = acceptedMessages.filter(
+      (msg) => (msg.autoReply ?? 0) === 0 && !isOtpOrPinMessage(msg.body)
+    );
     const ruleCandidates = acceptedInbound.filter(
       (message) => message.autoReply === 0 && !isOtpOrPinMessage(message.body)
     );
@@ -479,7 +474,7 @@ export async function handleIncomingBatch(
       try {
         const outcome = await applyRules(env, deviceId, ruleCandidates, now);
         if (outcome.replied.size > 0) {
-          flowMessages = acceptedMessages.filter(
+          flowMessages = flowMessages.filter(
             (message) => !outcome.replied.has(message.localId)
           );
         }
@@ -509,6 +504,17 @@ export async function handleIncomingBatch(
       headers: { "Content-Type": "application/json", "X-Device-Id": deviceId },
       body: JSON.stringify({ acks, fcm_token: fcmToken }),
     });
+    if (fcmToken) {
+      try {
+        await env.DB.prepare(
+          `UPDATE devices SET fcm_token = ? WHERE device_id = ? AND revoked_at IS NULL AND (fcm_token IS NULL OR fcm_token != ?)`
+        )
+          .bind(fcmToken, deviceId, fcmToken)
+          .run();
+      } catch {
+        // DO already holds the authoritative token; D1 is best-effort for fleet UI.
+      }
+    }
   }
 
   const commands = await readPending(stub);
@@ -558,7 +564,7 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
   const rows = await env.DB.prepare(
     `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply,
             reply_source, reply_ref, reply_command_id, reply_state, reply_error,
-            reply_verdict
+            reply_verdict, channel, conversation_id
        FROM messages
       WHERE device_id = ? AND received_at < ?
       ORDER BY received_at DESC, id DESC
@@ -682,6 +688,7 @@ async function applyRules(
       // The console documents an empty template as "match without sending a reply".
       if (replyBody.trim() === "") continue;
 
+      const matchedRule = rules.find((r) => r.id === evaluation.rule_id);
       const commandId = crypto.randomUUID();
       const queued = await enqueueOutboundCommand(env, {
         deviceId,
@@ -690,6 +697,7 @@ async function applyRules(
         body: replyBody,
         priority: "normal",
         expiresAt: now + RULE_COMMAND_TTL_MS,
+        simSlot: matchedRule?.sim_slot ?? 0,
       });
       // A DO failure is not a reason to try lower-priority rules: the queue as a
       // whole is unavailable. Leave the message unanswered so flows may still run.

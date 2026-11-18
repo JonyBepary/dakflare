@@ -246,15 +246,16 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       return;
     }
     const request = context.request;
-    const userId = request.headers.get("x-dakflare-actor");
+    const actorLabel = request.headers.get("x-dakflare-actor");
     const actorRole = request.headers.get("x-dakflare-actor-role");
-    if (userId === null || userId === "" || actorRole === null || actorRole === "") {
+    if (actorLabel === null || actorLabel === "" || actorRole === null || actorRole === "") {
       connection.close(1008, "agent_identity_missing");
       return;
     }
+    const headerUserId = request.headers.get("x-dakflare-user-id");
     const actor: AdminActor = {
-      userId,
-      label: userId,
+      userId: headerUserId && headerUserId !== "" ? headerUserId : actorLabel,
+      label: actorLabel,
       role: actorRole as AdminActor["role"],
       canGrantOwner: actorRole === "owner",
     };
@@ -353,24 +354,13 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
    * pending destroy), so this subclass must not override `alarm()`.
    */
   override async onAlarm(): Promise<void> {
-    const autonomy = await readAutonomyStatus(this.env);
-    // Mirror the per-frame check: an autonomy row's expiry closes the socket;
-    // autonomy merely being OFF (no row) has no grant deadline, so it must not
-    // close an otherwise valid session. The old `Date.now()` fallback only
-    // stayed invisible because nothing scheduled an alarm while autonomy was
-    // off; `Agent`'s housekeeping alarm now does.
-    const grantExpiresAt = autonomy.expires_at ?? Infinity;
     const now = Date.now();
     for (const connection of this.getConnections()) {
       const state = connection.state as AssistantConnectionState | null;
       const sessionExpiresAt = state?.sessionExpiresAt ?? now;
-      const earliest = Math.min(sessionExpiresAt, grantExpiresAt);
-      if (now >= earliest) {
+      if (now >= sessionExpiresAt) {
         try {
-          connection.close(
-            4001,
-            now >= grantExpiresAt ? "agent_grant_expired" : "agent_session_expired"
-          );
+          connection.close(4001, "agent_session_expired");
         } catch {
           // Already closed.
         }
@@ -444,14 +434,8 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     }
 
     const now = Date.now();
-    const autonomy = await readAutonomyStatus(this.env);
-    const grantExpiresAt = autonomy.expires_at ?? Infinity;
-    const earliest = Math.min(state.sessionExpiresAt, grantExpiresAt);
-    if (now >= earliest) {
-      connection.close(
-        4001,
-        now >= grantExpiresAt ? "agent_grant_expired" : "agent_session_expired"
-      );
+    if (now >= state.sessionExpiresAt) {
+      connection.close(4001, "agent_session_expired");
       return;
     }
 
@@ -510,6 +494,14 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       ctx.snapshot !== null && typeof ctx.snapshot === "object"
         ? (ctx.snapshot as { turn?: unknown; phase?: unknown })
         : null;
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE agent_turns SET state = 'failed', updated_at = ? WHERE state = 'running'`,
+        Date.now()
+      );
+    } catch {
+      // Non-fatal; reserve() still blocks crash replay.
+    }
     console.warn(
       `[agent] turn_interrupted ${JSON.stringify({
         fiber: ctx.id,
@@ -522,12 +514,7 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
   }
 
   /**
-   * Re-arm the socket-expiry alarm at the earliest session/autonomy deadline.
-   *
-   * `Agent` owns the physical alarm for its Lifecycle job queue, so this is a
-   * "never delay it" write: while `keepAlive` is armed its 30 s wake-up must
-   * not be pushed out, and an existing sooner alarm is left alone. The
-   * per-frame check remains the guarantee either way.
+   * Re-arm the socket-expiry alarm at the earliest session deadline.
    */
   async #armExpiryAlarm(): Promise<void> {
     if (this._keepAliveRefs > 0) return;
@@ -538,8 +525,6 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       const state = connection.state as AssistantConnectionState | null;
       earliest = Math.min(earliest, state?.sessionExpiresAt ?? Infinity);
     }
-    const autonomy = await readAutonomyStatus(this.env);
-    earliest = Math.min(earliest, autonomy.expires_at ?? Infinity);
     if (!Number.isFinite(earliest)) return;
     const target = Math.max(Date.now() + 1_000, earliest);
     try {
@@ -677,12 +662,41 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
         }
       }
     };
+    let tokenBuffer = "";
+    let tokenFlushAt = 0;
+    let tokenTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushTokens = (): void => {
+      if (tokenTimer !== null) {
+        clearTimeout(tokenTimer);
+        tokenTimer = null;
+      }
+      if (tokenBuffer !== "") {
+        const text = tokenBuffer;
+        tokenBuffer = "";
+        tokenFlushAt = Date.now();
+        sendRaw({ type: "token", text });
+      }
+    };
     const send = (frame: RunFrame): void => {
+      if (frame.type === "token") {
+        tokenBuffer += frame.text;
+        const now = Date.now();
+        if (tokenBuffer.length >= 64 || (tokenFlushAt > 0 && now - tokenFlushAt >= 50)) {
+          flushTokens();
+        } else {
+          if (tokenFlushAt === 0) tokenFlushAt = now;
+          if (tokenTimer === null) {
+            tokenTimer = setTimeout(flushTokens, 50);
+          }
+        }
+        return;
+      }
+      flushTokens();
       if (frame.type === "error") {
         errorRef.current = { reason: frame.reason, message: frame.message };
       }
-      // Every frame, `token` deltas included, is appended before it is sent.
-      // `token` is presentation (the model's prose as it was written); the
+      // Every frame, coalesced `token` deltas included, is appended before it is
+      // sent. `token` is presentation (the model's prose as it was written); the
       // `answer` frame remains the terminal marker and the value to replay.
       sendRaw(frame);
     };
@@ -721,25 +735,30 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     // not make the turn durable — the fiber row and the journal do.
     await this.#runTurnFiber(`turn:${idempotencyKey}`, async (fiber) => {
       fiber.stash({ turn: idempotencyKey, phase: "model" });
-      const result = await runTurn(
-        this.env,
-        state.actor,
-        sessionId,
-        message,
-        tools,
-        {
-          model: resolved.adapter,
-          journal: this.#journal,
-          budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
-          autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
-          idempotencyKey,
-          history,
-          onEvent: (frame) => {
-            send(frame);
-            fiber.stash({ turn: idempotencyKey, phase: frame.type });
-          },
-        }
-      );
+      let result;
+      try {
+        result = await runTurn(
+          this.env,
+          state.actor,
+          sessionId,
+          message,
+          tools,
+          {
+            model: resolved.adapter,
+            journal: this.#journal,
+            budget: { chargeTokens: (tokens) => chargeAgentTokens(this.env, tokens) },
+            autonomyNote: describeAutonomy(await readAutonomyStatus(this.env)),
+            idempotencyKey,
+            history,
+            onEvent: (frame) => {
+              send(frame);
+              fiber.stash({ turn: idempotencyKey, phase: frame.type });
+            },
+          }
+        );
+      } finally {
+        flushTokens();
+      }
 
       if (writer !== null) {
         try {

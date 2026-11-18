@@ -29,6 +29,7 @@ import {
   type GrantRecord,
 } from "../lib/authority";
 import { AUTHORITY_GUARD_OBJECT_NAME } from "../authority-guard";
+import { verifyDeploymentTotp } from "../mcp/elicitation";
 
 /** What an approver needs to render the menu, without a second call. */
 function describeApproval(approval: ApprovalRecord): Record<string, unknown> {
@@ -104,6 +105,17 @@ export async function handleApprovalApprove(
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
   const input = parsed.value;
+
+  const totpCode = req.headers.get("x-dakflare-totp")?.trim();
+  if (totpCode !== undefined && totpCode !== "") {
+    const verified = await verifyDeploymentTotp(env, actor, totpCode);
+    if (!verified) {
+      return Response.json(
+        { error: "invalid_totp", message: "The authenticator code did not verify." },
+        { status: 401 }
+      );
+    }
+  }
 
   const raw = input.duration_s;
   const durationS =

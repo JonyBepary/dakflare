@@ -183,7 +183,7 @@ Deploying needs an admin secret, because the Worker fails closed without one:
 
 ```bash
 cd worker
-printf '%s' "$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')" | npx wrangler secret put ADMIN_TOKEN
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text --text "$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
 npx wrangler deploy --var ACK_TIMEOUT_MS:8000 --var OFFLINE_ALERT_MS:900000 --var STALE_SOCKET_MS:120000
 ```
 

@@ -56,15 +56,27 @@ async function verifySignedValue(value: string, secret: string): Promise<string 
   }
 
   const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"]
-  );
+  const key = await getChallengeVerifyKey(secret);
   const ok = await crypto.subtle.verify("HMAC", key, bytes, encoder.encode(token));
   return ok ? token : null;
+}
+
+const CHALLENGE_VERIFY_KEYS = new Map<string, Promise<CryptoKey>>();
+
+function getChallengeVerifyKey(secret: string): Promise<CryptoKey> {
+  let cached = CHALLENGE_VERIFY_KEYS.get(secret);
+  if (cached === undefined) {
+    if (CHALLENGE_VERIFY_KEYS.size >= 8) CHALLENGE_VERIFY_KEYS.clear();
+    cached = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    CHALLENGE_VERIFY_KEYS.set(secret, cached);
+  }
+  return cached;
 }
 
 function readCookie(header: string | null, nameSuffix: string): string | null {

@@ -79,7 +79,7 @@ export default defineConfig({
 			// `ai_settings.system1_model` (workers-ai or openai-compatible),
 			// changed from the console, not vars.
 			// TOKENLAB_* are env defaults used only while `ai_settings` has no row.
-			// The provider key is a Worker secret (`wrangler secret put`), never a
+			// The provider key is a Worker secret (`cf workers secrets update`), never a
 			// var or a D1 row: AI_PROVIDER_API_KEY, with AI_CHAT_API_KEY and
 			// TOKENLAB_API_KEY as fallbacks.
 			TOKENLAB_BASE_URL: bindings.text("https://api.tokenlab.amd.com/v1"),

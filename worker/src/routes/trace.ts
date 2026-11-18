@@ -8,12 +8,18 @@
  */
 
 import type { Env } from "../index";
+import type { AdminActor } from "../audit";
 import { err } from "../lib/errors";
 import { traceMessage } from "../lib/reply-fate-trace";
 import { RE_DEVICE_ID } from "../auth/canonical";
 
 /** `GET /v1/admin/trace/:id[?device_id=]` */
-export async function handleTrace(env: Env, rawId: string, url: URL): Promise<Response> {
+export async function handleTrace(
+  env: Env,
+  rawId: string,
+  url: URL,
+  actor?: AdminActor
+): Promise<Response> {
   let id: string;
   try {
     id = decodeURIComponent(rawId);
@@ -31,6 +37,16 @@ export async function handleTrace(env: Env, rawId: string, url: URL): Promise<Re
     id,
     ...(rawDevice === null || rawDevice === "" ? {} : { deviceId: rawDevice }),
   });
+
+  if (actor?.agentTokenId && trace.durable_object && typeof trace.durable_object === "object") {
+    const durableObj = { ...(trace.durable_object as Record<string, unknown>) };
+    if (durableObj.command && typeof durableObj.command === "object") {
+      const { claim_token: _redacted, ...restCommand } = durableObj.command as Record<string, unknown>;
+      durableObj.command = restCommand;
+    }
+    return Response.json({ ...trace, durable_object: durableObj });
+  }
+
   return Response.json(trace);
 }
 

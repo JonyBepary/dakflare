@@ -271,7 +271,13 @@ export async function resolveAgentToken(
  * actually in use, so it is worth a write; it is not worth a write per request,
  * which would double the cost of every read for a field nobody watches closely.
  */
+const LAST_USED_MEMO = new Map<string, number>();
+
 export async function recordTokenUse(env: Env, tokenId: string, now = Date.now()): Promise<void> {
+  const prev = LAST_USED_MEMO.get(tokenId);
+  if (prev !== undefined && now - prev < LAST_USED_REFRESH_MS) return;
+  if (LAST_USED_MEMO.size >= 512) LAST_USED_MEMO.clear();
+  LAST_USED_MEMO.set(tokenId, now);
   try {
     await env.DB.prepare(
       `UPDATE agent_tokens SET last_used_at = ?

@@ -42,6 +42,12 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run check:config
+      - run: npm test
+      - name: Run Worker node check scripts
+        run: |
+          for f in src/lib/__checks__/*.mjs src/mcp/__checks__/run.mjs; do
+            node --experimental-strip-types "$f" || exit 1
+          done
 
   skills:
     name: Skills match the CLI
@@ -56,6 +62,8 @@ jobs:
       # a skill that documents a command that is not there is worse than none,
       # because an agent follows it and concludes the deployment is broken.
       - run: node test-support/skills-gate.mjs
+      - run: node dakflare_test_harness.mjs selftest
+      - run: node dakflare_test_harness.mjs verify-vectors
 
   dashboard:
     name: Console types and build
@@ -72,6 +80,10 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: node scripts/agent-patch-check.mjs
+      - run: node scripts/assistant-check.mjs
+      - run: node scripts/system1-draft-check.mjs
+      - run: node scripts/webmcp-check.mjs
       - run: npm run build
 
   simulator:

@@ -131,8 +131,20 @@ export function toChatHistory(newestFirst: SessionMessage[]): ChatMessage[] {
   const chronological = [...newestFirst].reverse();
   const history: ChatMessage[] = [];
   for (const message of chronological) {
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    history.push({ role: message.role, content: messageText(message) });
+    if (message.role !== "user" && message.role !== "assistant" && message.role !== "tool") continue;
+    const meta = (message.metadata ?? {}) as Record<string, unknown>;
+    const toolCalls = Array.isArray(meta.toolCalls)
+      ? (meta.toolCalls as ChatMessage["toolCalls"])
+      : undefined;
+    const toolCallId = typeof meta.toolCallId === "string" ? meta.toolCallId : undefined;
+    const name = typeof meta.name === "string" ? meta.name : undefined;
+    history.push({
+      role: message.role,
+      content: messageText(message),
+      ...(toolCalls !== undefined && toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(toolCallId !== undefined ? { toolCallId } : {}),
+      ...(name !== undefined ? { name } : {}),
+    });
   }
   return history;
 }
@@ -141,15 +153,23 @@ export function toChatHistory(newestFirst: SessionMessage[]): ChatMessage[] {
 export async function appendTurnMessages(
   session: ConversationSession,
   idempotencyKey: string,
-  entries: Array<{ role: string; content: string }>
+  entries: ChatMessage[]
 ): Promise<void> {
   for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
     await session.appendMessage(
       {
         id: turnMessageId(idempotencyKey, index),
-        role: entries[index].role,
-        parts: textParts(entries[index].content),
-        metadata: { turn: idempotencyKey },
+        role: entry.role,
+        parts: textParts(entry.content),
+        metadata: {
+          turn: idempotencyKey,
+          ...(entry.toolCalls !== undefined && entry.toolCalls.length > 0
+            ? { toolCalls: entry.toolCalls }
+            : {}),
+          ...(entry.toolCallId !== undefined ? { toolCallId: entry.toolCallId } : {}),
+          ...(entry.name !== undefined ? { name: entry.name } : {}),
+        },
       },
       { source: "server" }
     );

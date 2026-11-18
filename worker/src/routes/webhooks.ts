@@ -103,15 +103,27 @@ export function timingSafeEqualHex(a: string, b: string): boolean {
   return diff === 0;
 }
 
+const WEBHOOK_HMAC_KEYS = new Map<string, Promise<CryptoKey>>();
+
+function getWebhookHmacKey(secret: string): Promise<CryptoKey> {
+  let cached = WEBHOOK_HMAC_KEYS.get(secret);
+  if (cached === undefined) {
+    if (WEBHOOK_HMAC_KEYS.size >= 64) WEBHOOK_HMAC_KEYS.clear();
+    cached = crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    WEBHOOK_HMAC_KEYS.set(secret, cached);
+  }
+  return cached;
+}
+
 /** HMAC-SHA256(secret, rawBody) as lowercase hex. */
 export async function hmacSha256Hex(secret: string, rawBody: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const key = await getWebhookHmacKey(secret);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
   return toHex(new Uint8Array(signature));
 }
@@ -263,7 +275,7 @@ export async function handleWebhookCreate(
     .bind(id, name, createdAt, createdAt, secretHash, sealed, actor.label)
     .run();
 
-  return json(
+  return Response.json(
     {
       id,
       name,
@@ -272,7 +284,7 @@ export async function handleWebhookCreate(
       created_at: createdAt,
       created_by: actor.label,
     },
-    201
+    { status: 201, headers: { "Cache-Control": "no-store" } }
   );
 }
 
@@ -390,6 +402,19 @@ export async function handleWebhookIngress(
   env: Env,
   id: string
 ): Promise<Response> {
+  if (env.AGENT_RUNTIME !== "on") {
+    return Response.json(
+      { error: "agent_runtime_off", message: "the agent runtime is not enabled" },
+      { status: 503 }
+    );
+  }
+
+  // Throttle before any D1 read so unknown webhook ids cannot burn D1 quota.
+  if (env.ADMIN_LIMITER) {
+    const { success } = await env.ADMIN_LIMITER.limit({ key: `webhook:${id.slice(0, 64)}` });
+    if (!success) return err("rate_limited", 429);
+  }
+
   const hook = await env.DB.prepare(
     `SELECT id, name, secret_hash, secret_sealed, enabled, created_by, created_at, last_delivery_at
        FROM webhooks WHERE id = ? AND kind = 'inbound'`
@@ -405,15 +430,26 @@ export async function handleWebhookIngress(
     );
   }
 
-  // Per-hook budget, keyed on the proven row rather than an unauthenticated
-  // header. The key is namespaced so an admin caller's budget is untouched.
-  if (env.ADMIN_LIMITER) {
-    const { success } = await env.ADMIN_LIMITER.limit({ key: `webhook:${hook.id}` });
-    if (!success) return err("rate_limited", 429);
-  }
-
   const bounded = await readBodyBounded(req, MAX_WEBHOOK_BODY_BYTES);
   if (!bounded.ok) return err("payload_too_large", 413);
+
+  const tsHeader = req.headers.get("x-dakflare-timestamp");
+  if (tsHeader !== null && tsHeader.trim() !== "") {
+    const tsNum = Number(tsHeader.trim());
+    if (!Number.isFinite(tsNum)) {
+      return Response.json(
+        { error: "invalid_timestamp", message: "x-dakflare-timestamp is malformed" },
+        { status: 401 }
+      );
+    }
+    const tsMs = tsNum < 1e12 ? tsNum * 1_000 : tsNum;
+    if (Math.abs(Date.now() - tsMs) > 300_000) {
+      return Response.json(
+        { error: "invalid_timestamp", message: "webhook timestamp outside allowed window" },
+        { status: 401 }
+      );
+    }
+  }
 
   const secret = await openSecret(env, hook.secret_sealed);
   if (secret === null) {
@@ -475,7 +511,27 @@ export async function handleWebhookIngress(
         { status: 409 }
       );
     }
-    return replay(existing);
+    // Reclaim stale 'running' rows abandoned by an isolate crash (> 5 min old).
+    const isStaleRunning =
+      existing.status === "running" && receivedAt - existing.received_at > 300_000;
+    if (isStaleRunning) {
+      const reclaimed = await env.DB.prepare(
+        `UPDATE webhook_deliveries
+            SET received_at = ?, body_json = ?, error = NULL
+          WHERE id = ? AND webhook_id = ? AND status = 'running' AND received_at < ?`
+      )
+        .bind(
+          receivedAt,
+          bounded.text.slice(0, MAX_WEBHOOK_BODY_BYTES),
+          deliveryId,
+          hook.id,
+          receivedAt - 300_000
+        )
+        .run();
+      if (Number(reclaimed.meta?.changes ?? 0) === 0) return replay(existing);
+    } else {
+      return replay(existing);
+    }
   }
 
   const actor: AdminActor = {

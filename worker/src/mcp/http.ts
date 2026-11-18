@@ -126,6 +126,7 @@ export async function handleStreamableMcp(
     tools: toolDescriptors(env, actor),
     serverInfo: { name: "dakflare", version: VERSION },
     elicitation: createElicitationDriver(env, actor),
+    actorKey: actor.agentTokenId ?? actor.label,
     sessions,
     elicitations,
     onError: (error: unknown) => {

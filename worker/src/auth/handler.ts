@@ -32,6 +32,7 @@ import {
   clearAuthFailures,
   clientIp,
   lockoutResponse,
+  rateLimitedResponse,
   recordAuthFailure,
 } from "../lib/auth-limits";
 import { resolveSignInChallenge, verifyChallengeCode } from "./challenge";
@@ -253,6 +254,36 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
   // The live-session verify (enrolment confirmation) has no challenge cookie
   // and is not counted here; it writes nothing on a wrong code and the TOTP
   // management routes are counted directly.
+  if (relative.startsWith("/passkey/")) {
+    const ip = clientIp(req);
+    if (env.AUTH_FAIL_LIMITER && ip !== null) {
+      const { success } = await env.AUTH_FAIL_LIMITER.limit({ key: `passkey:${ip}` });
+      if (!success) {
+        return rateLimitedResponse(60, "Too many passkey attempts from this network.");
+      }
+    }
+  }
+
+  if (relative === "/two-factor/verify-backup-code" && req.method.toUpperCase() === "POST") {
+    const challenge = await resolveSignInChallenge(env, req);
+    if (challenge !== null) {
+      const ip = clientIp(req);
+      const before = await checkAuthLockout(env, { email: challenge.email, ip });
+      if (before.locked) return lockoutResponse(before);
+      const res = await auth.handler(req);
+      if (res.ok) {
+        await clearAuthFailures(env, challenge.email);
+      } else if (res.status === 400 || res.status === 401 || res.status === 403) {
+        const after = await recordAuthFailure(env, { email: challenge.email, ip });
+        if (after.locked) {
+          await auditLockout(env, req, { email: challenge.email, factor: "backup_code", lockout: after });
+          return lockoutResponse(after);
+        }
+      }
+      return res;
+    }
+  }
+
   if (relative === "/two-factor/verify-totp" && req.method.toUpperCase() === "POST") {
     const challenge = await resolveSignInChallenge(env, req);
     if (challenge !== null) {
