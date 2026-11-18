@@ -70,8 +70,8 @@ npx cf workers secrets update RESEND_API_KEY --worker dakflare-worker --type sec
 npm run deploy                                  # cf build + cf deploy; see docs/OPS_DEPLOY.md
 ```
 
-`cf` is the deploy path, and it sets secrets too. `wrangler` stays for local dev, `tail` and `d1 export`, because
-`cf` cannot set one secret or stream logs yet.
+`cf` is the deploy path, and it sets secrets too (`cf workers secrets update`). `wrangler` stays for local dev, `tail` and `d1 export`, because
+`cf` cannot stream logs yet.
 
 CI runs the same checks on every pull request; it does not deploy. Deploy from a clean tree with
 `npm run deploy`, which builds the console first. Migrations are applied by hand, never by the
@@ -204,6 +204,28 @@ offset) and `POST /v1/agent/synthesize` (a faithfulness score, an approval verdi
 `apply_token`). The model is Cloudflare Clef, asked as a batch of typed questions in one
 pass; when it is unreachable the routes return less and say so. `docs/AGENT_SURFACE.md` is the
 reference.
+
+### The console assistant and the agent runtime
+
+An owner opens `/admin/security/ai`, picks one provider for both roles (chat and System One),
+and the floating **Ask** panel answers from the fleet's own record. It proposes; it acts only
+inside an autonomy window that names its caps and belongs to the operator who opened it. Every
+act is journalled before its effect, authorised by an effect-shaped grant read at call time, and
+audited like a human write. `docs/AGENT_RUNTIME.md` is the contract and `docs/ADR_001_AGENT_RUNTIME.md`
+records why it is built this way, including what was rejected.
+
+The provider is a per-deployment choice: Workers AI (no key) or any OpenAI-compatible gateway
+that also serves `/systemone` for System One. The key is the Worker secret `AI_PROVIDER_API_KEY`
+(falling back per role to `AI_CHAT_API_KEY` / `TOKENLAB_API_KEY`); it is never stored in D1.
+
+### Webhooks
+
+`POST /v1/webhooks/:id` wakes the agent from an external service. The body is signed with
+HMAC-SHA256 over the raw bytes (`x-dakflare-signature: sha256=…`), the delivery id makes the call
+idempotent (a repeat returns the stored answer with `replayed: true`), and a webhook actor can
+read and propose but never act — a human still grants the effect. Create one with
+`POST /v1/admin/webhooks`; the secret is returned once and sealed under `WEBHOOK_SECRET_KEY`.
+Rotation is delete-and-recreate, because the secret cannot be recovered by design.
 
 ### MCP
 

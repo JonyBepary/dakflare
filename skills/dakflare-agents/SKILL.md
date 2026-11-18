@@ -74,7 +74,7 @@ runaway loop trips the second even while a human work is asleep.
 dakflare mcp serve --token-file ~/.dakflare-agent-token
 ```
 
-Stdio JSON-RPC in, the Worker's `/v1/mcp` out. Point a client at it:
+Stdio JSON-RPC in, the Worker's Streamable HTTP `/mcp` out (`Accept: application/json, text/event-stream`, tracking `Mcp-Session-Id` and SSE events). Point a client at it:
 
 ```json
 { "mcpServers": { "dakflare": {
@@ -87,13 +87,14 @@ refusal that advertises what the caller cannot use. Seven tools, each wrapping t
 route of the same name: `list_devices`, `read_messages`, `command_status`,
 `list_flows`, `get_flow`, `trace`, `send_sms`.
 
-`send_sms` uses the protocol's multi-round-trip flow. With no grant it returns
-`input_required` naming the approval request; take it to a human, and retry with
-`inputResponses`. The retry re-reads the grant store, so nothing the client says in
-`inputResponses` can widen a permission.
+Mutating tools (`send_sms`) on `/mcp` respond with `text/event-stream` SSE
+`elicitation/create` prompting the human operator for `confirm_deployment`,
+a 6-digit `totp_code`, and `max_uses`; settling an elicitation writes an
+authority grant bound to the caller's token and executes the tool. Legacy
+`POST /v1/mcp` also remains supported for stateless `_meta` clients.
 
-Authorization here is a static bearer, not OAuth: a conformant OAuth client cannot
-negotiate it. That is documented rather than pretended away.
+OAuth discovery is published at `/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-authorization-server`, alongside static agent bearer tokens.
 
 ## When something did not go out
 

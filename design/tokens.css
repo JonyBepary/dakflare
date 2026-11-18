@@ -19,6 +19,7 @@
 	--df-p-cream-300: #ede3d3;
 	--df-p-cream-400: #e7dccb;
 	--df-p-cream-500: #d3c4ac;
+	--df-p-cream-600: #887968;
 
 	--df-p-umber-300: #857a6b;
 	--df-p-umber-400: #6b6153;
@@ -72,6 +73,7 @@
 	--df-p-night-500: #3a3128;
 	--df-p-mist-50: #f4ece2;
 	--df-p-mist-300: #c9beaf;
+	--df-p-mist-400: #c4bab0;
 	--df-p-mist-500: #a0968a;
 
 	/* The system's only two absolute values, and not palette steps, because their
@@ -154,7 +156,7 @@
 	--df-surface-selected: var(--df-p-cream-50);
 
 	--df-border-hairline: var(--df-p-cream-400);
-	--df-border-control: var(--df-p-cream-500);
+	--df-border-control: var(--df-p-cream-600);
 	--df-border-focus: var(--df-p-coral-700);
 
 	--df-text-primary: var(--df-p-umber-900);

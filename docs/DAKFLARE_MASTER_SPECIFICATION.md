@@ -96,6 +96,18 @@ and `EXPIRED` are terminal; `EXPIRED` comes from a lease that was never acked. T
 A stale ack must not move a terminal command backwards. A lease that expires returns the command to
 `PENDING` without duplicating a dispatch. A command is never delivered twice on the socket.
 
+A `FAILED` update may carry the handset's reason in two optional fields:
+
+| Field | Shape | Stored |
+|---|---|---|
+| `error_code` | `[a-z0-9_]{1,64}` | only on `FAILED` |
+| `error_message` | trimmed string, at most 280 characters | only on `FAILED` |
+
+Both live on the command row in the owning Durable Object and are returned by
+`GET /v1/sms/commands/:command_id` and the trace's `command` record. A malformed or missing value is
+ignored, never a `400` for the whole batch: the status is still worth applying. Transitions into any
+other state leave the two columns untouched.
+
 ### 3.4 Command states
 
 ```

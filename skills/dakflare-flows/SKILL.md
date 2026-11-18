@@ -106,7 +106,7 @@ Derive the replacement from the messages that arrived, then heal the flow:
 ```
 dakflare extract synthesize --samples new-template.json --group order
 dakflare extract synthesize --samples new-template.json --group order --verify-d1-limit 500
-dakflare flows heal wf_orders --samples new-template.json --dry-run
+dakflare flows heal --id wf_orders --samples new-template.json --group order --dry-run
 dakflare flows heal wf_orders --samples new-template.json
 ```
 
@@ -118,8 +118,16 @@ many matched; history has no ground truth, so that number is reach, not accuracy
 Heal re-checks the real history: for every inbound body the old pattern matched, the
 new one must capture the same value byte for byte. One difference and nothing is
 written, the offenders are printed, and the exit code is 6. `--node` names the extract
-when a flow has more than one; `--corpus-limit` sets how many recent inbound messages
-to re-check (default 200, max 500). `--dry-run` runs the gate and writes nothing.
+when a flow has more than one; `--device` selects which handset history to scan;
+`--corpus-limit` sets how many recent inbound messages to re-check (default 200,
+max 500). `--dry-run` runs the gate and writes nothing.
+
+For AI-assisted patch proposals and gated promotion:
+
+```
+dakflare ask "tighten the amount group" --flow wf_orders --ndjson --agent
+dakflare flow apply --token ag1_<handle> --totp 123456
+```
 
 To change anything beyond one extract pattern, edit the flow file and apply it:
 
@@ -136,12 +144,14 @@ A rule is the short form: matcher, body matcher, reply template, cooldown, hourl
 cap. It compiles to a graph, and rules run before flows.
 
 ```
+dakflare rules list --agent
 dakflare rules apply rules.json --dry-run
 dakflare rules apply rules.json
+dakflare rules update rule_orders --disabled
 ```
 
-`apply` reports create, update or unchanged per rule. A rule with an empty reply
-template matches without replying.
+`apply` reports create, update or unchanged per rule, and `update` modifies or pauses
+an existing rule in place. A rule with an empty reply template matches without replying.
 
 ## Limits
 

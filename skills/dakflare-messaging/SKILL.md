@@ -44,8 +44,11 @@ dakflare send --to +8801540196080 --body "otp 849201" --idempotency-key "order-4
 ```
 
 The same key returns the **same `command_id`** with `replayed: true` instead of sending
-again. Without a key, `safe_to_retry` is `false` in the error envelope, and the right
-move after a timeout is `status`, never a second `send`.
+again, and sets `safe_to_retry: true` in the `network` error envelope if the HTTP post
+itself times out before a `command_id` comes back. Without a key, a `--wait` poll
+timeout exits `75` with `data.timed_out: true` and `data.command_id` (check with
+`status`, never send again), while a network timeout before queueing returns an error
+envelope with `safe_to_retry: false`.
 
 ## Checking
 

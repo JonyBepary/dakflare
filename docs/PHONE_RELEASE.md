@@ -1,6 +1,6 @@
 # Phone release build
 
-Status: `0.2.0` (versionCode 200) is the first signed, non-debuggable APK.
+Status: `6.1.0` (`versionCode` 610; `0.2.0` / `versionCode` 200 was the first signed, non-debuggable APK).
 It is built for sideloading; it is **not** published on Google Play or F-Droid
 and there is deliberately no `metadata/` directory yet (see
 [F-Droid readiness](#f-droid-readiness)).
@@ -92,8 +92,8 @@ Keep an offline copy. Do not rotate the key for convenience.
 One source: `simulator/src-tauri/tauri.conf.json`
 
 ```json
-"version": "0.2.0",
-"bundle": { "android": { "versionCode": 200 } }
+"version": "6.1.0",
+"bundle": { "android": { "versionCode": 610 } }
 ```
 
 `app/build.gradle.kts` reads exactly these two fields; `app/tauri.properties` is
@@ -215,7 +215,7 @@ apksigner verify --verbose --print-certs <apk>
 aapt2 dump badging <apk> | head -1
 ```
 
-Expected: `versionCode='200' versionName='0.2.0'`, no `application-debuggable`
+Expected: `versionCode='610' versionName='6.1.0'`, no `application-debuggable`
 line, certificate SHA-256 digest
 `77b28184758f829e9353c26c440f06bb285d9c83d11f99f1896739251fdc81f6`, and the
 permissions above plus the SMS role components.

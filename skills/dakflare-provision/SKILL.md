@@ -34,12 +34,13 @@ dakflare init --local
 dakflare up --email you@example.com
 
 # 4. point the CLI at the Worker
-dakflare init --url https://<worker>.workers.dev --token-file ~/.token
+dakflare init --url https://<worker>.workers.dev --token-file worker/.dev.vars
 dakflare pair --qr          # another pairing code, when needed
 ```
 
-The admin token `init --local` generated is the `ADMIN_TOKEN` line in
-`worker/.dev.vars`; put that value in `~/.token` before step 4. Never commit
+`init --local` generates `ADMIN_TOKEN=...` in `worker/.dev.vars`, and `init --token-file`
+reads either a raw token file or `ADMIN_TOKEN=` from `.dev.vars`; `up` also falls back
+to `worker/.dev.vars` during fresh provisioning before `init --url` runs. Never commit
 `.dev.vars`.
 
 `up --dry-run` prints the plan and changes nothing. Every step converges, so running
