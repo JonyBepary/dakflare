@@ -44,6 +44,33 @@ import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import { VERSION } from "../lib/version";
 import { toolDefinitions, type ToolAnswer } from "./tools";
+import type { AgentSendOptions } from "../lib/agent-send";
+
+/**
+ * The grant rule for this transport.
+ *
+ * `/v1/mcp` cannot push a server-initiated `elicitation/create`, but its tool
+ * answer CAN carry an MRTR round, and that is where the human answer travels.
+ * So the rule is not "refuse mutation": it is "no PRE-EXISTING grant
+ * authorises". `ignoreGrants` makes a live grant invisible unless it is the one
+ * minted by the approval id this round itself asked for, which is recovered
+ * from the client-returned request state on the retry.
+ */
+function legacyToolOptions(ctx: { mcpReq?: { requestState?: () => unknown } }): AgentSendOptions {
+  let approvalRequestId: string | null = null;
+  try {
+    const state = ctx.mcpReq?.requestState?.();
+    if (typeof state === "string" && state !== "") {
+      const parsed = JSON.parse(state) as { approval_request_id?: unknown };
+      if (typeof parsed.approval_request_id === "string") approvalRequestId = parsed.approval_request_id;
+    }
+  } catch {
+    // A malformed client-returned state is simply "no approval this round"; the
+    // gate then asks for a fresh one instead of trusting it.
+    approvalRequestId = null;
+  }
+  return { ignoreGrants: true, approvalRequestId };
+}
 
 /**
  * One handler per request, bound to the token that authenticated it.
@@ -70,8 +97,8 @@ export function createDakflareMcpHandler(env: Env, actor: AdminActor) {
           outputSchema: tool.outputSchema,
           ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
         },
-        async (args: Record<string, unknown>) => {
-          const answer = await tool.run(args, env, actor);
+        async (args: Record<string, unknown>, ctx) => {
+          const answer = await tool.run(args, env, actor, legacyToolOptions(ctx));
           // MRTR: an input-required result is the tool's answer, not a failure.
           if (isInputRequiredResult(answer)) return answer;
           const value = answer as ToolAnswer;

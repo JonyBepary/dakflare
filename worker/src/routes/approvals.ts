@@ -22,12 +22,14 @@ import { MAX_BODY_BYTES } from "../lib/config";
 import { GRANT_LADDER_S, SCOPE_CAPS } from "../lib/agent-scopes";
 import {
   decideApproval,
+  getApproval,
   listApprovals,
   listGrants,
   revokeGrant,
   type ApprovalRecord,
   type GrantRecord,
 } from "../lib/authority";
+import { verifyApplyHandle } from "../lib/apply-handle";
 import { AUTHORITY_GUARD_OBJECT_NAME } from "../authority-guard";
 import { verifyDeploymentTotp } from "../mcp/elicitation";
 
@@ -90,7 +92,31 @@ export async function handleGrantsList(env: Env, url: URL): Promise<Response> {
 }
 
 /**
- * `POST /v1/admin/approvals/:id/approve` — `{ duration_s }`.
+ * How many grants a signed handle has already produced.
+ *
+ * The grant target carries `handle_id`, so a second spend of the same handle is
+ * visible without a second table. `max_uses` is read from the VERIFIED handle,
+ * never from the stored target alone: a client cannot raise the ceiling by
+ * editing the JSON.
+ */
+async function handleUses(env: Env, handleId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM authority_grants
+      WHERE json_extract(target_json, '$.handle_id') = ?`
+  )
+    .bind(handleId)
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * `POST /v1/admin/approvals/:id/approve` — `{ duration_s, apply_token? }`.
+ *
+ * A request minted by `synthesize` is handle-bound, so approving it requires the
+ * signed handle it came with. That is what makes a tampered handle a named
+ * refusal instead of an approval for something else, and what lets `max_uses`
+ * be enforced where the handle is spent. Requests opened by a send tool have no
+ * `handle_id` and accept no token, exactly as before.
  *
  * The response names what was ASKED for and what was GRANTED whenever the two
  * differ, so a 30-day request that became a one-hour grant says so instead of
@@ -104,7 +130,56 @@ export async function handleApprovalApprove(
 ): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
-  const input = parsed.value;
+  const input = parsed.value as Record<string, unknown>;
+
+  const rawHandle = input.apply_token;
+  const handle =
+    typeof rawHandle === "string" && rawHandle.trim() !== ""
+      ? await verifyApplyHandle(env, rawHandle)
+      : null;
+  if (handle !== null && !handle.ok) {
+    return Response.json({ error: handle.code, message: handle.message }, { status: 400 });
+  }
+
+  const existing = await getApproval(env, id);
+  if (existing !== null && existing.target.handle_id !== undefined) {
+    if (handle === null) {
+      return Response.json(
+        {
+          error: "apply_token_required",
+          message:
+            "this request was minted with a signed apply handle; approve it with the handle, not just an id",
+        },
+        { status: 400 }
+      );
+    }
+    const target = handle.target;
+    if (
+      target.handle_id !== existing.target.handle_id ||
+      target.flow_id !== existing.target.flow_id ||
+      (target.body_hash !== undefined &&
+        existing.target.body_hash !== undefined &&
+        target.body_hash !== existing.target.body_hash)
+    ) {
+      return Response.json(
+        {
+          error: "apply_token_mismatch",
+          message: "the apply handle does not name this approval request",
+        },
+        { status: 409 }
+      );
+    }
+    const used = await handleUses(env, target.handle_id);
+    if (used >= target.max_uses) {
+      return Response.json(
+        {
+          error: "handle_exhausted",
+          message: `this apply handle allows ${target.max_uses} use(s) and has already been spent ${used} time(s)`,
+        },
+        { status: 409 }
+      );
+    }
+  }
 
   const totpCode = req.headers.get("x-dakflare-totp")?.trim();
   if (totpCode !== undefined && totpCode !== "") {

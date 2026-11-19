@@ -99,6 +99,29 @@ function withProxyHeader(response: Response): Response {
 }
 
 /**
+ * The RFC 8707 audience a static agent token is bound to.
+ *
+ * The deployment's configured origin is the honest resource identifier: a
+ * `dkf_agt_` token is minted by this deployment and is usable only against it.
+ * When `AUTH_BASE_URL` is unset (an older deployment) `undefined` preserves the
+ * previous behaviour exactly: an opaque token carries no audience, and no
+ * audience is not a mismatch. A token that DOES carry one — the configured
+ * resource — must match the resource being called, so a request proxied in
+ * under another host is refused instead of silently accepted.
+ */
+export function mcpDeploymentAudience(env: Env, request: Request): string | undefined {
+  const configured = env.AUTH_BASE_URL?.trim();
+  if (configured === undefined || configured === "") return undefined;
+  try {
+    return new URL("/mcp", new URL(configured).origin).toString();
+  } catch {
+    // A malformed AUTH_BASE_URL is already refused by the auth routes; here it
+    // means "no configured audience", not a reason to reject every MCP call.
+    return undefined;
+  }
+}
+
+/**
  * `POST|GET|DELETE /mcp` — one endpoint, both dialects.
  *
  * Returns 401 before reading a body when an OAuth audience does not name this

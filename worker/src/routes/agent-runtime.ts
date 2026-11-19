@@ -33,7 +33,9 @@ import { MAX_BODY_BYTES } from "../lib/config";
 import { err } from "../lib/errors";
 import {
   ASSISTANT_OBJECT_NAME,
+  IDEMPOTENCY_KEY_MESSAGE,
   mintTicket,
+  readIdempotencyKey,
   type MintedTicket,
 } from "../lib/agent-runtime";
 import { AGENT_SCHEMA_VERSION } from "../agent/runtime";
@@ -354,9 +356,6 @@ interface SayBody {
   attachmentIds?: unknown;
 }
 
-/** 8–64 chars of `[A-Za-z0-9_-]`, or null when the caller supplied one badly. */
-const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{8,64}$/;
-
 /** A caller-supplied or empty attachment id list, or null when malformed. */
 function readAttachmentIds(value: unknown): string[] | null {
   if (value === undefined || value === null) return [];
@@ -419,19 +418,14 @@ export async function handleAgentSay(
     );
   }
 
-  let idempotencyKey: string | undefined;
-  if (input.idempotencyKey !== undefined) {
-    if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
-      return Response.json(
-        {
-          error: "bad_request",
-          message: "idempotencyKey must be 8-64 characters of A-Z, a-z, 0-9, _ or -",
-        },
-        { status: 400 }
-      );
-    }
-    idempotencyKey = input.idempotencyKey;
+  const keyReading = readIdempotencyKey(input.idempotencyKey);
+  if (!keyReading.ok) {
+    return Response.json(
+      { error: "bad_request", message: IDEMPOTENCY_KEY_MESSAGE },
+      { status: 400 }
+    );
   }
+  const idempotencyKey = keyReading.key ?? undefined;
 
   const attachmentIds = readAttachmentIds(input.attachmentIds);
   if (attachmentIds === null) {

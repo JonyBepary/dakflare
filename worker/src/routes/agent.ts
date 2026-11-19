@@ -31,7 +31,8 @@ import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import { err } from "../lib/errors";
 import { readJsonBoundedResult } from "../lib/body";
-import { canonicalTargetJson, type GrantTarget } from "../lib/authority";
+import { requestApproval, type GrantTarget } from "../lib/authority";
+import { mintApplyHandle } from "../lib/apply-handle";
 import {
   aliasFor,
   ask,
@@ -975,7 +976,51 @@ const SynthesizeBody = z.object({
   flow_id: z.string().min(1).max(128),
   diff_summary: z.string().min(1).max(4_000),
   corpus_report: z.string().max(1_000),
+  /** The change itself, when the caller has it. The judge must see this. */
+  patch: z.string().max(4_000).optional(),
+  /** The graph the change lands in, when the caller already has it. */
+  graph: z.string().max(8_000).optional(),
 });
+
+/**
+ * The approval principal a handle is minted under when the caller holds no
+ * agent token (ADMIN_TOKEN or a person's session).
+ *
+ * `approval_requests.agent_token_id` is a foreign key, and the CLI's `ask` and
+ * `flow apply` use the operator's ADMIN_TOKEN, so a request with no principal
+ * could not exist. This row is NOT a credential — `resolveAgentToken` only
+ * accepts `dkf_agt_...` tokens and this id is not one — and it is the same
+ * reserved-namespace pattern migration 0012 uses for `autonomy:agent`.
+ */
+const APPLY_HANDLE_PRINCIPAL = "apply:handle";
+
+async function approvalPrincipal(env: Env, actor: AdminActor): Promise<string> {
+  if (actor.agentTokenId !== undefined) return actor.agentTokenId;
+  await env.DB.prepare(
+    `INSERT INTO agent_tokens
+       (id, name, token_hash, scopes_json, max_per_hour, sent_current_hour,
+        hour_window_start, created_at, created_by)
+     VALUES (?, ?, ?, '[]', 0, 0, 0, ?, 'synthesize:apply-handle')
+     ON CONFLICT(id) DO NOTHING`
+  )
+    .bind(APPLY_HANDLE_PRINCIPAL, "apply handles (mint)", "apply-not-a-credential", Date.now())
+    .run();
+  return APPLY_HANDLE_PRINCIPAL;
+}
+
+/** The stored flow graph, so the judge sees what the patch changes. */
+async function readWorkflowGraph(env: Env, flowId: string): Promise<string> {
+  try {
+    const row = await env.DB.prepare(`SELECT graph FROM workflows WHERE id = ?`)
+      .bind(flowId)
+      .first<{ graph: string }>();
+    return row?.graph ?? "";
+  } catch {
+    // The judge can still answer from the diff; a missing graph is not a reason
+    // to refuse a request the model may well judge as requiring approval.
+    return "";
+  }
+}
 
 function sha256Hex(text: string): Promise<string> {
   return crypto.subtle
@@ -983,13 +1028,6 @@ function sha256Hex(text: string): Promise<string> {
     .then((digest) =>
       [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")
     );
-}
-
-function base64Url(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 /**
@@ -1001,17 +1039,26 @@ function base64Url(text: string): string {
  * patch, flow or second apply. Nothing is applied here: the existing approval /
  * authority route is still the only spender.
  */
-export async function handleAgentSynthesize(req: Request, env: Env): Promise<Response> {
+export async function handleAgentSynthesize(
+  req: Request,
+  env: Env,
+  actor: AdminActor
+): Promise<Response> {
   const parsed = await readValidated(req, SynthesizeBody);
   if (!parsed.ok) return parsed.response;
   const input = parsed.data;
 
   const settings = await readSettingsOrEnv(env);
+  // The judge sees the CHANGE, not only a sentence about it: the caller's patch
+  // when supplied, otherwise the stored graph, always beside the diff summary.
+  const graph = input.graph ?? (await readWorkflowGraph(env, input.flow_id));
   const judged = await judgeCandidatePatch(
     system1ConfigFor(env, settings),
     input.intent,
     input.diff_summary,
-    input.corpus_report
+    input.corpus_report,
+    input.patch ?? "",
+    graph
   );
 
   if (!judged.ok) {
@@ -1031,6 +1078,7 @@ export async function handleAgentSynthesize(req: Request, env: Env): Promise<Res
   const approvalRequired = approvalProbability !== null && approvalProbability >= APPROVAL_NOUL_MIN;
 
   let applyToken: string | null = null;
+  let approvalRequestId: string | null = null;
   if (approvalRequired) {
     // Canonical form: fixed key order and trimmed text, so the same patch always
     // hashes the same bytes. This is the value `body_hash` binds the grant to.
@@ -1045,7 +1093,27 @@ export async function handleAgentSynthesize(req: Request, env: Env): Promise<Res
       body_hash: bodyHash,
       max_uses: 1,
     };
-    applyToken = `ag1_${base64Url(canonicalTargetJson(target))}`;
+    // Sign first: an unsigned handle is forgeable, and a handle that cannot be
+    // signed must not be returned at all.
+    const minted = await mintApplyHandle(env, target);
+    if (!minted.ok) {
+      logAgent("synthesize", { applied: false, reason: minted.code });
+      return Response.json(
+        { error: minted.code, message: minted.message },
+        { status: 503 }
+      );
+    }
+    // Mint the pending request in the same call, so `ask → approve → apply`
+    // has something to approve. Without the row, `flow apply` says there is
+    // nothing to spend even though a handle was printed.
+    const request = await requestApproval(env, {
+      agentTokenId: await approvalPrincipal(env, actor),
+      scope: "flow_deploy_prod",
+      target: minted.target,
+      reason: input.intent,
+    });
+    applyToken = minted.token;
+    approvalRequestId = request.id;
   }
 
   logAgent("synthesize", {
@@ -1064,6 +1132,7 @@ export async function handleAgentSynthesize(req: Request, env: Env): Promise<Res
           }
         : null,
     approval_required: approvalRequired,
+    approval_request_id: approvalRequestId,
     apply_token: applyToken,
   });
 }

@@ -2796,12 +2796,46 @@ async function cmdSuite() {
         name: 'send_sms',
         arguments: { device_id: identity.deviceId, to: recipient, body: 'mcp round' },
         inputResponses: { approval: { action: 'accept', content: { decision: 'retry' } } },
+        // MRTR state must be echoed verbatim; it names the approval this round is
+        // allowed to accept, so a grant from an earlier round cannot authorise it.
+        requestState: asked.data.result.requestState,
       },
       { 'Mcp-Name': 'send_sms' }
     );
     rep.check('the retry with inputResponses sends', retried.data?.result?.structuredContent?.sent, true);
     rep.check('...and names the command',
       typeof retried.data?.result?.structuredContent?.command_id, 'string');
+
+    /* ---- a live grant must not bypass the human ----------------------
+     * The retry above left a live grant covering this recipient. The old
+     * code let a second /v1/mcp call spend it silently; the transport now
+     * ignores every grant that predates the round and asks again.
+     */
+    const withGrant = await mcpCall(
+      full.token, 'tools/call',
+      { name: 'send_sms', arguments: { device_id: identity.deviceId, to: recipient, body: 'mcp round 2' } },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    rep.check('a live grant still asks on /v1/mcp', withGrant.data?.result?.resultType, 'input_required');
+    const queuedBeforeAnswer = await admin('GET', `/v1/messages?device_id=${identity.deviceId}&limit=20`);
+    rep.check('...and sends nothing before the answer',
+      (queuedBeforeAnswer.data?.messages ?? []).some((row) => row.body === 'mcp round 2'), false);
+    const secondApprovalId = JSON.parse(withGrant.data.result.requestState).approval_request_id;
+    rep.check('...naming a request for this round', secondApprovalId !== approvalId, true);
+
+    const approvedAgain = await admin('POST', `/v1/admin/approvals/${secondApprovalId}/approve`, { duration_s: 300 });
+    rep.check('a human approves the new round', approvedAgain.status, 200);
+    const retriedAgain = await mcpCall(
+      full.token, 'tools/call',
+      {
+        name: 'send_sms',
+        arguments: { device_id: identity.deviceId, to: recipient, body: 'mcp round 2' },
+        inputResponses: { approval: { action: 'accept', content: { decision: 'retry' } } },
+        requestState: withGrant.data.result.requestState,
+      },
+      { 'Mcp-Name': 'send_sms' }
+    );
+    rep.check('the retry after that approval sends', retriedAgain.data?.result?.structuredContent?.sent, true);
 
     /* ---- the CLI speaks the same contract ---------------------------- */
     const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dakflare-mcp-'));

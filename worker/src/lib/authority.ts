@@ -41,6 +41,13 @@ export interface GrantTarget {
   rule_id?: string;
   body_hash?: string;
   max_uses?: number;
+  /**
+   * The signed apply handle this target came from. It is a LOCATOR for the
+   * handle's use count, not an effect constraint: `targetMatches` ignores it
+   * exactly as it ignores `max_uses`, so a deploy request that names only the
+   * flow and its hash still matches the grant.
+   */
+  handle_id?: string;
 }
 
 export interface GrantRecord {
@@ -153,6 +160,44 @@ export function assertHuman(actor: AdminActor | null | undefined): HumanCheck {
   return { ok: true };
 }
 
+/** The header a machine caller uses to name its client. */
+export const MACHINE_CLIENT_HEADER = "X-Dakflare-Client";
+
+/**
+ * The stable identity a machine caller declares, or null when it declares none.
+ *
+ * `ADMIN_TOKEN` is one deployment-wide credential, so the label alone
+ * (`admin-token`) put every machine in one conversation and one attachment
+ * budget. The client header namespaces those per caller. It is normalised so
+ * the value is safe in a conversation id and an R2 prefix; two spellings that
+ * normalise alike are deliberately the same machine.
+ */
+export function machineClientId(req: Request): string | null {
+  const raw = req.headers.get(MACHINE_CLIENT_HEADER);
+  if (raw === null) return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "") return null;
+  const safe = value.replace(/[^a-z0-9._-]/g, "_").slice(0, 64);
+  return safe === "" ? null : safe;
+}
+
+/**
+ * The machine actor for one request.
+ *
+ * With a client identity the label is `admin-token:<client>`; without one it
+ * falls back to exactly the old label, so an existing caller that sends no
+ * header keeps its conversation.
+ */
+export function machineActorFromRequest(req: Request): AdminActor {
+  const client = machineClientId(req);
+  return {
+    userId: null,
+    label: client === null ? "admin-token" : `admin-token:${client}`,
+    role: "machine",
+    canGrantOwner: true,
+  };
+}
+
 /**
  * The one credential resolution an agent-facing path uses.
  *
@@ -219,18 +264,21 @@ export async function runAsAgent(
     });
   }
 
-  if (req.headers.get("X-Dakflare-Client") === "cli") {
-    if (!(await adminTokenMatches(req, env))) return agentUnauthorized();
-    if (env.ADMIN_LIMITER) {
-      const { success } = await env.ADMIN_LIMITER.limit({ key: "admin" });
-      if (!success) return Response.json({ error: "rate_limited" }, { status: 429 });
+  const client = machineClientId(req);
+  if (client !== null) {
+    // `cli` keeps its old fail-closed behaviour: a missing token is a 401, not a
+    // fall-through to session auth. Any other named client must prove the same
+    // ADMIN_TOKEN bearer, so a session cookie alone can never adopt a machine
+    // label (or the machine's `canGrantOwner`).
+    const matches = await adminTokenMatches(req, env);
+    if (client === "cli" && !matches) return agentUnauthorized();
+    if (matches) {
+      if (env.ADMIN_LIMITER) {
+        const { success } = await env.ADMIN_LIMITER.limit({ key: "admin" });
+        if (!success) return Response.json({ error: "rate_limited" }, { status: 429 });
+      }
+      return handler(machineActorFromRequest(req));
     }
-    return handler({
-      userId: null,
-      label: "admin-token",
-      role: "machine",
-      canGrantOwner: true,
-    });
   }
 
   const guard = await requireRole(req, env, permission, { action });
@@ -290,7 +338,7 @@ export function canonicalTargetJson(target: GrantTarget): string {
   if (target.recipients !== undefined && target.recipients.length > 0) {
     ordered.recipients = [...new Set(target.recipients)].sort();
   }
-  for (const key of ["device_id", "flow_id", "rule_id", "body_hash"] as const) {
+  for (const key of ["device_id", "flow_id", "rule_id", "body_hash", "handle_id"] as const) {
     const value = target[key];
     if (typeof value === "string" && value !== "") ordered[key] = value;
   }
@@ -312,7 +360,7 @@ export function parseTargetJson(json: string): GrantTarget {
       );
       if (recipients.length > 0) target.recipients = recipients;
     }
-    for (const key of ["device_id", "flow_id", "rule_id", "body_hash"] as const) {
+    for (const key of ["device_id", "flow_id", "rule_id", "body_hash", "handle_id"] as const) {
       if (typeof row[key] === "string" && row[key] !== "") target[key] = row[key] as string;
     }
     if (typeof row.max_uses === "number" && Number.isInteger(row.max_uses) && row.max_uses > 0) {
@@ -342,7 +390,7 @@ export function targetMatches(
   options: { allRecipients?: boolean } = {}
 ): boolean {
   const constraints = Object.entries(grant).filter(([key, value]) =>
-    key === "max_uses"
+    key === "max_uses" || key === "handle_id"
       ? false
       : Array.isArray(value)
         ? value.length > 0
@@ -352,7 +400,7 @@ export function targetMatches(
     // An empty grant target ({}) only matches an unscoped request ({}); it never acts as a wildcard
     // against scoped requests (e.g. sms:send:production with recipients, or flow_deploy_prod with flow_id).
     const requestConstraints = Object.entries(request).filter(([key, value]) =>
-      key === "max_uses"
+      key === "max_uses" || key === "handle_id"
         ? false
         : Array.isArray(value)
           ? value.length > 0

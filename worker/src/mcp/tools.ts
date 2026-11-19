@@ -19,6 +19,7 @@ import { inputRequired, type InputRequiredResult } from "@modelcontextprotocol/s
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import { handleSend } from "../routes/send";
+import type { AgentSendOptions } from "../lib/agent-send";
 import { handleCommandStatus } from "../routes/status";
 import { handleMessagesList } from "../routes/incoming";
 import { handleDevicesList } from "../routes/pair";
@@ -75,7 +76,8 @@ export interface ToolDefinition {
   run: (
     args: Record<string, unknown>,
     env: Env,
-    actor: AdminActor
+    actor: AdminActor,
+    options?: AgentSendOptions
   ) => Promise<ToolAnswer | InputRequiredResult>;
 }
 
@@ -350,9 +352,9 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         sent: z.boolean(),
         approval_request_id: z.string().nullable().optional(),
       }),
-      run: async (args, environment, actor) => {
+      run: async (args, environment, actor, options) => {
         const { status, data } = await callRoute(
-          (request) => handleSend(request, environment, actor),
+          (request) => handleSend(request, environment, actor, options),
           "POST",
           "/v1/sms/send",
           {

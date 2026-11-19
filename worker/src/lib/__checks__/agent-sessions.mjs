@@ -17,7 +17,28 @@
  */
 
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCapabilityHost } from "./agent-capability-harness.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+function resolveExtensionless(specifier, context, nextResolve) {
+  if ((specifier.startsWith("./") || specifier.startsWith("../")) && path.extname(specifier) === "") {
+    const base = context.parentURL ? path.dirname(fileURLToPath(context.parentURL)) : HERE;
+    for (const suffix of [".ts", ".tsx", "/index.ts", "/index.tsx"]) {
+      const candidate = path.resolve(base, specifier + suffix);
+      if (existsSync(candidate)) {
+        return { url: pathToFileURL(candidate).href, shortCircuit: true };
+      }
+    }
+  }
+  return nextResolve(specifier, context, nextResolve);
+}
+
+registerHooks({ resolve: resolveExtensionless });
 
 let passed = 0;
 const failures = [];

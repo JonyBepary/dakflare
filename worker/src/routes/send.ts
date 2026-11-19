@@ -29,7 +29,7 @@ import {
 } from "../lib/config";
 import { internalError } from "./pair";
 import { enqueueOutboundCommand } from "../lib/commands";
-import { enforceAgentSend, rollbackAgentSend } from "../lib/agent-send";
+import { enforceAgentSend, rollbackAgentSend, type AgentSendOptions } from "../lib/agent-send";
 import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 
 interface CommandPayload {
@@ -45,7 +45,8 @@ interface CommandPayload {
 export async function handleSend(
   req: Request,
   env: Env,
-  actor?: AdminActor
+  actor?: AdminActor,
+  options: AgentSendOptions = {}
 ): Promise<Response> {
   const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
   if (!parsed.ok) return err(parsed.reason);
@@ -80,7 +81,7 @@ export async function handleSend(
     recipients: [to],
     allRecipients: false,
     ...(typeof input.reason === "string" ? { reason: input.reason.slice(0, 200) } : {}),
-  });
+  }, options);
   if (!authority.ok) return authority.response;
 
   const commandId = crypto.randomUUID();

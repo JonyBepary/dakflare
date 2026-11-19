@@ -226,6 +226,13 @@ const ERROR_RULES = {
   forbidden: { exit: 4, category: 'permission', fix: 'this credential cannot perform that action' },
   already_revoked: { exit: 5, category: 'conflict' },
   not_pending: { exit: 5, category: 'conflict' },
+  // A signed apply handle is the caller's document: a bad one is a usage error,
+  // a handle from another request is a conflict, and one past its max_uses has
+  // nothing left to spend (6, so a caller knows a fresh ask is the fix).
+  invalid_apply_token: { exit: 2, category: 'usage', remediation: 'dakflare ask "<intent>" --flow <id>', fix: 'a tampered or malformed apply handle' },
+  apply_token_required: { exit: 2, category: 'usage', fix: 'this request must be approved with the ag1_ handle it was minted with' },
+  apply_token_mismatch: { exit: 5, category: 'conflict', fix: 'the handle names a different flow, hash or request' },
+  handle_exhausted: { exit: 6, category: 'precondition', remediation: 'dakflare ask "<intent>" --flow <id>', fix: 'the handle has spent its max_uses' },
   expired: { exit: 6, category: 'precondition', remediation: 'dakflare auth approvals' },
   not_grantable: { exit: 4, category: 'permission' },
   bad_target: { exit: 2, category: 'usage' },
@@ -5691,11 +5698,13 @@ async function commandFlowApply(argv) {
     cfg,
     'POST',
     `/v1/admin/approvals/${encodeURIComponent(pending.id)}/approve`,
-    { duration_s: 3_600 },
+    // The Worker verifies the signature and the handle's max_uses at the point
+    // of spend, so the handle travels with the approval it is spending.
+    { duration_s: 3_600, apply_token: rawToken },
     { headers }
   );
 
-  if (result.status === 409) {
+  if (result.status === 409 && apiErrorBody(result.data, result.status) === 'not_pending') {
     let decidedBy = result.data?.decided_by ?? null;
     let decidedAt = result.data?.decided_at ?? null;
     if (decidedBy === null) {

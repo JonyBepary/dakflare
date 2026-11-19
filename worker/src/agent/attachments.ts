@@ -41,6 +41,15 @@ export const ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1_000;
  */
 export const TEXT_PROMPT_BUDGET_BYTES = 64 * 1024;
 
+/**
+ * The first line of the attachment block inside a stored user message.
+ *
+ * The block stays in the stored turn — a later turn's prompt needs the file
+ * text — but the panel read must not serve it again. `conversation.ts` keys the
+ * strip on this exact header and on the message metadata written beside it.
+ */
+export const ATTACHMENT_BLOCK_HEADER = "Attached files from the operator:";
+
 /** Extensions read into the prompt. Anything else is named, not sent. */
 const TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
   "txt",
@@ -77,6 +86,10 @@ export interface AttachmentStore {
   find(actorHash: string, id: string): Promise<AttachmentRow | null>;
   remove(actorHash: string, id: string): Promise<void>;
   count(actorHash: string, now: number): Promise<number>;
+  /** Expired rows, oldest first, bounded by `limit`. Used only by the sweep. */
+  listExpired(now: number, limit: number): Promise<Array<Pick<AttachmentRow, "id" | "r2_key">>>;
+  /** Remove one row by id, across all actors. Used only by the sweep. */
+  removeById(id: string): Promise<void>;
 }
 
 /** The byte seam. Real implementation is R2; the check uses a Map. */
@@ -172,7 +185,7 @@ export function truncateUtf8(text: string, maxBytes: number): { text: string; tr
  */
 export function attachmentPromptBlock(files: PromptFile[]): string {
   if (files.length === 0) return "";
-  const lines: string[] = ["Attached files from the operator:"];
+  const lines: string[] = [ATTACHMENT_BLOCK_HEADER];
   let remaining = TEXT_PROMPT_BUDGET_BYTES;
   for (const file of files) {
     if (file.kind !== "text") {
@@ -303,6 +316,9 @@ export function checkUpload(input: {
 
 /** The HTTP status for a refused turn. Bad input is 400; our failure is 503. */
 export function turnRefusalStatus(reason: string): number {
+  // A key reused for different text, or one still running, is a conflict with
+  // an existing turn — not a malformed request and not our failure.
+  if (reason === "idempotency_conflict" || reason === "turn_in_progress") return 409;
   return reason === "bad_request" ||
     reason === "bad_attachment" ||
     reason === "unknown_attachment" ||
@@ -384,7 +400,57 @@ export function d1AttachmentStore(env: Pick<Env, "DB">): AttachmentStore {
         .first<{ n: number }>();
       return Number(row?.n ?? 0);
     },
+    async listExpired(now, limit) {
+      const result = await env.DB.prepare(
+        `SELECT id, r2_key FROM agent_attachments
+          WHERE expires_at <= ?
+          ORDER BY expires_at ASC
+          LIMIT ?`
+      )
+        .bind(now, limit)
+        .all<{ id: string; r2_key: string }>();
+      return result.results ?? [];
+    },
+    async removeById(id) {
+      await env.DB.prepare(`DELETE FROM agent_attachments WHERE id = ?`).bind(id).run();
+    },
   };
+}
+
+/**
+ * Reclaim expired attachments, in bounded batches.
+ *
+ * The 24 h TTL used to be a refusal only: the row and its R2 object stayed
+ * forever. This deletes both, oldest first, and stops after `maxBatches` so one
+ * scheduled run cannot spend an unbounded budget on a backlog. A failed object
+ * delete leaves its row for the next run rather than orphaning the object.
+ */
+export async function purgeExpiredAttachments(
+  deps: AttachmentDeps,
+  now: number = Date.now(),
+  options: { batchSize?: number; maxBatches?: number } = {}
+): Promise<{ deleted: number }> {
+  const batchSize = Math.max(1, Math.min(500, Math.trunc(options.batchSize ?? 100)));
+  const maxBatches = Math.max(1, Math.min(100, Math.trunc(options.maxBatches ?? 10)));
+  let deleted = 0;
+
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const rows = await deps.store.listExpired(now, batchSize);
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      try {
+        await deps.blobs.delete(row.r2_key);
+      } catch {
+        // Leave the row so a later run can retry the object delete.
+        continue;
+      }
+      await deps.store.removeById(row.id);
+      deleted += 1;
+    }
+    if (rows.length < batchSize) break;
+  }
+
+  return { deleted };
 }
 
 /** R2-backed byte store. */

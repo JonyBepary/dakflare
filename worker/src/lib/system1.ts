@@ -819,18 +819,35 @@ export async function classifyOperatorCommand(
   return { ok: result.ok, command: result.answers.command, mutation: result.answers.mutation, reason: result.reason };
 }
 
+/**
+ * Ask the model to judge the patch, not prose about it.
+ *
+ * `patch` is the change itself when the caller sent one; `graph` is the stored
+ * flow the change lands in. `diff` remains the caller's summary, but it is no
+ * longer the only thing standing in for the change: a verdict on a summary is
+ * not a verdict on the patch. The five fields share the same character budget
+ * the old three-field input used, so a longer input cannot become a longer
+ * model call.
+ */
+export const JUDGE_INPUT_BUDGET_CHARS = 6_000;
+
 export async function judgeCandidatePatch(
   config: System1Config,
   userIntent: string,
   flowDiffSummary: string,
-  corpusReport: string
+  corpusReport: string,
+  patchText = "",
+  graphText = ""
 ): Promise<{ ok: boolean; faithful?: Answer; approval?: Answer; reason?: AskResult["reason"] }> {
+  // 800 + 1_200 + 2_000 + 1_200 + 800 = 6_000 characters, the previous ceiling.
   const result = await ask(
     config,
     {
-      intent: userIntent.slice(0, 1000),
-      patch: flowDiffSummary.slice(0, 4000),
-      corpus: corpusReport.slice(0, 1000),
+      intent: userIntent.slice(0, 800),
+      diff: flowDiffSummary.slice(0, 1_200),
+      patch: patchText.slice(0, 2_000),
+      graph: graphText.slice(0, 1_200),
+      corpus: corpusReport.slice(0, 800),
     },
     {
       faithful: {

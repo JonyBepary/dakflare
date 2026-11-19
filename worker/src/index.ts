@@ -73,7 +73,7 @@ import {
   handleDeviceApprovalReject,
   handleDeviceApprovals,
 } from "./routes/device-approvals";
-import { handleStreamableMcp } from "./mcp/http";
+import { handleStreamableMcp, mcpDeploymentAudience } from "./mcp/http";
 import { handleMcpRequest } from "./mcp/server";
 import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
 import { routeAgentRequest } from "agents/routing";
@@ -86,6 +86,12 @@ import {
   redeemTicket,
   ticketRefusal,
 } from "./lib/agent-runtime";
+import { machineActorFromRequest, machineClientId } from "./lib/authority";
+import {
+  d1AttachmentStore,
+  purgeExpiredAttachments,
+  r2BlobStore,
+} from "./agent/attachments";
 import { handleAgentRuntimeRead, handleAgentSay,
  handleAgentTicketMint, handleAutonomyEnable, handleAutonomyRead, handleAutonomyRevoke,
  handleAgentConversationRead, handleAgentConversationClear,
@@ -425,7 +431,7 @@ async function handleMcpRoute(req: Request, env: Env, pathname: string): Promise
   if (pathname === "/v1/mcp") {
     return handleMcpRequest(req, env, actor);
   }
-  return handleStreamableMcp(req, env, actor);
+  return handleStreamableMcp(req, env, actor, mcpDeploymentAudience(env, req));
 }
 
 /**
@@ -469,8 +475,14 @@ async function withAdminAccess(
   if (looksLikeAgentToken(bearer)) {
     return withAgentAccess(req, env, bearer as string, action, handler);
   }
-  if (req.headers.get("X-Dakflare-Client") === "cli") {
-    return withAdmin(req, env, () => handler(machineActor()));
+  const client = machineClientId(req);
+  if (client !== null) {
+    if (client === "cli") {
+      return withAdmin(req, env, () => handler(machineActorFromRequest(req)));
+    }
+    // A named machine client still needs the ADMIN_TOKEN bearer. `withAdmin`
+    // also accepts a session cookie, which must not become a machine identity.
+    return withAdminToken(req, env, () => handler(machineActorFromRequest(req)));
   }
   const guard = await requireRole(req, env, permission, { action });
   if (!guard.ok) return guard.response;
@@ -566,10 +578,6 @@ async function withAdminToken(
     if (!success) return err("rate_limited", 429);
   }
   return handler();
-}
-
-function machineActor(): AdminActor {
-  return { userId: null, label: "admin-token", role: "machine", canGrantOwner: true };
 }
 
 function actorFromUser(user: AuthUser): AdminActor {
@@ -854,17 +862,18 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
             }
           }
           const headers = new Headers(request.headers);
-          if (request.headers.get("X-Dakflare-Client") === "cli") {
+          if (machineClientId(request) !== null) {
             const authorized = await withAdmin(
               request,
               env,
               async () => new Response(null, { status: 204 })
             );
             if (!authorized.ok) return authorized;
+            const machine = machineActorFromRequest(request);
             headers.delete("x-dakflare-actor");
             headers.delete("x-dakflare-user-id");
-            headers.set("x-dakflare-actor", machineActor().label);
-            headers.set("x-dakflare-actor-role", machineActor().role);
+            headers.set("x-dakflare-actor", machine.label);
+            headers.set("x-dakflare-actor-role", machine.role);
             return new Request(request, { headers });
           }
           const guard = await requireRole(request, env, "write", {
@@ -1269,8 +1278,8 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       );
     }
     if (method === "POST" && pathname === "/v1/agent/synthesize") {
-      return withAdminAccess(req, env, "write", "synthesize agent patches", (_actor) =>
-        handleAgentSynthesize(req, env)
+      return withAdminAccess(req, env, "write", "synthesize agent patches", (actor) =>
+        handleAgentSynthesize(req, env, actor)
       );
     }
 
@@ -1831,12 +1840,28 @@ async function runRetention(env: Env): Promise<void> {
     // Non-fatal if an older database schema lacks one of the auxiliary tables.
   }
 
+  // Attachments expire after 24 h. Until this sweep existed the row and its R2
+  // object outlived the TTL forever. The purge is bounded per run; a backlog
+  // continues on the next schedule rather than holding the handler open.
+  let attachmentsDeleted = 0;
+  if (env.MEDIA_BUCKET !== undefined) {
+    try {
+      const purged = await purgeExpiredAttachments({
+        store: d1AttachmentStore(env),
+        blobs: r2BlobStore(env.MEDIA_BUCKET),
+      });
+      attachmentsDeleted = purged.deleted;
+    } catch (error) {
+      console.warn(`[retention] attachment sweep failed: ${String(error)}`);
+    }
+  }
+
   console.log(
     `[retention] days=${days} messages=${deleted} pairing_codes=${Number(
       codes.meta?.changes ?? 0
     )} magic_links=${Number(magicLinks.meta?.changes ?? 0)} rule_hits=${hitsDeleted} alerts=${Number(
       alerts.meta?.changes ?? 0
-    )}`
+    )} attachments=${attachmentsDeleted}`
   );
 }
 

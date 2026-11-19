@@ -192,6 +192,33 @@ export function streamIdFor(idempotencyKey: string): string {
   return `turn:folded:${idempotencyKey.length}:${shortHash(idempotencyKey)}`;
 }
 
+/**
+ * The idempotency key contract, shared by HTTP and the socket.
+ *
+ * HTTP has enforced this since `say` was added; the socket accepted any
+ * non-empty string, so one transport could mint a key the other refused.
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+
+export const IDEMPOTENCY_KEY_MESSAGE =
+  "idempotencyKey must be 8-64 characters of A-Z, a-z, 0-9, _ or -";
+
+/**
+ * Read a caller-supplied idempotency key, or refine absence to `null`.
+ *
+ * `undefined`/`null` is "the caller did not supply one"; an empty string is a
+ * supplied value and fails the contract, exactly as it does over HTTP.
+ */
+export function readIdempotencyKey(
+  value: unknown
+): { ok: true; key: string | null } | { ok: false; message: string } {
+  if (value === undefined || value === null) return { ok: true, key: null };
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(value)) {
+    return { ok: false, message: IDEMPOTENCY_KEY_MESSAGE };
+  }
+  return { ok: true, key: value };
+}
+
 /** The first frame of every turn: what stream to resume and under what key. */
 export interface TurnFrame {
   type: "turn";

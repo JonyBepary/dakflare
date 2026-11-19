@@ -36,7 +36,9 @@ import type { Env } from "../index";
 import type { AdminActor } from "../audit";
 import {
   ASSISTANT_OBJECT_NAME,
+  IDEMPOTENCY_KEY_MESSAGE,
   STREAM_IDLE_TIMEOUT_MS,
+  readIdempotencyKey,
   shortHash,
   streamIdFor,
   streamSseResponse,
@@ -48,13 +50,14 @@ import {
   appendTurnMessages,
   clearConversationMessages,
   conversationIdFor,
+  messageFingerprint,
   readConversationMessages,
   readHistoryNewestFirst,
-  readTurnAnswer,
   recordTurnAnswer,
+  runClaimedTurn,
   toChatHistory,
-  withRecordedTurn,
   type ConversationReadMessage,
+  type TurnClaimStore,
 } from "./conversation";
 import {
   actorHashFor,
@@ -63,6 +66,7 @@ import {
   messageWithAttachments,
   r2BlobStore,
   resolveAttachments,
+  type PromptFile,
 } from "./attachments";
 import { Journal, type JournalSql } from "./journal";
 import type { AgentActor } from "./types";
@@ -116,6 +120,16 @@ const MIGRATIONS: readonly string[] = [
      created_at INTEGER NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session, id)`,
+  // Version 7 — one in-flight claim per turn key. The row is the mutual
+  // exclusion: a second request with the same key cannot enter the model path
+  // while the first is running. `expires_at` is the backstop for a turn whose
+  // process died without releasing it.
+  `CREATE TABLE IF NOT EXISTS agent_turn_claims (
+     turn         TEXT PRIMARY KEY NOT NULL,
+     message_hash TEXT NOT NULL,
+     claimed_at   INTEGER NOT NULL,
+     expires_at   INTEGER NOT NULL
+   )`,
 ];
 
 /**
@@ -484,10 +498,21 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       );
       return;
     }
+    const keyReading = readIdempotencyKey(payload.idempotencyKey);
+    if (!keyReading.ok) {
+      // The same rule the HTTP `say` route enforces: 8–64 URL-safe characters.
+      // The socket speaks its own frame shape, not an HTTP status.
+      connection.send(
+        JSON.stringify({
+          type: "error",
+          error: "bad_request",
+          message: IDEMPOTENCY_KEY_MESSAGE,
+        })
+      );
+      return;
+    }
     const idempotencyKey =
-      typeof payload.idempotencyKey === "string" && payload.idempotencyKey !== ""
-        ? payload.idempotencyKey
-        : `${connection.id}:${shortHash(messageText)}`;
+      keyReading.key ?? `${connection.id}:${shortHash(messageText)}`;
     const attachmentIds = readAttachmentIds(payload.attachmentIds);
 
     const sessionId = connection.id;
@@ -541,6 +566,22 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     } catch {
       // Non-fatal; reserve() still blocks crash replay.
     }
+    // An interrupted turn never reached its release. Drop the claim so a retry
+    // with the same key is not blocked until the TTL expires.
+    const interruptedKey =
+      typeof ctx.name === "string" && ctx.name.startsWith("turn:")
+        ? ctx.name.slice("turn:".length)
+        : null;
+    if (interruptedKey !== null && interruptedKey !== "") {
+      try {
+        this.ctx.storage.sql.exec(
+          `DELETE FROM agent_turn_claims WHERE turn = ?`,
+          interruptedKey
+        );
+      } catch {
+        // The TTL is the fallback; recovery must not fail on it.
+      }
+    }
     console.warn(
       `[agent] turn_interrupted ${JSON.stringify({
         fiber: ctx.id,
@@ -573,6 +614,52 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     } catch {
       // The alarm is a convenience; the per-frame check is the guarantee.
     }
+  }
+
+  /**
+   * The claim surface over this object's SQLite.
+   *
+   * `INSERT ... ON CONFLICT ... WHERE expires_at <= now` makes one statement
+   * both the claim and the reclaim of a dead claim. `rowsWritten === 1` is the
+   * single winner; a live row makes the statement write nothing and the loser
+   * takes the replay/poll path.
+   */
+  #turnClaims(): TurnClaimStore {
+    return {
+      claim: async (key, messageHash, now, expiresAt) => {
+        const write = (): boolean => {
+          const existing = this.ctx.storage.sql
+            .exec<{ expires_at: number }>(
+              `SELECT expires_at FROM agent_turn_claims WHERE turn = ?`,
+              key
+            )
+            .toArray();
+          // A live claim belongs to someone else. An expired one is reclaimed;
+          // the read and the write are one synchronous block, so exactly one
+          // caller can observe the row as free.
+          if (existing.length > 0 && Number(existing[0].expires_at) > now) return false;
+          this.ctx.storage.sql.exec(
+            `INSERT INTO agent_turn_claims (turn, message_hash, claimed_at, expires_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(turn) DO UPDATE SET
+               message_hash = excluded.message_hash,
+               claimed_at = excluded.claimed_at,
+               expires_at = excluded.expires_at`,
+            key,
+            messageHash,
+            now,
+            expiresAt
+          );
+          return true;
+        };
+        return typeof this.ctx.storage.transactionSync === "function"
+          ? this.ctx.storage.transactionSync(write)
+          : write();
+      },
+      release: async (key) => {
+        this.ctx.storage.sql.exec(`DELETE FROM agent_turn_claims WHERE turn = ?`, key);
+      },
+    };
   }
 
   /** Replay a durable stream from `from`, then tail it while it is live. */
@@ -623,6 +710,14 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     }
   }
 
+  /**
+   * Claim the key, then run or replay.
+   *
+   * The claim is what stops two concurrent asks with one key from both calling
+   * the model. A replay announces the same deterministic stream id first, so
+   * the client can still resume the turn that produced the answer. A reused
+   * key with different text is a named conflict, not a silent replay.
+   */
   async #ask(
     connection: Connection,
     state: AssistantConnectionState,
@@ -631,6 +726,94 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     idempotencyKey: string,
     attachmentIds: string[] = []
   ): Promise<void> {
+    const conversationId = conversationIdFor(state.actor.label);
+    const session = this.sessions.session(conversationId);
+    const messageHash = await messageFingerprint(message);
+
+    const outcome = await runClaimedTurn({
+      session,
+      key: idempotencyKey,
+      messageHash,
+      claims: this.#turnClaims(),
+      run: () =>
+        this.#runAskTurn(
+          connection,
+          state,
+          sessionId,
+          message,
+          idempotencyKey,
+          messageHash,
+          attachmentIds
+        ),
+    });
+
+    const logOutcome = (name: string): void => {
+      console.log(
+        `[agent] turn ${JSON.stringify({
+          turn: idempotencyKey,
+          actor: state.actor.label,
+          took_ms: 0,
+          frames: 0,
+          outcome: name,
+        })}`
+      );
+    };
+
+    if (outcome.status === "replayed") {
+      try {
+        connection.send(JSON.stringify(turnFrame(idempotencyKey, conversationId)));
+        // `replayed` on the frame is what lets the panel say "answered earlier, nothing ran
+        // twice". Without it a replayed socket turn is indistinguishable from a fresh one,
+        // which is the one thing the key exists to make visible.
+        connection.send(
+          JSON.stringify({ type: "answer", text: outcome.answer, replayed: true })
+        );
+      } catch {
+        // The replayed answer is durable; a closed socket can resume.
+      }
+      logOutcome("replayed");
+      return;
+    }
+    if (outcome.status === "conflict") {
+      try {
+        connection.send(
+          JSON.stringify({
+            type: "error",
+            error: "idempotency_conflict",
+            message: outcome.message,
+          })
+        );
+      } catch {
+        // closed; the refusal is in the log
+      }
+      logOutcome("error:idempotency_conflict");
+      return;
+    }
+    if (outcome.status === "busy") {
+      try {
+        connection.send(
+          JSON.stringify({
+            type: "error",
+            error: "turn_in_progress",
+            message: outcome.message,
+          })
+        );
+      } catch {
+        // closed; the refusal is in the log
+      }
+      logOutcome("error:turn_in_progress");
+    }
+  }
+
+  async #runAskTurn(
+    connection: Connection,
+    state: AssistantConnectionState,
+    sessionId: string,
+    message: string,
+    idempotencyKey: string,
+    messageHash: string,
+    attachmentIds: string[] = []
+  ): Promise<{ ok: boolean }> {
     const started = Date.now();
     let frames = 0;
     // A turn retried with the same key answers from storage: the model is not
@@ -654,27 +837,11 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       );
     };
 
-    const replayedAnswer = await readTurnAnswer(session, idempotencyKey);
-    if (replayedAnswer !== null) {
-      // Announce first even on a replay: the stream id is deterministic, so
-      // the client can still resume the turn that produced this answer.
-      try {
-        connection.send(JSON.stringify(turnFrame(idempotencyKey, conversationId)));
-        // `replayed` on the frame is what lets the panel say "answered earlier, nothing ran
-        // twice". Without it a replayed socket turn is indistinguishable from a fresh one,
-        // which is the one thing the key exists to make visible.
-        connection.send(JSON.stringify({ type: "answer", text: replayedAnswer, replayed: true }));
-      } catch {
-        // The replayed answer is durable; a closed socket can resume.
-      }
-      logTurn("replayed");
-      return;
-    }
-
     // Attachments are resolved only for a turn that will actually run, and
     // before any history or stream exists: an unknown or expired id must fail
     // the turn by name rather than silently arriving without the file.
     let promptMessage = message;
+    let attachmentNames: string[] = [];
     if (attachmentIds.length > 0) {
       const resolved = await this.#resolveAttachmentPrompt(attachmentIds, state.actor.label);
       if (!resolved.ok) {
@@ -686,9 +853,10 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
           // closed; the refusal is in the log
         }
         logTurn(`error:${resolved.reason}`);
-        return;
+        return { ok: false };
       }
       promptMessage = messageWithAttachments(message, resolved.block);
+      attachmentNames = resolved.files.map((file) => file.name);
     }
 
     const { messages: newestFirst } = await readHistoryNewestFirst(session);
@@ -786,7 +954,7 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
         }
       }
       logTurn(`error:${resolved.reason}`);
-      return;
+      return { ok: false };
     }
 
     const tools = buildAgentTools();
@@ -833,9 +1001,11 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       }
 
       try {
-        await appendTurnMessages(session, idempotencyKey, history.slice(before));
+        await appendTurnMessages(session, idempotencyKey, history.slice(before), {
+          attachmentNames,
+        });
         if (result.stopped === "answer" && result.answer !== "") {
-          await recordTurnAnswer(session, idempotencyKey, result.answer);
+          await recordTurnAnswer(session, idempotencyKey, result.answer, messageHash);
         }
       } catch {
         // A lost transcript row costs context, not the journal.
@@ -852,6 +1022,8 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       fiber.stash({ turn: idempotencyKey, phase: "settled" });
       logTurn(errorRef.current !== null ? `error:${errorRef.current.reason}` : result.stopped);
     });
+
+    return { ok: errorRef.current === null };
   }
 
 
@@ -865,7 +1037,8 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     ids: string[],
     actorLabel: string
   ): Promise<
-    { ok: true; block: string } | { ok: false; reason: string; message: string }
+    | { ok: true; block: string; files: PromptFile[] }
+    | { ok: false; reason: string; message: string }
   > {
     if (this.env.MEDIA_BUCKET === undefined) {
       return {
@@ -886,7 +1059,7 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
       blobs: r2BlobStore(this.env.MEDIA_BUCKET),
     });
     if (!resolved.ok) return resolved;
-    return { ok: true, block: resolved.block };
+    return { ok: true, block: resolved.block, files: resolved.files };
   }
 
   /**
@@ -927,16 +1100,21 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
     // transcript is shared with the socket path.
     const journalSessionId = "http:" + crypto.randomUUID();
 
-    return withRecordedTurn<SayResult>(
+    const messageHash = await messageFingerprint(trimmed);
+    const outcome = await runClaimedTurn<SayResult>({
       session,
-      idempotencyKey,
-      async () => {
+      key: idempotencyKey,
+      messageHash,
+      claims: this.#turnClaims(),
+      run: async () => {
         let promptMessage = trimmed;
+        let attachmentNames: string[] = [];
         const attachmentIds = options.attachmentIds ?? [];
         if (attachmentIds.length > 0) {
           const resolved = await this.#resolveAttachmentPrompt(attachmentIds, actor.label);
           if (!resolved.ok) return resolved;
           promptMessage = messageWithAttachments(trimmed, resolved.block);
+          attachmentNames = resolved.files.map((file) => file.name);
         }
 
         const { messages: newestFirst } = await readHistoryNewestFirst(session);
@@ -1045,9 +1223,11 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
           }
 
           try {
-            await appendTurnMessages(session, idempotencyKey, history.slice(before));
+            await appendTurnMessages(session, idempotencyKey, history.slice(before), {
+              attachmentNames,
+            });
             if (answer !== "") {
-              await recordTurnAnswer(session, idempotencyKey, answer);
+              await recordTurnAnswer(session, idempotencyKey, answer, messageHash);
             }
           } catch {
             // a lost transcript costs context, not the turn
@@ -1076,17 +1256,27 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
           };
         });
       },
-      (replayedAnswer: string) => ({
-        // A replay is answered from storage: no attachment read, no model call,
-        // no token charge and no second transcript row.
-        ok: true as const,
-        answer: replayedAnswer,
+    });
+
+    if (outcome.status === "replayed") {
+      // A replay is answered from storage: no attachment read, no model call,
+      // no token charge and no second transcript row.
+      return {
+        ok: true,
+        answer: outcome.answer,
         calls: [],
         tokens: null,
         took_ms: 0,
         replayed: true,
-      })
-    );
+      };
+    }
+    if (outcome.status === "conflict") {
+      return { ok: false, reason: "idempotency_conflict", message: outcome.message };
+    }
+    if (outcome.status === "busy") {
+      return { ok: false, reason: "turn_in_progress", message: outcome.message };
+    }
+    return outcome.value;
   }
 
   /* ─────────────────────────── conversation read ─────────────────────── */

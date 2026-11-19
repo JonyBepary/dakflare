@@ -51,6 +51,20 @@ export interface AgentSendRequest {
   reason?: string;
 }
 
+/**
+ * How a transport wants the grant gate to behave.
+ *
+ * `ignoreGrants` exists for the legacy `/v1/mcp` transport: it cannot carry a
+ * server-initiated elicitation, but its tool answer CAN carry an MRTR round, so
+ * the honest rule there is "no pre-existing grant authorises; only the grant a
+ * human just minted for THIS round does". `approvalRequestId` is that round's
+ * id, read from the client-returned request state.
+ */
+export interface AgentSendOptions {
+  ignoreGrants?: boolean;
+  approvalRequestId?: string | null;
+}
+
 export type AgentSendAuthority =
   | { ok: true; grant: GrantRecord }
   | { ok: false; kind: "approval"; approval: ApprovalRecord }
@@ -60,7 +74,8 @@ export type AgentSendAuthority =
 export async function authorizeAgentSend(
   env: Env,
   identity: AgentSendIdentity,
-  request: AgentSendRequest
+  request: AgentSendRequest,
+  options: AgentSendOptions = {}
 ): Promise<AgentSendAuthority> {
   if (identity.boundDeviceId !== null && identity.boundDeviceId !== request.deviceId) {
     return { ok: false, kind: "device_mismatch", boundDeviceId: identity.boundDeviceId };
@@ -72,9 +87,24 @@ export async function authorizeAgentSend(
     device_id: request.deviceId,
   };
 
-  const grant = await findLiveGrant(env, identity.tokenId, SEND_GRANT_SCOPE, target, {
-    allRecipients: request.allRecipients,
-  });
+  // The legacy transport ignores every grant that predates this round. A grant
+  // is still the thing that lets the retry through, but only the one a human
+  // minted from the approval id this round asked for — so an already-live grant
+  // cannot turn a second call into a silent send.
+  const restricted = options.ignoreGrants === true;
+  const approvalId =
+    typeof options.approvalRequestId === "string" && options.approvalRequestId !== ""
+      ? options.approvalRequestId
+      : null;
+  const lookup = restricted && approvalId === null ? null : await findLiveGrant(
+    env,
+    identity.tokenId,
+    SEND_GRANT_SCOPE,
+    target,
+    { allRecipients: request.allRecipients }
+  );
+  const grant =
+    lookup !== null && (!restricted || lookup.approval_request_id === approvalId) ? lookup : null;
   if (grant === null) {
     const approval = await requestApproval(env, {
       agentTokenId: identity.tokenId,
@@ -194,7 +224,8 @@ export type AgentSendEnforcement =
 export async function enforceAgentSend(
   env: Env,
   actor: { agentTokenId?: string; agentDeviceId?: string | null } | undefined,
-  request: AgentSendRequest
+  request: AgentSendRequest,
+  options: AgentSendOptions = {}
 ): Promise<AgentSendEnforcement> {
   const count = Math.max(1, request.count ?? 1);
   if (actor?.agentTokenId === undefined) return { ok: true, grantId: null, count };
@@ -202,7 +233,8 @@ export async function enforceAgentSend(
   const authority = await authorizeAgentSend(
     env,
     { tokenId: actor.agentTokenId, boundDeviceId: actor.agentDeviceId ?? null },
-    request
+    request,
+    options
   );
 
   if (authority.ok) return { ok: true, grantId: authority.grant.id, count };
