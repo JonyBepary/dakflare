@@ -108,9 +108,19 @@
 	import { formatAbsolute, formatClock } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
+	import AnswerText from './AnswerText.svelte';
 	import AssistantProposalCard, { type ProposalResult } from './AssistantProposalCard.svelte';
 	import Icon from './Icon.svelte';
 	import Spinner from './Spinner.svelte';
+
+	/**
+	 * `pageLabel` is the nav's own word for the page the operator is standing on.
+	 *
+	 * The route is the honest answer to "where am I" everywhere except the
+	 * console root, where the path is a bare `/`: there the label says `Overview`,
+	 * which is what the rail calls it. Empty means no line at all, never a slash.
+	 */
+	let { pageLabel = '' }: { pageLabel?: string } = $props();
 
 	const uid = $props.id();
 	const panelId = `assistant-panel-${uid}`;
@@ -286,8 +296,12 @@
 
 	const contextLabel = $derived.by(() => {
 		const route = context.route ?? '';
-		const short = route.startsWith(BASE) ? route.slice(BASE.length) || '/' : route;
-		return context.flowId ? `${short} · flow ${context.flowId}` : short;
+		const short = route.startsWith(BASE) ? route.slice(BASE.length) : route;
+		// The console root strips to `/`, which says nothing: the nav's word for
+		// that page does. Every other route keeps its path.
+		const where = short === '' || short === '/' ? pageLabel : short;
+		if (where === '') return '';
+		return context.flowId ? `${where} · flow ${context.flowId}` : where;
 	});
 
 	const canAsk = $derived(!asking && question.trim() !== '');
@@ -303,6 +317,8 @@
 	 */
 	const resuming = $derived(recovery?.kind === 'resuming');
 	const cutOff = $derived(unfinished && recovery?.kind === 'lost');
+	/** The streaming caret: while text is still arriving and nothing is wrong. */
+	const caretShown = $derived(unfinished && recovery === null && trouble === null);
 
 	/** The header's phase word: the link's state, or the HTTP ask in flight. */
 	const phaseWord = $derived.by(() => {
@@ -1081,12 +1097,17 @@
 
 <svelte:window onkeydown={onkeydown} />
 
+<!-- The caret is the one mark the answer adds while it is still arriving: it is
+     handed to AnswerText and rendered inside the last paragraph, right after the
+     last word, rather than on a line of its own. -->
+{#snippet caret()}<span class="caret" aria-hidden="true"></span>{/snippet}
+
 {#if open}
 	<section
 		id={panelId}
 		class="panel"
 		aria-labelledby={titleId}
-		aria-describedby={contextId}
+		aria-describedby={contextLabel === '' ? undefined : contextId}
 	>
 		<header class="panel-head">
 			<div class="head-copy">
@@ -1104,7 +1125,9 @@
 						</span>
 					{/if}
 				</div>
-				<p class="context mono" id={contextId}>{contextLabel}</p>
+				{#if contextLabel !== ''}
+					<p class="context mono" id={contextId}>{contextLabel}</p>
+				{/if}
 			</div>
 			<button type="button" class="close" onclick={close} aria-label="Close panel">
 				<Icon name="x" size={15} />
@@ -1197,7 +1220,13 @@
 										</time>
 									{/if}
 								</span>
-								<p class="message-text">{message.text}</p>
+								{#if message.role === 'assistant'}
+									<!-- The model answers in Markdown; the operator's own words are
+									     printed exactly as they were typed, as they are in This turn. -->
+									<AnswerText class="message-text" text={message.text} />
+								{:else}
+									<p class="message-text">{message.text}</p>
+								{/if}
 							</li>
 						{/each}
 					</ol>
@@ -1243,12 +1272,7 @@
 							{/if}
 
 							{#if turn.text !== ''}
-								<p class="answer">
-									{turn.text}{#if unfinished && recovery === null && trouble === null}<span
-											class="caret"
-											aria-hidden="true"
-										></span>{/if}
-								</p>
+								<AnswerText class="answer" text={turn.text} trailing={caretShown ? caret : undefined} />
 							{/if}
 
 							{#if steps.length === 1 && !timeline}
@@ -1400,7 +1424,7 @@
 					{:else if outcome.status === 'plain'}
 						<p class="answer">{outcome.text}</p>
 					{:else}
-						<p class="answer">{outcome.answer}</p>
+						<AnswerText class="answer" text={outcome.answer} />
 						{#if outcome.withheld.length > 0}
 							<!-- A proposal the gateway refused to hand over. Saying so is the
 							     difference between "the model suggested nothing" and "the model

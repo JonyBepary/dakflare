@@ -608,8 +608,10 @@
 	{/if}
 
 	<!-- One floating control, outside the scroll: the panel is a sibling of the
-	     shell so its fixed position is measured against the window, not a card. -->
-	<Assistant />
+	     shell so its fixed position is measured against the window, not a card.
+	     `activeLabel` is the rail's own word for this page: the panel shows it in
+	     place of the bare `/` the console root strips to. -->
+	<Assistant pageLabel={activeLabel} />
 {/if}
 
 <style>
