@@ -20,6 +20,7 @@
 
 - [Android Handset & Pairing](/docs/guides/android-node-pairing.md): Build, sign, install, pair, and verify dev.dakflare.simulator with Android Keystore P-256 identity.
 - [Durable Objects, Channels & Routing](/docs/guides/durable-objects-routing.md): Operate DeviceGateway/AuthGuard/AuthorityGuard/AssistantAgent, WS/poll fallback, Telegram/WhatsApp, and DakFlareApi.
+- [Call DakFlare from a Worker or Workflow](/docs/guides/worker-service-binding.md): Bind the DakFlareApi RPC entrypoint, the two trust modes, and the idempotency key a retrying Workflow step needs.
 - [Visual Workflow Editor & WebMCP](/docs/guides/visual-workflow-editor.md): Use Steps/Map/Source, PatternSheet Clef auto-tagging, ghost patches, and the 4 browser WebMCP tools.
 - [Agent Authority, Grants & Webhooks](/docs/guides/agent-authority-and-webhooks.md): Configure scopes, 8-rung grant ladder, AssistantAgent autonomy windows, and HMAC-signed webhooks.
 - [Self-Hosting & Production Operations](/docs/guides/self-hosting-production.md): Sync cloudflare.config.ts/wrangler.toml, apply D1 migrations 0001-0017, avoid cf traps, verify and restore.

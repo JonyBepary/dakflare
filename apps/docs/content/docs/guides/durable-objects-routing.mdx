@@ -55,11 +55,18 @@ service = "dakflare-worker"
 entrypoint = "DakFlareApi"
 ```
 
+`dakflare-worker` is not published to npm, so declare the methods you call rather than importing
+a type that cannot be resolved — the guide
+[Call DakFlare from a Worker or a Workflow](/docs/guides/worker-service-binding) has the full
+interface, a `WorkflowEntrypoint` example and the retry rule.
+
 ```ts
-import type { DakFlareApi } from "dakflare-worker/binding-api";
+interface DakFlareBinding {
+  sendSms(input: { to: string; body: string; idempotencyKey?: string }): Promise<unknown>;
+}
 
 export default {
-  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareApi> }) {
+  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareBinding> }) {
     const sent = await env.DAKFLARE.sendSms({
       to: "+8801711000111",
       body: "Payment settled.",
