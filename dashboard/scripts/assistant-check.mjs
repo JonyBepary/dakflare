@@ -55,27 +55,63 @@ async function startVite() {
 	throw new Error('vite did not come up on ' + PORT);
 }
 
+/**
+ * Launch a Chromium-family browser and wait for CDP.
+ *
+ * A CI runner has no `chromium` on PATH, so the candidate list is tried in order and
+ * `CHROME_PATH` wins when set — that is what `browser-actions/setup-chrome` exports. When none
+ * of them answers, the failure names every path tried instead of saying "chromium did not
+ * expose CDP", which is what sent the last person looking at the wrong end of the pipe.
+ */
 async function startChrome() {
-	const proc = spawn(
+	const candidates = [
+		process.env.CHROME_PATH,
 		'chromium',
-		[
-			'--headless=new',
-			`--remote-debugging-port=${DEBUG}`,
-			'--no-first-run',
-			'--no-default-browser-check',
-			'--disable-gpu',
-			'--hide-scrollbars',
-			'--window-size=1280,900',
-			`--user-data-dir=${OUT}/chrome-assistant-check`,
-			'about:blank'
-		],
-		{ stdio: 'ignore', detached: true }
-	);
-	for (let i = 0; i < 60; i += 1) {
-		await wait(300);
-		if (await up(`http://127.0.0.1:${DEBUG}/json/version`)) return { proc };
+		'chromium-browser',
+		'google-chrome',
+		'google-chrome-stable'
+	].filter((value) => typeof value === 'string' && value !== '');
+	const tried = [];
+	let lastError = '';
+
+	for (const candidate of candidates) {
+		const proc = spawn(
+			candidate,
+			[
+				'--headless=new',
+				`--remote-debugging-port=${DEBUG}`,
+				'--no-first-run',
+				'--no-default-browser-check',
+				'--disable-gpu',
+				'--hide-scrollbars',
+				'--window-size=1280,900',
+				`--user-data-dir=${OUT}/chrome-assistant-check`,
+				'about:blank'
+			],
+			{ stdio: 'ignore', detached: true }
+		);
+		let exited = false;
+		proc.once('error', (error) => {
+			exited = true;
+			lastError = String(error.message ?? error);
+		});
+		for (let i = 0; i < 40; i += 1) {
+			if (exited) break;
+			await wait(300);
+			if (await up(`http://127.0.0.1:${DEBUG}/json/version`)) return { proc, browser: candidate };
+		}
+		tried.push(`${candidate}${lastError === '' ? '' : ` (${lastError})`}`);
+		try {
+			process.kill(-proc.pid, 'SIGKILL');
+		} catch {
+			// already gone
+		}
 	}
-	throw new Error('chromium did not expose CDP');
+
+	throw new Error(
+		`no Chromium-family browser answered CDP on ${DEBUG}. Tried: ${tried.join(', ')}. ` +
+			'Set CHROME_PATH to a Chrome/Chromium binary (CI does this with browser-actions/setup-chrome).'
+	);
 }
 
 async function attach() {
@@ -190,6 +226,30 @@ const STUB = String.raw`
 						payload: window.__sinkPatch ?? {}
 					}
 				]
+			});
+		}
+		// The panel probes the runtime before it asks, and falls back to the stateless route
+		// when the runtime is off. Answering an empty object here made it believe a turn succeeded while
+		// returning nothing, so the proposal never rendered — the check was stale, not the panel.
+		if (path === '/v1/admin/agent/runtime') {
+			return json({ enabled: false, schemaVersion: 6, sessions: 0, pinnedName: 'assistant' });
+		}
+		if (path === '/v1/admin/agent/say') {
+			return json(
+				{ error: 'agent_runtime_off', message: 'the agent runtime is off on this deployment' },
+				503
+			);
+		}
+		if (path === '/v1/admin/agent/conversation') {
+			return json({ conversation: 'conv_stub', messages: [], truncated: false });
+		}
+		if (path === '/v1/admin/agent/attachments') return json({ attachments: [] });
+		if (path === '/v1/admin/agent/autonomy') {
+			return json({
+				enabled: false,
+				caps: { sms: 10, writes: 50 },
+				usage: { day: '2026-11-19', tokens: 0, writes: 0, sms: 0 },
+				mine: true
 			});
 		}
 		if (path.includes('/health')) return json({ ok: true, checks: [] });

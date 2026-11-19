@@ -128,6 +128,10 @@ simple = { limit = 20, period = 60 }
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
 AGENT_RUNTIME = "off"
+# Who may call the worker-to-worker interface (DakFlareApi): `trusted` treats a
+# service binding as the credential, `agent_token` requires a dkf_agt_ token per
+# call. See src/binding.ts and docs/WORKER_BINDING.md.
+BINDING_AUTH = "trusted"
 AUTH_PASSWORD_MODE = "client-derived"
 MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
 MAGIC_LINK_TTL_SECONDS = "900"

@@ -93,6 +93,10 @@ export default defineConfig({
 			// Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless
 			// console assistant is unaffected.
 			AGENT_RUNTIME: bindings.text("off"),
+			// Who may call the worker-to-worker interface (DakFlareApi). `trusted` lets
+			// any Worker in the account that binds this service act without a token;
+			// `agent_token` requires a dkf_agt_ token per call. See src/binding.ts.
+			BINDING_AUTH: bindings.text("trusted"),
 			// AGPL-3.0 §13: `/source` redirects here.
 			SOURCE_URL: bindings.text("https://github.com/OWNER/dakflare"),
 

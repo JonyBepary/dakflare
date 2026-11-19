@@ -80,8 +80,16 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci
       - run: npm run check
+      # The console checks drive a real browser over CDP. A runner has no `chromium` on PATH,
+      # so install one and let CHROME_PATH point at it (scripts resolve that first).
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          install-chromedriver: false
       - run: node scripts/agent-patch-check.mjs
       - run: node scripts/assistant-check.mjs
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
       - run: node scripts/system1-draft-check.mjs
       - run: node scripts/webmcp-check.mjs
       - run: npm run build

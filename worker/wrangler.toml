@@ -194,6 +194,10 @@ simple = { limit = 20, period = 60 }
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
 AGENT_RUNTIME = "on"
+# Who may call the worker-to-worker interface (DakFlareApi): `trusted` treats a
+# service binding as the credential, `agent_token` requires a dkf_agt_ token per
+# call. See src/binding.ts and docs/WORKER_BINDING.md.
+BINDING_AUTH = "trusted"
 # Which gate answers the admin routes. `legacy` = ADMIN_TOKEN (the default, and
 # what a deployment that has not migrated yet must keep). `new` = Better Auth
 # session via requireRole(), with ADMIN_TOKEN demoted to the CLI/machine path
