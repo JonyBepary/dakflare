@@ -1468,14 +1468,14 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
       );
     }
     if (method === "POST" && pathname === "/v1/admin/alerts/ack-all") {
-      return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
-        handleAlertsAckAll(env)
+      return withAdminAccess(req, env, "write", "acknowledge alerts", (actor) =>
+        handleAlertsAckAll(env, actor)
       );
     }
     const alertAckMatch = pathname.match(/^\/v1\/admin\/alerts\/([^/]+)\/ack$/);
     if (method === "POST" && alertAckMatch) {
-      return withAdminAccess(req, env, "write", "acknowledge alerts", (_actor) =>
-        handleAlertAck(env, decodeURIComponent(alertAckMatch[1]))
+      return withAdminAccess(req, env, "write", "acknowledge alerts", (actor) =>
+        handleAlertAck(env, decodeURIComponent(alertAckMatch[1]), actor)
       );
     }
 

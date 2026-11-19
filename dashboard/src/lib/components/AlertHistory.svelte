@@ -126,6 +126,10 @@
 							<p class="history-detail">The gateway recorded no detail for this alert.</p>
 						{/if}
 
+						{#if alert.acknowledged_by}
+							<p class="history-when">Acknowledged by {alert.acknowledged_by}</p>
+						{/if}
+
 						{#if !meta.known}
 							<p class="history-raw">Kind as the gateway sent it: <span class="mono">{alert.kind}</span></p>
 						{/if}
@@ -134,7 +138,7 @@
 			</ul>
 
 			<p class="history-foot">
-				The gateway records when an alert was acknowledged or resolved, not which account acted.
+				Rows written before the gateway recorded an account show only the time.
 			</p>
 		{/if}
 	</div>

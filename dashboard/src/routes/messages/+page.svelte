@@ -318,12 +318,36 @@
 		direction = 'all';
 	}
 
-	/** What may be said about a conversation's session window, and what cannot. */
-	function sessionNote(channel: string | null | undefined): string {
-		if (channelWord(channel) === 'WhatsApp') {
-			return 'WhatsApp accepts a free-form reply only inside its 24-hour window. This gateway does not report whether that window is open, so a reply may need a template.';
+	/**
+	 * What may be said about this conversation, from the state the gateway now
+	 * joins onto the row. Null is "not reported", never "open": a channel with no
+	 * session state must not read as permission.
+	 */
+	function sessionNote(message: Message): string {
+		const state = message.session_state;
+		const until =
+			typeof message.window_expires_at === 'number' && message.window_expires_at > 0
+				? new Date(message.window_expires_at).toLocaleTimeString([], {
+						hour: '2-digit',
+						minute: '2-digit'
+					})
+				: null;
+		switch (state) {
+			case 'WINDOW_OPEN':
+				return until === null
+					? 'The window is open: a free-form reply is allowed.'
+					: `The window is open until ${until}, so a free-form reply is allowed.`;
+			case 'TEMPLATE_ONLY':
+				return 'Free-form replies are closed; only an approved template may be sent.';
+			case 'OPTED_OUT':
+				return 'This contact opted out. Nothing may be sent on this conversation.';
+			case 'NO_SESSION':
+				return 'No session is open. Reaching this contact needs an approved template.';
+			default:
+				return channelWord(message.channel) === 'WhatsApp'
+					? 'WhatsApp allows a free-form reply only inside its 24-hour window; the gateway does not report a state for this conversation, so a reply may need a template.'
+					: 'The gateway reports no session state for this conversation, so nothing here says whether a free-form reply is allowed.';
 		}
-		return 'The gateway stores a session state for this conversation but no route reports it, so the console cannot say whether a free-form reply is allowed.';
 	}
 
 	async function loadStatus(): Promise<void> {
@@ -930,7 +954,7 @@
 												{/if}
 											</p>
 											{#if channelHasSessionState(message.channel)}
-												<p class="conv-note">{sessionNote(message.channel)}</p>
+												<p class="conv-note">{sessionNote(message)}</p>
 											{/if}
 											<button
 												type="button"

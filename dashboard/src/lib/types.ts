@@ -163,6 +163,13 @@ export interface Message {
 	body: string;
 	received_at: number;
 	auto_reply: number;
+	/**
+	 * The conversation's session state, joined by the gateway. Null means the row
+	 * has no conversation, or one whose state was never written — never "open".
+	 */
+	session_state?: string | null;
+	/** When the free-form window closes, when the channel has one. */
+	window_expires_at?: number | null;
 	/** `'rule'` when the gateway rule engine answered this inbound message. */
 	reply_source?: 'rule' | string | null;
 	/** The rule id that answered, when `reply_source` is `'rule'`. */
@@ -203,6 +210,11 @@ export interface Alert {
 	kind: 'device_offline' | string;
 	raised_at: number;
 	acknowledged_at: number | null;
+	/**
+	 * The account that acknowledged it. Null on a row written before the column
+	 * existed, which means "unknown", not "nobody".
+	 */
+	acknowledged_by?: string | null;
 	/**
 	 * Set when the gateway resolved the condition. Only `?all=1` returns a row
 	 * with this stamp; the default list is open alerts only. Absent on a row

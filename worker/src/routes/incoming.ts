@@ -576,12 +576,14 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
   if (!Number.isFinite(before)) return err("bad_request", 400);
 
   const rows = await env.DB.prepare(
-    `SELECT id, device_id, local_id, direction, peer, body, received_at, auto_reply,
-            reply_source, reply_ref, reply_command_id, reply_state, reply_error,
-            reply_verdict, channel, conversation_id
-       FROM messages
-      WHERE device_id = ? AND received_at < ?
-      ORDER BY received_at DESC, id DESC
+    `SELECT m.id, m.device_id, m.local_id, m.direction, m.peer, m.body, m.received_at,
+            m.auto_reply, m.reply_source, m.reply_ref, m.reply_command_id, m.reply_state,
+            m.reply_error, m.reply_verdict, m.channel, m.conversation_id,
+            c.session_state, c.window_expires_at
+       FROM messages m
+       LEFT JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.device_id = ? AND m.received_at < ?
+      ORDER BY m.received_at DESC, m.id DESC
       LIMIT ?`
   )
     .bind(deviceId, before, limit)

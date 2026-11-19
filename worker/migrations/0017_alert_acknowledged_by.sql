@@ -1,0 +1,11 @@
+-- DakFlare — who acknowledged an alert.
+--
+-- `alerts` recorded WHEN an alert was acknowledged but not by whom, so the
+-- console could show a named outage without being able to say who had already
+-- looked at it. `acknowledged_by` is the actor label (an email, "admin-token"),
+-- the same identity `audit_log.actor_label` records for the write.
+--
+-- Nullable on purpose: rows acknowledged before this column existed stay null,
+-- and null means "unknown" rather than "nobody" or an empty label. Acknowledgement
+-- never rewrites an existing actor or time; a second ack is a no-op.
+ALTER TABLE alerts ADD COLUMN acknowledged_by TEXT;
