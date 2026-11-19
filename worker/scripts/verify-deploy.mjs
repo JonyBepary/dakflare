@@ -57,13 +57,28 @@ async function cfJson(args) {
   }
 }
 
-async function status(path) {
-  try {
-    const response = await fetch(`${BASE_URL}${path}`, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
-    return response.status;
-  } catch {
-    return null;
+/**
+ * Up to three reads, 1.5 s apart, stopping at the first one that matches. A Worker that has
+ * just been uploaded can answer from an edge that has not caught up, and a gate that turns
+ * one blip into a red build is a gate people learn to ignore. Bounded, so a real failure
+ * still fails and still prints what it saw.
+ */
+async function status(path, want) {
+  const seen = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(`${BASE_URL}${path}`, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+      seen.push(response.status);
+      if (response.status === want) return { status: response.status, seen };
+    } catch {
+      seen.push(null);
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1_500));
   }
+  return { status: seen[seen.length - 1] ?? null, seen };
 }
 
 console.log(`\nverify-deploy · ${BASE_URL}\n`);
@@ -98,10 +113,13 @@ const routes = [
   ["/v1/admin/agent/conversation", 401, "the conversation route exists and demands auth"],
 ];
 for (const [path, want, why] of routes) {
-  // eslint-disable-next-line no-await-in-loop -- three requests, sequentially, so a
-  // failure reads in order against the route it belongs to.
-  const got = await status(path);
-  record(got === want, `${path} → ${want}`, got === want ? why : `got ${got ?? "no answer"}`);
+  // Sequentially, so a failure reads in order against the route it belongs to.
+  const { status: got, seen } = await status(path, want);
+  record(
+    got === want,
+    `${path} → ${want}`,
+    got === want ? why : `got ${seen.map((s) => s ?? "no answer").join(", then ")}`,
+  );
 }
 
 // ── 3. The workflow, which is what makes the exit code wrong ──────────────────
