@@ -42,6 +42,8 @@
 		| 'play'
 		| 'sliders'
 		| 'keyboard'
+		| 'expand'
+		| 'collapse'
 		| 'sparkles';
 </script>
 
@@ -204,6 +206,21 @@
 		<path d="M7 5.5 18.5 12 7 18.5V5.5Z" />
 	{:else if name === 'sliders'}
 		<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4" />
+	{:else if name === 'expand'}
+		<!-- Four corners opening outward. The gap between the arms is wider than the
+		     arms themselves on purpose: at 19px a tighter frame fills in and reads as
+		     a cross, which is the wrong word for this control. -->
+		<path d="M3 8.5V3h5.5" />
+		<path d="M15.5 3H21v5.5" />
+		<path d="M21 15.5V21h-5.5" />
+		<path d="M8.5 21H3v-5.5" />
+	{:else if name === 'collapse'}
+		<!-- The same four corners, turned inward, so the pair reads as one control in
+		     two states rather than two unrelated icons. -->
+		<path d="M8.5 3v5.5H3" />
+		<path d="M21 8.5h-5.5V3" />
+		<path d="M15.5 21v-5.5H21" />
+		<path d="M3 15.5h5.5V21" />
 	{/if}
 </svg>
 

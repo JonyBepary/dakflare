@@ -245,7 +245,11 @@
 	.md {
 		margin: 0;
 		color: var(--df-text-primary);
-		font-size: var(--df-p-text-sm);
+		/* The panel's answer step, unless the surface reading it has room for a
+		   bigger one: the assistant's full-screen view raises `--df-md-font-size`
+		   to the console's 15px reading step. Nothing else sets it, so every other
+		   caller keeps 12px. */
+		font-size: var(--df-md-font-size, var(--df-p-text-sm));
 		line-height: 1.55;
 		overflow-wrap: anywhere;
 		white-space: pre-wrap;

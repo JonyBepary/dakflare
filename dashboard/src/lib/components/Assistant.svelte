@@ -52,10 +52,19 @@
 	 * action (Ask). Its structure is header, transcript, this turn, files, composer,
 	 * footer, so the reading order and the visual order are the same.
 	 *
+	 * It has two presentations and one panel. The control beside the close expands
+	 * it to the screen: on a phone it *is* the screen, so it is a dialog that holds
+	 * the page still and keeps Tab inside; on a wide screen it is a sheet with the
+	 * page still visible and still live around it, so it stays a region and does not
+	 * pretend to be modal. Expanded, the type takes the console's 15px reading step
+	 * and the prose is capped at ~68 characters even when the sheet is wide. Escape
+	 * gives back one step at a time — to floating first, closed only from floating —
+	 * and the choice lives in `sessionStorage`, so it follows the tab.
+	 *
 	 * The button is fixed, so `+layout.svelte` gives the main region a floor under
 	 * it: at 390px the page's last row must never end behind this control.
 	 */
-	import { onDestroy, tick } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
 	import {
 		acceptProposal,
@@ -173,12 +182,60 @@
 		'session_expired'
 	]);
 
+	/**
+	 * The one query that decides whether the panel is standing on a small screen.
+	 *
+	 * It is width alone — the same rule the stylesheet sizes the panel with, so the
+	 * box and the semantics can never disagree — and it decides two things at once:
+	 * whether the expanded panel is the whole viewport, and whether that makes it a
+	 * dialog. A full-bleed surface that claimed to be a region would be a lie in one
+	 * direction; a sheet that claimed to be a dialog would be a lie in the other.
+	 */
+	const COMPACT = '(max-width: 720px)';
+
+	/**
+	 * How much of the screen the panel takes.
+	 *
+	 * `floating` is the corner pane this panel has always been. `fullscreen` is the
+	 * same panel with the room to read a long answer, and it is a presentation and
+	 * not a second panel: one state, one transcript, one composer.
+	 */
+	type Presentation = 'floating' | 'fullscreen';
+
+	/**
+	 * The operator's choice, remembered for this tab.
+	 *
+	 * `sessionStorage`, not a cookie and not a row in D1: this is a preference about
+	 * one window, and a new tab starts floating rather than inheriting a mode it did
+	 * not ask for. A tab that will not remember simply starts floating.
+	 */
+	const PRESENTATION_KEY = 'dakflare.assistant.presentation';
+
 	let open = $state(false);
 	let question = $state('');
 	/** The question the current answer belongs to, so Try again repeats that one. */
 	let asked = $state('');
 	let asking = $state(false);
 	let outcome = $state<SayOutcome | null>(null);
+
+	/* ---- the presentation ---- */
+
+	/**
+	 * Which presentation the panel is in, and the two facts that follow from it.
+	 *
+	 * `expanded` is the reading view. `modal` is the phone half of it: expanded *and*
+	 * the screen is small enough that the panel covers the viewport, which is the
+	 * only case where the panel blocks the page and so the only case that owes the
+	 * page dialog semantics and a focus trap. Expanded on a wide screen is a big
+	 * panel with the page still live around it, and it stays a region.
+	 */
+	let presentation = $state<Presentation>('floating');
+	let small = $state(false);
+	let panelEl = $state<HTMLElement | null>(null);
+	let presentControl = $state<HTMLButtonElement | null>(null);
+
+	const expanded = $derived(presentation === 'fullscreen');
+	const modal = $derived(expanded && small);
 
 	/** `unknown` until the runtime read answers; `off` never opens a socket. */
 	let runtime = $state<'unknown' | 'on' | 'off'>('unknown');
@@ -367,6 +424,36 @@
 		stageReady = workflowPatchSinkReady();
 	});
 
+	/**
+	 * A dialog has to hold the page still, and a panel does not.
+	 *
+	 * Only the phone's expanded panel claims `aria-modal`, because only there does
+	 * the surface cover the viewport. A wheel over its header would otherwise scroll
+	 * the page underneath an opaque panel, which is the classic half-modal: claiming
+	 * one thing and doing another. Expanded on a wide screen leaves the page alone
+	 * on purpose — the page is still visible around the sheet and still scrolls,
+	 * which is why it stays a region.
+	 */
+	$effect(() => {
+		if (!modal) return;
+		const root = document.documentElement;
+		const before = root.style.overflow;
+		root.style.overflow = 'hidden';
+		return () => {
+			root.style.overflow = before;
+		};
+	});
+
+	onMount(() => {
+		const query = window.matchMedia(COMPACT);
+		small = query.matches;
+		const follow = (event: MediaQueryListEvent): void => {
+			small = event.matches;
+		};
+		query.addEventListener('change', follow);
+		return () => query.removeEventListener('change', follow);
+	});
+
 	onDestroy(() => {
 		sequence += 1;
 		sessionId += 1;
@@ -401,14 +488,107 @@
 	}
 
 	async function show(): Promise<void> {
+		// The tab's own choice, read on every open so a panel that was closed while
+		// expanded comes back expanded, and a fresh tab comes back floating.
+		presentation = readPresentation();
 		open = true;
 		stageReady = workflowPatchSinkReady();
 		sessionId += 1;
 		await tick();
-		field?.focus();
+		// Expanded, the panel opens as a reading view with the keyboard down: a
+		// focused field would raise a soft keyboard over half the screen before the
+		// operator asked to type. The surface itself takes focus, so Tab starts
+		// inside it and Escape is where the operator expects it. Floating, the field
+		// is the point of the panel and takes focus as it always has.
+		if (expanded) panelEl?.focus();
+		else field?.focus();
 		void loadSession();
 		liveProbe = startLive();
 		void liveProbe;
+	}
+
+	/* ---- the presentation ---- */
+
+	/**
+	 * The tab's choice of presentation, read and written.
+	 *
+	 * Both calls absorb the same failure: a browser that refuses `sessionStorage`
+	 * (some privacy modes throw on write) must not take the panel down with it.
+	 * Reading then answers `floating`, which is the safe half — a tab that cannot
+	 * remember starts quietly.
+	 */
+	function readPresentation(): Presentation {
+		try {
+			return window.sessionStorage.getItem(PRESENTATION_KEY) === 'fullscreen'
+				? 'fullscreen'
+				: 'floating';
+		} catch {
+			return 'floating';
+		}
+	}
+
+	function rememberPresentation(next: Presentation): void {
+		try {
+			window.sessionStorage.setItem(PRESENTATION_KEY, next);
+		} catch {
+			// The choice still holds for this open; it just will not survive a reload.
+		}
+	}
+
+	/**
+	 * To the screen, or back to the corner.
+	 *
+	 * The control that does this is the same element in both presentations, so focus
+	 * never has to be moved to keep the operator where they were: it is put back
+	 * explicitly anyway, because the box under it changes size and some browsers
+	 * move focus when a layout shift takes the focused element near the edge.
+	 */
+	async function setPresentation(next: Presentation): Promise<void> {
+		if (presentation === next) return;
+		presentation = next;
+		rememberPresentation(next);
+		await tick();
+		presentControl?.focus();
+	}
+
+	/**
+	 * Keep Tab inside the surface that claims to be modal.
+	 *
+	 * This runs only for the phone's expanded panel, which is the only shape that
+	 * sets `aria-modal`. The wide sheet deliberately has no trap: the page around it
+	 * is visible and live, so Tab leaving the sheet is the truth, not a leak.
+	 */
+	function trapFocus(event: KeyboardEvent): void {
+		const root = panelEl;
+		if (root === null) return;
+
+		const stops = Array.from(
+			root.querySelectorAll<HTMLElement>(
+				'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+			)
+		).filter((node) => node.getClientRects().length > 0);
+
+		const first = stops[0];
+		const last = stops[stops.length - 1];
+		if (first === undefined || last === undefined) {
+			event.preventDefault();
+			root.focus();
+			return;
+		}
+
+		const active = document.activeElement;
+		const outside = !(active instanceof Node) || !root.contains(active);
+		if (event.shiftKey) {
+			if (outside || active === first || active === root) {
+				event.preventDefault();
+				last.focus();
+			}
+			return;
+		}
+		if (outside || active === last || active === root) {
+			event.preventDefault();
+			first.focus();
+		}
 	}
 
 	/**
@@ -707,6 +887,10 @@
 
 	function close(): void {
 		open = false;
+		// Closing does not rewrite the tab's choice: a panel closed while expanded
+		// reopens expanded. The transient state goes back to floating so the
+		// launcher — hidden while the panel owns the screen — is there to take focus.
+		presentation = 'floating';
 		question = '';
 		asked = '';
 		outcome = null;
@@ -745,11 +929,25 @@
 		launcher?.focus();
 	}
 
+	/**
+	 * Escape gives back one thing at a time.
+	 *
+	 * Expanded, it collapses to the floating panel, because taking a transcript away
+	 * from an operator who just made it readable is the wrong first answer. Floating,
+	 * it closes, with focus back on the launcher. Tab is trapped only where the panel
+	 * says it is modal.
+	 */
 	function onkeydown(event: KeyboardEvent): void {
 		if (!open) return;
-		if (event.key !== 'Escape') return;
-		event.preventDefault();
-		close();
+
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			if (expanded) void setPresentation('floating');
+			else close();
+			return;
+		}
+
+		if (event.key === 'Tab' && modal) trapFocus(event);
 	}
 
 	/**
@@ -1106,32 +1304,53 @@
 	<section
 		id={panelId}
 		class="panel"
+		data-presentation={presentation}
+		role={modal ? 'dialog' : undefined}
+		aria-modal={modal ? 'true' : undefined}
 		aria-labelledby={titleId}
 		aria-describedby={contextLabel === '' ? undefined : contextId}
+		tabindex="-1"
+		bind:this={panelEl}
 	>
 		<header class="panel-head">
-			<div class="head-copy">
-				<div class="title-row">
-					<h2 class="panel-title" id={titleId}>Assistant</h2>
-					{#if phaseWord !== ''}
-						<!-- The one factual marker of the live path: a word, not a badge. It
-						     is absent entirely when the runtime is off and nothing is asked. -->
-						<span
-							class="link-chip mono"
-							data-state={live ? linkState : 'asking'}
-							title={agentName === null ? undefined : `agent ${agentName}`}
-						>
-							{phaseWord}
-						</span>
+			<div class="head-row">
+				<div class="head-copy">
+					<div class="title-row">
+						<h2 class="panel-title" id={titleId}>Assistant</h2>
+						{#if phaseWord !== ''}
+							<!-- The one factual marker of the live path: a word, not a badge. It
+							     is absent entirely when the runtime is off and nothing is asked. -->
+							<span
+								class="link-chip mono"
+								data-state={live ? linkState : 'asking'}
+								title={agentName === null ? undefined : `agent ${agentName}`}
+							>
+								{phaseWord}
+							</span>
+						{/if}
+					</div>
+					{#if contextLabel !== ''}
+						<p class="context mono" id={contextId}>{contextLabel}</p>
 					{/if}
 				</div>
-				{#if contextLabel !== ''}
-					<p class="context mono" id={contextId}>{contextLabel}</p>
-				{/if}
+				<div class="head-actions">
+					<!-- One control, two presentations, and a name that says which way it
+					     goes. It is not a disclosure: nothing folds away, the same panel
+					     changes size, so the name carries the state instead of a chevron. -->
+					<button
+						type="button"
+						class="head-action presentation"
+						bind:this={presentControl}
+						aria-label={expanded ? 'Collapse to floating' : 'Expand the assistant'}
+						onclick={() => void setPresentation(expanded ? 'floating' : 'fullscreen')}
+					>
+						<Icon name={expanded ? 'collapse' : 'expand'} size={19} />
+					</button>
+					<button type="button" class="head-action close" onclick={close} aria-label="Close panel">
+						<Icon name="x" size={15} />
+					</button>
+				</div>
 			</div>
-			<button type="button" class="close" onclick={close} aria-label="Close panel">
-				<Icon name="x" size={15} />
-			</button>
 		</header>
 
 		<!-- Two regions, both present before anything is written into them, and
@@ -1589,6 +1808,7 @@
 	bind:this={launcher}
 	type="button"
 	class="launcher"
+	data-away={expanded}
 	aria-expanded={open}
 	aria-controls={open ? panelId : undefined}
 	aria-label={open ? 'Close the assistant' : 'Ask the assistant'}
@@ -1643,6 +1863,18 @@
 		border-color: var(--df-border-strong);
 	}
 
+	/* While the panel holds the screen the launcher has nowhere to stand: at 390
+	   it would sit exactly on the composer, and at 1280 it would float over the
+	   page beside a sheet that already carries its own close. It is hidden rather
+	   than moved because there is no corner left that is not either the panel or
+	   the page's own controls, and a second exit beside the first is noise. It
+	   stays in the document, so `aria-expanded` still describes the panel, and it
+	   comes back the moment the panel floats again. */
+	.launcher[data-away='true'] {
+		visibility: hidden;
+		pointer-events: none;
+	}
+
 	@media (hover: hover) and (pointer: fine) {
 		.launcher:hover {
 			background: var(--df-surface-well);
@@ -1669,12 +1901,79 @@
 		overflow: hidden;
 	}
 
+	/* ---- the expanded presentation ----
+	   The same panel, with the room to read. Nothing is added: the header, the
+	   transcript, the files, the composer and the footer are the same elements on
+	   the same tokens and the same 4px corners. Two things change.
+
+	   The type grows one step, to the console's own 15px reading size. The floating
+	   panel answers at 12px because it is a pane in a corner; a surface the size of
+	   the screen with 12px prose in it is a mock-up of a reading view, not one. The
+	   step is the console's, not a new one, and `AnswerText` is handed it through
+	   the one custom property it reads.
+
+	   The measure stays at ~68 characters. The sheet can be as wide as the screen
+	   allows and the words never follow it: the reading column is capped and
+	   centred, so a long answer is read at the width an answer wants. The hairlines
+	   and the footer keep the sheet's own width, because they are chrome, not text. */
+	.panel[data-presentation='fullscreen'] {
+		--df-md-font-size: var(--df-p-text-md);
+	}
+
+	.panel[data-presentation='fullscreen'] .head-row,
+	.panel[data-presentation='fullscreen'] .foot-note {
+		width: 100%;
+		max-width: 68ch;
+		margin-inline: auto;
+	}
+
+	.panel[data-presentation='fullscreen'] .body,
+	.panel[data-presentation='fullscreen'] .files,
+	.panel[data-presentation='fullscreen'] .ask {
+		width: 100%;
+		/* The measure plus the box's own 12px of inline padding, so the words — not
+		   the padding — land on the same edge as the header and the footer. */
+		max-width: calc(68ch + 24px);
+		margin-inline: auto;
+	}
+
+	.panel[data-presentation='fullscreen'] .foot-note {
+		display: block;
+	}
+
+	.panel[data-presentation='fullscreen'] .message-text,
+	.panel[data-presentation='fullscreen'] .turn-question,
+	.panel[data-presentation='fullscreen'] .answer {
+		font-size: var(--df-p-text-md);
+		line-height: 1.6;
+	}
+
+	.panel[data-presentation='fullscreen'] .section-title,
+	.panel[data-presentation='fullscreen'] .message-who {
+		font-size: var(--df-p-text-sm);
+	}
+
 	.panel-head {
+		padding: 10px 12px 9px;
+		border-bottom: 1px solid var(--df-border-hairline);
+	}
+
+	/* The header's contents sit in the reading column when the panel is expanded,
+	   while the hairline under them keeps the sheet's width. */
+	.head-row {
 		display: flex;
 		align-items: flex-start;
 		gap: var(--df-p-space-2);
-		padding: 10px 12px 9px;
-		border-bottom: 1px solid var(--df-border-hairline);
+	}
+
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		flex: none;
+		margin-left: auto;
+		margin-top: -3px;
+		margin-right: -3px;
 	}
 
 	.head-copy {
@@ -1729,15 +2028,15 @@
 		overflow-wrap: anywhere;
 	}
 
-	.close {
+	/* The header's two controls: the presentation and the close. Both are the same
+	   quiet plate, so the pair reads as one group, and neither is coral — colour is
+	   for the one action, not for chrome. */
+	.head-action {
 		flex: none;
-		margin-left: auto;
 		display: grid;
 		place-items: center;
 		width: 28px;
 		height: 28px;
-		margin-top: -3px;
-		margin-right: -3px;
 		border: 1px solid transparent;
 		border-radius: var(--df-p-radius-xs);
 		background: transparent;
@@ -1745,7 +2044,7 @@
 	}
 
 	@media (hover: hover) and (pointer: fine) {
-		.close:hover {
+		.head-action:hover {
 			background: var(--df-surface-well);
 			color: var(--df-text-primary);
 		}
@@ -2415,9 +2714,24 @@
 			height: 44px;
 		}
 
-		.close {
+		/* Two controls in the header, both 44: the presentation toggle sits beside
+		   the close, so both need the floor or the pair reads as one big and one
+		   small. The negative offsets live on the group so the pair keeps its
+		   optical alignment with the title's 12px edge. */
+		.head-action {
 			width: 44px;
 			height: 44px;
+		}
+
+		/* A four-corner frame needs more room than a close glyph to carry the same
+		   weight — its ink fills its box, an X's fills half of one — so it takes the
+		   target's extra 16px and stays a frame rather than four stray ticks. */
+		:global(.presentation svg) {
+			width: 20px;
+			height: 20px;
+		}
+
+		.head-actions {
 			margin-top: -8px;
 			margin-right: -8px;
 		}
@@ -2433,6 +2747,73 @@
 
 		.messages {
 			gap: 12px;
+		}
+	}
+
+	/* Expanded on a phone the panel *is* the screen: no gutter to the page, no
+	   corners to see round, and the notch and the home indicator kept clear. It is
+	   a dialog here — the component reads the same 720px line — so it may look like
+	   one. */
+	@media (max-width: 720px) {
+		.panel[data-presentation='fullscreen'] {
+			inset: 0;
+			width: auto;
+			max-width: none;
+			height: 100dvh;
+			max-height: none;
+			border-radius: 0;
+			padding-top: env(safe-area-inset-top, 0px);
+			padding-left: env(safe-area-inset-left, 0px);
+			padding-right: env(safe-area-inset-right, 0px);
+		}
+
+		/* The footer is the last strip, so the safe-area floor is paid for there
+		   rather than under it, where it would show as a band of card colour. */
+		.panel[data-presentation='fullscreen'] .panel-foot {
+			padding-bottom: calc(7px + env(safe-area-inset-bottom, 0px));
+		}
+
+		/* Expanded, the panel is the whole screen and there is no card edge above
+		   the title to give the header its air, so the header keeps a little more
+		   of its own. */
+		.panel[data-presentation='fullscreen'] .panel-head {
+			padding-top: 14px;
+		}
+	}
+
+	/* Expanded on a screen that has room for a sheet: a large surface with the
+	   page still visible and still live around it, which is why it stays a region
+	   and not a dialog. 880px of sheet around a 68ch measure is a deliberate
+	   proportion, not a leftover: the prose is read at the width it wants and the
+	   surface is big enough to feel like a change of room. */
+	@media (min-width: 721px) {
+		.panel[data-presentation='fullscreen'] {
+			top: 24px;
+			right: 24px;
+			bottom: 24px;
+			left: 24px;
+			width: auto;
+			max-width: 880px;
+			height: auto;
+			max-height: none;
+			margin-inline: auto;
+		}
+
+		.panel[data-presentation='fullscreen'] .panel-head {
+			padding-top: 12px;
+			padding-bottom: 10px;
+		}
+
+		.panel[data-presentation='fullscreen'] .body {
+			padding-block: 16px;
+		}
+
+		/* The field follows the prose up a step: a 12px field under 15px text
+		   reads as a broken control. Only past 720px — under it the 16px guard that
+		   keeps iOS from zooming owns this, and it must win. */
+		.panel[data-presentation='fullscreen'] .ask-input,
+		.panel[data-presentation='fullscreen'] .ask-send {
+			font-size: var(--df-p-text-md);
 		}
 	}
 

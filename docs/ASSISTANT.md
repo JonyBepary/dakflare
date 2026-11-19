@@ -204,6 +204,14 @@ the patch" only while a workflow editor is mounted, because the handover is a fu
 the editor registers on mount (`registerWorkflowPatchSink`). With no editor open the
 card says so and links to the editor rather than pretending a POST would do something.
 
+The panel has one more presentation, not a second panel. The control beside its close
+expands it: on a phone it becomes the screen (a dialog, with the page behind it held
+still and Tab kept inside), and on a wide screen it is a large sheet with the prose
+still capped at a readable measure and the page around it visible and live. Escape
+gives back one step at a time — expanded to floating first, closed only from floating —
+and the choice is remembered in `sessionStorage`, so it follows the tab and not the
+operator: a new tab starts floating.
+
 ## In the CLI
 
 ```bash
