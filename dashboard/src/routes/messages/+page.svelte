@@ -23,6 +23,7 @@
 	import { answerOf, answerPhrase } from '$lib/answers';
 	import { replyFatesOf } from '$lib/replies';
 	import { ROUTES } from '$lib/paths';
+	import { session } from '$lib/session.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import CommandTracker from '$lib/components/CommandTracker.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
@@ -76,6 +77,14 @@
 	let composeOpen = $state(false);
 	let composeDevice = $state('');
 	let composeButton = $state<HTMLButtonElement | null>(null);
+
+	/**
+	 * Sending is a `write` on the Worker; reading the ledger is not. A member can
+	 * read every row here and cannot queue a message, so the two sending
+	 * controls say that instead of failing when pressed.
+	 */
+	const canWrite = $derived(session.canWrite);
+	const sendRefusal = $derived('Members can read the message log but cannot send SMS.');
 
 	const selectedDevice = $derived(devices.find((device) => device.device_id === selected) ?? null);
 	const hasActiveDevice = $derived(devices.some((device) => !isRevoked(device)));
@@ -325,7 +334,8 @@
 	}
 
 	async function openCompose(): Promise<void> {
-		if (!hasActiveDevice) return;
+		// `?compose=1` reaches this too: the panel is the write, not the URL.
+		if (!canWrite || !hasActiveDevice) return;
 		if (!composeDevice || !devices.some((device) => device.device_id === composeDevice && !isRevoked(device))) {
 			composeDevice = devices.find((device) => !isRevoked(device))?.device_id ?? '';
 		}
@@ -363,7 +373,9 @@
 					: fallbackActive.device_id;
 			syncUrl();
 			composeDevice = (selectedDevice && !isRevoked(selectedDevice) ? selected : fallbackActive.device_id);
-			if (page.url.searchParams.get('compose') === '1' && hasActiveDevice) composeOpen = true;
+			if (page.url.searchParams.get('compose') === '1' && hasActiveDevice) {
+				composeOpen = canWrite;
+			}
 			await loadMessages(true);
 			if (!mounted) return;
 			void loadStatus();
@@ -406,10 +418,12 @@
 	>
 		<button
 			type="button"
-			class="btn {composeOpen ? '' : 'btn-primary'}"
+			class="btn {canWrite && !composeOpen ? 'btn-primary' : ''}"
 			bind:this={composeButton}
 			onclick={() => void openCompose()}
-			disabled={loadingDevices || !hasActiveDevice}
+			disabled={loadingDevices || !hasActiveDevice || !canWrite}
+			title={canWrite ? undefined : sendRefusal}
+			aria-describedby={canWrite ? undefined : 'messages-read-only'}
 			aria-expanded={composeOpen}
 			aria-controls={composeOpen ? 'compose-panel' : undefined}
 		>
@@ -426,6 +440,16 @@
 			Refresh
 		</button>
 	</PageHeader>
+
+	{#if !canWrite}
+		<p class="read-only" id="messages-read-only">
+			<Icon name="shield" size={14} />
+			<span>
+				<strong>Read-only.</strong> {sendRefusal} You can still read every message, follow a
+				reply's delivery and open its trace.
+			</span>
+		</p>
+	{/if}
 
 	{#if devicesError}
 		<section class="card">
@@ -453,11 +477,15 @@
 			<EmptyState
 				icon="message"
 				title="No devices paired yet"
-				description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
+				description={canWrite
+					? 'Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply.'
+					: 'No phone is paired with this gateway yet, so there is no log to read. An owner or admin pairs one with a single-use code.'}
 			>
-				<a class="btn btn-primary" href={`${ROUTES.devices}?mint=enroll`}>
-					<Icon name="key" size={14} /> Mint a pairing code
-				</a>
+				{#if canWrite}
+					<a class="btn btn-primary" href={`${ROUTES.devices}?mint=enroll`}>
+						<Icon name="key" size={14} /> Mint a pairing code
+					</a>
+				{/if}
 			</EmptyState>
 		</section>
 	{:else}
@@ -632,7 +660,7 @@
 							{@const canTrackDelivery = Boolean(trackerCommandId)}
 							{@const rowDevice = devices.find((device) => device.device_id === message.device_id)}
 							{@const resendHandler =
-								rowDevice && !isRevoked(rowDevice)
+								canWrite && rowDevice && !isRevoked(rowDevice)
 									? (to: string, body: string) => resendMessage(message.id, to, body)
 									: undefined}
 							{@const isLong = message.body.length > 200}
@@ -705,7 +733,7 @@
 											{/if}
 											{#if !outbound || canTrackDelivery}
 												<span class="spacer"></span>
-												{#if !outbound}
+												{#if !outbound && canWrite}
 													<a
 														class="link-btn track-btn rule-test-link"
 														href={`${ROUTES.rules}?test_sender=${encodeURIComponent(message.peer)}&test_body=${encodeURIComponent(message.body)}&device=${encodeURIComponent(message.device_id)}`}
@@ -809,6 +837,33 @@
 </div>
 
 <style>
+	/* Why a member sees the log without Compose: said once, on the page. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0 0 var(--df-p-space-4);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
 	.compose-panel {
 		margin-bottom: var(--df-p-space-4);
 		border-color: color-mix(in srgb, var(--df-accent-text) 24%, var(--df-border-hairline));

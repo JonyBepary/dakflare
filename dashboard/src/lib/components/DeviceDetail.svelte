@@ -56,6 +56,7 @@
 		deviceId,
 		device = null,
 		deviceLabels = {},
+		canWrite = true,
 		onclose,
 		onrevoked,
 		onarchived,
@@ -67,6 +68,11 @@
 		device?: Device | null;
 		/** id → label, so "copied from" can name a device that is still in the fleet. */
 		deviceLabels?: Record<string, string>;
+		/**
+		 * `false` for a member: every control in this drawer is a `write` on the
+		 * Worker, so the drawer shows the history and says who can act instead.
+		 */
+		canWrite?: boolean;
 		onclose: () => void;
 		onrevoked?: (deviceId: string) => void;
 		onarchived?: (deviceId: string) => void;
@@ -663,60 +669,71 @@
 				</section>
 			{:else}
 				<div class="action-row">
-					<button
-						type="button"
-						class="btn btn-sm"
-						class:btn-primary={!sendOpen}
-						onclick={() => {
-							onmint?.(deviceId);
-							onclose();
-						}}
-					>
-						<Icon name="key" size={13} /> Mint enroll code
-					</button>
-					<button
-						type="button"
-						class="btn btn-sm"
-						onclick={() => (sendOpen = !sendOpen)}
-						aria-expanded={sendOpen}
-						aria-controls={sendOpen ? `send-panel-${uid}` : undefined}
-					>
-						<Icon name="send" size={13} /> Send SMS
-					</button>
-					<span class="spacer"></span>
-					{#if archived}
+					{#if canWrite}
 						<button
 							type="button"
 							class="btn btn-sm"
-							onclick={() => void unarchiveNow()}
-							disabled={archiving}
-							aria-busy={archiving}
-						>
-							{#if archiving}<Spinner />{:else}<Icon name="unarchive" size={13} />{/if}
-							Unarchive
-						</button>
-					{:else}
-						<button
-							type="button"
-							class="btn btn-sm"
+							class:btn-primary={!sendOpen}
 							onclick={() => {
-								archiveError = null;
-								archiveOpen = true;
+								onmint?.(deviceId);
+								onclose();
 							}}
 						>
-							<Icon name="archive" size={13} /> Archive
+							<Icon name="key" size={13} /> Mint enroll code
 						</button>
+						<button
+							type="button"
+							class="btn btn-sm"
+							onclick={() => (sendOpen = !sendOpen)}
+							aria-expanded={sendOpen}
+							aria-controls={sendOpen ? `send-panel-${uid}` : undefined}
+						>
+							<Icon name="send" size={13} /> Send SMS
+						</button>
+						<span class="spacer"></span>
+						{#if archived}
+							<button
+								type="button"
+								class="btn btn-sm"
+								onclick={() => void unarchiveNow()}
+								disabled={archiving}
+								aria-busy={archiving}
+							>
+								{#if archiving}<Spinner />{:else}<Icon name="unarchive" size={13} />{/if}
+								Unarchive
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="btn btn-sm"
+								onclick={() => {
+									archiveError = null;
+									archiveOpen = true;
+								}}
+							>
+								<Icon name="archive" size={13} /> Archive
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="btn btn-danger btn-sm"
+							onclick={() => {
+								revokeError = null;
+								revokeOpen = true;
+							}}
+						>
+							<Icon name="trash" size={13} /> Revoke
+						</button>
+					{:else}
+						<p class="read-only">
+							<Icon name="shield" size={13} />
+							<span>
+								<strong>Read-only.</strong> Your account is a member, so this drawer shows the
+								device's history: pairing a code, sending SMS, archiving and revoking are done by
+								an owner or admin.
+							</span>
+						</p>
 					{/if}
-					<button
-						type="button"
-						class="btn btn-danger btn-sm"
-						onclick={() => {
-							revokeError = null;
-							revokeOpen = true;
-						}}
-					>
-						<Icon name="trash" size={13} /> Revoke
-					</button>
 				</div>
 			{/if}
 
@@ -828,8 +845,9 @@
 											<CommandTracker
 												deviceId={deviceId}
 												commandId={trackedCommands[command.command_id] ?? command.command_id}
-												onResend={(to, body) =>
-													resendCommand(command.command_id, to, body)}
+												onResend={canWrite
+													? (to, body) => resendCommand(command.command_id, to, body)
+													: undefined}
 											/>
 										</div>
 									{/if}
@@ -847,7 +865,7 @@
 						{#if loading}<Spinner />{:else}newest {MESSAGE_LIMIT}{/if}
 					</span>
 					<span class="spacer"></span>
-					{#if messages.length > 0 && !revoked}
+					{#if messages.length > 0 && !revoked && canWrite}
 						<button
 							type="button"
 							class="btn btn-danger-ghost btn-sm"
@@ -955,6 +973,8 @@
 	</div>
 </dialog>
 
+<!-- A member can never open these: the controls that would are not rendered. -->
+{#if canWrite}
 <ConfirmDialog
 	open={revokeOpen}
 	title="Revoke this device?"
@@ -1029,6 +1049,7 @@
 		device stays paired and new messages keep arriving. This cannot be undone.
 	</p>
 </ConfirmDialog>
+{/if}
 
 <style>
 	.drawer {
@@ -1440,6 +1461,33 @@
 		align-items: center;
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
+	}
+
+	/* The member's half of the action row: the reason the buttons are not here. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
 	}
 
 	.send-section {

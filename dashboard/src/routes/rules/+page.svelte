@@ -5,6 +5,7 @@
 	import { isRevoked, type BodyType, type Device, type MatcherType, type Rule } from '$lib/types';
 	import { utf8Bytes } from '$lib/format';
 	import { deviceLabel, deviceOptionLabel, devicePrimary } from '$lib/presence';
+	import { session } from '$lib/session.svelte';
 	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -134,6 +135,17 @@
 	let deleting = $state(false);
 	let deleteError = $state<string | null>(null);
 
+	/**
+	 * Saving, pausing, deleting and even the dry-run test are `write` on the
+	 * Worker (`/v1/admin/rules/test` is a POST that compiles stored patterns, so
+	 * it asks for `write` too). A member reads the rules and their coverage and
+	 * is told who can change them, instead of meeting a refusal on Save.
+	 */
+	const canWrite = $derived(session.canWrite);
+	const readOnlyWhy = $derived(
+		'Members can read rules but cannot save, pause, test or delete one. Ask an owner or admin.'
+	);
+
 	const activeDevices = $derived(devices.filter((device) => !isRevoked(device)));
 
 	const matcherHint = $derived(MATCHERS.find((item) => item.value === form.matcher_type) ?? MATCHERS[0]);
@@ -249,6 +261,7 @@
 	}
 
 	function openForm() {
+		if (!canWrite) return;
 		resetForm();
 		formOpen = true;
 		listTestOpen = false;
@@ -256,6 +269,7 @@
 	}
 
 	async function editRule(rule: Rule) {
+		if (!canWrite) return;
 		editingId = rule.id;
 		form = {
 			name: rule.name,
@@ -296,6 +310,7 @@
 	}
 
 	async function openListTest(rule: Rule) {
+		if (!canWrite) return;
 		formOpen = false;
 		editingId = null;
 		listTestScope = rule.device_id ?? '';
@@ -326,7 +341,7 @@
 	}
 
 	async function toggleRuleEnabled(rule: Rule): Promise<void> {
-		if (togglingId) return;
+		if (!canWrite || togglingId) return;
 		togglingId = rule.id;
 		flash = null;
 		try {
@@ -386,7 +401,7 @@
 	}
 
 	async function submitRule() {
-		if (submitting) return;
+		if (!canWrite || submitting) return;
 		formError = null;
 		flash = null;
 		if (!validate()) {
@@ -430,7 +445,7 @@
 	}
 
 	async function confirmDelete() {
-		if (!deleteTarget || deleting) return;
+		if (!canWrite || !deleteTarget || deleting) return;
 		deleting = true;
 		deleteError = null;
 		const target = deleteTarget;
@@ -454,6 +469,9 @@
 		const testBody = params.get('test_body') ?? '';
 		const testDevice = params.get('device')?.trim() ?? '';
 		if (testSender || testBody) {
+			// The panel is a write: it runs stored patterns. A member following
+			// this URL from the log gets the list, not a control that refuses.
+			if (!canWrite) return;
 			listTestInitialPeer = testSender;
 			listTestInitialBody = testBody;
 			listTestInitialDevice = testDevice;
@@ -518,8 +536,11 @@
 		</button>
 		<button
 			type="button"
-			class="btn {formOpen ? '' : 'btn-primary'}"
+			class="btn {canWrite && !formOpen ? 'btn-primary' : ''}"
 			onclick={() => (formOpen ? closeForm() : openForm())}
+			disabled={!canWrite}
+			title={canWrite ? undefined : readOnlyWhy}
+			aria-describedby={canWrite ? undefined : 'rules-read-only'}
 			aria-expanded={formOpen}
 			aria-controls="rule-form"
 		>
@@ -527,6 +548,13 @@
 			{formOpen ? 'Close editor' : 'New rule'}
 		</button>
 	</PageHeader>
+
+	{#if !canWrite}
+		<p class="read-only" id="rules-read-only">
+			<Icon name="shield" size={14} />
+			<span><strong>Read-only.</strong> {readOnlyWhy}</span>
+		</p>
+	{/if}
 
 	<AutomationHeader active="rules" />
 
@@ -974,11 +1002,15 @@
 					<EmptyState
 						icon="filter"
 						title="No rules yet"
-						description="A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically."
+						description={canWrite
+							? 'A rule pairs a sender matcher and a message matcher with an optional reply. Without one, a matching workflow is the only thing that can answer automatically.'
+							: 'No rules are authored on this gateway yet. An owner or admin adds one; a workflow is the only other thing that can answer automatically.'}
 					>
-						<button type="button" class="btn {formOpen ? '' : 'btn-primary'}" onclick={openForm}>
-							<Icon name="plus" size={14} /> Create the first rule
-						</button>
+						{#if canWrite}
+							<button type="button" class="btn btn-primary" onclick={openForm}>
+								<Icon name="plus" size={14} /> Create the first rule
+							</button>
+						{/if}
 					</EmptyState>
 				</section>
 			</div>
@@ -1023,56 +1055,60 @@
 								</div>
 
 								<div class="rule-actions">
-									<button
-										type="button"
-										class="btn btn-ghost btn-sm"
-										onclick={() => void toggleRuleEnabled(rule)}
-										disabled={togglingId === rule.id}
-										aria-busy={togglingId === rule.id}
-										aria-label={`${rule.enabled ? 'Pause' : 'Resume'} rule ${rule.name}`}
-									>
-										{#if togglingId === rule.id}
-											<Spinner />
-										{:else}
-											<Icon name={rule.enabled ? 'pause' : 'play'} size={12} />
-										{/if}
-										{rule.enabled ? 'Pause' : 'Resume'}
-									</button>
-									<button
-										type="button"
-										class="btn btn-ghost btn-sm"
-										onclick={() => void editRule(rule)}
-										aria-label={`Edit rule ${rule.name}`}
-									>
-										<Icon name="sliders" size={12} /> Edit
-									</button>
-									<button
-										type="button"
-										class="btn btn-ghost btn-sm"
-										onclick={() => void openListTest(rule)}
-										aria-label={`Test rule ${rule.name}`}
-									>
-										<Icon name="activity" size={12} /> Test
-									</button>
-									<button
-										type="button"
-										class="btn btn-danger-ghost btn-sm"
-										onclick={() => {
-											deleteError = null;
-											deleteTarget = rule;
-										}}
-										aria-label={`Delete rule ${rule.name}`}
-									>
-										<Icon name="trash" size={12} /> Delete
-									</button>
+									{#if canWrite}
+										<button
+											type="button"
+											class="btn btn-ghost btn-sm"
+											onclick={() => void toggleRuleEnabled(rule)}
+											disabled={togglingId === rule.id}
+											aria-busy={togglingId === rule.id}
+											aria-label={`${rule.enabled ? 'Pause' : 'Resume'} rule ${rule.name}`}
+										>
+											{#if togglingId === rule.id}
+												<Spinner />
+											{:else}
+												<Icon name={rule.enabled ? 'pause' : 'play'} size={12} />
+											{/if}
+											{rule.enabled ? 'Pause' : 'Resume'}
+										</button>
+										<button
+											type="button"
+											class="btn btn-ghost btn-sm"
+											onclick={() => void editRule(rule)}
+											aria-label={`Edit rule ${rule.name}`}
+										>
+											<Icon name="sliders" size={12} /> Edit
+										</button>
+										<button
+											type="button"
+											class="btn btn-ghost btn-sm"
+											onclick={() => void openListTest(rule)}
+											aria-label={`Test rule ${rule.name}`}
+										>
+											<Icon name="activity" size={12} /> Test
+										</button>
+										<button
+											type="button"
+											class="btn btn-danger-ghost btn-sm"
+											onclick={() => {
+												deleteError = null;
+												deleteTarget = rule;
+											}}
+											aria-label={`Delete rule ${rule.name}`}
+										>
+											<Icon name="trash" size={12} /> Delete
+										</button>
+									{:else}
+										<span class="view-only">View only</span>
+									{/if}
 								</div>
 							</li>
 						{/each}
 					</ul>
 
 					<p class="panel-note">
-						Patterns are checked against the RE2 subset when you save. The gateway matches rules as
-						messages sync; it does not send them to the phone.
+						Patterns are checked against the RE2 subset when a rule is saved. The gateway matches
+						rules as messages sync; it does not send them to the phone.
 					</p>
 				</section>
 
@@ -1095,6 +1131,8 @@
 	</div>
 </div>
 
+<!-- A member can never open this: the controls that would are not rendered. -->
+{#if canWrite}
 <ConfirmDialog
 	open={deleteTarget !== null}
 	title="Delete this rule?"
@@ -1121,6 +1159,7 @@
 		</p>
 	{/if}
 </ConfirmDialog>
+{/if}
 
 <style>
 	.editor {
@@ -1362,6 +1401,39 @@
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 		justify-content: flex-end;
+	}
+
+	/* Where the four buttons would be for a member: a state, not a gap. */
+	.view-only {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	/* The role, said once, above the list the member may read. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0 0 var(--df-p-space-4);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
 	}
 
 	/* ---------- editor form ---------- */

@@ -19,6 +19,7 @@
 		wakeMode
 	} from '$lib/presence';
 	import { isArchived } from '$lib/device-archive';
+	import { session } from '$lib/session.svelte';
 	import {
 		formatAbsolute,
 		formatClock,
@@ -115,6 +116,18 @@
 
 	let detailOpen = $state(false);
 	let detailId = $state('');
+
+	/**
+	 * Pairing, rotating, archiving and revoking are all `write` on the Worker,
+	 * which no member holds. The screen asks the same question the guard does so
+	 * it never offers an action the gateway will refuse; the note below the
+	 * header says why the controls are missing instead of leaving them as a
+	 * surprise.
+	 */
+	const canWrite = $derived(session.canWrite);
+	const readOnlyWhy = $derived(
+		'Members can see every device but cannot pair, rotate, archive or revoke one. Ask an owner or admin.'
+	);
 
 	const detailDevice = $derived(
 		devices.find((device) => device.device_id === detailId) ?? null
@@ -338,6 +351,8 @@
 		deviceId = '',
 		scroll = true
 	) {
+		// The URL can ask for this panel (`?mint=enroll`) as well as a button.
+		if (!canWrite) return;
 		stopWatching();
 		waitState = 'idle';
 		paired = null;
@@ -507,7 +522,7 @@
 	}
 
 	async function mint() {
-		if (minting || scopeError) return;
+		if (!canWrite || minting || scopeError) return;
 		const snapshot = fleetSnapshot();
 		stopWatching();
 		waitState = 'idle';
@@ -532,7 +547,7 @@
 	}
 
 	async function confirmRevoke() {
-		if (!revokeTarget || revoking) return;
+		if (!canWrite || !revokeTarget || revoking) return;
 		revoking = true;
 		revokeError = null;
 		const target = revokeTarget;
@@ -603,7 +618,7 @@
 	}
 
 	async function confirmArchive() {
-		if (!archiveTarget || archiving) return;
+		if (!canWrite || !archiveTarget || archiving) return;
 		archiving = true;
 		archiveError = null;
 		const target = archiveTarget;
@@ -619,6 +634,7 @@
 	}
 
 	async function unarchiveFromRow(device: Device): Promise<void> {
+		if (!canWrite) return;
 		try {
 			await unarchiveDevice(device.device_id);
 			handleUnarchived(device.device_id);
@@ -687,10 +703,24 @@
 			{#if refreshing}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
 			Refresh
 		</button>
-		<button type="button" class="btn {mintOpen ? '' : 'btn-primary'}" onclick={() => void openMint('enroll')}>
+		<button
+			type="button"
+			class="btn {canWrite && !mintOpen ? 'btn-primary' : ''}"
+			onclick={() => void openMint('enroll')}
+			disabled={!canWrite}
+			title={canWrite ? undefined : readOnlyWhy}
+			aria-describedby={canWrite ? undefined : 'devices-read-only'}
+		>
 			<Icon name="key" size={14} /> Mint pairing code
 		</button>
 	</PageHeader>
+
+	{#if !canWrite}
+		<p class="read-only" id="devices-read-only">
+			<Icon name="shield" size={14} />
+			<span><strong>Read-only.</strong> {readOnlyWhy}</span>
+		</p>
+	{/if}
 
 	{#if refreshError && lastRefreshedAt}
 		<p class="refresh-note" role="status" title={refreshError}>
@@ -1018,11 +1048,15 @@
 				<EmptyState
 					icon="smartphone"
 					title="No devices paired yet"
-					description="Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply."
+					description={canWrite
+						? 'Mint a single-use code and open the link on the phone you want to answer. Until one is paired, nothing can reply.'
+						: 'No phone is paired with this gateway yet. An owner or admin pairs one with a single-use code; until then, nothing can reply.'}
 				>
-					<button type="button" class="btn {mintOpen ? '' : 'btn-primary'}" onclick={() => void openMint('enroll')}>
-						<Icon name="key" size={14} /> Mint a pairing code
-					</button>
+					{#if canWrite}
+						<button type="button" class="btn {mintOpen ? '' : 'btn-primary'}" onclick={() => void openMint('enroll')}>
+							<Icon name="key" size={14} /> Mint a pairing code
+						</button>
+					{/if}
 				</EmptyState>
 			</section>
 		{:else}
@@ -1191,7 +1225,7 @@
 											>
 												Pair again to revive
 											</span>
-										{:else}
+										{:else if canWrite}
 											<button
 												type="button"
 												class="btn btn-ghost btn-sm"
@@ -1233,6 +1267,8 @@
 											>
 												<Icon name="trash" size={12} /> Revoke
 											</button>
+										{:else}
+											<span class="cell-muted">View only</span>
 										{/if}
 									</div>
 								</li>
@@ -1315,6 +1351,7 @@
 	deviceId={detailId}
 	device={detailDevice}
 	deviceLabels={deviceLabels}
+	canWrite={canWrite}
 	onclose={closeDetail}
 	onrevoked={handleRevoked}
 	onarchived={handleArchived}
@@ -1323,6 +1360,34 @@
 />
 
 <style>
+	/* The role, said once. A member sees every device but no write control, so
+	   the reason lives here rather than in a tooltip nobody can focus. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0 0 var(--df-p-space-4);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
 	.refresh-note {
 		margin: calc(-1 * var(--df-p-space-2)) 0 var(--df-p-space-4);
 		font-family: var(--df-p-font-mono);

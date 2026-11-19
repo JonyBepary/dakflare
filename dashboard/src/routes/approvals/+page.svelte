@@ -24,6 +24,7 @@
 	import { session } from '$lib/session.svelte';
 	import type { ApprovalDecision, ApprovalRequest, AuthorityGrant, Device } from '$lib/types';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import Notice from '$lib/components/Notice.svelte';
@@ -94,6 +95,50 @@
 	let revoking = $state(false);
 	let revokeError = $state<string | null>(null);
 
+	/*
+	 * History: the decisions that are no longer in the queue.
+	 *
+	 * A decided request leaves `?state=PENDING` on the next poll, so the screen
+	 * used to lose it the moment it was answered — no record, no confirmation.
+	 * Both reads the Worker already answers carry what is needed and nothing is
+	 * invented for it: `GET /v1/admin/approvals` with no `state` returns every
+	 * row (decided ones included, newest requested first), and
+	 * `GET /v1/admin/grants` without `live=1` returns revoked and expired grants
+	 * with the stamp of the revocation and the expiry.
+	 */
+	type DecisionOutcome = 'approved' | 'rejected' | 'expired' | 'revoked';
+	interface HistoryRow {
+		key: string;
+		kind: 'request' | 'grant';
+		outcome: DecisionOutcome;
+		/** What decides where the row sorts: the decision, or the end of the lease. */
+		at: number;
+		scope: string;
+		target: string;
+		/** The account that made the decision, when the row names one. */
+		by: string | null;
+		grant?: AuthorityGrant;
+	}
+
+	let history = $state<HistoryRow[]>([]);
+	let historyLoading = $state(false);
+	let historyLoaded = $state(false);
+	let historyError = $state<string | null>(null);
+	let historyUpdatedAt = $state<number | null>(null);
+	let historyVersion = 0;
+
+	/** Newest first, and bounded: the section is a record, not a second queue. */
+	const HISTORY_LIMIT = 10;
+	const shownHistory = $derived(history.slice(0, HISTORY_LIMIT));
+	const olderHistory = $derived(Math.max(0, history.length - shownHistory.length));
+
+	const OUTCOME_WORDS: Record<DecisionOutcome, string> = {
+		approved: 'Approved',
+		rejected: 'Rejected',
+		expired: 'Expired',
+		revoked: 'Revoked'
+	};
+
 	let version = 0;
 	let grantsVersion = 0;
 	let outcomeKey = 0;
@@ -163,6 +208,81 @@
 	function removeApproval(id: string): void {
 		approvals = approvals.filter((approval) => approval.id !== id);
 		consoleCounts.noteApprovals(approvals.length);
+	}
+
+	/**
+	 * The two reads that make a decision visible after it leaves the queue.
+	 *
+	 * A request is "decided" when its stored state says so, and "expired" when it
+	 * is still `PENDING` past its window — the Worker drops those from the queue
+	 * without flipping the state, so history is where they are still readable. A
+	 * grant is history when it was revoked or has run out. Nothing here is
+	 * guessed: an unknown state is left out rather than given a label.
+	 */
+	function historyFrom(
+		all: ApprovalRequest[],
+		everyGrant: AuthorityGrant[],
+		now: number
+	): HistoryRow[] {
+		const rows: HistoryRow[] = [];
+
+		for (const approval of all) {
+			const outcome: DecisionOutcome | null =
+				approval.state === 'APPROVED'
+					? 'approved'
+					: approval.state === 'REJECTED'
+						? 'rejected'
+						: approval.state === 'EXPIRED' || approval.expires_at <= now
+							? 'expired'
+							: null;
+			if (outcome === null) continue;
+			const at = approval.decided_at ?? approval.expires_at ?? approval.requested_at;
+			rows.push({
+				key: `request:${approval.id}`,
+				kind: 'request',
+				outcome,
+				at,
+				scope: approval.scope,
+				target: targetWords(approval.target),
+				by: approval.decided_by?.trim() ? approval.decided_by.trim() : null
+			});
+		}
+
+		for (const grant of everyGrant) {
+			const revoked = grant.revoked_at !== null;
+			if (!revoked && grant.expires_at > now) continue;
+			rows.push({
+				key: `grant:${grant.id}`,
+				kind: 'grant',
+				outcome: revoked ? 'revoked' : 'expired',
+				at: revoked ? (grant.revoked_at as number) : grant.expires_at,
+				scope: grant.scope,
+				target: grantTarget(grant),
+				by: grant.granted_by?.trim() ? grant.granted_by.trim() : null,
+				grant
+			});
+		}
+
+		return rows.sort((a, b) => b.at - a.at);
+	}
+
+	async function loadHistory(soft = false): Promise<void> {
+		const current = ++historyVersion;
+		if (!soft || !historyLoaded) historyLoading = true;
+
+		try {
+			const [all, everyGrant] = await Promise.all([getApprovals(''), getGrants()]);
+			if (current !== historyVersion) return;
+			history = historyFrom(all, everyGrant, Date.now());
+			historyError = null;
+			historyLoaded = true;
+			historyUpdatedAt = Date.now();
+		} catch (failure) {
+			if (current !== historyVersion) return;
+			historyError = describeError(failure);
+		} finally {
+			if (current === historyVersion) historyLoading = false;
+		}
 	}
 
 	function setCardError(id: string, message: string): void {
@@ -239,7 +359,11 @@
 	 * by its label when the fleet read supplied one.
 	 */
 	function grantTarget(grant: AuthorityGrant): string {
-		const target = grant.target;
+		return targetWords(grant.target);
+	}
+
+	/** The target in operator words — shared by the queue, the grants and history. */
+	function targetWords(target: ApprovalRequest['target'] | undefined): string {
 		if (!target) return 'Everything this permission covers';
 		const parts: string[] = [];
 
@@ -370,8 +494,10 @@
 				outcome = rejectedOutcome(approval);
 			}
 			void load(true);
-			// An approval mints a grant; the panel beside the queue must show it.
+			// An approval mints a grant; the panel beside the queue must show it,
+			// and the decision itself belongs in the history below.
 			void loadGrants(true);
+			void loadHistory(true);
 		} catch (failure) {
 			setCardError(approval.id, decisionError(failure));
 			if (isStaleDecision(failure)) {
@@ -387,6 +513,8 @@
 						: 'Another answer reached the gateway first. The queue now shows the current state.'
 				};
 				void load(true);
+				// Whichever way the row left the queue, it is history now.
+				void loadHistory(true);
 			}
 		} finally {
 			deciding = null;
@@ -395,7 +523,7 @@
 
 	async function refresh(): Promise<void> {
 		now = Date.now();
-		await Promise.all([load(true), loadGrants(true)]);
+		await Promise.all([load(true), loadGrants(true), loadHistory(true)]);
 	}
 
 	/* ------------------------------------------------------------ live grants */
@@ -436,6 +564,7 @@
 				body: `${scopeTitle(target.scope)}: revoked. The agent's next request will be refused.`
 			};
 			void loadGrants(true);
+			void loadHistory(true);
 		} catch (failure) {
 			if (failure instanceof ApiError && failure.status === 404) {
 				dropGrant(target.id);
@@ -466,6 +595,10 @@
 	onMount(() => {
 		void load();
 		void loadGrants();
+		// History is read once here and again after a decision or on return to the
+		// tab — not on the 15 s poll: it changes only when someone decides, while
+		// the queue changes while you watch it.
+		void loadHistory();
 		void loadDevices();
 
 		const clockTimer = setInterval(() => {
@@ -478,9 +611,16 @@
 			if (loading || refreshing || grantsLoading) return;
 			if (Date.now() - lastSweep < SWEEP_MS) return;
 			lastSweep = Date.now();
-			if (hasExpired) void load(true);
+			if (hasExpired) {
+				// An expired card leaves the queue; the history picks it up.
+				void load(true);
+				void loadHistory(true);
+			}
 			// A grant that ran out is no longer live, and the list must say so.
-			if (grantExpired) void loadGrants(true);
+			if (grantExpired) {
+				void loadGrants(true);
+				void loadHistory(true);
+			}
 		}, TICK_MS);
 
 		const pollTimer = setInterval(() => {
@@ -500,6 +640,8 @@
 			now = Date.now();
 			if (!loading && !refreshing) void load(true);
 			if (!grantsLoading) void loadGrants(true);
+			// A decision may have been made in another tab while this one was hidden.
+			void loadHistory(true);
 		};
 
 		document.addEventListener('visibilitychange', onVisible);
@@ -894,6 +1036,110 @@
 								</li>
 							{/each}
 						</ul>
+					{/if}
+				{/if}
+			</section>
+
+			<section class="card history" aria-labelledby="history-title">
+				<header class="history-head">
+					<div>
+						<p class="eyebrow">History</p>
+						<h2 id="history-title">Recent decisions</h2>
+					</div>
+					{#if historyUpdatedAt}
+						<span class="history-checked mono">
+							read <RelativeTime value={historyUpdatedAt} />
+						</span>
+					{/if}
+				</header>
+
+				<p class="history-lede">
+					The requests that left the queue and the grants that have ended, newest first. An
+					answered request and the grant it minted are two rows, because they are two facts.
+				</p>
+
+				{#if historyLoading && !historyLoaded}
+					<div class="history-loading" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Reading the decision history</span>
+						{#each ['a', 'b'] as key (key)}
+							<div class="skeleton" style="height: 46px; width: 100%"></div>
+						{/each}
+					</div>
+				{:else if historyError && !historyLoaded}
+					<Notice tone="danger" title="The decision history did not load">
+						{historyError} The queue above is unaffected; this section only says what has
+						already been decided.
+					</Notice>
+					<div class="row" style="margin-top: 12px">
+						<button type="button" class="btn btn-primary" onclick={() => void loadHistory()}>
+							<Icon name="refresh" size={14} /> Try again
+						</button>
+					</div>
+				{:else}
+					{#if historyError}
+						<Notice tone="warn" title="Could not refresh the history">
+							{historyError} The rows below are the last answer from the gateway.
+						</Notice>
+					{/if}
+
+					{#if history.length === 0}
+						<p class="history-empty">
+							Nothing has been decided yet. The first approval or rejection appears here, with
+							who answered it and when.
+						</p>
+					{:else}
+						<ul class="history-list">
+							{#each shownHistory as row (row.key)}
+								<li class="history-row">
+									<div class="history-main">
+										<p class="history-scope">
+											<span class="history-kind mono">{row.kind === 'request' ? 'Request' : 'Grant'}</span>
+											{scopeTitle(row.scope)}
+										</p>
+										<p class="history-target">
+											<span class="fact-label">Applies to</span>
+											<span class="history-target-value">{row.target}</span>
+										</p>
+									</div>
+
+									<div class="history-when">
+										<span class="history-at mono" title={formatAbsolute(row.at)}>
+											{formatClock(row.at)}
+										</span>
+										<span class="history-ago"><RelativeTime value={row.at} /></span>
+									</div>
+
+									<div class="history-verdict">
+										<Badge tone={row.outcome === 'approved' ? 'ok' : 'muted'}>
+											{OUTCOME_WORDS[row.outcome]}
+										</Badge>
+									</div>
+
+									<p class="history-by">
+										{#if row.kind === 'request'}
+											{#if row.by}
+												answered by <span class="history-who">{row.by}</span>
+											{:else}
+												nobody answered it before the window closed
+											{/if}
+										{:else if row.grant}
+											{#if row.by}
+												granted by <span class="history-who">{row.by}</span>
+											{:else}
+												granted by an account the row does not name
+											{/if}
+											<span class="fact-sep" aria-hidden="true">·</span>
+											{useCountWords(row.grant.use_count)}
+										{/if}
+									</p>
+								</li>
+							{/each}
+						</ul>
+						{#if olderHistory > 0}
+							<p class="history-more">
+								and {olderHistory} older {olderHistory === 1 ? 'decision' : 'decisions'}
+							</p>
+						{/if}
 					{/if}
 				{/if}
 			</section>
@@ -1447,6 +1693,188 @@
 			width: 100%;
 			justify-content: center;
 			min-height: 44px;
+		}
+	}
+
+	/* ---------------------------------------------------------- the history */
+
+	.history {
+		display: grid;
+		gap: var(--df-p-space-3);
+		min-width: 0;
+	}
+
+	.history-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+	}
+
+	.history-head h2 {
+		margin-top: 3px;
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-lg);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+	}
+
+	.history-checked {
+		font-size: 10.5px;
+		color: var(--df-text-meta);
+	}
+
+	.history-lede {
+		max-width: 74ch;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.55;
+		color: var(--df-text-secondary);
+	}
+
+	.history-loading {
+		display: grid;
+		gap: var(--df-p-space-2);
+	}
+
+	.history-empty {
+		font-size: var(--df-p-text-sm);
+		line-height: 1.55;
+		color: var(--df-text-meta);
+	}
+
+	.history-list {
+		display: grid;
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	/* What it was, when, what was decided, by whom: four columns on a wide card,
+	   stacked under 720px where the scope needs the whole line. The time column is
+	   a definite width so the verdict chips line up down the right edge. */
+	.history-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 92px auto;
+		grid-template-areas:
+			'main when verdict'
+			'by by by';
+		align-items: center;
+		gap: 4px var(--df-p-space-4);
+		padding: var(--df-p-space-3) 0;
+		border-top: 1px solid var(--df-border-hairline);
+		min-width: 0;
+	}
+
+	.history-row:first-child {
+		padding-top: 0;
+		border-top: 0;
+	}
+
+	.history-main {
+		grid-area: main;
+		min-width: 0;
+	}
+
+	.history-scope {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-base);
+		font-weight: 700;
+		line-height: 1.3;
+		letter-spacing: -0.005em;
+		overflow-wrap: anywhere;
+	}
+
+	.history-kind {
+		margin-right: 6px;
+		padding: 1px 5px;
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+		font-family: var(--df-p-font-mono);
+		font-size: 9.5px;
+		font-weight: 500;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+		vertical-align: 2px;
+	}
+
+	.history-target {
+		margin-top: 3px;
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.history-target-value {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.history-when {
+		grid-area: when;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 1px;
+		flex: none;
+	}
+
+	.history-at {
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.history-ago {
+		font-size: 10.5px;
+		color: var(--df-text-meta);
+		white-space: nowrap;
+	}
+
+	.history-verdict {
+		grid-area: verdict;
+		flex: none;
+	}
+
+	.history-by {
+		grid-area: by;
+		font-size: 11.5px;
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.history-who {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.history-more {
+		padding-top: var(--df-p-space-2);
+		border-top: 1px solid var(--df-border-hairline);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
+	@media (max-width: 720px) {
+		/* The scope gets the whole line; the time and the decision share the next
+		   one, so a long permission title is not squeezed into a column. */
+		.history-row {
+			grid-template-columns: minmax(0, 1fr) auto;
+			grid-template-areas:
+				'main main'
+				'when verdict'
+				'by by';
+			align-items: baseline;
+			gap: 6px var(--df-p-space-3);
+		}
+
+		.history-when {
+			flex-direction: row;
+			align-items: baseline;
+			gap: var(--df-p-space-2);
 		}
 	}
 

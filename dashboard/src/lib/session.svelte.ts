@@ -43,6 +43,21 @@ class SessionStore {
 	}
 
 	/**
+	 * Anything that changes the gateway: pairing, sending, rules, approvals.
+	 *
+	 * The Worker decides this with one permission (`write`, `auth/guard.ts`) and
+	 * every mutation route asks for it, so the console asks the same question
+	 * once. In `legacy` the admin token *is* the owner credential, so a token
+	 * session writes; under `new`, only owner and admin do, and an unknown or
+	 * missing role writes nothing.
+	 */
+	get canWrite(): boolean {
+		if (this.status !== 'authed') return false;
+		if (this.role === 'owner' || this.role === 'admin') return true;
+		return this.role === null && this.authMode !== 'new';
+	}
+
+	/**
 	 * Factors belong to an account, and an admin-token session has none: in
 	 * `legacy` the cookie is a machine credential with no user row, so there is
 	 * nothing to enrol a second factor for. The Security page reads this instead

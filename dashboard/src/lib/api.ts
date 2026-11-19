@@ -203,7 +203,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<R
 				? (payload as Record<string, unknown>).details
 				: null;
 		throw new ApiError(
-			code ? (CODE_MESSAGES[code] ?? serverMsg ?? fallback) : (serverMsg ?? fallback),
+			// The endpoint knows why it refused and says so in its own sentence —
+			// `forbidden` carries "Members can read this but cannot send SMS." The
+			// map is only the floor for a code that arrives without one, because a
+			// generic sentence is worse than a specific one whenever both exist.
+			serverMsg ?? (code ? (CODE_MESSAGES[code] ?? fallback) : fallback),
 			response.status,
 			code,
 			details,
@@ -522,7 +526,9 @@ export function getTrace(id: string, deviceId?: string): Promise<TraceResult> {
 function extractField(payload: unknown, field: string): string | null {
 	if (!payload || typeof payload !== 'object') return null;
 	const value = (payload as Record<string, unknown>)[field];
-	return typeof value === 'string' ? value : null;
+	// A blank sentence is not a sentence: callers treat `null` as "it said
+	// nothing", so whitespace must not outrank the fallback copy.
+	return typeof value === 'string' && value.trim() !== '' ? value : null;
 }
 
 

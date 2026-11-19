@@ -1,9 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { acknowledgeAlert, describeError, getAlerts } from '$lib/api';
+	import {
+		alertKind,
+		alertName,
+		alertsHeadline,
+		alertsSeverity,
+		type AlertSeverity
+	} from '$lib/alerts';
+	import { session } from '$lib/session.svelte';
 	import type { Alert } from '$lib/types';
 	import { ROUTES } from '$lib/paths';
 	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
+	import Badge from './Badge.svelte';
 	import Icon from './Icon.svelte';
 	import RelativeTime from './RelativeTime.svelte';
 	import Spinner from './Spinner.svelte';
@@ -17,15 +26,19 @@
 	let acking = $state<Set<string>>(new Set());
 	let inFlight = false;
 
-	const deviceCount = $derived(alerts.length);
-	const deviceWord = $derived(deviceCount === 1 ? 'device' : 'devices');
+	const alertCount = $derived(alerts.length);
 	const newest = $derived(alerts[0] ?? null);
 	const shown = $derived(alerts.slice(0, 5));
 	const remaining = $derived(Math.max(0, alerts.length - shown.length));
+	/** The band's tone: the loudest kind present, never a fixed red. */
+	const severity = $derived<AlertSeverity>(alertsSeverity(alerts));
+	/** Acknowledging is a `write`; a member reads the alert and is told who can. */
+	const canWrite = $derived(session.canWrite);
 
-	function alertName(alert: Alert): string {
-		const label = alert.label?.trim();
-		return label ? label : alert.device_id;
+	function alertTone(value: AlertSeverity): 'danger' | 'warn' | 'neutral' {
+		if (value === 'danger') return 'danger';
+		if (value === 'warn') return 'warn';
+		return 'neutral';
 	}
 
 	function deviceHref(alert: Alert): string {
@@ -96,25 +109,19 @@
 </script>
 
 {#if alerts.length > 0}
-	<section class="alert-banner" aria-labelledby="open-alerts-title">
+	<section class="alert-banner" data-severity={severity} aria-labelledby="open-alerts-title">
 		<div class="alert-head">
 			<span class="alert-mark" aria-hidden="true"><Icon name="alert" size={15} /></span>
 			<div class="alert-copy">
-				<h2 id="open-alerts-title">
-					{#if deviceCount === 1 && newest}
-						{alertName(newest)} has not been heard from
-					{:else}
-						{deviceCount} {deviceWord} {deviceCount === 1 ? 'has' : 'have'} not been heard from
-					{/if}
-				</h2>
-				{#if newest && deviceCount > 1}
+				<h2 id="open-alerts-title">{alertsHeadline(alerts)}</h2>
+				{#if newest && alertCount > 1}
 					<p class="alert-meta">
 						Newest: <a class="alert-device-link" href={deviceHref(newest)}>{alertName(newest)}</a>
 						· raised <RelativeTime value={newest.raised_at} />
 					</p>
 				{/if}
 			</div>
-			{#if deviceCount > 1}
+			{#if alertCount > 1}
 				<button
 					type="button"
 					class="btn btn-sm"
@@ -122,40 +129,72 @@
 					aria-expanded={expanded}
 					aria-controls="open-alert-list"
 				>
-					{expanded ? 'Hide devices' : `Review ${deviceCount}`}
+					{expanded ? 'Hide alerts' : `Review ${alertCount}`}
 				</button>
 			{/if}
 		</div>
 
-		{#if deviceCount === 1 || expanded}
+		{#if alertCount === 1 || expanded}
 			<ul class="alert-list" id="open-alert-list">
 				{#each shown as alert (alert.id)}
-					<li class="alert-row">
-						<span class="alert-device">
-							<a class="alert-device-link" href={deviceHref(alert)}>{alertName(alert)}</a>
-							{#if alert.label?.trim()}
-								<span class="mono">{alert.device_id}</span>
-							{/if}
-						</span>
-						<span class="alert-age">
-							raised <RelativeTime value={alert.raised_at} />
-						</span>
-						<button
-							type="button"
-							class="btn btn-sm btn-danger-ghost"
-							onclick={() => void acknowledge(alert)}
-							disabled={acking.has(alert.id)}
-							aria-busy={acking.has(alert.id)}
-							aria-label={`Acknowledge alert for ${alertName(alert)}`}
-						>
-							{#if acking.has(alert.id)}<Spinner />{:else}<Icon name="check" size={12} />{/if}
-							Acknowledge
-						</button>
+					{@const meta = alertKind(alert.kind)}
+					{@const lines = meta.detail(alert.detail)}
+					<li class="alert-row" data-severity={meta.severity}>
+						<div class="alert-row-head">
+							<Badge tone={alertTone(meta.severity)}>{meta.label}</Badge>
+							<span class="alert-device">
+								<a
+									class="alert-device-link"
+									href={deviceHref(alert)}
+									aria-label={`${alertName(alert)} — ${meta.known ? meta.label : alert.kind} alert`}
+								>{alertName(alert)}</a>
+								{#if alert.label?.trim()}
+									<span class="mono">{alert.device_id}</span>
+								{/if}
+							</span>
+							<span class="spacer"></span>
+							<span class="alert-age">
+								raised <RelativeTime value={alert.raised_at} />
+							</span>
+						</div>
+
+						{#if lines.length > 0 || !meta.known}
+							<div class="alert-detail">
+								{#each lines as line, index (index)}
+									<p>{line}</p>
+								{/each}
+								{#if !meta.known}
+									<p class="alert-kind-raw">
+										No wording for this kind yet — the detail above is the gateway's own.
+									</p>
+								{/if}
+							</div>
+						{/if}
+
+						{#if canWrite}
+							<button
+								type="button"
+								class="btn btn-sm alert-ack"
+								onclick={() => void acknowledge(alert)}
+								disabled={acking.has(alert.id)}
+								aria-busy={acking.has(alert.id)}
+								aria-label={`Acknowledge the ${meta.known ? meta.label.toLowerCase() : alert.kind} alert for ${alertName(alert)}`}
+							>
+								{#if acking.has(alert.id)}<Spinner />{:else}<Icon name="check" size={12} />{/if}
+								Acknowledge
+							</button>
+						{/if}
 					</li>
 				{/each}
 			</ul>
 			{#if remaining > 0}
 				<p class="alert-more">and {remaining} more open {remaining === 1 ? 'alert' : 'alerts'}</p>
+			{/if}
+			{#if !canWrite}
+				<p class="alert-note">
+					<Icon name="shield" size={13} />
+					<span>Members can read alerts; an owner or admin acknowledges one.</span>
+				</p>
 			{/if}
 		{/if}
 
@@ -173,10 +212,34 @@
 
 <style>
 	/* Full-bleed band under the header: 04 §4.5. No entrance animation —
-	   DESIGN_2026 §2 forbids motion on the alert path. */
+	   DESIGN_2026 §2 forbids motion on the alert path.
+
+	   Tone follows the loudest kind in the band, not the band itself: a phone that
+	   went silent is an outage and reads red; a drifting extraction is a warning
+	   and reads amber; a kind this console does not know reads neutral. One local
+	   pair of custom properties is the whole palette, so every edge below follows
+	   the severity with it. */
 	.alert-banner {
-		border-bottom: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 22%, transparent);
-		background: var(--df-state-danger-bg);
+		--alert-ink: var(--df-state-danger-ink);
+		--alert-bg: var(--df-state-danger-bg);
+		--alert-edge: color-mix(in srgb, var(--df-state-danger-ink) 22%, transparent);
+		--alert-rule: color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
+		border-bottom: 1px solid var(--alert-edge);
+		background: var(--alert-bg);
+	}
+
+	.alert-banner[data-severity='warn'] {
+		--alert-ink: var(--df-state-warn-ink);
+		--alert-bg: var(--df-state-warn-bg);
+		--alert-edge: var(--df-c-tint-edge-warn);
+		--alert-rule: color-mix(in srgb, var(--df-state-warn-ink) 14%, transparent);
+	}
+
+	.alert-banner[data-severity='info'] {
+		--alert-ink: var(--df-text-secondary);
+		--alert-bg: var(--df-surface-well);
+		--alert-edge: var(--df-border-hairline);
+		--alert-rule: var(--df-border-hairline);
 	}
 
 	.alert-head {
@@ -192,10 +255,10 @@
 		width: 26px;
 		height: 26px;
 		flex: none;
-		border: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 26%, transparent);
+		border: 1px solid var(--alert-edge);
 		border-radius: var(--df-p-radius-sm);
 		background: var(--df-surface-card);
-		color: var(--df-state-danger-ink);
+		color: var(--alert-ink);
 	}
 
 	.alert-copy {
@@ -236,20 +299,31 @@
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 18%, transparent);
+		border-top: 1px solid var(--alert-edge);
 	}
 
+	/* Kind, device and age share the first line; the detail and the one control
+	   share the second, so a row is two lines at any width that fits. */
 	.alert-row {
-		display: flex;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
 		align-items: center;
-		gap: var(--df-p-space-3);
-		flex-wrap: wrap;
+		gap: 6px var(--df-p-space-3);
 		padding: 9px var(--df-c-shell-gutter);
-		border-bottom: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
+		border-bottom: 1px solid var(--alert-rule);
 	}
 
 	.alert-row:last-child {
 		border-bottom: 0;
+	}
+
+	.alert-row-head {
+		grid-column: 1 / -1;
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	.alert-device {
@@ -265,6 +339,33 @@
 		overflow-wrap: anywhere;
 	}
 
+	/* The row's device name is a standalone control, not a link inside a
+	   sentence: it carries a 24px hit height like every other small target. */
+	.alert-row .alert-device-link {
+		display: inline-flex;
+		align-items: center;
+		min-height: 24px;
+	}
+
+	.alert-detail {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+		padding-left: 2px;
+	}
+
+	.alert-detail p {
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.alert-kind-raw {
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-meta);
+	}
+
 	.alert-age {
 		font-family: var(--df-p-font-mono);
 		font-size: var(--df-p-text-xs);
@@ -272,12 +373,16 @@
 		white-space: nowrap;
 	}
 
-	.alert-row .btn {
-		margin-left: auto;
+	.alert-ack {
+		justify-self: end;
 	}
 
 	.alert-more,
-	.alert-error {
+	.alert-error,
+	.alert-note {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
 		padding: 8px var(--df-c-shell-gutter);
 		font-size: var(--df-p-text-sm);
 		line-height: 1.45;
@@ -285,11 +390,21 @@
 	}
 
 	.alert-more {
-		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
+		border-top: 1px solid var(--alert-rule);
+	}
+
+	.alert-note {
+		border-top: 1px solid var(--alert-rule);
+		color: var(--df-text-meta);
+	}
+
+	.alert-note :global(svg) {
+		flex: none;
+		margin-top: 2px;
 	}
 
 	.alert-error {
-		border-top: 1px solid color-mix(in srgb, var(--df-state-danger-ink) 18%, transparent);
+		border-top: 1px solid var(--alert-edge);
 		color: var(--df-state-danger-ink);
 	}
 
@@ -306,10 +421,18 @@
 	}
 
 	@media (max-width: 620px) {
-		.alert-row .btn {
-			margin-left: 0;
+		.alert-row {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.alert-row-head {
+			grid-column: 1;
+		}
+
+		.alert-ack {
 			width: 100%;
 			min-height: 44px;
+			justify-content: center;
 		}
 
 		.alert-check {
