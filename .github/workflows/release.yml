@@ -1,0 +1,65 @@
+name: Release
+
+# A tag is the release. There is nothing else to press.
+#
+#   1. bump the version in `cli/bin/dakflare.js` (CLI_VERSION) and `worker/package.json`
+#   2. commit, then `git tag v6.3.0 && git push origin v6.3.0`
+#
+# The tag must agree with both files (worker/scripts/check-versions.mjs), the CLI must pass its
+# own syntax gate, and the archive is assembled from the tree at that commit so the artifact
+# cannot contain anything the tag does not name.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag, verify, publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+
+      - name: The tag, the CLI and the Worker must name one version
+        run: node worker/scripts/check-versions.mjs "$GITHUB_REF_NAME"
+
+      - name: The CLI must at least parse
+        run: node --check cli/bin/dakflare.js
+
+      - name: The harness agrees with itself
+        run: |
+          node dakflare_test_harness.mjs selftest
+          node dakflare_test_harness.mjs verify-vectors
+
+      - name: Assemble the CLI archive
+        id: archive
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          stage="dist/dakflare-${version}"
+          mkdir -p "$stage"
+          # What a user actually runs: the CLI, the four skills, the licence and the readme.
+          # The Worker and the console are deployed, not downloaded.
+          cp -r cli skills LICENSE README.md "$stage"/
+          tar -czf "dist/dakflare-cli-${version}.tar.gz" -C dist "dakflare-${version}"
+          ( cd dist && sha256sum "dakflare-cli-${version}.tar.gz" > "dakflare-cli-${version}.tar.gz.sha256" )
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          ls -l dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz" \
+            "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz.sha256" \
+            --title "DakFlare $GITHUB_REF_NAME" \
+            --generate-notes

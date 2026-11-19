@@ -42,6 +42,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run check:config
+      - run: node scripts/check-versions.mjs
       - run: npm test
       - name: Run Worker node check scripts
         run: |

@@ -41,6 +41,7 @@ Start at the root `README.md` for what the product is. This page is the map of e
 |---|---|
 | `OPS_DEPLOY.md` | deploy, schema order, the `cf` traps, rollback |
 | `OPS_BACKUP.md` | Time Travel bookmarks and exports |
+| `RELEASE.md` | cutting a release: one version, one tag, what the archive contains |
 | `PHONE_APP.md` | the handset app: shape, SMS role, flow engine, wake capability |
 | `PHONE_RELEASE.md` | building and signing the APK |
 | `HARNESS.md` | the conformance harness and the dev stack |
