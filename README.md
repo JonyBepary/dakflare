@@ -40,7 +40,7 @@ AndroidKeyStore AES-GCM key. A copied database alone cannot impersonate the phon
 | `cli/` | `dakflare`, a zero-dependency Node 22+ operator CLI |
 | `simulator/` | the Android app (Tauri + Rust core, Kotlin telephony, Svelte UI) and the on-device flow engine |
 | `design/` | design tokens and the token preview |
-| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, `STATE_MACHINES.md` (every state machine and whether it is guarded, declared or derived), and `history/` for point-in-time plans |
+| `docs/` | every document, indexed by `docs/README.md`: the master spec, the agent surface and runtime contracts, `WORKER_BINDING.md`, runbooks, console and design notes, `STATE_MACHINES.md`, and `history/` for point-in-time plans |
 | `skills/` | four `SKILL.md` packages for agents: provision, messaging, flows, agents |
 | `contracts/` | the MCP tool contract (`mcp-tools.json`) |
 | `test-support/` | local dev stack, protocol and flow vectors, platform and skills gates |

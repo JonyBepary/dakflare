@@ -2,7 +2,7 @@
 
 The harness is `dakflare_test_harness.mjs` at the repository root: a zero-dependency Node
 "Virtual Android Device" that implements the wire protocol of
-`docs/history/PROTOCOL_CONTRACT_V5.md` from the contract text alone. It was deliberately **not**
+`history/PROTOCOL_CONTRACT_V5.md` from the contract text alone. It was deliberately **not**
 derived from `worker/src` — its only value is that it can disagree with the server.
 
 ## One published copy of the contract vectors
@@ -266,7 +266,7 @@ behaviour. Verified gaps:
   structurally valid JWT that Google rejects is only caught against the real endpoint.
 - **DO placement and TLS/CDN behaviour** in front of the Worker are untestable offline.
 
-These are Tier 2 (staged deploy) items. See §4.3 of `docs/history/dakflare_v5_master_plan_rev_c.md`.
+These are Tier 2 (staged deploy) items. See §4.3 of `history/dakflare_v5_master_plan_rev_c.md`.
 
 ## Hoppscotch
 
@@ -275,7 +275,7 @@ node dakflare_test_harness.mjs pair     # once, to create the signing identity
 node dakflare_test_harness.mjs proxy    # :8788
 ```
 
-Import `docs/hoppscotch_dakflare_collection.json` and point it at `http://localhost:8788`. The proxy
+Import `hoppscotch_dakflare_collection.json` and point it at `http://localhost:8788`. The proxy
 injects the four signed headers for device routes and forwards your `Authorization` header for admin
 routes, so no request needs manual signing. Requests `2.x` and `3.x` depend on `1.1`/`1.2` having been
 run first to mint and pair a device.

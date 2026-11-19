@@ -85,7 +85,7 @@
       }
      ],
      "preRequestScript": "",
-     "testScript": "pw.expect(pw.response.status).toBe(200)\n// The four X-* headers are injected by the proxy; see test-support/README.md",
+     "testScript": "pw.expect(pw.response.status).toBe(200)\n// The four X-* headers are injected by the proxy; see docs/HARNESS.md",
      "auth": {
       "authType": "none",
       "authActive": true

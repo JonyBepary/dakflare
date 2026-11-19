@@ -74,7 +74,7 @@ install them into another repository unchanged.
 | `simulator/` | the Android app (Tauri + Rust core) |
 | `design/` | the landing page sources and tokens |
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
-| `docs/` | the master spec, the agent surface reference, `WORKER_BINDING.md` (calling this Worker from another Worker or a Workflow), runbooks, console and workflow notes, `STATE_MACHINES.md` (every state machine, and whether it is guarded, declared or derived), and `history/` for point-in-time plans |
+| `docs/` | every document, indexed by `docs/README.md`: the master spec, the agent surface and runtime, `WORKER_BINDING.md`, runbooks, console and design notes, `STATE_MACHINES.md`, and `history/` for point-in-time plans |
 
 ## How this owner wants work done
 

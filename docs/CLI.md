@@ -127,5 +127,5 @@ dakflare trace cmdf_01j...
 dakflare capabilities --agent
 ```
 
-The root README has the deployment model, the grant caps and the MCP tools. `docs/OPS_DEPLOY.md` has
+The root README has the deployment model, the grant caps and the MCP tools. `OPS_DEPLOY.md` has
 the Worker-side deploy and secret order.
