@@ -230,6 +230,12 @@ export interface Env {
    */
   ADMIN_TOKEN?: string;
   /**
+   * Who may call the worker-to-worker interface (`DakFlareApi`). `trusted` (default) treats the
+   * service binding as the credential; `agent_token` requires a `dkf_agt_` token per call and
+   * therefore enforces that token's scopes and grants. See `src/binding.ts`.
+   */
+  BINDING_AUTH?: string;
+  /**
    * Optional dedicated key for sealing a webhook signing secret at rest
    * (routes/webhooks.ts). Absent falls back to ADMIN_TOKEN then
    * BETTER_AUTH_SECRET. Rotating it makes existing hooks unverifiable; they
@@ -798,7 +804,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(req.url);
     const { pathname } = url;
     const method = req.method.toUpperCase();
@@ -2065,3 +2071,11 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
   return diff === 0;
 }
+
+/**
+ * The worker-to-worker interface. A consumer binds this script with
+ * `entrypoint: "DakFlareApi"` and calls typed methods; every one of them goes through
+ * `handleFetch`, so the scopes, limiters, audits and idempotency are the same ones the HTTP API
+ * applies. See `src/binding.ts` for the trust modes.
+ */
+export { DakFlareApi } from "./binding-api";

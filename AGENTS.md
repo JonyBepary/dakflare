@@ -55,6 +55,10 @@ install them into another repository unchanged.
   secret cannot be re-read: rotation is create, cut over, delete. Rotating
   `WEBHOOK_SECRET_KEY` invalidates every sealed secret at once and needs each hook recreated —
   `docs/AGENT_RUNTIME.md` has the procedure, `docs/ADR_001_AGENT_RUNTIME.md` the reasons.
+- **Another Worker calls this one through `DakFlareApi`.** It delegates to `handleFetch`, so
+  scopes, limiters and audits still apply. `BINDING_AUTH` decides what a binding may do without a
+  credential: `trusted` (default, the account is the boundary) or `agent_token`. A raw Durable
+  Object binding bypasses all of it — `docs/WORKER_BINDING.md`.
 - **A deploy is verified by evidence.** `cf deploy` can exit `1` on a deploy that worked, so
   `npm run verify:deploy` checks the version, live routes, the workflow binding and the
   migration ledger. `npm run deploy` refuses a dirty console tree, because `cf deploy` uploads
@@ -70,7 +74,7 @@ install them into another repository unchanged.
 | `simulator/` | the Android app (Tauri + Rust core) |
 | `design/` | the landing page sources and tokens |
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
-| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, `STATE_MACHINES.md` (every state machine, and whether it is guarded, declared or derived), and `history/` for point-in-time plans |
+| `docs/` | the master spec, the agent surface reference, `WORKER_BINDING.md` (calling this Worker from another Worker or a Workflow), runbooks, console and workflow notes, `STATE_MACHINES.md` (every state machine, and whether it is guarded, declared or derived), and `history/` for point-in-time plans |
 
 ## How this owner wants work done
 
