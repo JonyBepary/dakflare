@@ -237,9 +237,9 @@ The console compounds it: the banner labels every alert as device silence and re
 | | |
 |---|---|
 | Machine | One flow execution as the phone reports it |
-| States | `completed`, and a `partial` the schema allows but nothing writes |
-| Enforced in | `0001_baseline.sql:60`; `worker/src/flow/dispatch.ts:325` |
-| Kind | **Declared.** The handset skips `Delay` and `Webhook` actions and still reports `delivered`; the Worker then believes the run finished and skips its fallback, so a later SMS fires immediately and a webhook never runs |
+| States | `completed` / `delivered`, `partial`, `halted`, `filtered`, `no_trigger`, `error` |
+| Enforced in | `0001_baseline.sql:60`; `simulator/core/src/carrier.rs:237` (`partial`); `worker/src/flow/dispatch.ts:68` and `:325` (the fallback) |
+| Kind | **Guarded on both sides.** The handset marks a run `partial` when it produced a `Delay` or `Webhook` it cannot perform; the Worker then skips only the SMS steps already sent before that boundary and runs the rest, including the webhook. A pure-SMS run stays `delivered` |
 
 ## Connector
 
@@ -288,6 +288,7 @@ The console compounds it: the banner labels every alert as device silence and re
    message. Claim the key before running, and compare the text on replay.
 4. **Attachment text is stored in the transcript and re-served**, and expired attachments are
    never reclaimed. Keep a reference, not the text; add the sweep.
-5. **A flow that skips a delay or a webhook reports success.** Write `partial` and let the
-   Worker run its fallback.
+5. **A run recorded `delivered` by an older handset still hides a skipped webhook.** The
+   handset tells the truth now; runs already stored keep the old outcome, and nothing
+   re-classifies them.
 6. **Drift alerts never resolve**, and acknowledgement spawns a fresh open row.
