@@ -28,7 +28,7 @@ pub use db::{
     RETENTION_LAST_DELETED, RETENTION_LAST_PURGE, RETENTION_SETTING, Retention, RetentionStatus,
     SearchHits, SendFailureOutcome, Store, StoreError, is_device_fact_key,
 };
-pub use flowrun::{FlowRunReport, LocalRun, RemoteFlow, run_flows};
+pub use flowrun::{FlowRunReport, LocalAction, LocalRun, RemoteFlow, run_flows};
 pub use identity::{
     Identity, IdentityError, generate_identity, is_valid_device_id, public_key_spki_b64,
     sign_p1363, verify_p1363,

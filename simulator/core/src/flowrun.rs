@@ -30,10 +30,22 @@ pub struct FlowRunReport {
     pub outcome: String,
 }
 
+/// One action the handset must perform, tagged with the run that produced it.
+///
+/// The tag lets the carrier report `partial` for exactly the flow whose action
+/// it could not perform. Several flows can run for one message, and a `Delay`
+/// in one says nothing about a pure-SMS flow beside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalAction {
+    /// Index into [`LocalRun::reports`].
+    pub report: usize,
+    pub action: Action,
+}
+
 #[derive(Debug)]
 pub struct LocalRun {
     /// Actions the device must perform (send SMS) — already templated.
-    pub actions: Vec<Action>,
+    pub actions: Vec<LocalAction>,
     pub reports: Vec<FlowRunReport>,
 }
 
@@ -76,7 +88,13 @@ pub fn run_flows(flows: &[RemoteFlow], local_id: &str, sender: &str, body: &str)
         });
 
         if result.matched && result.outcome == "delivered" {
-            actions.extend(result.actions);
+            let report = reports.len() - 1;
+            actions.extend(
+                result
+                    .actions
+                    .into_iter()
+                    .map(|action| LocalAction { report, action }),
+            );
         }
     }
 
@@ -123,12 +141,13 @@ mod tests {
 
         assert_eq!(result.actions.len(), 1);
         assert_eq!(
-            result.actions[0],
+            result.actions[0].action,
             Action::SendSms {
                 to: "+15551230000".into(),
                 body: "Your code is 483920".into(),
             }
         );
+        assert_eq!(result.actions[0].report, 0);
         assert_eq!(result.reports.len(), 1);
         assert_eq!(result.reports[0].flow_id, "wf_a");
         assert_eq!(result.reports[0].flow_version, 3);

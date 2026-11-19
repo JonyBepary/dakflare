@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use dakflare_flow::Action;
 
 use crate::db::{Message, Store, StoreError};
-use crate::flowrun::{RemoteFlow, run_flows};
+use crate::flowrun::{LocalRun, RemoteFlow, run_flows};
 use crate::protocol::{Ack, DeviceClient, InboundMessage, OutboundReport, ProtocolError, StatusUpdateItem};
 
 /// The JNI surface caps these before calling in; the core repeats the check so a
@@ -143,7 +143,8 @@ pub async fn receive_and_reply(
         return Ok((message, Vec::new()));
     }
 
-    let run = run_flows(&flows, &inbound_local_id, &message.peer, &message.body);
+    let mut run = run_flows(&flows, &inbound_local_id, &message.peer, &message.body);
+    mark_skipped_actions(&mut run);
 
     // Persist the run before anything else so a later flush can report it. The
     // inbound row is already written, so a failed insert must not lose the
@@ -156,10 +157,10 @@ pub async fn receive_and_reply(
     }
 
     let mut actions = Vec::new();
-    for (index, action) in run.actions.iter().enumerate() {
+    for (index, entry) in run.actions.iter().enumerate() {
         // Same rule as above: only a send is something this device performs, and
         // the other kinds are named rather than fallen through.
-        let Action::SendSms { to, body } = action else {
+        let Action::SendSms { to, body } = &entry.action else {
             continue;
         };
         let outbound_local_id = reply_local_id(&inbound_local_id, index);
@@ -183,7 +184,7 @@ pub async fn receive_and_reply(
             )
             .await
         {
-            Ok(_) => actions.push(action.clone()),
+            Ok(_) => actions.push(entry.action.clone()),
             // A duplicate broadcast racing this one hit UNIQUE(device_id,
             // local_id). The winner already represents the reply.
             Err(error) => {
@@ -206,6 +207,38 @@ pub async fn receive_and_reply(
 /// the row it just returned an action for without re-implementing the rule.
 pub fn reply_local_id(inbound_local_id: &str, action_index: usize) -> String {
     format!("{inbound_local_id}-reply-{action_index}")
+}
+
+/// Mark as `partial` every run that produced an action this handset cannot do.
+///
+/// The flow engine still reports `delivered` — it reached the end of the graph —
+/// but a `Delay` never waited and a `Webhook` never fired here, so saying
+/// `delivered` would make the Worker skip the part the handset did not perform.
+/// The Worker reads `partial` and runs the actions after the handset's boundary
+/// itself. A pure-SMS flow is untouched.
+///
+/// Returns how many actions were skipped, which is the count the stderr lines
+/// report one by one.
+fn mark_skipped_actions(run: &mut LocalRun) -> usize {
+    let mut skipped = 0;
+    let mut partial = vec![false; run.reports.len()];
+
+    for entry in &run.actions {
+        if matches!(entry.action, Action::Delay { .. } | Action::Webhook { .. }) {
+            skipped += 1;
+            if let Some(flag) = partial.get_mut(entry.report) {
+                *flag = true;
+            }
+        }
+    }
+
+    for (report, skipped) in run.reports.iter_mut().zip(partial) {
+        if skipped && report.outcome == "delivered" {
+            report.outcome = "partial".into();
+        }
+    }
+
+    skipped
 }
 
 /// Pick the device an inbound message belongs to. No "default device" flag
@@ -291,15 +324,19 @@ pub async fn inject_inbound(
     let mut runs = Vec::new();
     if let Some(flows) = flows {
         if !flows.is_empty() {
-            let local = run_flows(flows, &local_id, sender, body);
-            for action in &local.actions {
+            let mut local = run_flows(flows, &local_id, sender, body);
+            // The device can perform a send, not a wait or an outbound call.
+            // Mark the affected runs before the reports are uploaded, so the
+            // Worker knows this run stopped at the handset's boundary.
+            mark_skipped_actions(&mut local);
+            for entry in &local.actions {
                 // An explicit match, so a new action type is a compile error here
                 // rather than something silently ignored at runtime. v6.1 added
                 // `Delay` and `Webhook`; this device cannot perform either without
                 // blocking the carrier or making an outbound call, so both are
                 // skipped LOUDLY. The flow still replies, and the log says which
                 // part of it the handset did not do.
-                match action {
+                match &entry.action {
                     dakflare_flow::Action::SendSms { to, body } => {
                         let outbound_id = format!("out-{}", random_hex(8)?);
                         captured.push(
@@ -976,6 +1013,174 @@ mod tests {
                 ]
             }),
         }
+    }
+
+    /// A flow that must POST before it replies: the handset skips the webhook but
+    /// still sends the SMS that follows it.
+    fn webhook_then_sms_flow(id: &str, version: i64) -> crate::flowrun::RemoteFlow {
+        crate::flowrun::RemoteFlow {
+            id: id.into(),
+            version,
+            graph: serde_json::json!({
+                "nodes": [
+                    { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                    { "id": "h1", "type": "webhook", "data": {
+                        "url": "https://example.test/hook", "body": "{{body}}" } },
+                    { "id": "s1", "type": "send_sms", "data": {
+                        "to": "{{sender}}", "body": "after the hook" } },
+                    { "id": "e1", "type": "stop", "data": {} }
+                ],
+                "edges": [
+                    { "id": "a", "source": "t1", "target": "h1" },
+                    { "id": "b", "source": "h1", "target": "s1" },
+                    { "id": "c", "source": "s1", "target": "e1" }
+                ]
+            }),
+        }
+    }
+
+    /// A flow that waits before it replies: the handset sends immediately, which
+    /// is exactly the behaviour the Worker must be told about.
+    fn delay_then_sms_flow(id: &str, version: i64) -> crate::flowrun::RemoteFlow {
+        crate::flowrun::RemoteFlow {
+            id: id.into(),
+            version,
+            graph: serde_json::json!({
+                "nodes": [
+                    { "id": "t1", "type": "trigger", "data": { "kind": "incoming" } },
+                    { "id": "d1", "type": "delay", "data": { "seconds": 60 } },
+                    { "id": "s1", "type": "send_sms", "data": {
+                        "to": "{{sender}}", "body": "after the wait" } },
+                    { "id": "e1", "type": "stop", "data": {} }
+                ],
+                "edges": [
+                    { "id": "a", "source": "t1", "target": "d1" },
+                    { "id": "b", "source": "d1", "target": "s1" },
+                    { "id": "c", "source": "s1", "target": "e1" }
+                ]
+            }),
+        }
+    }
+
+    /// A client whose next request lands on a one-shot endpoint, so a test can
+    /// assert exactly what the device uploaded.
+    fn upload_client(
+        device: &crate::db::Device,
+    ) -> (
+        DeviceClient,
+        std::thread::JoinHandle<serde_json::Value>,
+    ) {
+        let identity = crate::generate_identity().unwrap();
+        let (base_url, server) = serve_one_poll();
+        let client = DeviceClient::new(
+            Target::new(base_url, None).unwrap(),
+            device.device_id.clone(),
+            identity.private_key_pkcs8_pem.clone(),
+        );
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_webhook_flow_is_reported_partial_and_still_sends_its_sms() {
+        let (_dir, store, device) = paired_store().await;
+        let (client, server) = upload_client(&device);
+
+        let injected = inject_inbound(
+            &store,
+            Some(&client),
+            &device.device_id,
+            "+15550001111",
+            "hello",
+            false,
+            Some(&[webhook_then_sms_flow("wf_hook", 1)]),
+        )
+        .await
+        .unwrap();
+        let uploaded = server.join().unwrap();
+
+        assert_eq!(uploaded["flow_runs"][0]["flow_id"], "wf_hook");
+        assert_eq!(uploaded["flow_runs"][0]["outcome"], "partial");
+        assert_eq!(
+            injected.captured.len(),
+            1,
+            "the SMS after the webhook is still performed"
+        );
+        assert_eq!(injected.captured[0].body, "after the hook");
+        assert_eq!(injected.device_sent, 1);
+    }
+
+    #[tokio::test]
+    async fn a_pure_sms_flow_still_reports_delivered() {
+        let (_dir, store, device) = paired_store().await;
+        let (client, server) = upload_client(&device);
+
+        let injected = inject_inbound(
+            &store,
+            Some(&client),
+            &device.device_id,
+            "+15550001111",
+            "hello",
+            false,
+            Some(&[reply_flow("wf_sms", 1, "plain reply")]),
+        )
+        .await
+        .unwrap();
+        let uploaded = server.join().unwrap();
+
+        assert_eq!(uploaded["flow_runs"][0]["outcome"], "delivered");
+        assert_eq!(injected.captured.len(), 1);
+        assert_eq!(injected.captured[0].body, "plain reply");
+    }
+
+    #[tokio::test]
+    async fn a_delay_before_the_sms_reports_partial() {
+        let (_dir, store, device) = paired_store().await;
+        let (client, server) = upload_client(&device);
+
+        let injected = inject_inbound(
+            &store,
+            Some(&client),
+            &device.device_id,
+            "+15550001111",
+            "hello",
+            false,
+            Some(&[delay_then_sms_flow("wf_wait", 1)]),
+        )
+        .await
+        .unwrap();
+        let uploaded = server.join().unwrap();
+
+        assert_eq!(uploaded["flow_runs"][0]["outcome"], "partial");
+        assert_eq!(
+            injected.captured.len(),
+            1,
+            "the handset still sends immediately; the report is what changes"
+        );
+        assert_eq!(injected.captured[0].body, "after the wait");
+    }
+
+    #[test]
+    fn skipped_actions_are_counted_and_only_their_run_is_partial() {
+        let mut run = crate::flowrun::run_flows(
+            &[
+                webhook_then_sms_flow("wf_hook", 1),
+                reply_flow("wf_sms", 2, "plain reply"),
+            ],
+            "sim-9",
+            "+15550001111",
+            "hello",
+        );
+
+        assert_eq!(mark_skipped_actions(&mut run), 1);
+        assert_eq!(run.reports[0].outcome, "partial");
+        assert_eq!(
+            run.reports[1].outcome, "delivered",
+            "a pure-SMS flow beside it is unaffected"
+        );
+        assert!(run.actions.iter().any(|entry| matches!(
+            &entry.action,
+            Action::SendSms { body, .. } if body == "after the hook"
+        )));
     }
 
     #[tokio::test]
