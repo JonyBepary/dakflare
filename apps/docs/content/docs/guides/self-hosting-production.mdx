@@ -3,7 +3,7 @@ title: Self-Hosting & Production Operations
 description: Keep the three Cloudflare configs synchronized, apply D1 migrations safely, avoid cf CLI traps, verify deploys, and restore from D1 Time Travel.
 ---
 
-DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 6 hermetic verification jobs (`worker`, `skills`, `dashboard`, `simulator`, `rust`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
+DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 7 hermetic verification jobs (`worker`, `skills`, `dashboard`, `docs`, `simulator`, `rust`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
 
 ## Keep the Three Config Files in Sync
 

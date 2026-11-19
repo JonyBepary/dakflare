@@ -38,18 +38,20 @@ export interface DakFlareBinding {
     body: string;
     deviceId?: string;
     idempotencyKey?: string;
-  }): Promise<unknown>;
-  ask(message: string, options?: { idempotencyKey?: string }): Promise<unknown>;
+  }, options?: { token?: string }): Promise<unknown>;
+  ask(message: string, options?: { idempotencyKey?: string; token?: string }): Promise<unknown>;
   request(input: {
     path: string;
     method?: string;
     body?: unknown;
     headers?: Record<string, string>;
+    token?: string;
   }): Promise<{ status: number; body: unknown; bookmark: string | null }>;
 }
 
 interface Env {
   DAKFLARE: Service<DakFlareBinding>;
+  DAKFLARE_AGENT_TOKEN?: string; // only needed when BINDING_AUTH=agent_token
 }
 ```
 
@@ -69,15 +71,26 @@ export default {
 };
 ```
 
+When the producer runs `BINDING_AUTH=agent_token`, pass the token with the call. A read or a
+write is then limited to that token's scopes, and an act additionally needs a live grant:
+
+```ts
+// BINDING_AUTH=agent_token: the token names the actor on every call.
+const sent = await env.DAKFLARE.sendSms(
+  { to: "+8801711000111", body: "Payment settled.", idempotencyKey: "invoice-9021-notice-1" },
+  { token: env.DAKFLARE_AGENT_TOKEN }
+);
+```
+
 | Method | Route it reaches | Credential |
 | --- | --- | --- |
 | `health()` | `GET /v1/auth/mode` | none — that route is public by design |
 | `deployment()` | `GET /v1/admin/health` | yes |
 | `devices()` | `GET /v1/devices` | yes |
 | `messages({ limit, deviceId, direction })` | `GET /v1/messages` | yes |
-| `sendSms({ to, body, deviceId?, idempotencyKey? })` | `POST /v1/sms/send` | yes |
-| `ask(message, { idempotencyKey? })` | `POST /v1/admin/agent/say` | yes |
-| `request({ path, method, body })` | anything under `/v1` | yes |
+| `sendSms({ to, body, deviceId?, idempotencyKey? }, { token? })` | `POST /v1/sms/send` | yes |
+| `ask(message, { idempotencyKey?, token? })` | `POST /v1/admin/agent/say` | yes |
+| `request({ path, method, body, token? })` | anything under `/v1` | yes |
 
 Every one of them delegates to the same router the public API uses, with
 `X-Dakflare-Client: binding`, so scopes, rate limiters, audit rows, idempotency and the D1 bookmark

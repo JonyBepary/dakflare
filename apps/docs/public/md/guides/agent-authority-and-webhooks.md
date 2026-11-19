@@ -11,7 +11,8 @@ DakFlare separates **what an agent may attempt** (token scopes) from **what an a
 | Category | Scopes |
 | --- | --- |
 | **Read** | `messages:read`, `devices:read`, `flows:read`, `audit:read` |
-| **Reversible / Cheap Write** | `sms:send`, `messages:purge`, `alerts:write`, `flows:write`, `devices:write`, `rules:write`, `webhooks:write` |
+| **Reversible / Cheap Write** | `sms:send`, `messages:purge`, `alerts:write`, `flows:write`, `devices:write` |
+| **Grant-Required Write (always grant-gated)** | `rules:write`, `webhooks:write` |
 | **Costly / Production Write (always grant-gated)** | `sms:send:production`, `enable_shortcode`, `dlq_bulk_replay`, `flow_deploy_prod` |
 | **Never Grantable (hard-refused)** | `devices:revoke`, `auth:reset` |
 
@@ -64,4 +65,4 @@ There is intentionally no rotate endpoint:
 2. Update the upstream caller and verify a `200` response with `replayed: false`.
 3. Delete the old webhook via `DELETE /v1/admin/webhooks/:old_id`.
 
-> **Warning on `WEBHOOK_SECRET_KEY`**: Rotating `WEBHOOK_SECRET_KEY` invalidates every sealed webhook secret in D1 simultaneously (ingress returns `500`). Only rotate it during a planned window when you recreate every hook.
+> **Warning on `WEBHOOK_SECRET_KEY`**: Rotating `WEBHOOK_SECRET_KEY` invalidates every sealed webhook secret in D1 simultaneously (ingress answers `503 webhook_secret_unavailable`). Only rotate it during a planned window when you recreate every hook.

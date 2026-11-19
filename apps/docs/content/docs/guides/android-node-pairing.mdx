@@ -41,7 +41,7 @@ cd simulator/flow && cargo test
 
 - **Role**: The handset holds `android.app.role.SMS` so `SmsReceiver.kt` receives `SMS_DELIVER`, writes to `SmsProvider.kt` (`content://sms`), and posts one silent notification per thread with inline reply (`SmsReplyReceiver.kt`).
 - **MMS**: Not supported; an incoming MMS push produces an explicit notification rather than silently dropping.
-- **Persistence**: `GatewayService.kt` runs as a `remoteMessaging` foreground service flushing pending rows every 15 minutes, and `BootReceiver.kt` restores it after reboot.
+- **Persistence**: `GatewayService.kt` runs as a `remoteMessaging` foreground service draining pending rows every 5 minutes and refreshing flows every 15 minutes, and `BootReceiver.kt` restores it after reboot.
 
 ## Wake Capability: `poll-only` vs. FCM Push
 

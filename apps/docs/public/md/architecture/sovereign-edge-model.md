@@ -14,8 +14,8 @@ DakFlare is built around one thesis: **the handset is the radio, the Worker is t
 
 - **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 17 D1 migrations (`0001_baseline.sql`–`0017_alert_acknowledged_by.sql`), 4 SQLite Durable Objects, 3 channel adapters (SMS, Telegram, WhatsApp Cloud), `flow.wasm`, Clef System 1, and `/mcp`.
 - **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
-- **`dashboard/`**: SvelteKit 5 static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
-- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (28 commands).
+- **`dashboard/`**: Svelte 5 with SvelteKit static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
+- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (27 commands).
 
 ## Honest Architectural Boundaries (Known Gaps)
 

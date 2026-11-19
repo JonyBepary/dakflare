@@ -40,7 +40,7 @@ Inbound messages across all three channels normalize into one `conversations` ro
 | **Telegram** | `POST /v1/channels/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` | `POST /v1/channels/telegram/send` |
 | **WhatsApp Cloud** | `POST /v1/channels/whatsapp/webhook` (`GET` verify + `POST` ingress) | `X-Hub-Signature-256` | `POST /v1/channels/whatsapp/send` |
 
-> **Current state note**: Both Telegram and WhatsApp inserts currently write `session_state = 'WINDOW_OPEN'`. Automated transitions to `TEMPLATE_ONLY` and `OPTED_OUT` are declared in `0007_multi_platform_and_conversations.sql` but do not yet have background writers (see [State Machines](/reference/state-machines/)).
+> **Current state note**: Both Telegram and WhatsApp inserts currently write `session_state = 'WINDOW_OPEN'`. Automated transitions to `TEMPLATE_ONLY` and `OPTED_OUT` are declared in `0007_multi_platform_and_conversations.sql` but do not yet have background writers (see [State Machines](/docs/reference/state-machines/)).
 
 ## Calling DakFlare from Another Cloudflare Worker (`DakFlareApi`)
 
@@ -54,10 +54,18 @@ service = "dakflare-worker"
 entrypoint = "DakFlareApi"
 ```
 
+`dakflare-worker` is not published to npm, so declare the methods you call rather than importing
+a type that cannot be resolved — the guide
+[Call DakFlare from a Worker or a Workflow](/docs/guides/worker-service-binding) has the full
+interface, a `WorkflowEntrypoint` example and the retry rule.
+
 ```ts
+interface DakFlareBinding {
+  sendSms(input: { to: string; body: string; idempotencyKey?: string }): Promise<unknown>;
+}
 
 export default {
-  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareApi> }) {
+  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareBinding> }) {
     const sent = await env.DAKFLARE.sendSms({
       to: "+8801711000111",
       body: "Payment settled.",
@@ -77,9 +85,23 @@ Every `DakFlareApi` method (`health`, `deployment`, `devices`, `messages`, `send
 `DakFlareApi` exposes `request()` as a typed escape hatch to any `/v1/*` route through the exact same auth, rate-limit, and validation pipeline (`worker/src/binding-api.ts`). Use `PUT /v1/admin/workflows/:id` to load or update a custom JSON flow template from another Cloudflare Worker or Cloudflare Workflow:
 
 ```ts
+/** The part of the `DakFlareApi` binding this task calls; see the worker-service-binding guide for the complete interface. */
+interface DakFlareBinding {
+  request(input: {
+    path: string;
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    token?: string;
+  }): Promise<{ status: number; body: unknown; bookmark: string | null }>;
+  sendSms(
+    input: { to: string; body: string; deviceId?: string; idempotencyKey?: string },
+    options?: { token?: string }
+  ): Promise<unknown>;
+}
 
 interface Env {
-  DAKFLARE: Service<DakFlareApi>;
+  DAKFLARE: Service<DakFlareBinding>;
   DAKFLARE_AGENT_TOKEN?: string; // only needed if BINDING_AUTH=agent_token
 }
 
@@ -124,8 +146,13 @@ export default {
 
       return Response.json({ saved: saved.body, sent });
     } catch (err) {
-      if (err instanceof BindingError) {
-        return Response.json({ error: err.code, message: err.message }, { status: err.status });
+      // A refusal is a thrown error carrying a stable `code`; branch on it, not the sentence.
+      if (err instanceof Error && "code" in err) {
+        const failure = err as Error & { code?: string; status?: number };
+        return Response.json(
+          { error: failure.code, message: failure.message },
+          { status: failure.status ?? 400 }
+        );
       }
       throw err;
     }

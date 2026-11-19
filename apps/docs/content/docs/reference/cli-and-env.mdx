@@ -1,6 +1,6 @@
 ---
 title: CLI, Bindings & Error Codes
-description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+description: Reference for all 27 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
 ---
 
 ## `dakflare` CLI Machine Contract
@@ -22,13 +22,13 @@ description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cl
 | `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
 | `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
 
-### Command Inventory (28 Commands)
+### Command Inventory (27 Commands)
 
 - **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
 - **Messaging**: `send`, `status`, `audit`
 - **Auth & Control Plane**: `auth bootstrap`, `auth invite`, `auth invites`, `auth reset`, `auth mint-agent-token`, `auth agent-tokens`, `auth revoke-agent-token`, `auth approvals`, `auth approve`, `auth reject`, `auth grants`, `auth grants revoke`
 - **Automation**: `flows apply`, `flows heal`, `rules list`, `rules apply`, `rules update`, `rules delete`, `rules test`, `extract synthesize`
-- **Agent Work**: `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
+- **Agent Work**: `ai` (`ai providers`, `ai configure`, `ai models`, `ai test`), `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
 - **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`
 - **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
 
@@ -46,7 +46,6 @@ description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cl
 | `WEBHOOK_QUEUE` | Queue (producer & consumer) | `dakflare-webhook-queue` (`max_batch_size=10`, `max_retries=3`) |
 | `FLOW_WORKFLOW` | Workflow | `FlowExecutionWorkflow` (`flow-execution-workflow`) |
 | `AI` | Workers AI | Clef System 1 & optional chat provider |
-| `ASSETS` | Static Assets | `worker/public` (landing page + `/admin` SvelteKit console) |
 | Rate Limiters | 7 namespaces (`1001`–`1007`) | `PAIR_LIMITER` (30/60s), `ADMIN_LIMITER` (600/60s), `DEVICE_LIMITER` (600/60s), `AUTH_FAIL_LIMITER` (120/60s), `PAIR_GLOBAL_LIMITER` (300/60s), `AUTH_ACCOUNT_LIMITER` (5/60s), `AUTH_IP_LIMITER` (20/60s) |
 
 ## Environment Variables & Secrets
@@ -65,7 +64,7 @@ description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cl
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENT_RUNTIME` | `"off"` | `"off"` returns `503` on `/agents/*`; `"on"` enables `AssistantAgent` |
+| `AGENT_RUNTIME` | `"on"` | `"on"` enables `AssistantAgent`; `"off"` returns `503` on `/agents/*` |
 | `BINDING_AUTH` | `"trusted"` | `DakFlareApi` service binding auth: `"trusted"` or `"agent_token"` |
 | `AUTH_PASSWORD_MODE` | `"client-derived"` | `"off"`, `"client-derived"` (browser PBKDF2), or `"server-kdf"` (paid tier) |
 | `AUTH_LOCKOUT_WINDOW_SECONDS` | `"900"` | Lockout window in `AuthGuard` |
@@ -73,8 +72,8 @@ description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cl
 | `MESSAGE_RETENTION_DAYS` | `"90"` | Daily cron (`17 3 * * *`) retention cutoff |
 | `INCOMING_ROWS_PER_DAY` | `"10000"` | Per-device daily inbound write quota |
 | `AI_DAILY_TOKEN_BUDGET` | `"20000"` | Daily token budget for stateless console assistant |
-| `LEASE_MS` / `ACK_TIMEOUT_MS` | `60000` / `8000` | Outbound command lease & WS ack timeout (ms) |
-| `OFFLINE_ALERT_MS` / `STALE_SOCKET_MS` / `NONCE_WINDOW_MS` | `900000` / `120000` / `300000` | Offline alert, stale socket, and P-256 replay window (ms) |
+
+`LEASE_MS`, `ACK_TIMEOUT_MS`, `OFFLINE_ALERT_MS`, `STALE_SOCKET_MS`, and `NONCE_WINDOW_MS` are **not declared in any config carrier** — no `[vars]` block sets them. They are code defaults in `worker/src/lib/config.ts` (60 s lease, 8 s ack, 15 min offline alert, 2 min stale socket, 5 min P-256 replay window). A deployment overrides one only by adding the variable itself.
 
 ## Uniform §8 Error Code Catalog (`worker/src/lib/errors.ts`)
 

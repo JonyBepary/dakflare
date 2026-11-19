@@ -21,7 +21,7 @@ softened, and where the code has no writer for a declared state, this file now s
 | | |
 |---|---|
 | Machine | A command leaving the phone |
-| States | `PENDING` → `LEASED` → `DISPATCHED` → `SENT` → `DELIVERED` / `FAILED`; `EXPIRED` from any unsettled state |
+| States | `PENDING` → `LEASED` → `DISPATCHED` → `SENT` → `DELIVERED`; `FAILED` from `DISPATCHED` or `SENT`; `EXPIRED` from `PENDING`, `LEASED` or `DISPATCHED` |
 | Terminal | `DELIVERED`, `FAILED`, `EXPIRED` — no transition leaves them |
 | Enforced in | `worker/src/durable-object.ts:136` (`ALLOWED_PREDECESSORS`), `:147` (terminal set) |
 | Kind | **Guarded**, in SQL, so the guard is atomic and cannot be bypassed from a new route |
@@ -146,7 +146,7 @@ vocabulary is not.
 | Machine | Whether the runtime may act without a click |
 | States | `off`, `open`, `expired` (clock), `other-session` (opened by a different operator) |
 | Enforced in | `0003`/`0012` schema; decided in `agent/grants.ts:166` |
-| Kind | **Derived.** Stored as `enabled` + `expires_at` + `actor` + caps; recomputed on every act. Refusals are ordered cheapest-first and named (`autonomy_off`, `autonomy_expired`, `autonomy_other_session`, `no_grant`, `grant_expired`, `sms_cap`, `write_cap`, `webhook_cannot_act`) |
+| Kind | **Derived.** Stored as `enabled` + `expires_at` + `actor` + caps; recomputed on every act. Refusals are ordered cheapest-first and named (`webhook_cannot_act`, `autonomy_off`, `autonomy_other_session`, `autonomy_expired`, `sms_cap`/`write_cap`, `daily_sms_cap`, `no_grant`, `grant_expired`) |
 
 The window is deliberately not the grant: a window mints grants for the act classes it covers.
 `agent_autonomy.daily_sms_cap` bounds the deployment's day beside the per-window cap, and it is
@@ -265,7 +265,7 @@ kind is neutral rather than being announced as silence.
 | | |
 |---|---|
 | Machine | One alarm-queue row |
-| States | `pending` → `running` → `consumed` / `rescheduled` (with backoff) → `dead_letters` at 5 attempts |
+| States | no state column — `run_at` plus `attempts`; an alarm returns `consumed` / `rescheduled` (`TaskOutcome`), and after 5 attempts the row is moved to the separate `dead_letters` table |
 | Enforced in | `worker/src/durable-object.ts:100` (`ScheduledTaskRow`), `:141` (`MAX_TASK_ATTEMPTS`) |
 | Kind | **Guarded** — a dead letter is a terminal absence, and the attempt ceiling stops a poisoned task from spinning |
 

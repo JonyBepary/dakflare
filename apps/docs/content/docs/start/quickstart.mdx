@@ -10,7 +10,7 @@ This tutorial takes you from a clean checkout to a live DakFlare deployment on y
 - **Node.js 22+** (required by the zero-dependency `dakflare` CLI)
 - **Cloudflare `cf` CLI** authenticated to your account (`cf auth login`)
 - **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
-- **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/guides/android-node-pairing/))
+- **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/docs/guides/android-node-pairing/))
 
 ## Step 1: Clone and Install Dependencies
 
@@ -27,7 +27,7 @@ Verify the CLI is available and speaks its machine contract:
 dakflare capabilities --agent
 ```
 
-Expected output: a single compact JSON document with `"ok": true` listing all 28 commands, their effects, and flags.
+Expected output: a single compact JSON document with `"ok": true` listing all 27 commands, their effects, and flags.
 
 ## Step 2: Generate Local Secrets
 
@@ -40,7 +40,7 @@ dakflare init --local
 This creates `worker/.dev.vars` containing:
 - `ADMIN_TOKEN` — machine credential for CLI and service bindings
 - `BETTER_AUTH_SECRET` — signs `__Secure-better-auth.session_token` cookies and encrypts TOTP secrets
-- `AUTH_PEPPER` — versioned pepper string (`v2:<b64 32B>,v1:<b64 32B>`) for password verification
+- `AUTH_PEPPER` — versioned pepper string, a single `v1:<b64 32B>` entry (`v2:<b64 32B>,v1:<b64 32B>` is the rotation shape once a second version is added) for password verification
 
 > Never commit `worker/.dev.vars`. Secrets are pushed to Cloudflare via `cf workers secrets update` or `dakflare up` and persist across future deploys.
 
@@ -139,4 +139,4 @@ Run the full health check before moving on:
 dakflare doctor
 ```
 
-Next: [Build your first Wasm auto-reply flow](/start/first-wasm-flow/) or [connect an MCP agent](/start/connect-mcp-agent/).
+Next: [Build your first Wasm auto-reply flow](/docs/start/first-wasm-flow/) or [connect an MCP agent](/docs/start/connect-mcp-agent/).

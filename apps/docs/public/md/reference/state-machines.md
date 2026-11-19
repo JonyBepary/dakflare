@@ -13,7 +13,8 @@ Owned by `worker/src/durable-object.ts` (`ALLOWED_PREDECESSORS`):
 
 ```text
 PENDING -> LEASED -> DISPATCHED -> SENT -> DELIVERED
-                  \-> FAILED (with optional error_code & error_message)
+                         |            |
+                         +-----------> FAILED (with optional error_code & error_message)
 PENDING | LEASED | DISPATCHED -> EXPIRED (error_code: "expired")
 ```
 
@@ -24,7 +25,7 @@ PENDING | LEASED | DISPATCHED -> EXPIRED (error_code: "expired")
 ## Inbound Reply Fate (**Guarded**)
 
 Owned by `worker/src/routes/incoming.ts`:
-- **States**: `null` → `queued` → `sent` → `delivered` / `failed`. `delivered` and `failed` are terminal.
+- **States**: `null` → any valid state (`queued`, `sent`, `delivered`, `failed`); then `queued` → `sent` → `delivered` / `failed`. `delivered` and `failed` are terminal.
 - **Suppression axis (`reply_verdict`)**: `suppressed_cooldown` or `suppressed_hourly_cap` (`0004_provenance.sql`).
 
 ## Flow Run (**Guarded on Handset & Worker**)
@@ -38,11 +39,11 @@ Owned by `worker/src/routes/incoming.ts`:
 | --- | --- | --- |
 | **Approval Request** | `PENDING` → `APPROVED` / `REJECTED` / `EXPIRED` / `CANCELLED` | **Declared** (`0003` CHECK + atomic single-winner claim; loser gets `409`) |
 | **Authority Grant** | `live` → `revoked` / `expired` / `exhausted` | **Derived** (`agent/grants.ts`; note: all three non-live endings currently surface as `grant_expired`) |
-| **Autonomy Window** | `off`, `open`, `expired`, `other-session` | **Derived** on every act; ordered refusals: `autonomy_off`, `autonomy_expired`, `autonomy_other_session`, `no_grant`, `grant_expired`, `sms_cap`, `write_cap`, `webhook_cannot_act` |
+| **Autonomy Window** | `off`, `open`, `expired`, `other-session` | **Derived** on every act; ordered refusals: `webhook_cannot_act`, `autonomy_off`, `autonomy_other_session`, `autonomy_expired`, `sms_cap`/`write_cap`, `daily_sms_cap`, `no_grant`, `grant_expired` |
 | **Runtime WS Ticket** | `issued` → `spent` / `expired` | **Guarded** (atomic conditional `DELETE ... WHERE expires_at > ?` in `lib/agent-runtime.ts`) |
 | **Assistant Proposal** | `pending` → `consumed` / `expired` | **Guarded** (conditional claim before effect; duplicate click gets `409 already_applied`; failed effect releases claim) |
 | **Agent Turn** | `running` → `done` / `failed` | **Guarded** for completed replay (`<key>:answer` returns `replayed: true`) |
-| **Scheduled DO Work** | `pending` → `running` → `consumed` / `rescheduled` → `dead_letters` (5 attempts) | **Guarded** (`durable-object.ts`) |
+| **Scheduled DO Work** | no state column — `run_at` plus `attempts`; an alarm returns `consumed` / `rescheduled` (`TaskOutcome`), and after 5 attempts the row is moved to the separate `dead_letters` table | **Guarded** (`durable-object.ts`) |
 | **Auth Lockout** | `ok` → `counting` → `locked` | **Guarded** across two scopes in `AuthGuard`: per-account (5) and per-IP (20) |
 
 ## Known Unwritten / Declared-Only Columns

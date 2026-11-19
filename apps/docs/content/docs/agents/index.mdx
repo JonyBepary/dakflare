@@ -11,9 +11,9 @@ DakFlare treats AI coding agents (Claude Code, Cursor, Windsurf, OpenCode, and a
 | --- | --- | --- |
 | [`/llms.txt`](/llms.txt) | Markdown index | Concise navigation index ordered by onboarding priority with one-line descriptions |
 | [`/llms-full.txt`](/llms-full.txt) | Concatenated Markdown | Complete documentation bundle with `llms-ignore` JSX stripped and `llms-only` context preserved |
-| `/{any-path}.md` | `text/markdown; charset=utf-8` | Clean source Markdown for any page (e.g. `/start/quickstart.md`, `/reference/api-reference.md`) |
+| `/docs/{any-path}.md` | `text/markdown; charset=utf-8` | Clean source Markdown for any page (e.g. `/docs/start/quickstart.md`, `/docs/reference/api-reference.md`) |
 | `Accept: text/markdown` | HTTP content negotiation | Any doc URL returns clean Markdown with `Vary: Accept` and `x-markdown-tokens` budget header |
-| [`/openapi.json`](/openapi.json) | OpenAPI 3.1.0 JSON | Complete REST API contract with security schemes, request/response examples, and error shapes |
+| [`/openapi.json`](/openapi.json) | OpenAPI 3.1.0 JSON | The 17 operations the API playground covers (pairing, poll, status, send, devices, messages, one workflow route, the four `/v1/agent/*` endpoints, webhooks, health, auth mode, `/mcp`), with security schemes, request/response examples, and error shapes |
 | [`/SKILL.md`](/SKILL.md) | Agent Skill Markdown | Curated single-file skill encoding DakFlare invariants, CLI rules, Wasm ABI, and Do/Don't guardrails |
 | [`/AGENTS.md`](/AGENTS.md) | Repository Agent Guide | Repo-root instructions for coding agents working directly inside `dakflare` |
 | `POST /mcp` | JSON-RPC 2.0 (Docs MCP) | Live retrieval tools: `list_sections`, `search_docs`, `get_doc_page`, `get_openapi_operation` |
@@ -22,10 +22,10 @@ DakFlare treats AI coding agents (Claude Code, Cursor, Windsurf, OpenCode, and a
 
 ```bash
 # Via explicit .md route
-curl -sS https://docs.dakflare.dev/start/quickstart.md
+curl -sS https://docs.dakflare.dev/docs/start/quickstart.md
 
 # Via HTTP content negotiation (returns x-markdown-tokens header)
-curl -i -H "Accept: text/markdown" https://docs.dakflare.dev/reference/mcp-tools/
+curl -i -H "Accept: text/markdown" https://docs.dakflare.dev/docs/reference/mcp-tools/
 ```
 
 ## Querying the Docs MCP Server

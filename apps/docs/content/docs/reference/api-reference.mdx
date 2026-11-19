@@ -94,25 +94,34 @@ Content-Type: application/json
 **Success (`200 OK`)**
 ```json
 {
-  "ok": true,
   "command_id": "cmdf_01j9x7m2k8p3q4r5",
-  "device_id": "dev63f3953f417d587f",
-  "state": "PENDING",
-  "replayed": false
+  "replayed": false,
+  "lifecycle": {
+    "state": "QUEUED",
+    "substate": null,
+    "is_terminal": false,
+    "settled": false,
+    "remediation": null
+  }
 }
 ```
 
 **Agent Missing Grant (`202 Accepted` — Nothing Sent)**
 ```json
 {
-  "sent": false,
   "error": "approval_required",
+  "sent": false,
+  "state": "PENDING",
   "approval_request": {
     "id": "apr_01j9x7n0v1w2x3y4",
     "scope": "sms:send:production",
     "target": { "recipients": ["+8801540196080"] },
-    "max_ttl_s": 3600
-  }
+    "requested_at": 1730000000000,
+    "expires_at": 1730003600000,
+    "ladder_s": [60, 300, 900, 1800, 3600, 86400, 604800, 2592000],
+    "max_s": 3600
+  },
+  "next": "a human must approve this: dakflare auth approve apr_01j9x7n0v1w2x3y4 --for <duration>"
 }
 ```
 
