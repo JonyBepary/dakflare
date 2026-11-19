@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "build:app": "node scripts/build-app.mjs",
     "prebuild": "node scripts/assert-no-workbenches.mjs",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
