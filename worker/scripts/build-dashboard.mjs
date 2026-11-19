@@ -17,6 +17,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { existsSync, renameSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +51,24 @@ let code = 0;
 try {
   execFileSync("npm", ["--prefix", dashboardDir, "ci", "--no-audit", "--no-fund"], { stdio: "inherit" });
   execFileSync("npm", ["--prefix", dashboardDir, "run", "build"], { stdio: "inherit" });
+  // Record what produced these assets. The deploy gate reads this rather than guessing from
+  // the working tree, so a Worker-only deploy stays possible while the console is being edited.
+  const git = (args) => execFileSync("git", args, { cwd: dashboardDir, encoding: "utf8" }).trim();
+  writeFileSync(
+    resolve(workerDir, ".build-source.json"),
+    `${JSON.stringify(
+      {
+        sha: git(["rev-parse", "HEAD"]),
+        dirty: git(["status", "--porcelain", "--", "src", "static", "package.json"]).replace(
+          /^\s*\?\?\s+src\/routes\/states\/.*$/gm,
+          "",
+        ).trim() !== "",
+        at: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+  );
 } catch (error) {
   code = typeof error.status === "number" ? error.status : 1;
 } finally {

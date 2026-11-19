@@ -13,3 +13,6 @@ node_modules/
 
 # OS noise
 .DS_Store
+
+# The console build records what produced worker/public/admin (scripts/build-dashboard.mjs).
+.build-source.json
