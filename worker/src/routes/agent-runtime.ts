@@ -444,9 +444,18 @@ export async function handleAgentSay(
     attachmentIds,
   });
   if (!result.ok) {
+    const status = turnRefusalStatus(result.reason);
+    // A 4xx is the caller's own condition — a reused key, a key still running, a bad
+    // attachment id — and calling that "agent_refused" makes an agent branch on the wrong
+    // thing. The reason is the error there; `agent_refused` stays for the 5xx, where the
+    // agent really did decline or the model failed.
     return Response.json(
-      { error: "agent_refused", reason: result.reason, message: result.message },
-      { status: turnRefusalStatus(result.reason) }
+      {
+        error: status >= 500 ? "agent_refused" : result.reason,
+        reason: result.reason,
+        message: result.message,
+      },
+      { status }
     );
   }
   return Response.json(result);
