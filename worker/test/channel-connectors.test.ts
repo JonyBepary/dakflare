@@ -28,6 +28,7 @@ import {
   handleConnectorDelete,
   handleConnectorList,
   handleConnectorUpdate,
+  sendConnectorOutbound,
 } from "../src/routes/channel-connectors";
 
 /**
@@ -702,6 +703,97 @@ describe("legacy WhatsApp Cloud path", () => {
       expect((captured[0].body as { text?: { body?: string } }).text?.body).toBe(
         "legacy reply"
       );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Outbound through a connector: the sealed credential, not the environment
+ * ------------------------------------------------------------------------- */
+
+describe("connector outbound", () => {
+  it("sends with the connector's own token and page id", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    // A conversation opens with an inbound message: without one the 24-hour window is closed and
+    // the send is refused (correctly), which is what the first version of this test discovered.
+    const stub = testEnv.CHANNEL_CONN.getByName(`messenger:${accountId}`);
+    await stub.ingestEvents([
+      {
+        connectorId: id,
+        channel: "messenger",
+        accountId,
+        eventKind: "inbound_message",
+        eventId: `mid.window.${accountId}`,
+        peerId: "psid-42",
+        body: "hello",
+        timestamp: Date.now(),
+      },
+    ]);
+    const calls: Array<{ url: string; auth: string | null; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({
+          url: String(url),
+          auth: new Headers(init.headers).get("authorization"),
+          body: JSON.parse(String(init.body)),
+        });
+        return Response.json({ message_id: "mid.sent.1" });
+      })
+    );
+    try {
+      const result = await sendConnectorOutbound(testEnv, "messenger", id, {
+        to: "psid-42",
+        body: "hello from the connector",
+      });
+      expect(result.success).toBe(true);
+      expect(result.channelMessageId).toBe("mid.sent.1");
+      expect(calls).toHaveLength(1);
+      // The page access token sealed at creation is what authorises the send; the deployment's
+      // environment credential is never involved.
+      expect(calls[0].auth).toBe("Bearer page-access-token-value");
+      expect(calls[0].url).toContain(encodeURIComponent(accountId));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports a closed 24-hour window as window_expired", async () => {
+    const { id } = await createMessengerConnector();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { error: { code: 10, error_subcode: 2018278, message: "outside the window" } },
+          { status: 400 }
+        )
+      )
+    );
+    try {
+      const result = await sendConnectorOutbound(testEnv, "messenger", id, {
+        to: "psid-42",
+        body: "too late",
+      });
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("window_expired");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses an unknown connector by name rather than sending", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = await sendConnectorOutbound(testEnv, "messenger", "conn_missing", {
+        to: "psid-42",
+        body: "nobody",
+      });
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("connector_not_found");
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

@@ -150,6 +150,7 @@ import {
   handleConnectorDelete,
   handleConnectorList,
   handleConnectorUpdate,
+  sendConnectorOutbound,
 } from "./routes/channel-connectors";
 import type { NormalizedChannelEvent } from "./channels/connection-do";
 
@@ -1689,6 +1690,42 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
       return withAdminAccess(req, env, "write", "send SMS", (actor) =>
         handleSendBatch(req, env, actor)
       );
+    }
+
+    // Per-connector send: same effect as the legacy route below, but with the credential that
+    // belongs to that account instead of the deployment's environment. Inbound without this is a
+    // mailbox nobody can answer from.
+    const connectorSendMatch = pathname.match(/^\/v1\/channels\/([^/]+)\/([^/]+)\/send$/);
+    if (method === "POST" && connectorSendMatch !== null) {
+      const channel = connectorSendMatch[1];
+      const connectorId = connectorSendMatch[2];
+      return withAdminAccess(req, env, "write", `send ${channel} message`, async (_actor) => {
+        const parsed = await readJsonBoundedResult(req, MAX_BODY_BYTES);
+        if (!parsed.ok) return err(parsed.reason);
+        const body = parsed.value;
+        const to = String(body.to || "");
+        const messageBody = String(body.body || "");
+        if (!to || !messageBody) {
+          return Response.json(
+            { error: "bad_request", message: "to and body required" },
+            { status: 400 }
+          );
+        }
+        const result = await sendConnectorOutbound(env, channel, connectorId, {
+          to,
+          body: messageBody,
+          ...(typeof body.media_url === "string" ? { mediaUrl: body.media_url } : {}),
+          ...(typeof body.template_id === "string" ? { templateId: body.template_id } : {}),
+        });
+        const status = result.success
+          ? 200
+          : result.errorCode === "connector_not_found"
+            ? 404
+            : result.errorCode === "window_expired"
+              ? 409
+              : 400;
+        return Response.json(result, { status });
+      });
     }
 
     const channelSendMatch = pathname.match(/^\/v1\/channels\/([^/]+)\/send$/);
