@@ -5,6 +5,7 @@
 	import { ROUTES } from '$lib/paths';
 	import type { Device, WorkflowSummary } from '$lib/types';
 	import { devicePrimary } from '$lib/presence';
+	import { session } from '$lib/session.svelte';
 	import AutomationHeader from '$lib/components/AutomationHeader.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -26,6 +27,17 @@
 	let deleting = $state(false);
 	let deleteError = $state<string | null>(null);
 
+	/**
+	 * Creating, saving and deleting a flow are all `write` on the Worker. A
+	 * member reads the list and opens a flow to follow its graph; the controls
+	 * that would be refused are disabled or not drawn, and the note under the
+	 * header says why once.
+	 */
+	const canWrite = $derived(session.canWrite);
+	const readOnlyWhy = $derived(
+		'Members can read workflows but cannot create, save or delete one. Ask an owner or admin.'
+	);
+
 	const totalNodes = $derived(workflows.reduce((sum, workflow) => sum + workflow.node_count, 0));
 	const enabledCount = $derived(workflows.filter((workflow) => workflow.enabled).length);
 
@@ -44,12 +56,13 @@
 	}
 
 	function openDelete(workflow: WorkflowSummary) {
+		if (!canWrite) return;
 		deleteError = null;
 		deleteTarget = workflow;
 	}
 
 	async function confirmDelete() {
-		if (!deleteTarget || deleting) return;
+		if (!canWrite || !deleteTarget || deleting) return;
 		deleting = true;
 		deleteError = null;
 		const target = deleteTarget;
@@ -115,10 +128,29 @@
 			{#if refreshing}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
 			Refresh
 		</button>
-		<a class="btn btn-primary" href={ROUTES.workflowEdit}>
-			<Icon name="plus" size={14} /> New workflow
-		</a>
+		{#if canWrite}
+			<a class="btn btn-primary" href={ROUTES.workflowEdit}>
+				<Icon name="plus" size={14} /> New workflow
+			</a>
+		{:else}
+			<button
+				type="button"
+				class="btn"
+				disabled
+				title={readOnlyWhy}
+				aria-describedby="workflows-read-only"
+			>
+				<Icon name="plus" size={14} /> New workflow
+			</button>
+		{/if}
 	</PageHeader>
+
+	{#if !canWrite}
+		<p class="read-only" id="workflows-read-only">
+			<Icon name="shield" size={14} />
+			<span><strong>Read-only.</strong> {readOnlyWhy}</span>
+		</p>
+	{/if}
 
 	<AutomationHeader active="workflows" />
 
@@ -158,11 +190,15 @@
 					<EmptyState
 						icon="workflow"
 						title="No workflows yet"
-						description="A workflow begins when a message arrives. Add a trigger, connect the steps and save it; paired phones receive it on their next flow sync."
+						description={canWrite
+							? 'A workflow begins when a message arrives. Add a trigger, connect the steps and save it; paired phones receive it on their next flow sync.'
+							: 'No workflows are saved on this gateway yet. An owner or admin authors one; until then, only rules can answer automatically.'}
 					>
-						<a class="btn btn-primary" href={ROUTES.workflowEdit}>
-							<Icon name="plus" size={14} /> New workflow
-						</a>
+						{#if canWrite}
+							<a class="btn btn-primary" href={ROUTES.workflowEdit}>
+								<Icon name="plus" size={14} /> New workflow
+							</a>
+						{/if}
 					</EmptyState>
 				</section>
 			</div>
@@ -219,14 +255,16 @@
 									>
 										Open
 									</a>
-									<button
-										type="button"
-										class="btn btn-danger-ghost btn-sm"
-										onclick={() => openDelete(workflow)}
-										aria-label={`Delete ${workflow.name}`}
-									>
-										<Icon name="trash" size={12} /> Delete
-									</button>
+									{#if canWrite}
+										<button
+											type="button"
+											class="btn btn-danger-ghost btn-sm"
+											onclick={() => openDelete(workflow)}
+											aria-label={`Delete ${workflow.name}`}
+										>
+											<Icon name="trash" size={12} /> Delete
+										</button>
+									{/if}
 								</div>
 							</li>
 						{/each}
@@ -243,6 +281,8 @@
 	</div>
 </div>
 
+<!-- A member can never open this: the controls that would are not rendered. -->
+{#if canWrite}
 <ConfirmDialog
 	open={deleteTarget !== null}
 	title="Delete this workflow?"
@@ -270,8 +310,36 @@
 		</p>
 	{/if}
 </ConfirmDialog>
+{/if}
 
 <style>
+	/* Why a member sees the list without the controls that change it. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0 0 var(--df-p-space-4);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
 	.list-card {
 		padding: 0;
 		overflow: hidden;
@@ -333,6 +401,11 @@
 	}
 
 	.flow-name {
+		/* A row's name is the first way into the flow; it carries a 24px target
+		   like every other small control, at every width. */
+		display: inline-flex;
+		align-items: center;
+		min-height: 24px;
 		font-size: var(--df-p-text-md);
 		font-weight: 600;
 		line-height: 1.3;

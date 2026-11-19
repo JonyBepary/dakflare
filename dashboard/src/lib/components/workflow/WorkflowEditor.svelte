@@ -30,6 +30,7 @@
 
 	import { ApiError, describeError, getWorkflow, readWorkflowIssues, saveWorkflow } from '$lib/api';
 	import { ROUTES } from '$lib/paths';
+	import { session } from '$lib/session.svelte';
 	import type { WorkflowNodeType } from '$lib/types';
 	import { WORKFLOW_UI, type WorkflowCanvasUi } from '$lib/workflow/context';
 	import {
@@ -63,6 +64,18 @@
 	import { runWasmFlow } from '$lib/workflow/wasm-engine';
 
 	let { id }: { id: string } = $props();
+
+	/**
+	 * Saving is a `write` on the Worker, and so is asking the agent for a patch
+	 * (`/v1/agent/synthesize`). A member may open a workflow and read its graph —
+	 * steps, map, checks, preview — but cannot keep a change, delete a step or
+	 * accept a patch. The strip under the header says so once; the controls that
+	 * would fail are disabled or not drawn.
+	 */
+	const canWrite = $derived(session.canWrite);
+	const readOnlyWhy = $derived(
+		'Members can read this workflow, but saving it, deleting a step and accepting a patch are done by an owner or admin, and any change made here is not kept.'
+	);
 
 	/** Below this a card's own copy stops being readable, so the map never goes there. */
 	const MIN_ZOOM = 0.7;
@@ -540,6 +553,10 @@
 	 * taken when the patch was staged, with the same step selected.
 	 */
 	function acceptStaged() {
+		if (!canWrite) {
+			announce = readOnlyWhy;
+			return;
+		}
 		if (!staged) return;
 		const decision = acceptGate();
 		if (!decision.ok) {
@@ -636,6 +653,11 @@
 		}
 		if (mod && event.key.toLowerCase() === 'j') {
 			event.preventDefault();
+			// Agent mode asks the gateway to tailor a patch, which is a write.
+			if (!canWrite) {
+				announce = readOnlyWhy;
+				return;
+			}
 			finderMode = 'agent';
 			finderOpen = true;
 			return;
@@ -786,12 +808,19 @@
 	const dirty = $derived(touched && signature() !== baseline);
 
 	const pageTitle = $derived(
-		notFound || loadError ? 'Workflow unavailable' : name.trim() || 'Untitled workflow'
+		notFound || loadError
+			? 'Workflow unavailable'
+			: !canWrite && id === '' && !loading
+				? 'New workflow'
+				: name.trim() || 'Untitled workflow'
 	);
 	const pageDescription = $derived.by(() => {
 		if (loading) return 'Loading the saved graph…';
 		if (notFound) return 'This workflow may have been deleted from the gateway.';
 		if (loadError) return 'The saved graph could not be read.';
+		// A member at `/workflows/edit` with no id: a draft this account cannot
+		// create, so the header says that instead of describing an empty flow.
+		if (!canWrite && id === '') return 'Creating a workflow needs an owner or admin.';
 		const scope = deviceId ? `Scoped to ${deviceId}` : 'Fleet-wide scope';
 		return `${scope} · ${nodeCount} ${nodeCount === 1 ? 'step' : 'steps'} · runs on the phone first, with a Worker fallback`;
 	});
@@ -813,6 +842,9 @@
 	/* -------------------------------------------------------------- context */
 
 	const ui: WorkflowCanvasUi = {
+		get canEdit() {
+			return canWrite;
+		},
 		get selectedId() {
 			return selectedNode?.id ?? null;
 		},
@@ -1253,6 +1285,10 @@
 	}
 
 	function removeNode(nodeId: string) {
+		if (!canWrite) {
+			announce = readOnlyWhy;
+			return;
+		}
 		if (patchIsPending()) return;
 		const node = nodes.find((item) => item.id === nodeId);
 		if (!node) return;
@@ -1386,6 +1422,10 @@
 	}
 
 	function handleDelete() {
+		if (!canWrite) {
+			announce = readOnlyWhy;
+			return;
+		}
 		if (patchIsPending()) return;
 		if (simResult) clearSimulation();
 		touch();
@@ -1437,6 +1477,10 @@
 	/* ---------------------------------------------------------------- saving */
 
 	async function save() {
+		if (!canWrite) {
+			announce = readOnlyWhy;
+			return;
+		}
 		if (patchIsPending()) return;
 		if (!canSave) {
 			announce = blockedReason;
@@ -1715,7 +1759,7 @@
 	inert={sourceOpen || finderOpen || leavePrompt !== null ? true : undefined}
 >
 	<PageHeader eyebrow="Automation" title={pageTitle} description={pageDescription}>
-		{#if !loading && !notFound && !loadError}
+		{#if !loading && !notFound && !loadError && (id !== '' || canWrite)}
 			<a
 				class="btn btn-ghost btn-icon btn-sm"
 				href={ROUTES.workflows}
@@ -1794,9 +1838,10 @@
 				type="button"
 				class="btn btn-primary btn-sm"
 				onclick={() => void save()}
-				disabled={!canSave}
+				disabled={!canSave || !canWrite}
 				aria-busy={saving}
-				title={`${blockedReason} (Ctrl+S)`}
+				aria-describedby={canWrite ? undefined : 'workflow-read-only'}
+				title={canWrite ? `${blockedReason} (Ctrl+S)` : readOnlyWhy}
 			>
 				{#if saving}<Spinner />{:else}<Icon name="check" size={16} />{/if}
 				Save
@@ -1859,25 +1904,34 @@
 							<span>Find a step</span>
 							<span class="menu-note mono">Ctrl K</span>
 						</button>
-						<button
-							type="button"
-							class="menu-item"
-							role="menuitem"
-							onclick={() => {
-								menuOpen = false;
-								finderMode = 'agent';
-								finderOpen = true;
-							}}
-						>
-							<Icon name="sparkles" size={16} />
-							<span>Ask the agent</span>
-							<span class="menu-note mono">Ctrl J</span>
-						</button>
+						{#if canWrite}
+							<button
+								type="button"
+								class="menu-item"
+								role="menuitem"
+								onclick={() => {
+									menuOpen = false;
+									finderMode = 'agent';
+									finderOpen = true;
+								}}
+							>
+								<Icon name="sparkles" size={16} />
+								<span>Ask the agent</span>
+								<span class="menu-note mono">Ctrl J</span>
+							</button>
+						{/if}
 					</div>
 				{/if}
 			</span>
 		{/if}
 	</PageHeader>
+
+	{#if !canWrite && !loading && !notFound && !loadError && id !== ''}
+		<p class="read-only" id="workflow-read-only">
+			<Icon name="shield" size={14} />
+			<span><strong>Read-only.</strong> {readOnlyWhy}</span>
+		</p>
+	{/if}
 
 	{#if loading}
 		<section class="panel" aria-busy="true" aria-live="polite">
@@ -1898,7 +1952,9 @@
 					<a class="btn btn-primary" href={ROUTES.workflows}>Back to workflows</a>
 					<!-- Same route as this page, so ask SvelteKit for a fresh document: the
 					     editor only reads `?id=` when it mounts, and a draft needs that. -->
-					<a class="btn" href={ROUTES.workflowEdit} data-sveltekit-reload>New workflow</a>
+					{#if canWrite}
+						<a class="btn" href={ROUTES.workflowEdit} data-sveltekit-reload>New workflow</a>
+					{/if}
 				</div>
 			</div>
 		</section>
@@ -1910,6 +1966,20 @@
 					<button type="button" class="btn btn-primary" onclick={() => void load(id)}>
 						<Icon name="refresh" size={16} /> Try again
 					</button>
+					<a class="btn" href={ROUTES.workflows}>Back to workflows</a>
+				</div>
+			</div>
+		</section>
+	{:else if id === '' && !canWrite}
+		<!-- A member pasted `/workflows/edit`, or followed a draft link. A draft is
+		     an authoring surface with nothing to read yet, and it cannot be saved. -->
+		<section class="panel">
+			<div class="panel-body stack">
+				<Notice tone="info" title="A new workflow needs an owner or admin">
+					There is nothing to read in a draft: no steps are drawn until a workflow is saved.
+					Open a saved workflow from the list to read its steps and map.
+				</Notice>
+				<div class="row">
 					<a class="btn" href={ROUTES.workflows}>Back to workflows</a>
 				</div>
 			</div>
@@ -2106,8 +2176,8 @@
 							<button
 								type="button"
 								class="btn btn-primary btn-sm"
-								disabled={!gate.ok}
-								title={gate.reason}
+								disabled={!gate.ok || !canWrite}
+								title={canWrite ? gate.reason : readOnlyWhy}
 								onclick={acceptStaged}
 							>
 								<Icon name="check" size={15} /> Accept
@@ -2169,6 +2239,7 @@
 								<label class="ghost-tick">
 									<input
 										type="checkbox"
+										disabled={!canWrite}
 										checked={staged.approved}
 										onchange={(event) => {
 											if (staged) staged.approved = event.currentTarget.checked;
@@ -2219,6 +2290,7 @@
 								bind:framedOnce
 								minZoom={MIN_ZOOM}
 								staged={staged !== null}
+								canEdit={canWrite}
 								{savedViewport}
 								focusId={nodes.find((n) => n.type === 'trigger')?.id ?? null}
 								onbeforeconnect={beforeConnect}
@@ -2368,10 +2440,12 @@
 														layout="wide"
 														onupdate={(patch) => updateNodeData(item.node.id, patch)}
 														oncases={(op) => updateSwitchCases(item.node.id, op)}
-														ondelete={() => {
-															removeNode(item.node.id);
-															selectOnly(null);
-														}}
+														ondelete={canWrite
+															? () => {
+																	removeNode(item.node.id);
+																	selectOnly(null);
+																}
+															: undefined}
 														onselect={selectOnly}
 														onclose={() => selectOnly(null)}
 													/>
@@ -2427,10 +2501,12 @@
 								{issues}
 								onupdate={(patch) => updateNodeData(selectedNode?.id ?? '', patch)}
 								oncases={(op) => updateSwitchCases(selectedNode?.id ?? '', op)}
-								ondelete={() => {
-									if (selectedNode) removeNode(selectedNode.id);
-									selectOnly(null);
-								}}
+								ondelete={canWrite
+									? () => {
+											if (selectedNode) removeNode(selectedNode.id);
+											selectOnly(null);
+										}
+									: undefined}
 								onselect={selectOnly}
 								onclose={() => selectOnly(null)}
 							/>
@@ -2500,6 +2576,33 @@
 <style>
 	.editor-page {
 		min-width: 0;
+	}
+
+	/* The role, said once, above the graph the member may read. */
+	.read-only {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin: 0 0 var(--df-p-space-4);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-text-meta);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.read-only :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
+	.read-only strong {
+		font-weight: 600;
+		color: var(--df-text-primary);
 	}
 
 	/* ---------------------------------------------------------- header row */

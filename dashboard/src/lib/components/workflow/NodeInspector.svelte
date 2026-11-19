@@ -63,7 +63,8 @@
 		layout?: 'rail' | 'wide';
 		onupdate: (patch: Record<string, unknown>) => void;
 		oncases: (op: SwitchCaseOp) => void;
-		ondelete: () => void;
+		/** No handler means no Delete step button: a member's read-only view. */
+		ondelete?: () => void;
 		onselect: (id: string) => void;
 		onclose?: (() => void) | null;
 	} = $props();
@@ -856,9 +857,11 @@
 
 	<div class="inspector-foot">
 		<span class="mono node-id" title={node.id}>{node.id}</span>
-		<button type="button" class="btn btn-danger btn-sm" onclick={ondelete}>
-			<Icon name="trash" size={16} /> Delete step
-		</button>
+		{#if ondelete}
+			<button type="button" class="btn btn-danger btn-sm" onclick={ondelete}>
+				<Icon name="trash" size={16} /> Delete step
+			</button>
+		{/if}
 	</div>
 </section>
 

@@ -32,6 +32,7 @@
 		viewport = $bindable<Viewport>(),
 		minZoom = 0.7,
 		staged = false,
+		canEdit = true,
 		savedViewport = false,
 		framedOnce = $bindable(false),
 		focusId = null,
@@ -49,6 +50,8 @@
 		viewport: Viewport;
 		minZoom?: number;
 		staged?: boolean;
+		/** `false` hides the keys and tools that change the graph: a member's view. */
+		canEdit?: boolean;
 		savedViewport?: boolean;
 		framedOnce: boolean;
 		focusId?: string | null;
@@ -95,7 +98,7 @@
 	{minZoom}
 	maxZoom={1.8}
 	snapGrid={[16, 16]}
-	deleteKey={staged ? [] : ['Backspace', 'Delete']}
+	deleteKey={staged || !canEdit ? [] : ['Backspace', 'Delete']}
 	nodesDraggable={!staged}
 	nodesConnectable={!staged}
 	defaultMarkerColor={null}

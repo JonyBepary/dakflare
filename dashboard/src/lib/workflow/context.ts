@@ -9,6 +9,12 @@
 export const WORKFLOW_UI = Symbol('workflow-canvas');
 
 export interface WorkflowCanvasUi {
+	/**
+	 * `false` in a member's read-only view: the node actions that change the
+	 * graph (delete, duplicate) are not drawn, because nothing could be saved.
+	 * Reading, selecting and the preview highlight are unaffected.
+	 */
+	readonly canEdit: boolean;
 	readonly selectedId: string | null;
 	readonly activeNodeIds: Set<string>;
 	readonly activeEdgeIds: Set<string>;

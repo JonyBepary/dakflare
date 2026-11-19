@@ -67,29 +67,31 @@
 
 	{@render children?.()}
 
-	<NodeToolbar class="wf-toolbar" offset={8}>
-		{#if canDuplicate}
+	{#if ui.canEdit}
+		<NodeToolbar class="wf-toolbar" offset={8}>
+			{#if canDuplicate}
+				<button
+					type="button"
+					class="wf-tool"
+					onclick={() => ui.duplicateNode(nodeId)}
+					title="Duplicate node"
+					aria-label={`Duplicate ${title} node`}
+				>
+					<Icon name="copy" size={16} />
+				</button>
+				<span class="wf-tool-sep" aria-hidden="true"></span>
+			{/if}
 			<button
 				type="button"
-				class="wf-tool"
-				onclick={() => ui.duplicateNode(nodeId)}
-				title="Duplicate node"
-				aria-label={`Duplicate ${title} node`}
+				class="wf-tool wf-tool-danger"
+				onclick={() => ui.deleteNode(nodeId)}
+				title="Delete node"
+				aria-label={`Delete ${title} node`}
 			>
-				<Icon name="copy" size={16} />
+				<Icon name="trash" size={16} />
 			</button>
-			<span class="wf-tool-sep" aria-hidden="true"></span>
-		{/if}
-		<button
-			type="button"
-			class="wf-tool wf-tool-danger"
-			onclick={() => ui.deleteNode(nodeId)}
-			title="Delete node"
-			aria-label={`Delete ${title} node`}
-		>
-			<Icon name="trash" size={16} />
-		</button>
-	</NodeToolbar>
+		</NodeToolbar>
+	{/if}
 </div>
 
 <style>
