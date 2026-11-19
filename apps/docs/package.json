@@ -3,11 +3,11 @@
   "version": "6.3.0-alpha.1",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "check": "next build",
+    "check": "next build --webpack",
     "postinstall": "fumadocs-mdx",
     "predev": "node scripts/sync-markdown.mjs",
     "prebuild": "node scripts/sync-markdown.mjs",
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.17",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^22.14.0",
     "@types/react": "^19.0.0",
     "tailwindcss": "^4.1.0",

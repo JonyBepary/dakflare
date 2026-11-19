@@ -73,6 +73,18 @@ Two known consequences, stated rather than hidden:
   keeps its name because the markdown negotiation it performs is part of the agent surface and a
   rename should be a deliberate change, not a build warning.
 
+## Why the build runs webpack
+
+`next build` and `next dev` pass `--webpack` on purpose. The theme imports `design/tokens.css`
+from outside this app, which Turbopack only allows when `turbopack.root` is the repository root;
+with that set, Next writes `.next/standalone/apps/docs/…` while OpenNext — which finds the
+monorepo root from `apps/docs/package-lock.json` — looks for `.next/standalone/.next/…`. Next
+forces `outputFileTracingRoot` to equal `turbopack.root`, so the two cannot be reconciled. Webpack
+builds where OpenNext expects, and that is the only reason `build:worker` passes.
+
+If someone removes the flag, the failure is `build:worker` looking in a directory the build never
+wrote — not a styling problem, which is worth knowing before debugging the wrong layer.
+
 ## Deploying it
 
 Not configured here. There is no `wrangler` config and no OpenNext target in this directory, so

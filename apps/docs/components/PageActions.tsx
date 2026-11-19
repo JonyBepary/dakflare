@@ -78,14 +78,21 @@ export function PageActions({ slug, title }: PageActionsProps) {
   }
 
   return (
-    <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-fd-border pb-4 text-xs">
+    <div className="df-actions">
+      <span className="df-actions-label">Page</span>
+
       {/* 1. Copy Markdown */}
       <button
         type="button"
         onClick={handleCopyMarkdown}
-        className="inline-flex items-center gap-1.5 rounded-md border border-fd-border bg-fd-secondary px-2.5 py-1.5 font-medium text-fd-secondary-foreground transition hover:bg-fd-accent"
+        className="df-action"
+        data-state={copiedMd ? "copied" : undefined}
       >
-        {copiedMd ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+        {copiedMd ? (
+          <Check className="df-action-icon text-fd-success" />
+        ) : (
+          <Copy className="df-action-icon" />
+        )}
         {copiedMd ? "Copied Markdown" : "Copy Markdown"}
       </button>
 
@@ -94,40 +101,27 @@ export function PageActions({ slug, title }: PageActionsProps) {
         <button
           type="button"
           onClick={() => setOpenMenu(openMenu === "open" ? null : "open")}
-          className="inline-flex items-center gap-1.5 rounded-md border border-fd-border bg-fd-secondary px-2.5 py-1.5 font-medium text-fd-secondary-foreground transition hover:bg-fd-accent"
+          className="df-action"
+          data-state={openMenu === "open" ? "open" : undefined}
+          aria-haspopup="menu"
+          aria-expanded={openMenu === "open"}
         >
-          <ExternalLink className="size-3.5" />
+          <ExternalLink className="df-action-icon" />
           Open in
-          <ChevronDown className="size-3" />
+          <ChevronDown className="size-3 opacity-60" />
         </button>
         {openMenu === "open" && (
-          <div className="absolute left-0 z-30 mt-1.5 w-48 rounded-lg border border-fd-border bg-fd-popover p-1 shadow-lg">
-            <button
-              type="button"
-              onClick={() => openInLlm("chatgpt")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+          <div className="df-menu left-0 w-48" role="menu">
+            <button type="button" role="menuitem" onClick={() => openInLlm("chatgpt")} className="df-menu-item">
               Open in ChatGPT
             </button>
-            <button
-              type="button"
-              onClick={() => openInLlm("claude")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => openInLlm("claude")} className="df-menu-item">
               Open in Claude
             </button>
-            <button
-              type="button"
-              onClick={() => openInLlm("perplexity")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => openInLlm("perplexity")} className="df-menu-item">
               Open in Perplexity
             </button>
-            <button
-              type="button"
-              onClick={() => openInLlm("cursor")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => openInLlm("cursor")} className="df-menu-item">
               Open in Cursor
             </button>
             <a
@@ -135,9 +129,10 @@ export function PageActions({ slug, title }: PageActionsProps) {
               target="_blank"
               rel="noopener noreferrer"
               onClick={() => setOpenMenu(null)}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
+              className="df-menu-item"
+              role="menuitem"
             >
-              <FileText className="size-3.5" />
+              <FileText />
               View raw .md
             </a>
           </div>
@@ -149,40 +144,31 @@ export function PageActions({ slug, title }: PageActionsProps) {
         <button
           type="button"
           onClick={() => setOpenMenu(openMenu === "share" ? null : "share")}
-          className="inline-flex items-center gap-1.5 rounded-md border border-fd-border bg-fd-secondary px-2.5 py-1.5 font-medium text-fd-secondary-foreground transition hover:bg-fd-accent"
+          className="df-action"
+          data-state={openMenu === "share" ? "open" : undefined}
+          aria-haspopup="menu"
+          aria-expanded={openMenu === "share"}
         >
-          {copiedLink ? <Check className="size-3.5 text-emerald-500" /> : <Share2 className="size-3.5" />}
+          {copiedLink ? (
+            <Check className="df-action-icon text-fd-success" />
+          ) : (
+            <Share2 className="df-action-icon" />
+          )}
           {copiedLink ? "Link copied" : "Share"}
-          <ChevronDown className="size-3" />
+          <ChevronDown className="size-3 opacity-60" />
         </button>
         {openMenu === "share" && (
-          <div className="absolute left-0 z-30 mt-1.5 w-44 rounded-lg border border-fd-border bg-fd-popover p-1 shadow-lg">
-            <button
-              type="button"
-              onClick={() => handleShare("copy")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+          <div className="df-menu left-0 w-44" role="menu">
+            <button type="button" role="menuitem" onClick={() => handleShare("copy")} className="df-menu-item">
               Copy link
             </button>
-            <button
-              type="button"
-              onClick={() => handleShare("x")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => handleShare("x")} className="df-menu-item">
               Share on X
             </button>
-            <button
-              type="button"
-              onClick={() => handleShare("linkedin")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => handleShare("linkedin")} className="df-menu-item">
               Share on LinkedIn
             </button>
-            <button
-              type="button"
-              onClick={() => handleShare("native")}
-              className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left hover:bg-fd-accent"
-            >
+            <button type="button" role="menuitem" onClick={() => handleShare("native")} className="df-menu-item">
               System share...
             </button>
           </div>

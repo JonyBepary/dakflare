@@ -7,7 +7,13 @@ export default function Layout({ children }: { children: ReactNode }) {
     <DocsLayout
       tree={source.pageTree}
       nav={{
-        title: "DakFlare",
+        title: (
+          <span className="df-brand">
+            <span className="df-brand-mark" aria-hidden />
+            DakFlare
+            <span className="df-brand-tag">docs</span>
+          </span>
+        ),
         url: "/docs",
       }}
       githubUrl="https://github.com/JonyBepary/dakflare"

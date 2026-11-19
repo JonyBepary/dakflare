@@ -1,3 +1,1098 @@
+/* ==========================================================================
+   DakFlare docs — the same paper, with more air.
+   --------------------------------------------------------------------------
+   Layer order matters and is the whole architecture:
+
+     1. tokens.css      the one token file, shared with the console and the phone
+     2. Fumadocs        preset: utilities, prose, code-block chrome, layout vars
+     3. this file       unlayered: maps Fumadocs' --color-fd-* onto DakFlare roles,
+                        then styles the handful of surfaces that need it
+
+   Everything below refers to a token, so a token change moves the docs with the
+   console. No palette value is written here: the four night edge values that
+   tokens.css does not carry yet are mixed from night primitives instead.
+   ========================================================================== */
+
 @import "tailwindcss";
-@import "fumadocs-ui/css/neutral.css";
+@import "../../../design/tokens.css";
 @import "fumadocs-ui/css/preset.css";
+@import "fumadocs-openapi/css/preset.css";
+
+/* Nunito is the display face, the same file the console and the phone bundle.
+   Licence: SIL Open Font License 1.1. Latin subset, variable 400–800. */
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/nunito-var.woff2") format("woff2");
+}
+
+/* --------------------------------------------------------------------------
+   1. Fumadocs' theme variables, mapped onto DakFlare roles.
+   --------------------------------------------------------------------------
+   The checklist is node_modules/fumadocs-ui/css/lib/default-colors.css. Every
+   slot it defines is defined here too, which is why the app does not import
+   that file (or `neutral.css` that re-exports it): no grey is ever emitted, not
+   even in a `.dark` block that a later rule would have to override.
+   Each fd slot points at a role, never at a shade of grey: this file is the
+   only place the two vocabularies meet.
+   -------------------------------------------------------------------------- */
+
+@theme {
+  --font-sans: var(--df-p-font-sans);
+  --font-mono: var(--df-p-font-mono);
+
+  /* radius scale, from design/tokens.css only */
+  --radius-xs: var(--df-p-radius-xs);
+  --radius-sm: var(--df-p-radius-xs);
+  --radius-md: var(--df-p-radius-sm);
+  --radius-lg: var(--df-p-radius-md);
+  --radius-xl: var(--df-p-radius-lg);
+
+  /* type scale: the docs stop at 11px, like the console */
+  --text-xs: var(--df-p-text-xs);
+  --text-sm: var(--df-p-text-sm);
+  --text-base: var(--df-p-text-base);
+  --text-lg: var(--df-p-text-lg);
+
+  /* paper */
+  --color-fd-background: var(--df-surface-page);
+  --color-fd-foreground: var(--df-text-primary);
+  --color-fd-card: var(--df-surface-card);
+  --color-fd-card-foreground: var(--df-text-primary);
+  --color-fd-popover: var(--df-surface-card);
+  --color-fd-popover-foreground: var(--df-text-primary);
+  --color-fd-muted: var(--df-surface-well);
+  --color-fd-muted-foreground: var(--df-text-meta);
+  --color-fd-secondary: var(--df-surface-well);
+  --color-fd-secondary-foreground: var(--df-text-primary);
+
+  /* strokes */
+  --color-fd-border: var(--df-border-hairline);
+
+  /* the one coral action: text on paper, and the fill of a primary button */
+  --color-fd-primary: var(--df-accent-text);
+  --color-fd-primary-foreground: var(--df-text-on-accent);
+  --color-fd-accent: var(--df-accent-soft);
+  --color-fd-accent-foreground: var(--df-text-primary);
+
+  --color-fd-ring: var(--df-border-focus);
+  --color-fd-overlay: var(--df-c-dialog-scrim);
+}
+
+/* `static`: the callout component writes `var(--color-fd-info)` into an inline
+   style, so no utility references these names and Tailwind would otherwise drop
+   them from the output. They must exist at runtime, unused or not. */
+@theme static {
+  /* callout channels: state ink, because a callout is a container whose word
+     is the state — the fill is mixed from this same ink below */
+  --color-fd-info: var(--df-state-info-ink);
+  --color-fd-warning: var(--df-state-warn-ink);
+  --color-fd-error: var(--df-state-danger-ink);
+  --color-fd-success: var(--df-state-ok-ink);
+  --color-fd-idea: var(--df-state-filter-ink);
+
+  /* diff highlights in code review blocks, mixed from the state pair rather
+     than Fumadocs' magenta/green */
+  --color-fd-diff-remove: color-mix(in srgb, var(--df-state-danger-ink) 12%, transparent);
+  --color-fd-diff-remove-symbol: var(--df-state-danger-ink);
+  --color-fd-diff-add: color-mix(in srgb, var(--df-state-ok-ink) 10%, transparent);
+  --color-fd-diff-add-symbol: var(--df-state-ok-ink);
+}
+
+/* --------------------------------------------------------------------------
+   2. Night: the light file is the only one tokens.css carries, so the docs
+   re-map the roles it defines onto its night primitives. Light and dark are
+   one value list; every fd variable above follows because it points at a role.
+   -------------------------------------------------------------------------- */
+
+.dark {
+  --df-surface-page: var(--df-p-night-800);
+  --df-surface-card: var(--df-p-night-700);
+  --df-surface-well: var(--df-p-night-600);
+  --df-surface-press: color-mix(in srgb, var(--df-p-mist-50) 14%, var(--df-p-night-600));
+  --df-surface-field: var(--df-p-night-900);
+  --df-surface-selected: color-mix(in srgb, var(--df-p-mist-50) 18%, var(--df-p-night-600));
+
+  --df-border-hairline: color-mix(in srgb, var(--df-p-mist-300) 18%, var(--df-p-night-800));
+  --df-border-control: color-mix(in srgb, var(--df-p-mist-300) 65%, var(--df-p-night-800));
+  --df-border-focus: var(--df-p-coral-300);
+
+  --df-text-primary: var(--df-p-mist-50);
+  --df-text-secondary: var(--df-p-mist-300);
+  --df-text-meta: var(--df-p-mist-400);
+  --df-text-on-accent: var(--df-p-umber-1000);
+
+  --df-accent-text: var(--df-p-coral-300);
+  --df-accent-text-hover: var(--df-p-coral-100);
+  --df-accent-fill: var(--df-p-coral-400);
+  --df-accent-fill-hover: var(--df-p-coral-300);
+  --df-accent-fill-press: var(--df-p-coral-500);
+  --df-accent-soft: color-mix(in srgb, var(--df-p-coral-400) 22%, var(--df-p-night-700));
+  --df-accent-decor: var(--df-p-coral-400);
+
+  --df-state-ok-bg: var(--df-p-mint-900);
+  --df-state-ok-ink: var(--df-p-mint-300);
+  --df-state-info-bg: var(--df-p-sky-900);
+  --df-state-info-ink: var(--df-p-sky-300);
+  --df-state-warn-bg: var(--df-p-butter-900);
+  --df-state-warn-ink: var(--df-p-butter-300);
+  --df-state-danger-bg: var(--df-p-peach-900);
+  --df-state-danger-ink: var(--df-p-peach-300);
+  --df-state-neutral-bg: var(--df-p-stone-900);
+  --df-state-neutral-ink: var(--df-p-stone-300);
+  --df-state-filter-bg: var(--df-p-lilac-900);
+  --df-state-filter-ink: var(--df-p-lilac-300);
+
+  --df-c-dialog-scrim: color-mix(in srgb, var(--df-p-night-900) 74%, transparent);
+
+  /* A shadow on near-black is a drop in luminance, not a 3% white line. The
+     light three live in the token file; dark replaces them because a shadow is
+     geometry plus a colour list, which light-dark() cannot express. */
+  --df-shadow-card:
+    0 1px 0 color-mix(in srgb, var(--df-p-mist-50) 4%, transparent),
+    0 1px 2px color-mix(in srgb, var(--df-p-night-900) 55%, transparent);
+  --df-shadow-raised:
+    0 2px 6px color-mix(in srgb, var(--df-p-night-900) 45%, transparent),
+    0 18px 44px -22px color-mix(in srgb, var(--df-p-night-900) 85%, transparent);
+  --df-shadow-dialog: 0 40px 100px -32px color-mix(in srgb, var(--df-p-night-900) 95%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   3. Base
+   -------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+html {
+  scroll-padding-block-start: var(--df-p-space-6);
+}
+
+body {
+  background-color: var(--df-surface-page);
+  color: var(--df-text-primary);
+  font-family: var(--df-p-font-sans);
+  font-size: var(--df-p-text-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--df-accent-soft);
+  color: var(--df-text-primary);
+}
+
+/* The console's focus ring, verbatim: 2px, 2px out, accent. Fumadocs ships
+   ring utilities with no offset; an outline is the only way to get the gap
+   without a second box-shadow per component. No radius is set here: the outline
+   follows the shape of whatever is focused. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--df-accent-text);
+  outline-offset: 2px;
+}
+
+/* A coral fill needs an ink ring: coral on coral is invisible. Same rule the
+   console's primary button already carries. */
+:where(.bg-fd-primary):focus-visible {
+  outline-color: var(--df-text-primary);
+}
+
+/* Fumadocs' own ring shadows would double the outline above. */
+:where(a, button, [role="button"], [tabindex]):focus-visible {
+  --tw-ring-shadow: 0 0 #0000;
+  box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
+   4. Chrome: lockup, sidebar, mobile header, search, table of contents
+   -------------------------------------------------------------------------- */
+
+/* The lockup is the product's: wordmark in the display face, a mono qualifier
+   after a hairline, and one small coral mark. */
+.df-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-p-space-2);
+  font-family: var(--df-font-display);
+  font-size: var(--df-p-text-lg);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary);
+}
+
+.df-brand-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--df-p-radius-xs);
+  background: var(--df-accent-decor);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--df-accent-decor) 18%, transparent);
+}
+
+.df-brand-tag {
+  margin-inline-start: 2px;
+  padding-inline-start: 10px;
+  border-inline-start: 1px solid var(--df-border-hairline);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+/* Sidebar and mobile drawer sit one step off the page: the well, as in the
+   console, so the paper is the content and the navigation is the furniture. */
+#nd-sidebar,
+#nd-sidebar-mobile {
+  background-color: var(--df-surface-well);
+  border-color: var(--df-border-hairline);
+  font-size: var(--df-p-text-base);
+}
+
+#nd-sidebar a,
+#nd-sidebar-mobile a,
+#nd-sidebar button,
+#nd-sidebar-mobile button {
+  border-radius: var(--df-p-radius-sm);
+}
+
+/* The current page: coral wash, coral word, and the console's 2px bar at the
+   row's edge. The bar is drawn here rather than inherited from Fumadocs'
+   optional `highlight` variant so the root page — which is a link item, not a
+   tree item — is marked the same way as every other page. */
+#nd-sidebar [data-active="true"],
+#nd-sidebar-mobile [data-active="true"] {
+  position: relative;
+  background-color: var(--df-accent-soft);
+  color: var(--df-accent-text);
+}
+
+#nd-sidebar [data-active="true"]::before,
+#nd-sidebar-mobile [data-active="true"]::before {
+  content: "";
+  position: absolute;
+  inset-block: 6px;
+  inset-inline-start: 0;
+  width: 2px;
+  border-radius: var(--df-p-radius-pill);
+  background-color: var(--df-accent-decor);
+}
+
+/* The full search trigger in the sidebar: a field, not a button — its fill
+   equals the card so the hairline is its whole boundary. */
+#nd-sidebar [data-search-full],
+#nd-sidebar-mobile [data-search-full] {
+  border: 1px solid var(--df-border-control);
+  border-color: color-mix(in srgb, var(--df-border-control) 60%, transparent);
+  background-color: var(--df-surface-card);
+  border-radius: var(--df-p-radius-sm);
+  font-size: var(--df-p-text-sm);
+  color: var(--df-text-meta);
+}
+
+#nd-sidebar [data-search-full]:hover,
+#nd-sidebar-mobile [data-search-full]:hover {
+  border-color: var(--df-border-control);
+  background-color: var(--df-surface-card);
+  color: var(--df-text-primary);
+}
+
+#nd-sidebar [data-search-full] kbd {
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  color: var(--df-text-meta);
+  background: var(--df-surface-well);
+  border-color: var(--df-border-hairline);
+  border-radius: var(--df-p-radius-xs);
+}
+
+/* Mobile header: paper over paper, hairline under. */
+header[class*="grid-area:header"] {
+  background-color: color-mix(in srgb, var(--df-surface-page) 88%, transparent);
+  border-color: var(--df-border-hairline);
+}
+
+header[class*="grid-area:header"] [data-transparent="false"] {
+  background-color: color-mix(in srgb, var(--df-surface-page) 88%, transparent);
+}
+
+/* Two icons, two 44px targets, not two 34px ones. */
+header[class*="grid-area:header"] button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* The reading-progress bar above the article on phones. */
+[data-toc-popover-trigger] {
+  font-size: var(--df-p-text-base);
+  color: var(--df-text-secondary);
+}
+
+[data-toc-popover-trigger] svg {
+  color: var(--df-accent-decor);
+}
+
+/* "On this page" reads as a console sheet label: mono, tracked, meta ink. */
+#nd-toc h3 {
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+#nd-toc .prose {
+  font-size: var(--df-p-text-base);
+  line-height: 1.5;
+}
+
+#nd-toc a {
+  border-radius: var(--df-p-radius-xs);
+}
+
+/* A heading in the TOC is a label, not a place for code slabs: ids render in
+   mono at the same size and weight as the rest of the line. The same goes for
+   the phone reading-progress bar, which shows one heading at a time. */
+#nd-toc code,
+[data-toc-popover-trigger] code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: 0.95em;
+}
+
+#nd-toc code::before,
+#nd-toc code::after,
+[data-toc-popover-trigger] code::before,
+[data-toc-popover-trigger] code::after {
+  content: none;
+}
+
+/* --------------------------------------------------------------------------
+   5. Prose — 15px on 1.7, display headings, mono for anything comparable
+   -------------------------------------------------------------------------- */
+
+#nd-page {
+  padding-block-start: var(--df-p-space-6);
+}
+
+#nd-page > h1 {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: clamp(1.625rem, 1.35rem + 1.2vw, 2.125rem);
+  font-weight: 650;
+  line-height: 1.14;
+  letter-spacing: -0.025em;
+  color: var(--df-text-primary);
+  text-wrap: balance;
+}
+
+/* The page marker: the console's 2px accent bar, used once per page. */
+#nd-page > h1::before {
+  content: "";
+  display: block;
+  width: 24px;
+  height: 2px;
+  margin-bottom: var(--df-p-space-4);
+  border-radius: var(--df-p-radius-pill);
+  background: var(--df-accent-decor);
+}
+
+#nd-page > h1 + p {
+  margin-top: var(--df-p-space-3);
+  margin-bottom: 0;
+  max-width: 62ch;
+  font-size: var(--df-p-text-lg);
+  line-height: 1.55;
+  color: var(--df-text-secondary);
+}
+
+#nd-page .prose {
+  font-size: var(--df-p-text-md);
+  line-height: 1.7;
+  color: var(--df-text-primary);
+  max-width: 780px;
+}
+
+/* The playground is a full-width page: its endpoint rows, request-body tables
+   and playground panel need the room the container already gives them. */
+#nd-page[data-full="true"] .prose {
+  max-width: none;
+}
+
+/* Running text keeps a reading measure even when the panel is wider. */
+#nd-page .prose > p,
+#nd-page .prose > ul,
+#nd-page .prose > ol {
+  max-width: 68ch;
+}
+
+#nd-page .prose > :first-child {
+  margin-top: 0;
+}
+
+#nd-page .prose p,
+#nd-page .prose li {
+  line-height: 1.7;
+}
+
+#nd-page .prose p {
+  margin-block: var(--df-p-space-4);
+}
+
+#nd-page .prose ul,
+#nd-page .prose ol {
+  margin-block: var(--df-p-space-4);
+  padding-inline-start: 1.35em;
+}
+
+#nd-page .prose li {
+  margin-block: 6px;
+  padding-inline-start: 2px;
+}
+
+#nd-page .prose li::marker {
+  color: var(--df-accent-decor);
+}
+
+#nd-page .prose h2,
+#nd-page .prose h3,
+#nd-page .prose h4 {
+  font-family: var(--df-font-display);
+  color: var(--df-text-primary);
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+}
+
+/* A document that opens with its own h1 keeps it a section opener: the page
+   title above stays the only 34px line. */
+#nd-page .prose h1 {
+  margin-block: 0 var(--df-p-space-3);
+  font-family: var(--df-font-display);
+  font-size: var(--df-p-text-2xl);
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose h2 {
+  margin-block: var(--df-p-space-7) var(--df-p-space-3);
+  font-size: var(--df-p-text-2xl);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+/* The rule above a section is drawn only where the heading owns the full
+   column. Inside the playground, headings sit in a flex row beside their
+   method badge, and a border there would be a stub the width of the word. */
+#nd-page .prose > h2 {
+  padding-block-start: var(--df-p-space-4);
+  border-top: 1px solid var(--df-border-hairline);
+}
+
+#nd-page .prose h3 {
+  margin-block: var(--df-p-space-6) var(--df-p-space-2);
+  font-size: var(--df-p-text-lg);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+#nd-page .prose h4 {
+  margin-block: var(--df-p-space-5) var(--df-p-space-2);
+  font-size: var(--df-p-text-md);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+#nd-page .prose h5,
+#nd-page .prose h6 {
+  margin-block: var(--df-p-space-4) var(--df-p-space-2);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+#nd-page .prose strong {
+  font-weight: 650;
+  color: var(--df-text-primary);
+}
+
+/* Links: the accent, underlined in a wash of itself, so a paragraph full of
+   them stays readable and the hover is a change of weight, not of hue. */
+#nd-page .prose a:not([data-card]) {
+  color: var(--df-accent-text);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--df-accent-text) 40%, transparent);
+  text-underline-offset: 3px;
+  transition:
+    color var(--df-p-dur-lift) var(--df-p-ease-standard),
+    text-decoration-color var(--df-p-dur-lift) var(--df-p-ease-standard);
+}
+
+#nd-page .prose a:not([data-card]):hover {
+  color: var(--df-accent-text-hover);
+  text-decoration-color: currentColor;
+}
+
+/* Anything an operator would copy or compare with a log is mono. No size is
+   set here on purpose: the OpenAPI tables declare their own (13px field names,
+   12px constraints) and a relative size would silently shrink them under the
+   console's 11px floor. The typography preset steps code down in running prose. */
+#nd-page .prose :not(pre) > code {
+  padding: 0.1em 0.28em;
+  border-radius: var(--df-p-radius-xs);
+  background: var(--df-surface-well);
+  color: var(--df-text-primary);
+  font-family: var(--df-p-font-mono);
+  font-weight: 400;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+/* Code in a heading is a name, not a slab: it keeps the heading's colour and
+   only steps down enough to stop shouting. */
+#nd-page .prose h1 code,
+#nd-page .prose h2 code,
+#nd-page .prose h3 code,
+#nd-page .prose h4 code {
+  padding: 0.04em 0.2em;
+  font-size: 0.82em;
+  background: var(--df-surface-well);
+}
+
+#nd-page .prose a code,
+#nd-page .prose li > code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#nd-page .prose blockquote {
+  margin-block: var(--df-p-space-5);
+  padding: var(--df-p-space-3) var(--df-p-space-4);
+  border: 1px solid var(--df-border-hairline);
+  border-inline-start: 2px solid var(--df-accent-decor);
+  border-radius: var(--df-p-radius-sm);
+  background: var(--df-surface-well);
+  color: var(--df-text-secondary);
+  font-style: normal;
+}
+
+#nd-page .prose blockquote p {
+  margin-block: 6px;
+}
+
+#nd-page .prose hr {
+  margin-block: var(--df-p-space-7);
+  border-color: var(--df-border-hairline);
+}
+
+#nd-page .prose kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--df-border-hairline);
+  border-bottom-color: var(--df-border-control);
+  border-radius: var(--df-p-radius-xs);
+  background: var(--df-surface-card);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  color: var(--df-text-secondary);
+}
+
+/* Anchors that copy their own heading link, revealed on hover. */
+#nd-page .group\/heading > button {
+  color: var(--df-text-meta);
+  border-radius: var(--df-p-radius-xs);
+}
+
+#nd-page .group\/heading > button:hover {
+  background: var(--df-accent-soft);
+  color: var(--df-accent-text);
+}
+
+/* --------------------------------------------------------------------------
+   6. Tables — the console's table: mono head on a well, hairline rows
+   -------------------------------------------------------------------------- */
+
+#nd-page .prose > div:has(> table) {
+  margin-block: var(--df-p-space-5);
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-md);
+  background: var(--df-surface-card);
+}
+
+#nd-page .prose table {
+  width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: var(--df-p-text-base);
+  line-height: 1.55;
+}
+
+#nd-page .prose thead th {
+  padding: 9px var(--df-p-space-3);
+  background: var(--df-surface-well);
+  color: var(--df-text-meta);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: start;
+  vertical-align: bottom;
+  border-bottom: 1px solid var(--df-border-hairline);
+  white-space: nowrap;
+}
+
+/* An id in a header stays an id. */
+#nd-page .prose thead th code {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--df-p-text-xs);
+}
+
+#nd-page .prose tbody td {
+  padding: 10px var(--df-p-space-3);
+  border-top: 1px solid var(--df-border-hairline);
+  color: var(--df-text-primary);
+  vertical-align: top;
+}
+
+#nd-page .prose tbody tr:first-child td {
+  border-top: 0;
+}
+
+#nd-page .prose tbody tr {
+  transition: background-color 120ms var(--df-p-ease-standard);
+}
+
+#nd-page .prose tbody tr:hover {
+  background: color-mix(in srgb, var(--df-surface-well) 55%, transparent);
+}
+
+#nd-page .prose tbody td:first-child {
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose td code,
+#nd-page .prose th code {
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   7. Code blocks — a card panel, mono at 13px, coral for the focused line
+   -------------------------------------------------------------------------- */
+
+#nd-page .prose figure.shiki,
+#nd-page .prose figure[data-rehype-pretty-code-figure] {
+  margin-block: var(--df-p-space-5);
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-md);
+  background: var(--df-surface-card);
+  overflow: hidden;
+}
+
+#nd-page .prose figure.shiki figcaption,
+#nd-page .prose figure[data-rehype-pretty-code-figure] figcaption {
+  display: flex;
+  align-items: center;
+  gap: var(--df-p-space-2);
+  height: 38px;
+  padding-inline: var(--df-p-space-4);
+  border-bottom: 1px solid var(--df-border-hairline);
+  background: var(--df-surface-card);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  letter-spacing: 0.04em;
+  color: var(--df-text-meta);
+}
+
+#nd-page .prose figure.shiki pre,
+#nd-page .prose figure[data-rehype-pretty-code-figure] pre {
+  background: var(--df-surface-card) !important;
+  font-size: var(--df-p-text-base);
+  line-height: 1.7;
+}
+
+#nd-page .prose .shiki code {
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-base);
+}
+
+#nd-page .prose .shiki .line::after {
+  color: var(--df-text-meta);
+}
+
+#nd-page .prose .shiki .highlighted {
+  background: var(--df-accent-soft);
+}
+
+#nd-page .prose .shiki .highlighted::after {
+  border-inline-start-color: var(--df-accent-decor);
+}
+
+#nd-page .prose .shiki .highlighted-word {
+  border-radius: var(--df-p-radius-xs);
+  border-color: color-mix(in srgb, var(--df-accent-text) 30%, transparent);
+  background: var(--df-accent-soft);
+}
+
+/* Copy button: a quiet control that only exists on approach. */
+#nd-page .prose figure [aria-label],
+#nd-page .prose .nd-copy-ignore,
+#nd-page .prose figure button {
+  color: var(--df-text-meta);
+  border-radius: var(--df-p-radius-sm);
+}
+
+/* --------------------------------------------------------------------------
+   8. Callouts — a tinted container with the state's own ink
+   -------------------------------------------------------------------------- */
+
+#nd-page .prose [style*="--callout-color"] {
+  border: 1px solid color-mix(in srgb, var(--callout-color) 26%, transparent);
+  border-radius: var(--df-p-radius-md);
+  background: color-mix(in srgb, var(--callout-color) 12%, var(--df-surface-card));
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose [style*="--callout-color"] > div:first-child {
+  background: color-mix(in srgb, var(--callout-color) 55%, transparent);
+  border-radius: var(--df-p-radius-pill);
+}
+
+.dark #nd-page .prose [style*="--callout-color"] {
+  background: color-mix(in srgb, var(--callout-color) 16%, var(--df-surface-card));
+  border-color: color-mix(in srgb, var(--callout-color) 34%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   9. Cards and page-to-page navigation
+   -------------------------------------------------------------------------- */
+
+/* Fumadocs marks two different things with `data-card`: the MDX Card, and the
+   anchor a heading wraps its own text in. Only the first is a card; the heading
+   anchor must stay a plain link or the title gets a rounded box. */
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a) {
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-lg);
+  background: var(--df-surface-card);
+  color: var(--df-text-primary);
+  transition:
+    background-color var(--df-p-dur-lift) var(--df-p-ease-standard),
+    border-color var(--df-p-dur-lift) var(--df-p-ease-standard),
+    box-shadow var(--df-p-dur-lift) var(--df-p-ease-standard),
+    transform var(--df-p-dur-lift) var(--df-p-ease-standard);
+}
+
+#nd-page .prose a[data-card]:not(:where(h1, h2, h3, h4, h5, h6) a):hover {
+  background: var(--df-surface-card);
+  border-color: var(--df-border-control);
+  box-shadow: var(--df-shadow-raised);
+  transform: translateY(-2px);
+}
+
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a) h3 {
+  font-family: var(--df-font-display);
+  font-size: var(--df-p-text-md);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a) p {
+  font-size: var(--df-p-text-base);
+  line-height: 1.55;
+  color: var(--df-text-secondary);
+}
+
+/* Previous / next */
+#nd-page > div.grid a[href] {
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-md);
+  background: var(--df-surface-card);
+  padding: var(--df-p-space-4);
+  font-size: var(--df-p-text-base);
+}
+
+#nd-page > div.grid a[href]:hover {
+  background: var(--df-accent-soft);
+  color: var(--df-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   10. Page actions bar (components/PageActions.tsx)
+   -------------------------------------------------------------------------- */
+
+.df-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-p-space-1);
+  margin-block: var(--df-p-space-2) var(--df-p-space-6);
+  padding: 6px;
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-md);
+  background: var(--df-surface-well);
+}
+
+.df-actions-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  padding-inline: 8px 10px;
+  margin-inline-end: 2px;
+  border-inline-end: 1px solid var(--df-border-hairline);
+  font-family: var(--df-p-font-mono);
+  font-size: var(--df-p-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+.df-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--df-p-radius-sm);
+  background: transparent;
+  color: var(--df-text-secondary);
+  font-size: var(--df-p-text-sm);
+  font-weight: 500;
+  line-height: 1.2;
+  transition:
+    background-color var(--df-p-dur-press) var(--df-p-ease-standard),
+    color var(--df-p-dur-press) var(--df-p-ease-standard),
+    border-color var(--df-p-dur-press) var(--df-p-ease-standard);
+}
+
+.df-action:hover {
+  border-color: var(--df-border-hairline);
+  background: var(--df-surface-card);
+  color: var(--df-text-primary);
+}
+
+.df-action:active {
+  transform: scale(0.97);
+}
+
+.df-action[data-state="open"] {
+  border-color: var(--df-border-hairline);
+  background: var(--df-surface-card);
+  color: var(--df-text-primary);
+}
+
+.df-action-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--df-text-meta);
+}
+
+.df-action[data-state="open"] .df-action-icon {
+  color: var(--df-accent-text);
+}
+
+.df-menu {
+  position: absolute;
+  z-index: 30;
+  margin-block-start: 6px;
+  padding: 4px;
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-md);
+  background: var(--df-surface-card);
+  box-shadow: var(--df-shadow-raised);
+}
+
+.df-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--df-p-space-2);
+  padding: 6px 8px;
+  border-radius: var(--df-p-radius-xs);
+  color: var(--df-text-secondary);
+  font-size: var(--df-p-text-sm);
+  text-align: start;
+  transition:
+    background-color var(--df-p-dur-press) var(--df-p-ease-standard),
+    color var(--df-p-dur-press) var(--df-p-ease-standard);
+}
+
+.df-menu-item:hover {
+  background: var(--df-accent-soft);
+  color: var(--df-text-primary);
+}
+
+.df-menu-item svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--df-text-meta);
+}
+
+/* --------------------------------------------------------------------------
+   11. Search dialog and popovers
+   -------------------------------------------------------------------------- */
+
+[role="dialog"] {
+  border-radius: var(--df-p-radius-lg);
+  box-shadow: var(--df-shadow-dialog);
+}
+
+[role="dialog"] input {
+  font-family: var(--df-p-font-sans);
+  font-size: var(--df-p-text-md);
+  color: var(--df-text-primary);
+}
+
+[role="dialog"] input::placeholder {
+  color: var(--df-text-meta);
+}
+
+/* The dialog is a sheet: the search row is its head, the results its body. */
+[role="dialog"] div:has(> input) {
+  border-bottom: 1px solid var(--df-border-hairline);
+}
+
+/* --------------------------------------------------------------------------
+   11b. The OpenAPI package's palette escapes
+   --------------------------------------------------------------------------
+   fumadocs-openapi is the one dependency that writes Tailwind's own palette:
+   the HTTP-method badge (POST green, GET blue, PUT yellow, PATCH orange,
+   DELETE red) and the required-field asterisk. Left alone they import a second
+   colour language into the page, so each is pointed at the state ink it means.
+   -------------------------------------------------------------------------- */
+
+[class*="text-green-600"],
+[class*="text-green-400"] {
+  color: var(--df-state-ok-ink);
+}
+
+[class*="text-blue-600"],
+[class*="text-blue-400"] {
+  color: var(--df-state-info-ink);
+}
+
+[class*="text-yellow-600"],
+[class*="text-yellow-400"],
+[class*="text-amber-600"],
+[class*="text-amber-400"] {
+  color: var(--df-state-warn-ink);
+}
+
+[class*="text-red-600"],
+[class*="text-red-400"] {
+  color: var(--df-state-danger-ink);
+}
+
+[class*="text-orange-600"],
+[class*="text-orange-400"] {
+  color: var(--df-state-filter-ink);
+}
+
+/* The playground's response dot and its "beta" chip, which only appear after a
+   request is sent. `~=` matches a whole class token, so the 10% wash is not
+   caught by the solid dot rule. */
+[class~="bg-green-500"] {
+  background-color: var(--df-state-ok-ink);
+}
+
+[class~="bg-blue-500"] {
+  background-color: var(--df-state-info-ink);
+}
+
+[class~="bg-amber-500"] {
+  background-color: var(--df-state-warn-ink);
+}
+
+[class~="bg-red-500"] {
+  background-color: var(--df-state-danger-ink);
+}
+
+[class~="bg-amber-500/10"] {
+  background-color: color-mix(in srgb, var(--df-state-warn-ink) 12%, transparent);
+}
+
+/* fumadocs-openapi writes `rounded-[5px]` into its playground button and its
+   checkboxes — not a step on this scale. Bring them back to 8px. */
+[class*="rounded-[5px]"] {
+  border-radius: var(--df-p-radius-sm);
+}
+
+@media (max-width: 480px) {
+  /* The label and its rule cost a whole row at 390px; the buttons are clear
+     without it. */
+  .df-actions-label {
+    display: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   12. Motion — one entrance, the console's settle; press and lift on controls
+   -------------------------------------------------------------------------- */
+
+@keyframes df-settle {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+#nd-page {
+  animation: df-settle var(--df-p-dur-settle) var(--df-p-ease-standard) both;
+}
+
+/* Cards settle in behind the page, staggered to six; heading anchors share the
+   `data-card` attribute but must not animate, or every h2 would drift on load. */
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a) {
+  animation: df-settle var(--df-p-dur-settle) var(--df-p-ease-standard) both;
+}
+
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a):nth-child(2) {
+  animation-delay: 40ms;
+}
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a):nth-child(3) {
+  animation-delay: 80ms;
+}
+#nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a):nth-child(4) {
+  animation-delay: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  #nd-page {
+    animation: none;
+  }
+
+  #nd-page .prose [data-card]:not(:where(h1, h2, h3, h4, h5, h6) a):hover {
+    transform: none;
+  }
+}
