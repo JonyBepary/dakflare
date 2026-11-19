@@ -113,9 +113,9 @@ not telemetry, and nothing sets them. A 24-hour WhatsApp window that has expired
 | Enforced in | `0003_agent_control_plane.sql:82` (`CHECK`) |
 | Kind | **Declared.** The transition lives in the route, so "only `PENDING` may be approved" is a predicate a new caller must remember |
 
-Decided requests are not shown in the console: the page asks only for `PENDING`
-(`dashboard/src/routes/approvals/+page.svelte:111`), which makes an approved or refused request
-invisible the moment it is decided.
+The console shows decided requests and revoked or expired grants under "Recent decisions",
+newest first, so a decision does not remove its own evidence — the page used to ask only for
+`PENDING` and live grants, and a queue row vanished the moment someone answered it.
 
 ## Authority grant
 
@@ -229,8 +229,9 @@ because an act was refused for authority from one the model chose.
 | Enforced in | `0001_baseline.sql:31`; resolution at `worker/src/index.ts:618`, `flow/dispatch.ts:155` |
 | Kind | **Declared, partially driven.** Only `device_offline` is resolved on contact; a drift alert is never auto-resolved, and its next miss inserts a *fresh* open alert because the dedupe query excludes acknowledged rows |
 
-The console compounds it: the banner labels every alert as device silence and renders neither
-`kind` nor `detail`.
+The console now renders each kind's own words and severity (`dashboard/src/lib/alerts.ts`):
+silence stays red, drift is amber and says a flow cannot read what it expects, and an unknown
+kind is neutral rather than being announced as silence.
 
 ## Flow run
 
