@@ -75,6 +75,20 @@ action and the foreground service. `--reboot` also proves the boot path. It need
 a rooted debug handset, `adb`, `node`, `python3` and `sqlite3`; a SKIP is not a
 pass, and a failed check exits non-zero.
 
+## Wake capability: polling, not push
+
+The Worker can wake a handset through FCM (`worker/src/lib/fcm.ts`), and it will — but only
+for a device row that carries an `fcm_token`, and the device app never registers one. That is
+deliberate, not unfinished: a token comes from Google Play services, and the handset this
+app is built for runs LineageOS without them (`com.google.android.gms` is not installed).
+The app is therefore `poll-only`: it polls `/v1/sms/outgoing/poll` on its own schedule, and
+`wakeDevice` is a no-op for it.
+
+The console already models this — `docs/CONSOLE_UX.md:62` gives the device a `poll-only`
+chip rather than pretending a wake is possible. Do not add token registration to the app
+without first deciding how a GMS-free build authenticates to FCM; a registration that
+returns an error is worse than an honest `poll-only`.
+
 ## Release signing
 
 ```bash
