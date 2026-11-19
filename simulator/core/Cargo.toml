@@ -19,6 +19,16 @@ dakflare-flow = { path = "../flow" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 
+[features]
+# The default build pulls no protocol client crate and no extra dependency.
+default = []
+# Opt-in Telegram MTProto adapter (`grammers`). Declared now, empty in the
+# default build: `core/src/edge_channels.rs` documents what would live here.
+mtproto = []
+# Opt-in WhatsApp linked-device adapter (`whatsapp-rust`). Same rule: declaration
+# only, so `cargo build` never resolves the crate.
+wa-linked = []
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

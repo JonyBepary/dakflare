@@ -141,6 +141,17 @@ import {
   recordAuthFailure,
 } from "./lib/auth-limits";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
+import { ChannelConnection } from "./channels/connection-do";
+import { consumeIngestBatch, consumeIngestDeadLetter } from "./channels/ingest";
+import { handleEdgeIncomingBatch } from "./routes/edge-incoming";
+import {
+  handleChannelWebhook,
+  handleConnectorCreate,
+  handleConnectorDelete,
+  handleConnectorList,
+  handleConnectorUpdate,
+} from "./routes/channel-connectors";
+import type { NormalizedChannelEvent } from "./channels/connection-do";
 
 export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent };
 
@@ -235,6 +246,10 @@ export interface Env {
    * therefore enforces that token's scopes and grants. See `src/binding.ts`.
    */
   BINDING_AUTH?: string;
+  /** One Durable Object per external channel account, named `${channel}:${account_id}`. */
+  CHANNEL_CONN: DurableObjectNamespace<ChannelConnection>;
+  /** Inbound channel events, deduped in the DO and coalesced into one D1 batch per delivery. */
+  INGEST_QUEUE: Queue<NormalizedChannelEvent>;
   /**
    * Optional dedicated key for sealing a webhook signing secret at rest
    * (routes/webhooks.ts). Absent falls back to ADMIN_TOKEN then
@@ -769,7 +784,26 @@ export default {
     ctx.waitUntil(runRetention(env));
   },
 
-  async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext): Promise<void> {
+  async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext): Promise<void> {
+    // One consumer, three queues. Inbound channel events are deduped in the DO before they get
+    // here, so this half only has to write them atomically and refuse to drop a failed batch.
+    if (batch.queue === "dakflare-ingest-queue") {
+      const written = await consumeIngestBatch(batch as MessageBatch<NormalizedChannelEvent>, env);
+      if (written > 0) console.log(`[ingest] wrote ${written} rows from ${batch.messages.length} events`);
+      return;
+    }
+    if (batch.queue === "dakflare-ingest-dlq") {
+      await consumeIngestDeadLetter(batch, env);
+      return;
+    }
+
+    if (batch.queue !== "dakflare-webhook-queue") {
+      // An unknown queue is a misconfiguration, not a message: retrying it forever hides it.
+      console.error(`[queue] no consumer for "${batch.queue}"; acknowledging so it is not retried`);
+      batch.ackAll();
+      return;
+    }
+
     for (const msg of batch.messages) {
       try {
         const payload = msg.body as { url?: string; headers?: Record<string, string>; body?: unknown } | null;
@@ -954,6 +988,12 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     }
 
     /* ---- Multi-Channel Webhooks (v7.0) -------------------------------- */
+    // `/v1/channels/<channel>/<connector-id>/webhook`: public by design, authenticates the caller
+    // with the connector's own secret, and is matched after the legacy exact paths above/below.
+    const connectorWebhook = pathname.match(/^\/v1\/channels\/([a-z]+)\/([^/]+)\/webhook$/);
+    if (connectorWebhook) {
+      return handleChannelWebhook(req, env, connectorWebhook[1], connectorWebhook[2]);
+    }
     if (pathname === "/v1/channels/telegram/webhook") {
       if (method !== "POST") return new Response("Method not allowed", { status: 405 });
       const bounded = await readBodyBounded(req, MAX_BODY_BYTES);
@@ -1220,6 +1260,31 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         handleListInvites(env)
       );
     }
+    /* ---- channel connectors ------------------------------------------- */
+    // Credentials: every handler refuses a member session and an agent token, so a dkf_agt_
+    // credential can never read or rotate a connector's secret.
+    if (method === "POST" && pathname === "/v1/admin/connectors") {
+      return withAdminAccess(req, env, "write", "create channel connectors", (actor) =>
+        handleConnectorCreate(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/connectors") {
+      return withAdminAccess(req, env, "read", "read channel connectors", (actor) =>
+        handleConnectorList(env, actor)
+      );
+    }
+    const connectorMatch = pathname.match(/^\/v1\/admin\/connectors\/([^/]+)$/);
+    if (method === "PATCH" && connectorMatch) {
+      return withAdminAccess(req, env, "write", "update channel connectors", (actor) =>
+        handleConnectorUpdate(req, env, actor, connectorMatch[1])
+      );
+    }
+    if (method === "DELETE" && connectorMatch) {
+      return withAdminAccess(req, env, "write", "delete channel connectors", (actor) =>
+        handleConnectorDelete(env, actor, connectorMatch[1])
+      );
+    }
+
     const inviteDeleteMatch = pathname.match(/^\/v1\/admin\/invites\/([^/]+)$/);
     if (method === "DELETE" && inviteDeleteMatch) {
       return withAdminAccess(req, env, "write", "revoke invites", (actor) =>
@@ -1681,6 +1746,9 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     if (method === "GET" && pathname === "/v1/device/ws") {
       return withDevice(req, env, ctx, (r, e, deviceId) => handleWs(r, e, deviceId));
     }
+    if (method === "POST" && pathname === "/v1/edge/incoming/batch") {
+      return handleEdgeIncomingBatch(req, env, ctx);
+    }
     if (method === "POST" && pathname === "/v1/sms/incoming/batch") {
       return withDevice(req, env, ctx, (r, e, deviceId, body) =>
         handleIncomingBatch(r, e, deviceId, body)
@@ -2079,3 +2147,6 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
  * applies. See `src/binding.ts` for the trust modes.
  */
 export { DakFlareApi } from "./binding-api";
+
+/** Exported class: a Durable Object only exists if the entry module exports it. */
+export { ChannelConnection };

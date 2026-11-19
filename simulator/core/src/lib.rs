@@ -7,6 +7,7 @@
 pub mod carrier;
 pub mod compose;
 pub mod db;
+pub mod edge_channels;
 pub mod flowrun;
 pub mod identity;
 pub mod keyvault;
@@ -27,6 +28,13 @@ pub use db::{
     MAX_SEARCH_HITS, MIN_SEARCH_CHARS, Message, NewDevice, RETENTION_CHECK_INTERVAL_MS,
     RETENTION_LAST_DELETED, RETENTION_LAST_PURGE, RETENTION_SETTING, Retention, RetentionStatus,
     SearchHits, SendFailureOutcome, Store, StoreError, is_device_fact_key,
+};
+pub use edge_channels::{
+    EDGE_ADAPTERS_COMPILED, EDGE_CHANNELS, EDGE_INCOMING_PATH, EdgeBatchError, EdgeFlushError,
+    EdgeFlushed, EdgeInboundMessage, EdgeIncomingBatch, EdgeRefusal, EdgeUploadError,
+    MAX_EDGE_BATCH_BYTES, MAX_EDGE_MESSAGES_PER_BATCH, chunk_edge_batch, edge_local_id,
+    flush_edge_pending, is_edge_channel, record_edge_inbound, upload_edge_batch,
+    upload_edge_messages,
 };
 pub use flowrun::{FlowRunReport, LocalAction, LocalRun, RemoteFlow, run_flows};
 pub use identity::{

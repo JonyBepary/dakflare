@@ -244,7 +244,10 @@ fn mark_skipped_actions(run: &mut LocalRun) -> usize {
 /// Pick the device an inbound message belongs to. No "default device" flag
 /// exists in the schema, so a store with more than one row uses the most
 /// recently paired/updated device.
-async fn resolve_device(store: &Store, requested: Option<&str>) -> Result<String, CarrierError> {
+pub(crate) async fn resolve_device(
+    store: &Store,
+    requested: Option<&str>,
+) -> Result<String, CarrierError> {
     if let Some(device_id) = requested {
         return match store.get_device(device_id).await? {
             Some(device) => Ok(device.device_id),

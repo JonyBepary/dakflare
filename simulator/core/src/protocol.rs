@@ -528,7 +528,12 @@ impl DeviceClient {
         serde_json::from_str(&text).map_err(|e| ProtocolError::Shape(format!("{e}: {text}")))
     }
 
-    async fn signed_post(&self, path: &str, body: Value) -> Result<Value, ProtocolError> {
+    /// Sign and POST one JSON body, then decode the response.
+    ///
+    /// `pub(crate)` so a sibling module (the edge-channel uploader) reaches the
+    /// same canonical signer and header set instead of growing a second copy of
+    /// them. The endpoint is the only argument that differs.
+    pub(crate) async fn signed_post(&self, path: &str, body: Value) -> Result<Value, ProtocolError> {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| ProtocolError::Shape(format!("serialize: {e}")))?;
         let mut headers = self.signed_headers("POST", path, &body_bytes)?;

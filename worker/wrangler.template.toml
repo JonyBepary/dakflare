@@ -35,6 +35,13 @@ class_name = "AuthorityGuard"
 name = "ASSISTANT"
 class_name = "AssistantAgent"
 
+# The fifth Durable Object: one per external channel account. Addressed by
+# `getByName(\`${channel}:${account_id}\`)`, so five WhatsApp numbers are five isolated objects
+# rather than one hot one. Holds dedupe, the 24-hour window, and per-account token buckets.
+[[durable_objects.bindings]]
+name = "CHANNEL_CONN"
+class_name = "ChannelConnection"
+
 [exports.DeviceGateway]
 type = "durable-object"
 storage = "sqlite"
@@ -48,6 +55,10 @@ type = "durable-object"
 storage = "sqlite"
 
 [exports.AssistantAgent]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ChannelConnection]
 type = "durable-object"
 storage = "sqlite"
 
@@ -79,6 +90,25 @@ queue = "dakflare-webhook-queue"
 max_batch_size = 10
 max_batch_timeout = 5
 max_retries = 3
+
+# Inbound channel events, coalesced 50-at-a-time into one D1 batch. A dead-letter queue is
+# configured rather than leaving a failed batch to vanish after its retries.
+[[queues.producers]]
+binding = "INGEST_QUEUE"
+queue = "dakflare-ingest-queue"
+
+[[queues.consumers]]
+queue = "dakflare-ingest-queue"
+max_batch_size = 50
+max_batch_timeout = 2
+max_retries = 3
+dead_letter_queue = "dakflare-ingest-dlq"
+
+[[queues.consumers]]
+queue = "dakflare-ingest-dlq"
+max_batch_size = 50
+max_batch_timeout = 5
+max_retries = 1
 
 [[workflows]]
 name = "flow-execution-workflow"

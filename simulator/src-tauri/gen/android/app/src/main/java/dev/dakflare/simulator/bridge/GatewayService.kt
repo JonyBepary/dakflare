@@ -56,6 +56,14 @@ class GatewayService : Service() {
     @Volatile
     private var socketLive = false
 
+    /**
+     * How many personal-channel rows the Worker can never accept (one message
+     * over the batch budget). Shown on the foreground notification so the user
+     * learns a message did not upload; the row stays in the store.
+     */
+    @Volatile
+    private var stuckEdge = 0
+
     private var worker: Thread? = null
     private val sleeper = Object()
 
@@ -120,6 +128,7 @@ class GatewayService : Service() {
                     val current = NativeBridge.identitySafely(appDir)
                     if (current == null) {
                         Log.i(TAG, "gateway identity gone; stopping")
+                        stuckEdge = 0
                         updateNotification(deviceId = null, lastContactMs = 0L)
                         running = false
                         stopSelf()
@@ -167,6 +176,20 @@ class GatewayService : Service() {
                     val ok = NativeBridge.flushPendingSafely(appDir, deviceId)
                     if (ok) saveLastContact(System.currentTimeMillis())
 
+                    // Personal channels have their own queue and endpoint. The
+                    // call is separate on purpose: an edge refusal or network
+                    // failure must never change the SMS flush's outcome.
+                    val edge = NativeBridge.flushEdgePendingSafely(appDir, deviceId)
+                    stuckEdge = edge.refused.size
+                    if (edge.refused.isNotEmpty()) {
+                        Log.w(
+                            TAG,
+                            "edge uploaded=${edge.uploaded} refused=${edge.refused.size} reason=${edge.error}",
+                        )
+                    } else if (edge.error != null) {
+                        Log.w(TAG, "edge flush failed: ${edge.error}")
+                    }
+
                     // The flow set is the expensive fetch and changes rarely.
                     // Three outcomes, not two: a boolean defaulting to false made
                     // every pass that skipped the fetch read as a failure, and
@@ -182,7 +205,8 @@ class GatewayService : Service() {
                         TAG,
                         "gateway socket=${if (awaited.live) "live" else "down"} " +
                             "captured=${awaited.captured.size} drained=$drained handed=$handed " +
-                            "retried=$retried flush ok=$ok flows=$flows",
+                            "retried=$retried flush ok=$ok edge=${edge.uploaded} " +
+                            "edge_stuck=$stuckEdge flows=$flows",
                     )
 
                     synchronized(sleeper) {
@@ -229,6 +253,10 @@ class GatewayService : Service() {
             socketLive -> "$ONGOING · live · last contact ${time(lastContactMs)}"
             lastContactMs <= 0L -> "$ONGOING · polling only · no contact yet"
             else -> "$ONGOING · polling only · last contact ${time(lastContactMs)}"
+        } + when {
+            stuckEdge <= 0 -> ""
+            stuckEdge == 1 -> " · 1 message could not be uploaded"
+            else -> " · $stuckEdge messages could not be uploaded"
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)

@@ -58,6 +58,8 @@ export default defineConfig({
 			AuthorityGuard: exports.durableObject({ storage: "sqlite" }),
 			// The agent runtime (pass 3, stage A): one pinned `assistant` instance.
 			AssistantAgent: exports.durableObject({ storage: "sqlite" }),
+			// One per external channel account, addressed by `${channel}:${account_id}`.
+			ChannelConnection: exports.durableObject({ storage: "sqlite" }),
 			// Multi-step durable flow execution (v7.0).
 			FlowExecutionWorkflow: exports.workflow({ name: "flow-execution-workflow" }),
 		},
@@ -71,6 +73,23 @@ export default defineConfig({
 				maxBatchSize: 10,
 				maxBatchTimeout: 5,
 				maxRetries: 3,
+			}),
+			// Inbound channel events. 50 at a time, two seconds of patience, then the worker's
+			// queue handler turns the whole delivery into one D1 batch.
+			triggers.queue({
+				name: "dakflare-ingest-queue",
+				maxBatchSize: 50,
+				maxBatchTimeout: 2,
+				maxRetries: 3,
+				deadLetterQueue: "dakflare-ingest-dlq",
+			}),
+			// The dead-letter queue, so a batch that exhausted its retries still lands in D1
+			// rather than expiring unread.
+			triggers.queue({
+				name: "dakflare-ingest-dlq",
+				maxBatchSize: 50,
+				maxBatchTimeout: 5,
+				maxRetries: 1,
 			}),
 		],
 
@@ -132,6 +151,10 @@ export default defineConfig({
 			WEBHOOK_QUEUE: bindings.queue({
 				name: "dakflare-webhook-queue",
 			}),
+			// Inbound channel events: deduped in the DO, coalesced here, one D1 batch per delivery.
+			INGEST_QUEUE: bindings.queue({
+				name: "dakflare-ingest-queue",
+			}),
 			FLOW_WORKFLOW: bindings.workflow({
 				name: "flow-execution-workflow",
 				worker: "dakflare-worker",
@@ -157,6 +180,10 @@ export default defineConfig({
 			ASSISTANT: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "AssistantAgent",
+			}),
+			CHANNEL_CONN: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "ChannelConnection",
 			}),
 
 			// ── rate limiting (hardening S3) ────────────────────────────────────

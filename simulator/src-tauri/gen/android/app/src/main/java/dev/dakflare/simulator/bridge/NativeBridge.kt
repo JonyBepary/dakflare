@@ -73,6 +73,113 @@ object NativeBridge {
     ): String
 
     /**
+     * Persist one personal-channel message observed by
+     * [MessagingNotificationBridge], on the same inbound row path as SMS.
+     *
+     * [localId] is the deterministic notification key
+     * (`notif:<package>:<id>:<postTime>`), so a re-post returns the row the first
+     * delivery created instead of inserting a duplicate. No flows run: this
+     * entry is persistence only.
+     *
+     * Returns `{"ok":true,"device_id":"…","local_id":"…"}` or
+     * `{"ok":false,"error":"unpaired"|"bad_input"|"storage"}`.
+     */
+    @JvmStatic
+    external fun storeEdgeInbound(
+        appDir: String,
+        channel: String,
+        localId: String,
+        sender: String,
+        body: String,
+        receivedAtMs: Long,
+    ): String
+
+    /**
+     * Safe wrapper for the notification listener. Never throws and never logs
+     * a sender or a body; only the exception class is logged.
+     */
+    fun storeEdgeInboundSafely(
+        appDir: String,
+        channel: String,
+        localId: String,
+        sender: String,
+        body: String,
+        receivedAtMs: Long,
+    ): Boolean {
+        if (loadFailure != null) return false
+        if (appDir.isEmpty() || channel.isEmpty() || localId.isEmpty()) return false
+
+        return try {
+            val parsed = JSONObject(
+                storeEdgeInbound(appDir, channel, localId, sender, body, receivedAtMs),
+            )
+            parsed.optBoolean("ok")
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "storeEdgeInbound symbol missing: ${error.javaClass.simpleName}")
+            false
+        } catch (error: Throwable) {
+            Log.e(TAG, "storeEdgeInbound failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Upload the personal-channel rows the SMS flush never selects.
+     *
+     * Returns `{"ok":true,"uploaded":N,"batches":B,"refused":[]}` or, when a
+     * stored row alone is over the batch budget,
+     * `{"ok":false,"error":"oversized","uploaded":N,"refused":[{"local_id","bytes"}]}`.
+     * A refused row is left pending and named; it is never dropped or shortened.
+     * A transport failure is `error` in `network`/`protocol`/`storage`.
+     */
+    @JvmStatic
+    external fun flushEdgePending(appDir: String, deviceId: String): String
+
+    /** What one edge flush did, including the rows it can never upload. */
+    class EdgeFlushResult(
+        val uploaded: Int,
+        val refused: List<String>,
+        val error: String?,
+    )
+
+    /**
+     * Safe wrapper for the gateway loop. Never throws: a missing symbol or a
+     * malformed answer becomes an error result, so the SMS flush is unaffected.
+     * Only ids and counts are read; no body is ever logged.
+     */
+    fun flushEdgePendingSafely(appDir: String, deviceId: String): EdgeFlushResult {
+        if (loadFailure != null) return EdgeFlushResult(0, emptyList(), "unavailable")
+        if (appDir.isEmpty() || deviceId.isEmpty()) {
+            return EdgeFlushResult(0, emptyList(), "bad_input")
+        }
+
+        return try {
+            val parsed = JSONObject(flushEdgePending(appDir, deviceId))
+            val refused = parsed.optJSONArray("refused")
+            val ids = if (refused == null) {
+                emptyList()
+            } else {
+                (0 until refused.length()).mapNotNull { index ->
+                    refused.optJSONObject(index)
+                        ?.optString("local_id")
+                        ?.takeIf { it.isNotEmpty() }
+                }
+            }
+            EdgeFlushResult(
+                uploaded = parsed.optInt("uploaded"),
+                refused = ids,
+                error = if (parsed.optBoolean("ok")) null else parsed.optString("error").ifEmpty { "unknown" },
+            )
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e(TAG, "flushEdgePending symbol missing: ${error.javaClass.simpleName}")
+            EdgeFlushResult(0, emptyList(), "unavailable")
+        } catch (error: Throwable) {
+            Log.e(TAG, "flushEdgePending failed: ${error.javaClass.simpleName}")
+            EdgeFlushResult(0, emptyList(), "unknown")
+        }
+    }
+
+    /**
      * Record what happened to a queued reply row (`queued`, `sent`, `failed`,
      * `delivered`).
      *

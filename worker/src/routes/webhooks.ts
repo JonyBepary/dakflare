@@ -81,7 +81,8 @@ function toHex(bytes: Uint8Array): string {
   return out;
 }
 
-async function sha256Hex(value: string): Promise<string> {
+/** Exported so the channel-connector layer fingerprints and seals with one scheme. */
+export async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
   return toHex(new Uint8Array(digest));
 }
@@ -167,8 +168,14 @@ async function sealingKey(env: Env): Promise<CryptoKey | null> {
   ]);
 }
 
-/** `v1.<iv-hex>.<ciphertext-hex>` so a future key version can be introduced. */
-async function sealSecret(env: Env, secret: string): Promise<string | null> {
+/**
+ * `v1.<iv-hex>.<ciphertext-hex>` so a future key version can be introduced.
+ *
+ * Exported for `routes/channel-connectors.ts`: a channel credential and a
+ * webhook signing secret are the same kind of value, so they share one key and
+ * one envelope rather than growing a second sealing scheme that rotates apart.
+ */
+export async function sealSecret(env: Env, secret: string): Promise<string | null> {
   const key = await sealingKey(env);
   if (key === null) return null;
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -180,7 +187,8 @@ async function sealSecret(env: Env, secret: string): Promise<string | null> {
   return `v1.${toHex(iv)}.${toHex(new Uint8Array(ciphertext))}`;
 }
 
-async function openSecret(env: Env, sealed: string | null): Promise<string | null> {
+/** Counterpart to {@link sealSecret}; shared with the channel connector layer. */
+export async function openSecret(env: Env, sealed: string | null): Promise<string | null> {
   if (sealed === null) return null;
   const parts = sealed.split(".");
   if (parts.length !== 3 || parts[0] !== "v1") return null;

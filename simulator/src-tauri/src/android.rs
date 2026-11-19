@@ -13,11 +13,11 @@
 use std::path::Path;
 
 use dakflare_core::{
-    Action, CarrierError, DeviceClient, Flushed, MAX_DEVICE_FACT_LEN, ProtocolError, Store,
-    StoreError, Target,
+    Action, CarrierError, DeviceClient, EdgeFlushError, EdgeFlushed, EdgeInboundMessage, Flushed,
+    MAX_DEVICE_FACT_LEN, MAX_EDGE_MESSAGES_PER_BATCH, ProtocolError, Store, StoreError, Target,
     carrier::{ack_command, drain_outbox, flush_pending},
-    is_device_fact_key, receive_and_reply, reply_local_id, report_command_state_with_reason,
-    sync_flows,
+    flush_edge_pending, is_device_fact_key, receive_and_reply, record_edge_inbound,
+    reply_local_id, report_command_state_with_reason, sync_flows,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -31,6 +31,12 @@ const MAX_COMPOSE_BODY_LEN: usize = 1600;
 const MAX_RECIPIENT_LEN: usize = 64;
 const MAX_DEVICE_ID_LEN: usize = 64;
 const MAX_LOCAL_ID_LEN: usize = 200;
+/// Personal-channel inputs. A notification body can carry more than one SMS,
+/// but no single message is allowed to fill a whole edge batch on its own.
+const MAX_EDGE_CHANNEL_LEN: usize = 64;
+const MAX_EDGE_LOCAL_ID_LEN: usize = 128;
+const MAX_EDGE_SENDER_LEN: usize = 256;
+const MAX_EDGE_BODY_LEN: usize = 262_144;
 const MAX_STATE_LEN: usize = 16;
 /// The longest a single `awaitCommand` may park the gateway thread.
 const MAX_AWAIT_MS: i64 = 120_000;
@@ -91,6 +97,55 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIn
         "processIncoming",
         true,
     );
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.storeEdgeInbound`
+///
+/// Persist one personal-channel notification on the same inbound row path as
+/// SMS, without running flows: `{"ok":true,"device_id":"…","local_id":"…"}` or
+/// `{"ok":false,"error":"unpaired"|"bad_input"|"storage"}`.
+///
+/// `local_id` is the deterministic `notif:<package>:<id>:<postTime>` string, so
+/// a re-posted notification resolves to one row. The sender and body are never
+/// logged.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeEdgeInbound(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    channel: JString,
+    local_id: JString,
+    sender: JString,
+    body: JString,
+    received_at_ms: jlong,
+) -> jstring {
+    let json = edge_guarded(
+        &mut env,
+        &app_dir,
+        &channel,
+        &local_id,
+        &sender,
+        &body,
+        received_at_ms,
+    );
+    to_jstring(&mut env, json)
+}
+
+/// `dev.dakflare.simulator.bridge.NativeBridge.flushEdgePending`
+///
+/// Upload the personal-channel rows the SMS flush never selects:
+/// `{"ok":true,"uploaded":N,"batches":B,"refused":[]}`. A row that alone exceeds
+/// the batch budget is reported in `refused` and left pending, so the sync loop
+/// can say one message could not be uploaded rather than losing it silently.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushEdgePending(
+    mut env: JNIEnv,
+    _class: JClass,
+    app_dir: JString,
+    device_id: JString,
+) -> jstring {
+    let json = edge_flush_guarded(&mut env, &app_dir, &device_id);
     to_jstring(&mut env, json)
 }
 
@@ -968,6 +1023,183 @@ fn guarded(
             error_json("storage")
         }
     }
+}
+
+/// The notification path follows the two-guard shape of the inbound path: no
+/// panic crosses JNI, and every result is JSON. The message is persistence-only
+/// — no flow runs — because the flow engine answers with `SendSms` and an SMS is
+/// not a reply to a WhatsApp message.
+fn edge_guarded(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    channel: &JString,
+    local_id: &JString,
+    sender: &JString,
+    body: &JString,
+    received_at_ms: i64,
+) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_edge_inputs(
+            env,
+            app_dir,
+            channel,
+            local_id,
+            sender,
+            body,
+            received_at_ms,
+        ) {
+            Ok((app_dir, message)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    edge_blocking(&app_dir, &message)
+                })) {
+                    Ok(Ok((device_id, local_id))) => serde_json::json!({
+                        "ok": true,
+                        "device_id": device_id,
+                        "local_id": local_id,
+                    })
+                    .to_string(),
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] storeEdgeInbound panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] storeEdgeInbound panicked before storage");
+            error_json("storage")
+        }
+    }
+}
+
+/// Decode and validate one personal-channel message. Strings are copied before
+/// the `JNIEnv` is released and bounded here, so oversized input never reaches
+/// the database. No value is logged.
+fn read_edge_inputs(
+    env: &mut JNIEnv,
+    app_dir: &JString,
+    channel: &JString,
+    local_id: &JString,
+    sender: &JString,
+    body: &JString,
+    received_at_ms: i64,
+) -> Result<(String, EdgeInboundMessage), &'static str> {
+    let app_dir = java_string(env, app_dir)?;
+    let channel = java_string(env, channel)?;
+    let local_id = java_string(env, local_id)?;
+    let sender = java_string(env, sender)?;
+    let body = java_string(env, body)?;
+
+    if app_dir.is_empty() || !Path::new(&app_dir).is_absolute() {
+        return Err("bad_input");
+    }
+    if channel.is_empty() || channel.len() > MAX_EDGE_CHANNEL_LEN {
+        return Err("bad_input");
+    }
+    if local_id.is_empty() || local_id.len() > MAX_EDGE_LOCAL_ID_LEN {
+        return Err("bad_input");
+    }
+    if sender.trim().is_empty() || sender.len() > MAX_EDGE_SENDER_LEN {
+        return Err("bad_input");
+    }
+    if body.trim().is_empty() || body.len() > MAX_EDGE_BODY_LEN {
+        return Err("bad_input");
+    }
+    if received_at_ms <= 0 {
+        return Err("bad_input");
+    }
+
+    Ok((
+        app_dir,
+        EdgeInboundMessage {
+            channel,
+            local_id,
+            sender,
+            body,
+            received_at: received_at_ms,
+        },
+    ))
+}
+
+fn edge_blocking(
+    app_dir: &str,
+    message: &EdgeInboundMessage,
+) -> Result<(String, String), &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    tauri::async_runtime::block_on(record_edge_inbound(&store, None, message))
+        .map(|stored| (stored.device_id, stored.local_id.unwrap_or_default()))
+        .map_err(map_carrier_error)
+}
+
+/// The edge flush has its own guards because it has its own error vocabulary:
+/// a refusal is a stored row the Worker can never accept, not a network fault.
+fn edge_flush_guarded(env: &mut JNIEnv, app_dir: &JString, device_id: &JString) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match read_flush_inputs(env, app_dir, device_id) {
+            Ok((app_dir, device_id)) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    edge_flush_blocking(&app_dir, &device_id)
+                })) {
+                    Ok(Ok(report)) => {
+                        let refused: Vec<serde_json::Value> = report
+                            .refused
+                            .iter()
+                            .map(|row| {
+                                serde_json::json!({
+                                    "local_id": row.local_id,
+                                    "bytes": row.bytes,
+                                })
+                            })
+                            .collect();
+                        let mut value = serde_json::json!({
+                            "ok": report.refused.is_empty(),
+                            "uploaded": report.uploaded,
+                            "batches": report.batches,
+                            "refused": refused,
+                        });
+                        if !report.refused.is_empty() {
+                            value["error"] = serde_json::Value::String("oversized".into());
+                        }
+                        value.to_string()
+                    }
+                    Ok(Err(code)) => error_json(code),
+                    Err(_) => {
+                        eprintln!("[jni] flushEdgePending panicked in the core");
+                        error_json("storage")
+                    }
+                }
+            }
+            Err(code) => error_json(code),
+        }
+    })) {
+        Ok(json) => json,
+        Err(_) => {
+            eprintln!("[jni] flushEdgePending panicked before storage");
+            error_json("storage")
+        }
+    }
+}
+
+fn edge_flush_blocking(app_dir: &str, device_id: &str) -> Result<EdgeFlushed, &'static str> {
+    let store = open_store_blocking(app_dir)?;
+    let client = signed_client_blocking(&store, device_id)?;
+    tauri::async_runtime::block_on(flush_edge_pending(
+        &store,
+        &client,
+        device_id,
+        MAX_EDGE_MESSAGES_PER_BATCH,
+    ))
+    .map_err(|error| match error {
+        EdgeFlushError::Store(StoreError::KeyLocked) => "locked",
+        EdgeFlushError::Store(_) => "storage",
+        EdgeFlushError::Batch(_) => "bad_input",
+        EdgeFlushError::Protocol(ProtocolError::Http(_) | ProtocolError::Url(_)) => "network",
+        EdgeFlushError::Protocol(_) => "protocol",
+    })
 }
 
 /// The state-mark path has the same two panic guards as the inbound path: a

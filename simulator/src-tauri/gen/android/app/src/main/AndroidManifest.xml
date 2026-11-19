@@ -210,6 +210,23 @@
             </intent-filter>
         </receiver>
 
+        <!--
+            Personal-message channels (WhatsApp, Telegram, Messenger, Instagram).
+            The system binds this service only after the user grants Notification
+            access in Settings; the declaration itself does not enable anything,
+            and no runtime permission is requested for it. It reads titles,
+            bodies and the official reply action of the packages it knows.
+        -->
+        <service
+            android:name="dev.dakflare.simulator.bridge.MessagingNotificationBridge"
+            android:exported="false"
+            android:label="Shows messages from WhatsApp, Telegram, Messenger and Instagram in DakFlare"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

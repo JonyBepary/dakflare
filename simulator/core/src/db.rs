@@ -184,6 +184,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // re-send an outbound row before its SENT broadcast lands.
         "ALTER TABLE messages ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
     ),
+    (
+        13,
+        // Where an inbound row came from. 'sms' is the radio; anything else is
+        // the personal-channel slug the notification bridge observed
+        // ('whatsapp_personal', 'telegram_personal', …). The SMS uploader only
+        // ever selects 'sms', so an edge row can never wedge the SMS flush and a
+        // long personal message is never shortened to satisfy that endpoint.
+        "ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'sms'",
+    ),
 ];
 
 /// True when a migration failed because another connection already applied it.
@@ -953,6 +962,10 @@ impl Store {
     }
 
     /// Append a message to this device's local thread.
+    ///
+    /// The row's `source` is `'sms'`, the radio path. Personal-channel rows use
+    /// [`Self::record_sourced_message`] with the channel slug so the SMS uploader
+    /// never selects them.
     pub async fn record_message(
         &self,
         device_id: &str,
@@ -962,13 +975,35 @@ impl Store {
         state: &str,
         local_id: Option<&str>,
     ) -> Result<Message, StoreError> {
+        self.record_sourced_message(
+            device_id, direction, peer, body, state, local_id, "sms",
+        )
+        .await
+    }
+
+    /// Append one message with an explicit inbound source.
+    ///
+    /// `source` is `'sms'` for the radio and the channel slug for a personal
+    /// message. The existing sync only reads `'sms'`; edge rows are drained by
+    /// `edge_channels::flush_edge_pending`, which uploads them to the edge
+    /// endpoint with no per-body clamp.
+    pub async fn record_sourced_message(
+        &self,
+        device_id: &str,
+        direction: &str,
+        peer: &str,
+        body: &str,
+        state: &str,
+        local_id: Option<&str>,
+        source: &str,
+    ) -> Result<Message, StoreError> {
         let id = format!("msg{}", random_hex(12)?);
         let now = now_ms()?;
         let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO messages
-                (id, device_id, direction, peer, body, state, local_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, device_id, direction, peer, body, state, local_id, created_at, source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id.clone(),
                 device_id,
@@ -977,7 +1012,8 @@ impl Store {
                 body,
                 state,
                 local_id,
-                now
+                now,
+                source
             ],
         )
         .await?;
@@ -1592,6 +1628,7 @@ impl Store {
                 "SELECT id, device_id, direction, peer, body, state, local_id, created_at, last_error
                    FROM messages
                   WHERE device_id = ? AND direction = 'in' AND state = 'received'
+                    AND source = 'sms'
                   ORDER BY created_at ASC LIMIT ?",
                 params![device_id, limit],
             )
@@ -1610,6 +1647,48 @@ impl Store {
                 created_at: row.get(7)?,
                 last_error: row.get(8)?,
             });
+        }
+        Ok(out)
+    }
+
+    /// Personal-channel rows waiting for the edge uploader, paired with the
+    /// channel they came from (`source`). Never returned by
+    /// [`Self::list_pending_inbound`], so a long edge body cannot wedge the SMS
+    /// flush and an SMS failure cannot hide an edge row.
+    pub async fn list_pending_edge_inbound(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, Message)>, StoreError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT source, id, device_id, direction, peer, body, state,
+                        local_id, created_at, last_error
+                   FROM messages
+                  WHERE device_id = ? AND direction = 'in' AND state = 'received'
+                    AND source <> 'sms'
+                  ORDER BY created_at ASC LIMIT ?",
+                params![device_id, limit],
+            )
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((
+                row.get(0)?,
+                Message {
+                    id: row.get(1)?,
+                    device_id: row.get(2)?,
+                    direction: row.get(3)?,
+                    peer: row.get(4)?,
+                    body: row.get(5)?,
+                    state: row.get(6)?,
+                    local_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                    last_error: row.get(9)?,
+                },
+            ));
         }
         Ok(out)
     }
