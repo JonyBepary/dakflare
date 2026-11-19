@@ -9,7 +9,7 @@
 		"dev": "wrangler dev --local",
 		"dev:account": "wrangler dev --config wrangler.account.toml --env-file .dev.vars",
 		"build:dashboard": "node scripts/build-dashboard.mjs",
-		"deploy": "node scripts/assert-clean-dashboard.mjs && npm run build:dashboard && cf deploy",
+		"deploy": "npm run build:dashboard && node scripts/assert-clean-dashboard.mjs && cf deploy",
 		"deploy:no-dashboard": "node scripts/assert-clean-dashboard.mjs && cf deploy",
 		"smoke": "./scripts/smoke.sh",
 		"cf:check": "cf deploy --dry-run",
