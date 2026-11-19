@@ -21,6 +21,7 @@
 	"include": [
 		"src/lib/components/AgentTelemetryPanel.svelte",
 		"src/lib/components/AlertBanner.svelte",
+		"src/lib/components/AlertHistory.svelte",
 		"src/lib/components/AnswerText.svelte",
 		"src/lib/components/Assistant.svelte",
 		"src/lib/components/AssistantProposalCard.svelte",

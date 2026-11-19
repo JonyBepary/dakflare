@@ -19,7 +19,9 @@
 	import { consoleCounts } from '$lib/console-counts.svelte';
 	import { formatAbsolute, formatCount, plural } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
+	import { session } from '$lib/session.svelte';
 	import AgentTelemetryPanel from '$lib/components/AgentTelemetryPanel.svelte';
+	import AlertHistory from '$lib/components/AlertHistory.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -86,6 +88,8 @@
 	// `open_alerts` collapses to 0 when the count query failed. Do not print that
 	// zero as "quiet": an unreadable database is an unknown, not an empty list.
 	const alertsKnown = $derived(health !== null && !health.db_error && health.counts !== null);
+	/** Acknowledging is a `write`: the banner's own rule applies to this card too. */
+	const canWrite = $derived(session.canWrite);
 
 	const refreshNote = $derived.by(() => {
 		if (healthRefreshError && fleetRefreshError) return 'health and fleet refresh failed';
@@ -595,15 +599,23 @@
 						</p>
 						<div class="alerts-actions">
 							<a class="card-link alerts-link" href={ROUTES.devices}>Open devices</a>
-							<button
-								type="button"
-								class="btn btn-ghost btn-sm ack-all-btn"
-								onclick={handleAcknowledgeAll}
-								disabled={acknowledgingAll}
-							>
-								{acknowledgingAll ? 'Acknowledging…' : 'Acknowledge all'}
-							</button>
+							{#if canWrite}
+								<button
+									type="button"
+									class="btn btn-ghost btn-sm ack-all-btn"
+									onclick={handleAcknowledgeAll}
+									disabled={acknowledgingAll}
+								>
+									{acknowledgingAll ? 'Acknowledging…' : 'Acknowledge all'}
+								</button>
+							{/if}
 						</div>
+						{#if !canWrite}
+							<p class="alerts-readonly">
+								<Icon name="shield" size={12} />
+								<span>Members can read alerts; an owner or admin acknowledges one.</span>
+							</p>
+						{/if}
 						{#if ackError}
 							<div style="margin-top: 10px">
 								<Notice tone="danger" title="Could not acknowledge">{ackError}</Notice>
@@ -625,6 +637,10 @@
 								sleep.
 							</p>
 						</div>
+					{/if}
+
+					{#if alertsKnown}
+						<AlertHistory />
 					{/if}
 				</section>
 			</div>
@@ -987,6 +1003,21 @@
 		font-size: var(--df-p-text-xs);
 		padding: 2px 8px;
 		height: 28px;
+	}
+
+	.alerts-readonly {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		margin-top: var(--df-p-space-2);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.45;
+		color: var(--df-text-meta);
+	}
+
+	.alerts-readonly :global(svg) {
+		flex: none;
+		margin-top: 2px;
 	}
 
 	/* ---------- automation board ---------- */

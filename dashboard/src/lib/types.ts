@@ -178,6 +178,15 @@ export interface Message {
 	reply_state?: ReplyState | string | null;
 	/** The phone's own failure reason, when `reply_state` is `'failed'`. */
 	reply_error?: string | null;
+	/**
+	 * The channel the row travelled on: `sms` for the paired handset, or a
+	 * platform such as `telegram`/`whatsapp`. `/v1/messages` fills it for every
+	 * row it reads; absent means a row older than the column, which is unknown
+	 * and must not be printed as SMS.
+	 */
+	channel?: string | null;
+	/** The conversation the row belongs to, when the channel keeps one. */
+	conversation_id?: string | null;
 }
 
 export interface MessagesResult {
@@ -194,6 +203,12 @@ export interface Alert {
 	kind: 'device_offline' | string;
 	raised_at: number;
 	acknowledged_at: number | null;
+	/**
+	 * Set when the gateway resolved the condition. Only `?all=1` returns a row
+	 * with this stamp; the default list is open alerts only. Absent on a row
+	 * written before the column existed.
+	 */
+	resolved_at?: number | null;
 	detail: string | null;
 }
 

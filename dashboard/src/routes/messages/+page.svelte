@@ -21,6 +21,7 @@
 		wakeMode
 	} from '$lib/presence';
 	import { answerOf, answerPhrase } from '$lib/answers';
+	import { channelHasSessionState, channelWord } from '$lib/channels';
 	import { replyFatesOf } from '$lib/replies';
 	import { ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
@@ -63,6 +64,10 @@
 	let rules = $state<Rule[]>([]);
 	let newIds = $state<Set<string>>(new Set());
 	let direction = $state('all');
+	/** Rows whose conversation context panel is open, by message id. */
+	let contextOpen = $state<Set<string>>(new Set());
+	/** When set, the log shows only rows from this conversation. */
+	let conversationFilter = $state<string | null>(null);
 	let lastUpdatedAt = $state<number | null>(null);
 	const clock = $derived(currentTime());
 	let trackers = $state<Set<string>>(new Set());
@@ -102,10 +107,63 @@
 	// Fleet-wide total from the shell's health read; null until it answers, so the
 	// log says "100 shown" rather than inventing a total it does not have.
 	const totalMessages = $derived(consoleCounts.messages);
+
+	/**
+	 * What the loaded window knows about each conversation: how much of the
+	 * back-and-forth is here, both directions, and where it starts and ends.
+	 *
+	 * This is deliberately the loaded page, not the whole table: `/v1/messages`
+	 * has no conversation filter and no total, so a count here means "in this
+	 * window" and the panel says so.
+	 */
+	const conversations = $derived.by(() => {
+		const map = new Map<
+			string,
+			{
+				channel: string | null;
+				peer: string;
+				count: number;
+				inbound: number;
+				outbound: number;
+				first: number;
+				last: number;
+			}
+		>();
+		for (const message of messages) {
+			const id = message.conversation_id;
+			if (typeof id !== 'string' || id === '') continue;
+			const existing = map.get(id);
+			if (existing === undefined) {
+				map.set(id, {
+					channel: message.channel ?? null,
+					peer: message.peer,
+					count: 1,
+					inbound: message.direction === 'in' ? 1 : 0,
+					outbound: message.direction === 'out' ? 1 : 0,
+					first: message.received_at,
+					last: message.received_at
+				});
+			} else {
+				existing.count += 1;
+				if (message.direction === 'in') existing.inbound += 1;
+				else existing.outbound += 1;
+				existing.first = Math.min(existing.first, message.received_at);
+				existing.last = Math.max(existing.last, message.received_at);
+			}
+		}
+		return map;
+	});
+
+	const filteredConversation = $derived(
+		conversationFilter === null ? null : (conversations.get(conversationFilter) ?? null)
+	);
+
 	const visibleMessages = $derived(
-		direction === 'all'
-			? messages
-			: messages.filter((message) => message.direction === direction)
+		messages.filter(
+			(message) =>
+				(direction === 'all' || message.direction === direction) &&
+				(conversationFilter === null || message.conversation_id === conversationFilter)
+		)
 	);
 
 	/** One fate per row: a reply says its own, a question inherits its reply's. */
@@ -239,6 +297,35 @@
 		trackers = next;
 	}
 
+	function toggleContext(messageId: string): void {
+		const next = new Set(contextOpen);
+		if (next.has(messageId)) next.delete(messageId);
+		else next.add(messageId);
+		contextOpen = next;
+	}
+
+	/**
+	 * Narrow the log to one conversation. The direction filter is reset with it:
+	 * "only this conversation" means the whole back-and-forth, not the half the
+	 * current filter happens to show.
+	 */
+	function toggleConversationFilter(id: string): void {
+		if (conversationFilter === id) {
+			conversationFilter = null;
+			return;
+		}
+		conversationFilter = id;
+		direction = 'all';
+	}
+
+	/** What may be said about a conversation's session window, and what cannot. */
+	function sessionNote(channel: string | null | undefined): string {
+		if (channelWord(channel) === 'WhatsApp') {
+			return 'WhatsApp accepts a free-form reply only inside its 24-hour window. This gateway does not report whether that window is open, so a reply may need a template.';
+		}
+		return 'The gateway stores a session state for this conversation but no route reports it, so the console cannot say whether a free-form reply is allowed.';
+	}
+
 	async function loadStatus(): Promise<void> {
 		const target = devices.find((device) => device.device_id === selected);
 		if (!selected || (target && isRevoked(target))) {
@@ -273,6 +360,8 @@
 		messages = [];
 		expanded = new Set();
 		trackers = new Set();
+		contextOpen = new Set();
+		conversationFilter = null;
 		trackedCommands = {};
 		newIds = new Set();
 		followNote = null;
@@ -291,6 +380,8 @@
 		await loadDevices();
 		if (selected && !devices.some((device) => device.device_id === selected)) {
 			selected = devices.find((device) => !isRevoked(device))?.device_id ?? devices[0]?.device_id ?? '';
+			contextOpen = new Set();
+			conversationFilter = null;
 		}
 		if (selected) {
 			await loadMessages(true);
@@ -618,6 +709,19 @@
 						title="No messages for this device yet"
 						description="Inbound SMS appears after the phone syncs. Anything you queue here appears immediately."
 					/>
+				{:else if visibleMessages.length === 0 && conversationFilter !== null}
+					<div class="log-message conv-empty">
+						<p class="conv-empty-title">No messages match these filters</p>
+						<p class="conv-empty-note">
+							The loaded window holds no message from this conversation in this direction. Load
+							older messages, or show every conversation.
+						</p>
+						<div class="row" style="margin-top: 12px">
+							<button type="button" class="btn btn-sm" onclick={() => (conversationFilter = null)}>
+								<Icon name="filter" size={13} /> Show every conversation
+							</button>
+						</div>
+					</div>
 				{:else if visibleMessages.length === 0}
 					<EmptyState
 						icon="filter"
@@ -652,6 +756,28 @@
 							</Notice>
 						</div>
 					{/if}
+					{#if conversationFilter !== null}
+						<div class="conv-filter-bar">
+							<Icon name="filter" size={12} />
+							<span>
+								Only
+								{filteredConversation === null
+									? 'this'
+									: (channelWord(filteredConversation.channel) ?? 'this')}
+								conversation{filteredConversation === null
+									? ''
+									: ` with ${filteredConversation.peer}`}
+							</span>
+							<span class="spacer"></span>
+							<button
+								type="button"
+								class="link-btn"
+								onclick={() => (conversationFilter = null)}
+							>
+								Show every conversation
+							</button>
+						</div>
+					{/if}
 					<ul class="log">
 						{#each visibleMessages as message (message.id)}
 							{@const outbound = message.direction === 'out'}
@@ -674,6 +800,14 @@
 							{@const answerSource = answerOf(message)}
 							{@const fate = fates.get(message.id) ?? null}
 							{@const failedReply = !outbound && fate?.state === 'failed'}
+							{@const channelLabel = channelWord(message.channel)}
+							{@const conversationId =
+								typeof message.conversation_id === 'string' && message.conversation_id !== ''
+									? message.conversation_id
+									: null}
+							{@const contextExpanded = contextOpen.has(message.id)}
+							{@const context =
+								conversationId !== null ? (conversations.get(conversationId) ?? null) : null}
 							<li
 								id={`msg-${message.id}`}
 								class="log-row"
@@ -687,13 +821,34 @@
 								</span>
 								<div class="msg-main">
 									<p class="msg-head">
-										<span class="dir-word">
-											<span aria-hidden="true">{outbound ? 'out' : 'in'}</span>
-											<span class="sr-only">{outbound ? 'Outbound' : 'Inbound'}</span>
+										<span class="msg-head-main">
+											<span class="dir-word">
+												<span aria-hidden="true">{outbound ? 'out' : 'in'}</span>
+												<span class="sr-only">{outbound ? 'Outbound' : 'Inbound'}</span>
+											</span>
+											<span class="peer mono">{message.peer}</span>
+											{#if channelLabel}
+												{#if conversationId}
+													<button
+														type="button"
+														class="channel channel-button"
+														aria-expanded={contextExpanded}
+														aria-controls={contextExpanded ? `ctx-${message.id}` : undefined}
+														aria-label={`${contextExpanded ? 'Hide' : 'Show'} the ${channelLabel} conversation with ${message.peer}, ${formatAbsolute(message.received_at)}`}
+														title="Conversation context"
+														onclick={() => toggleContext(message.id)}
+													>
+														{channelLabel}
+														<span class="channel-chevron" aria-hidden="true">
+															<Icon name="chevron-down" size={10} />
+														</span>
+													</button>
+												{:else}
+													<span class="channel">{channelLabel}</span>
+												{/if}
+											{/if}
+											{#if isNew}<span class="new-word">new</span>{/if}
 										</span>
-										<span class="peer mono">{message.peer}</span>
-										{#if isNew}<span class="new-word">new</span>{/if}
-										<span class="spacer"></span>
 										<span class="msg-time">
 											<RelativeTime value={message.received_at} />
 										</span>
@@ -756,6 +911,36 @@
 													</button>
 												{/if}
 											{/if}
+										</div>
+									{/if}
+									{#if conversationId && contextExpanded}
+										<div class="conv-context" id={`ctx-${message.id}`}>
+											<p class="conv-title">{channelLabel ?? 'Conversation'} conversation</p>
+											<p class="conv-facts">
+												{#if context}
+													{context.peer} ·
+													{formatCount(context.count)}
+													{context.count === 1 ? 'message' : 'messages'} loaded · {formatCount(
+														context.inbound
+													)} in, {formatCount(context.outbound)} out ·
+													<RelativeTime value={context.first} /> to
+													<RelativeTime value={context.last} />
+												{:else}
+													No other row from this conversation is loaded yet.
+												{/if}
+											</p>
+											{#if channelHasSessionState(message.channel)}
+												<p class="conv-note">{sessionNote(message.channel)}</p>
+											{/if}
+											<button
+												type="button"
+												class="link-btn conv-filter-btn"
+												onclick={() => toggleConversationFilter(conversationId)}
+											>
+												{conversationFilter === conversationId
+													? 'Show every conversation'
+													: 'Only this conversation'}
+											</button>
 										</div>
 									{/if}
 									{#if trackers.has(message.id) && trackerCommandId}
@@ -1033,8 +1218,19 @@
 	.msg-head {
 		display: flex;
 		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--df-p-space-2);
+	}
+
+	/* Direction, peer, channel and the new mark share the left cluster; the time
+	   keeps the right edge whether a channel word is there or not, so an older
+	   row and a Telegram row still line up. */
+	.msg-head-main {
+		display: flex;
+		align-items: baseline;
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	.dir-word {
@@ -1056,6 +1252,122 @@
 		overflow-wrap: anywhere;
 	}
 
+	/* A channel word, not a chip: same quiet mono as the direction, so an SMS row
+	   reads as it always did and a row with no channel at all (one written before
+	   the column) simply has no word. */
+	.channel {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+		white-space: nowrap;
+	}
+
+	/* The channel names its conversation. A chevron, not a second control: the
+	   word already belongs to the row, and one target per line is enough. */
+	.channel-button {
+		min-height: 24px;
+		padding: 0 var(--df-p-space-1) 0 0;
+		border: 0;
+		border-radius: var(--df-p-radius-xs);
+		background: none;
+		cursor: pointer;
+	}
+
+	.channel-button:focus-visible {
+		outline: 2px solid var(--df-border-focus);
+		outline-offset: 2px;
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.channel-button:hover {
+			color: var(--df-accent-text);
+		}
+	}
+
+	.channel-chevron {
+		display: grid;
+		place-items: center;
+		transition: transform var(--df-p-dur-lift) ease;
+	}
+
+	.channel-button[aria-expanded='true'] .channel-chevron {
+		transform: rotate(180deg);
+	}
+
+	.conv-context {
+		display: grid;
+		gap: 2px;
+		margin-top: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-left: 2px solid var(--df-border-control);
+		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
+		background: var(--df-surface-well);
+	}
+
+	.conv-title {
+		font-size: var(--df-p-text-xs);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.conv-facts,
+	.conv-note {
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.conv-note {
+		color: var(--df-text-meta);
+	}
+
+	.conv-filter-btn {
+		justify-self: start;
+		min-height: 24px;
+		font-size: var(--df-p-text-xs);
+	}
+
+	.conv-filter-bar {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		flex-wrap: wrap;
+		padding: var(--df-p-space-2) var(--df-p-space-4);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-well);
+		font-size: var(--df-p-text-xs);
+		color: var(--df-text-secondary);
+	}
+
+	.conv-filter-bar :global(svg) {
+		flex: none;
+		color: var(--df-text-meta);
+	}
+
+	.conv-filter-bar .link-btn {
+		font-size: var(--df-p-text-xs);
+	}
+
+	.conv-empty-title {
+		font-size: var(--df-p-text-md);
+		font-weight: 600;
+		color: var(--df-text-primary);
+	}
+
+	.conv-empty-note {
+		margin-top: var(--df-p-space-1);
+		font-size: var(--df-p-text-base);
+		line-height: 1.5;
+		color: var(--df-text-meta);
+	}
+
 	.new-word {
 		font-family: var(--df-p-font-mono);
 		font-size: var(--df-p-text-2xs);
@@ -1065,6 +1377,8 @@
 	}
 
 	.msg-time {
+		flex: none;
+		margin-left: auto;
 		font-size: var(--df-p-text-2xs);
 		color: var(--df-text-meta);
 		white-space: nowrap;
@@ -1221,9 +1535,11 @@
 			display: none;
 		}
 
+		/* Two actions (Test in Rules, Delivery) used to share row 1 of column 2
+		   and overlap. The column stays, the row is auto: the first sits beside
+		   the answer, the second directly under it. */
 		.msg-meta .track-btn {
 			grid-column: 2;
-			grid-row: 1;
 			justify-self: end;
 		}
 
@@ -1235,10 +1551,23 @@
 		.compose-meta {
 			display: none;
 		}
+
+		.channel-button {
+			min-height: 32px;
+		}
+
+		.conv-filter-btn,
+		.conv-filter-bar .link-btn {
+			min-height: 44px;
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
 		.log-row {
+			transition: none;
+		}
+
+		.channel-chevron {
 			transition: none;
 		}
 	}
