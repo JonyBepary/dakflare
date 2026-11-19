@@ -165,6 +165,12 @@
 
 :root {
   color-scheme: light;
+
+  /* Scrollbars are furniture, not browser chrome: a warm pair from the same
+     roles as every other edge. Both values are role references, so the dark
+     remap below moves them without a second declaration. */
+  --df-scrollbar-thumb: var(--df-border-control);
+  --df-scrollbar-track: var(--df-surface-page);
 }
 
 .dark {
@@ -173,6 +179,48 @@
 
 html {
   scroll-padding-block-start: var(--df-p-space-6);
+  scrollbar-color: var(--df-scrollbar-thumb) var(--df-scrollbar-track);
+  scrollbar-width: thin;
+}
+
+/* Chromium and Safari paint the pseudo-elements when they exist, so both paths
+   read the same two variables and cannot drift apart. The thumb's border is the
+   track colour, which is what gives it air inside the gutter. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--df-scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--df-scrollbar-thumb);
+  border: 3px solid var(--df-scrollbar-track);
+  border-radius: var(--df-p-radius-pill);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--df-text-meta);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--df-scrollbar-track);
+}
+
+/* Fumadocs' own thin scroll container (search results, long menus) paints its
+   thumb from `--color-fd-border`, which is a hairline — visible as a line but
+   not as a thumb. Point it at the same pair as everything else. */
+.fd-scroll-container {
+  --df-scrollbar-track: var(--df-surface-card);
+  scrollbar-color: var(--df-scrollbar-thumb) var(--df-scrollbar-track);
+}
+
+.fd-scroll-container::-webkit-scrollbar-thumb {
+  background: var(--df-scrollbar-thumb);
+  border: 0;
+  border-radius: var(--df-p-radius-pill);
 }
 
 body {
@@ -255,6 +303,7 @@ body {
   background-color: var(--df-surface-well);
   border-color: var(--df-border-hairline);
   font-size: var(--df-p-text-base);
+  --df-scrollbar-track: var(--df-surface-well);
 }
 
 #nd-sidebar a,
@@ -330,14 +379,18 @@ header[class*="grid-area:header"] button {
   min-height: 44px;
 }
 
-/* The reading-progress bar above the article on phones. */
+/* The phone's section bar. Its leading ring is a 0–25% progress arc drawn with
+   a 1.5px stroke at 18px: at that size it reads as an indeterminate spinner,
+   and the bar's own text already says which section you are in. Dropped rather
+   than completed into the app mark, which would put a second, 18px copy of the
+   lockup directly under the header's. */
 [data-toc-popover-trigger] {
   font-size: var(--df-p-text-base);
   color: var(--df-text-secondary);
 }
 
-[data-toc-popover-trigger] svg {
-  color: var(--df-accent-decor);
+[data-toc-popover-trigger] > svg[role="progressbar"] {
+  display: none;
 }
 
 /* "On this page" reads as a console sheet label: mono, tracked, meta ink. */
@@ -357,6 +410,14 @@ header[class*="grid-area:header"] button {
 
 #nd-toc a {
   border-radius: var(--df-p-radius-xs);
+}
+
+/* With a child heading in view, both the child and its ancestor carry
+   `data-active`. The child is the position and the ancestor is the path, so
+   only the deepest active entry keeps the accent; an active entry followed by
+   another active entry is, by construction, an ancestor. */
+#nd-toc a[data-active="true"]:has(+ a[data-active="true"]) {
+  color: var(--df-text-secondary);
 }
 
 /* A heading in the TOC is a label, not a place for code slabs: ids render in
@@ -390,9 +451,9 @@ header[class*="grid-area:header"] button {
   margin: 0;
   font-family: var(--df-font-display);
   font-size: clamp(1.625rem, 1.35rem + 1.2vw, 2.125rem);
-  font-weight: 650;
-  line-height: 1.14;
-  letter-spacing: -0.025em;
+  font-weight: 750;
+  line-height: 1.12;
+  letter-spacing: -0.032em;
   color: var(--df-text-primary);
   text-wrap: balance;
 }
@@ -480,17 +541,18 @@ header[class*="grid-area:header"] button {
   margin-block: 0 var(--df-p-space-3);
   font-family: var(--df-font-display);
   font-size: var(--df-p-text-2xl);
-  font-weight: 650;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
+  font-weight: 750;
+  line-height: 1.18;
+  letter-spacing: -0.028em;
   color: var(--df-text-primary);
 }
 
 #nd-page .prose h2 {
   margin-block: var(--df-p-space-7) var(--df-p-space-3);
   font-size: var(--df-p-text-2xl);
-  font-weight: 650;
-  line-height: 1.2;
+  font-weight: 750;
+  line-height: 1.18;
+  letter-spacing: -0.028em;
 }
 
 /* The rule above a section is drawn only where the heading owns the full
@@ -504,8 +566,9 @@ header[class*="grid-area:header"] button {
 #nd-page .prose h3 {
   margin-block: var(--df-p-space-6) var(--df-p-space-2);
   font-size: var(--df-p-text-lg);
-  font-weight: 700;
-  line-height: 1.3;
+  font-weight: 750;
+  line-height: 1.28;
+  letter-spacing: -0.022em;
 }
 
 #nd-page .prose h4 {
@@ -552,9 +615,13 @@ header[class*="grid-area:header"] button {
 /* Anything an operator would copy or compare with a log is mono. No size is
    set here on purpose: the OpenAPI tables declare their own (13px field names,
    12px constraints) and a relative size would silently shrink them under the
-   console's 11px floor. The typography preset steps code down in running prose. */
+   console's 11px floor. The typography preset steps code down in running prose.
+
+   Horizontal padding is near zero so punctuation keeps contact with the chip:
+   `(mode `600`)` must not read as `(mode `600` )`. Mono sidebearings already
+   give the glyphs ~1px of air, and the fill still marks the span. */
 #nd-page .prose :not(pre) > code {
-  padding: 0.1em 0.28em;
+  padding: 0.12em 0.06em;
   border-radius: var(--df-p-radius-xs);
   background: var(--df-surface-well);
   color: var(--df-text-primary);
@@ -562,6 +629,8 @@ header[class*="grid-area:header"] button {
   font-weight: 400;
   letter-spacing: 0;
   white-space: nowrap;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 /* Code in a heading is a name, not a slab: it keeps the heading's colour and
@@ -570,7 +639,7 @@ header[class*="grid-area:header"] button {
 #nd-page .prose h2 code,
 #nd-page .prose h3 code,
 #nd-page .prose h4 code {
-  padding: 0.04em 0.2em;
+  padding: 0.04em 0.05em;
   font-size: 0.82em;
   background: var(--df-surface-well);
 }
@@ -632,6 +701,7 @@ header[class*="grid-area:header"] button {
   border: 1px solid var(--df-border-hairline);
   border-radius: var(--df-p-radius-md);
   background: var(--df-surface-card);
+  --df-scrollbar-track: var(--df-surface-card);
 }
 
 #nd-page .prose table {
@@ -703,6 +773,13 @@ header[class*="grid-area:header"] button {
   border-radius: var(--df-p-radius-md);
   background: var(--df-surface-card);
   overflow: hidden;
+  --df-scrollbar-track: var(--df-surface-card);
+}
+
+/* A code block scrolls sideways on a phone; its scrollbar sits on the panel,
+   not on the page. */
+#nd-page .prose figure pre {
+  scrollbar-color: var(--df-scrollbar-thumb) var(--df-surface-card);
 }
 
 #nd-page .prose figure.shiki figcaption,

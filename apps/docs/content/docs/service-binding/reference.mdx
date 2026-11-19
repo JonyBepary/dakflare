@@ -1,0 +1,95 @@
+---
+title: Method reference
+description: Every DakFlareApi method, the route it reaches, its arguments and whether it needs a credential.
+---
+
+Every method delegates to `handleFetch`, the router the public API uses. The "route" column is what
+an HTTP caller would have hit; the "credential" column is whether `agent_token` mode requires a
+token for that call in `trusted` mode it never does.
+
+| Method | Route | Credential |
+|---|---|---|
+| `health()` | `GET /v1/auth/mode` | none — public by design |
+| `deployment()` | `GET /v1/admin/health` | yes |
+| `devices()` | `GET /v1/devices` | yes |
+| `messages({ limit, deviceId, direction })` | `GET /v1/messages` | yes |
+| `sendSms(input, options?)` | `POST /v1/sms/send` | yes |
+| `ask(message, options?)` | `POST /v1/admin/agent/say` | yes |
+| `request(input, needsCredential?)` | anything under `/v1` | yes, unless `false` is passed |
+
+## `health()`
+
+Liveness and the deployment's auth mode. The one call that needs no credential, so a bound Worker can
+check the service without holding `ADMIN_TOKEN`.
+
+Returns the `/v1/auth/mode` document: `auth_mode`, `auth_configured`, `password_mode`, `magic_link`.
+
+## `deployment()`
+
+The operator's own health read: device, message, rule and alert counts, and the checks the Overview
+shows. Same document the console's overview consumes.
+
+## `devices()`
+
+The paired fleet with each device's label, presence and last-seen stamp.
+
+## `messages({ limit, deviceId, direction })`
+
+The message log, newest first.
+
+| Argument | Type | Notes |
+|---|---|---|
+| `limit` | number | the route clamps it; omit for the default |
+| `deviceId` | string | one handset |
+| `direction` | `"in"` or `"out"` | omit for both |
+
+Rows carry `channel`, `conversation_id`, `session_state` and `window_expires_at` when the row belongs
+to a conversation, which is what tells you whether a free-form reply is allowed.
+
+## `sendSms(input, options?)`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `to` | string | E.164 |
+| `body` | string | the message text |
+| `deviceId` | string, optional | omit to let the deployment choose |
+| `idempotencyKey` | string, optional | 8–64 of `A-Z a-z 0-9 _ -`; the same key returns the same command |
+| `options.token` | string, optional | required in `agent_token` mode |
+
+Returns `{ command_id, replayed, lifecycle }`. `command_id` is what `status` reads; `lifecycle` is the
+canonical state (see the state-machine reference). **`SENT` is not delivery** — `DELIVERED` requires a
+status report from the handset.
+
+## `ask(message, options?)`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `message` | string | one question for the agent |
+| `options.idempotencyKey` | string, optional | a retry replays the recorded answer |
+| `options.token` | string, optional | required in `agent_token` mode |
+
+Returns the turn: the answer, any proposals the agent prepared, and `replayed` when the key had
+already been answered. Reusing a key with different text is a refusal (`idempotency_conflict`), not a
+silent replay.
+
+## `request(input, needsCredential?)`
+
+The escape hatch. `input.path` is everything after the origin, e.g. `/v1/admin/workflows/wf_bkash`;
+`method` defaults to `GET`; `body` is serialised for you; `headers` are added to the ones the
+entrypoint sets.
+
+Returns `{ status, body, bookmark }`, where `body` is parsed JSON when the route answered JSON and the
+text otherwise. `bookmark` is the D1 session bookmark when the route returned one, which lets a caller
+chain a read-your-writes sequence.
+
+Passing `false` as the second argument skips the credential — only for routes that are public by
+design, and it is shown here so the option is not a mystery.
+
+## What is not exposed
+
+- **No Durable Object methods.** Binding a class directly skips every gate; the entrypoint exists so
+  you do not have to.
+- **No cross-account calls.** A binding is account-scoped; another account uses the HTTP API with a
+  `dkf_agt_` token.
+- **No streaming.** A conversation turn over the socket (`/agents/*`) is a browser surface; `ask`
+  returns the finished turn.

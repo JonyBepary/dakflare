@@ -1456,14 +1456,24 @@ In addition to the unified [`/SKILL.md`](/SKILL.md), the repository ships four m
 
 ---
 
-# Call DakFlare from a Worker or a Cloudflare Workflow
+# Service binding
 
-> Bind the DakFlareApi RPC entrypoint from another Worker or a Workflow step, with the trust modes, the idempotency rule a retrying step needs, and the same-account limit.
+> Call this deployment from another Worker or a Cloudflare Workflow as a typed service, and what a binding is allowed to do.
 
-Another Worker in the same Cloudflare account — or a Cloudflare Workflow, which runs inside one —
-can call this deployment as a typed service instead of building a `Request` and remembering which
-header carries the credential. That interface is `DakFlareApi`, a `WorkerEntrypoint` exported by
-`dakflare-worker` (`worker/src/binding-api.ts`).
+DakFlare exports a **`WorkerEntrypoint`** called `DakFlareApi`. A second Worker in the same
+Cloudflare account — or a Cloudflare Workflow, which runs inside one — can bind this script as a
+service and call typed methods instead of building a `Request` and remembering which header carries
+the credential.
+
+```ts
+const sent = await env.DAKFLARE.sendSms({ to: "+8801711000111", body: "Payment settled." });
+const fleet = await env.DAKFLARE.devices();
+const turn = await env.DAKFLARE.ask("How many rules are enabled?");
+```
+
+Every method delegates to the same router the public API uses. Scopes, rate limiters, audit rows,
+idempotency and the D1 session bookmark behave exactly as they do for an HTTP caller — this is a
+calling convention, not a second code path.
 
 ## The consumer's config
 
@@ -1475,14 +1485,61 @@ service = "dakflare-worker"
 entrypoint = "DakFlareApi"
 ```
 
-The consumer needs a compatibility date that supports RPC entrypoints; this repository's own
-Worker runs `compatibility_date = "2026-04-07"` with `nodejs_compat`, which is what the entrypoint
-is built and tested against.
+The consumer needs a compatibility date that supports RPC entrypoints; this repository's Worker runs
+`compatibility_date = "2026-04-07"` with `nodejs_compat`, which is what the entrypoint is built and
+tested against.
 
-## The type
+## Who may act
 
-`dakflare-worker` is not published to npm, so there is nothing to `import` from. Declare the part
-you call, and keep `worker/src/binding-api.ts` as the reference when a method changes:
+`BINDING_AUTH` on the **producer** decides, read per call so a deploy changes it without a warm
+isolate holding the old answer:
+
+| Mode | Credential | What a bound Worker can do |
+|---|---|---|
+| `trusted` (default) | none — the binding is the credential | everything the deployment can, including sending SMS and spending money |
+| `agent_token` | a `dkf_agt_` token passed per call | whatever that token's scopes allow; an act additionally needs a live authority grant |
+
+`trusted` is the default because a single-owner account is already the trust boundary, and it is
+also why the limits below matter. If `BINDING_AUTH=trusted` and the deployment has no
+`ADMIN_TOKEN`, every credentialed call refuses with `binding_untrusted` naming both ways out,
+rather than running unauthenticated.
+
+## What a binding cannot do
+
+- **It cannot cross accounts.** Service bindings, queues, workflows and rate-limit namespaces are
+  account-scoped. From another account, call the HTTP API with a `dkf_agt_` token.
+- **A raw Durable Object binding bypasses all of it.** Binding `AssistantAgent` or `DeviceGateway`
+  directly gives you their RPC methods with no session, no scope, no rate limit and no audit row —
+  the binding is the authorisation. Use `DakFlareApi` unless you are deliberately operating the
+  object.
+- **It cannot see another machine's transcript by accident.** The entrypoint sends
+  `X-Dakflare-Client: binding`, so its conversation and attachments are its own. `ADMIN_TOKEN`
+  remains one shared credential: this separates cooperating clients by declared identity, not
+  cryptographically.
+
+## Where to go next
+
+| | |
+|---|---|
+| [From a Worker](/docs/service-binding/worker) | the local interface, the calls, the error shape |
+| [From a Cloudflare Workflow](/docs/service-binding/workflow) | `step.do`, the retry rule, and why the idempotency key is the whole safety story |
+| [Method reference](/docs/service-binding/reference) | every method, its route, its arguments and its credential |
+
+
+---
+
+# From another Worker
+
+> The typed calls, the local interface a consumer needs, the request() escape hatch, and how refusals arrive.
+
+A Worker in the same account holds the binding in `env` and calls methods on it. There is nothing to
+authenticate by hand in `trusted` mode, and nothing to serialise: arguments and results are
+structured-clone values, not JSON strings.
+
+## The interface a consumer needs
+
+`dakflare-worker` is not published to npm, so there is no type to import. Declare the part you call,
+and keep `worker/src/binding-api.ts` as the reference when a method changes:
 
 ```ts
 // the consumer's types.ts
@@ -1491,19 +1548,24 @@ export interface DakFlareBinding {
   deployment(): Promise<unknown>;
   devices(): Promise<unknown>;
   messages(query?: { limit?: number; deviceId?: string; direction?: string }): Promise<unknown>;
-  sendSms(input: {
-    to: string;
-    body: string;
-    deviceId?: string;
-    idempotencyKey?: string;
-  }): Promise<unknown>;
-  ask(message: string, options?: { idempotencyKey?: string }): Promise<unknown>;
-  request(input: {
-    path: string;
-    method?: string;
-    body?: unknown;
-    headers?: Record<string, string>;
-  }): Promise<{ status: number; body: unknown; bookmark: string | null }>;
+  sendSms(
+    input: { to: string; body: string; deviceId?: string; idempotencyKey?: string },
+    options?: { token?: string }
+  ): Promise<unknown>;
+  ask(
+    message: string,
+    options?: { idempotencyKey?: string; token?: string }
+  ): Promise<unknown>;
+  request(
+    input: {
+      path: string;
+      method?: string;
+      body?: unknown;
+      headers?: Record<string, string>;
+      token?: string;
+    },
+    needsCredential?: boolean
+  ): Promise<{ status: number; body: unknown; bookmark: string | null }>;
 }
 
 interface Env {
@@ -1511,41 +1573,92 @@ interface Env {
 }
 ```
 
-## From a Worker
+The `token` fields matter only in `agent_token` mode; leaving them out is what makes that mode
+impossible to use, so they are part of the declaration rather than an afterthought.
+
+## Sending something
 
 ```ts
 export default {
-  async fetch(_request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const { to, body } = await request.json<{ to: string; body: string }>();
+
     // Idempotent by key: the same key returns the same command instead of a second SMS.
     const sent = await env.DAKFLARE.sendSms({
-      to: "+8801711000111",
-      body: "Payment settled.",
-      idempotencyKey: "invoice-9021-notice-1",
+      to,
+      body,
+      idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
     });
+
     return Response.json(sent);
   },
 };
 ```
 
-| Method | Route it reaches | Credential |
-| --- | --- | --- |
-| `health()` | `GET /v1/auth/mode` | none — that route is public by design |
-| `deployment()` | `GET /v1/admin/health` | yes |
-| `devices()` | `GET /v1/devices` | yes |
-| `messages({ limit, deviceId, direction })` | `GET /v1/messages` | yes |
-| `sendSms({ to, body, deviceId?, idempotencyKey? })` | `POST /v1/sms/send` | yes |
-| `ask(message, { idempotencyKey? })` | `POST /v1/admin/agent/say` | yes |
-| `request({ path, method, body })` | anything under `/v1` | yes |
+In `agent_token` mode the same call carries the credential:
 
-Every one of them delegates to the same router the public API uses, with
-`X-Dakflare-Client: binding`, so scopes, rate limiters, audit rows, idempotency and the D1 bookmark
-behave exactly as they do for an HTTP caller. `request()` is the escape hatch: a route added to the
-HTTP API is callable the day it ships, which is what keeps the two surfaces from drifting.
+```ts
+await env.DAKFLARE.sendSms({ to, body }, { token: env.DAKFLARE_AGENT_TOKEN });
+```
 
-## From a Cloudflare Workflow
+## Reaching a route the shortcuts do not cover
 
-A Workflow class lives in a Worker and receives the same `env`, so the binding is used exactly as
-above — inside a step:
+`request()` is the escape hatch over everything under `/v1`, with the same authentication rules.
+A route added to the HTTP API is callable the day it ships, which is what keeps the two surfaces
+from drifting:
+
+```ts
+const saved = await env.DAKFLARE.request({
+  path: "/v1/admin/workflows/wf_bkash",
+  method: "PUT",
+  body: { name: "bKash receipts", enabled: true, graph },
+});
+```
+
+`request()` returns the status instead of throwing on 2xx; a 4xx or 5xx is refused the same way the
+shortcuts are.
+
+## Refusals
+
+A failure is a thrown error carrying a code, a status and the route's own sentence. Branch on the
+code, never on the message:
+
+```ts
+try {
+  await env.DAKFLARE.sendSms({ to, body });
+} catch (error) {
+  if (error instanceof Error && "code" in error) {
+    // binding_untrusted      · trusted mode with no ADMIN_TOKEN on the deployment
+    // binding_token_required · agent_token mode and no token was passed
+    // idempotency_conflict   · the key is bound to a different message
+    // turn_in_progress       · another turn holds that key right now
+    // sms_cap / write_cap    · the window's ceiling is spent
+  }
+  throw error;
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `binding_untrusted` | `trusted` mode, but the deployment has no `ADMIN_TOKEN` to act as |
+| `binding_token_required` | `agent_token` mode, and the call passed no token |
+| `idempotency_conflict` | that key already answered a different message |
+| `turn_in_progress` | another turn is running under this key |
+| `sms_cap` / `write_cap` / `daily_sms_cap` | the autonomy ceiling is spent |
+| the route's own code | anything the HTTP API would have returned |
+
+Next: [from a Cloudflare Workflow](/docs/service-binding/workflow), where a retrying step makes the
+idempotency key load-bearing.
+
+
+---
+
+# From a Cloudflare Workflow
+
+> Use the binding inside a Workflow step, and the one rule that makes a retrying step safe.
+
+A Workflow is a class in a Worker. It receives the same `env`, so the binding is used exactly as it
+is from a Worker — inside `step.do`, where the platform may run it more than once.
 
 ```ts
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
@@ -1583,59 +1696,148 @@ export class InvoiceFollowUp extends WorkflowEntrypoint<Env, Payload> {
 }
 ```
 
-Two rules make that safe, and they are the whole reason to read this page:
+Export the class (`exports.workflow({ name: "invoice-follow-up" })` in `cloudflare.config.ts`, or the
+equivalent `workflows` entry in `wrangler.toml`) and `cf deploy` attaches it. The consumer's service
+binding is declared exactly as in [the overview](/docs/service-binding):
 
-1. **Every `step.do` can run more than once.** Derive the `idempotencyKey` from the event and the
-   step's purpose, never from `Date.now()`. A key that changes on retry buys a second SMS.
-2. **A step's result is durable, the side effect is not.** If a step sends and then fails before
-   returning, the retry re-enters the closure; the key is what makes that a no-op rather than a
-   duplicate.
+```toml
+[[services]]
+binding = "DAKFLARE"
+service = "dakflare-worker"
+entrypoint = "DakFlareApi"
 
-`step.sleep` is the Workflow's own clock, not the flow interpreter's `delay` node. A `delay` inside
-a `dakflare.flow/v2` graph runs on the handset, and a graph the handset could only partly perform
-reports `partial` so the Worker runs the rest — see the state-machine reference for that boundary.
-
-## Who may act
-
-`BINDING_AUTH` on the **producer** decides, read per call:
-
-| Mode | Credential | What a bound Worker can do |
-| --- | --- | --- |
-| `trusted` (default) | none — the binding is the credential | everything the deployment can, including sending SMS and spending money |
-| `agent_token` | a `dkf_agt_` token passed per call | whatever that token's scopes allow; an act additionally needs a live authority grant |
-
-`trusted` is the default because a single-owner account is already the trust boundary, and it is
-also why the limit below matters. If `BINDING_AUTH=trusted` and the deployment has no
-`ADMIN_TOKEN`, every credentialed call refuses with `binding_untrusted` naming both ways out,
-rather than running unauthenticated.
-
-A refusal is a thrown error carrying a code, so the consumer branches on the code and never on the
-sentence:
-
-```ts
-try {
-  await env.DAKFLARE.sendSms({ to, body });
-} catch (error) {
-  if (error instanceof Error && "code" in error) {
-    // binding_untrusted · binding_token_required · idempotency_conflict
-    // turn_in_progress · unknown_attachment · sms_cap …
-  }
-  throw error;
-}
+[[workflows]]
+name = "invoice-follow-up"
+binding = "INVOICE_FOLLOW_UP"
+class_name = "InvoiceFollowUp"
 ```
 
-## What a binding cannot do
+## The two rules that make it safe
 
-- **It cannot cross accounts.** Service bindings, queues, workflows and rate-limit namespaces are
-  account-scoped. From another account, call the HTTP API with a `dkf_agt_` token.
-- **A raw Durable Object binding bypasses all of it.** Binding `AssistantAgent` or `DeviceGateway`
-  directly gives you their RPC methods with no session, no scope, no rate limit and no audit row —
-  the binding is the authorisation. Use `DakFlareApi` unless you are deliberately operating the
-  object.
-- **It cannot see a machine's transcript by accident.** The entrypoint sends
-  `X-Dakflare-Client: binding`, so its conversation and attachments are its own. `ADMIN_TOKEN`
-  remains one shared credential: this separates cooperating clients by declared identity, not
-  cryptographically.
-- **The event payload of this repository's own Workflow is internal.** `flow-execution-workflow`
-  (bound here as `FLOW_WORKFLOW`, class `FlowExecutionWorkflow`) is invoked by the Worker's flow
-  fallback; a consumer can bind it, but its payload shape is not a contract.
+1. **Every `step.do` can run more than once.** Derive the `idempotencyKey` from the event and the
+   step's purpose — never from `Date.now()`, a random value, or the step's attempt number. A key that
+   changes on retry buys a second SMS.
+2. **A step's result is durable; its side effect is not.** If a step sends and then fails before
+   returning, the retry re-enters the closure. The key is what turns that into a no-op: the second
+   `sendSms` with the same key returns the recorded command.
+
+A step that runs out of retries is what `step.do` reports; it does not retry forever. If a notice
+must not be missed, put the ceiling in the workflow (`retries: { limit: 5, delay: "30 seconds" }`)
+and let a failed workflow be visible rather than silently swallowed.
+
+## `step.sleep` is not the flow interpreter's `delay`
+
+They look similar and are not:
+
+| | Runs where | After a restart | Reported as |
+|---|---|---|---|
+| `step.sleep` | Cloudflare's Workflow engine | resumes at the same step | durable |
+| a `delay` node in a `dakflare.flow/v2` graph | the handset | depends on the phone | the run reports `partial`, and the Worker runs the rest |
+
+A flow the handset could only partly perform says so, and the Worker executes the actions after that
+boundary — the state-machine reference has the exact rule. Use `step.sleep` for orchestration you
+control; use a flow `delay` when the phone must act while the gateway is unreachable.
+
+## This repository's own Workflow
+
+`flow-execution-workflow` (bound here as `FLOW_WORKFLOW`, class `FlowExecutionWorkflow`) is the
+Worker's own delay and webhook runner. A consumer can bind it, but its event payload is internal:
+it is invoked by the flow fallback, and its shape is not a contract. Bind `DakFlareApi` instead.
+
+
+---
+
+# Method reference
+
+> Every DakFlareApi method, the route it reaches, its arguments and whether it needs a credential.
+
+Every method delegates to `handleFetch`, the router the public API uses. The "route" column is what
+an HTTP caller would have hit; the "credential" column is whether `agent_token` mode requires a
+token for that call in `trusted` mode it never does.
+
+| Method | Route | Credential |
+|---|---|---|
+| `health()` | `GET /v1/auth/mode` | none — public by design |
+| `deployment()` | `GET /v1/admin/health` | yes |
+| `devices()` | `GET /v1/devices` | yes |
+| `messages({ limit, deviceId, direction })` | `GET /v1/messages` | yes |
+| `sendSms(input, options?)` | `POST /v1/sms/send` | yes |
+| `ask(message, options?)` | `POST /v1/admin/agent/say` | yes |
+| `request(input, needsCredential?)` | anything under `/v1` | yes, unless `false` is passed |
+
+## `health()`
+
+Liveness and the deployment's auth mode. The one call that needs no credential, so a bound Worker can
+check the service without holding `ADMIN_TOKEN`.
+
+Returns the `/v1/auth/mode` document: `auth_mode`, `auth_configured`, `password_mode`, `magic_link`.
+
+## `deployment()`
+
+The operator's own health read: device, message, rule and alert counts, and the checks the Overview
+shows. Same document the console's overview consumes.
+
+## `devices()`
+
+The paired fleet with each device's label, presence and last-seen stamp.
+
+## `messages({ limit, deviceId, direction })`
+
+The message log, newest first.
+
+| Argument | Type | Notes |
+|---|---|---|
+| `limit` | number | the route clamps it; omit for the default |
+| `deviceId` | string | one handset |
+| `direction` | `"in"` or `"out"` | omit for both |
+
+Rows carry `channel`, `conversation_id`, `session_state` and `window_expires_at` when the row belongs
+to a conversation, which is what tells you whether a free-form reply is allowed.
+
+## `sendSms(input, options?)`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `to` | string | E.164 |
+| `body` | string | the message text |
+| `deviceId` | string, optional | omit to let the deployment choose |
+| `idempotencyKey` | string, optional | 8–64 of `A-Z a-z 0-9 _ -`; the same key returns the same command |
+| `options.token` | string, optional | required in `agent_token` mode |
+
+Returns `{ command_id, replayed, lifecycle }`. `command_id` is what `status` reads; `lifecycle` is the
+canonical state (see the state-machine reference). **`SENT` is not delivery** — `DELIVERED` requires a
+status report from the handset.
+
+## `ask(message, options?)`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `message` | string | one question for the agent |
+| `options.idempotencyKey` | string, optional | a retry replays the recorded answer |
+| `options.token` | string, optional | required in `agent_token` mode |
+
+Returns the turn: the answer, any proposals the agent prepared, and `replayed` when the key had
+already been answered. Reusing a key with different text is a refusal (`idempotency_conflict`), not a
+silent replay.
+
+## `request(input, needsCredential?)`
+
+The escape hatch. `input.path` is everything after the origin, e.g. `/v1/admin/workflows/wf_bkash`;
+`method` defaults to `GET`; `body` is serialised for you; `headers` are added to the ones the
+entrypoint sets.
+
+Returns `{ status, body, bookmark }`, where `body` is parsed JSON when the route answered JSON and the
+text otherwise. `bookmark` is the D1 session bookmark when the route returned one, which lets a caller
+chain a read-your-writes sequence.
+
+Passing `false` as the second argument skips the credential — only for routes that are public by
+design, and it is shown here so the option is not a mystery.
+
+## What is not exposed
+
+- **No Durable Object methods.** Binding a class directly skips every gate; the entrypoint exists so
+  you do not have to.
+- **No cross-account calls.** A binding is account-scoped; another account uses the HTTP API with a
+  `dkf_agt_` token.
+- **No streaming.** A conversation turn over the socket (`/agents/*`) is a browser surface; `ask`
+  returns the finished turn.

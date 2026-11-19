@@ -1,4 +1,12 @@
 {
   "title": "DakFlare",
-  "pages": ["index", "start", "guides", "reference", "architecture", "agents"]
+  "pages": [
+    "index",
+    "start",
+    "service-binding",
+    "guides",
+    "reference",
+    "architecture",
+    "agents"
+  ]
 }

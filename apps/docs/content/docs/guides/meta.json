@@ -3,7 +3,6 @@
   "pages": [
     "android-node-pairing",
     "durable-objects-routing",
-    "worker-service-binding",
     "visual-workflow-editor",
     "agent-authority-and-webhooks",
     "self-hosting-production"

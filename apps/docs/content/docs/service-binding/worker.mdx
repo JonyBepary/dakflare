@@ -1,0 +1,122 @@
+---
+title: From another Worker
+description: The typed calls, the local interface a consumer needs, the request() escape hatch, and how refusals arrive.
+---
+
+A Worker in the same account holds the binding in `env` and calls methods on it. There is nothing to
+authenticate by hand in `trusted` mode, and nothing to serialise: arguments and results are
+structured-clone values, not JSON strings.
+
+## The interface a consumer needs
+
+`dakflare-worker` is not published to npm, so there is no type to import. Declare the part you call,
+and keep `worker/src/binding-api.ts` as the reference when a method changes:
+
+```ts
+// the consumer's types.ts
+export interface DakFlareBinding {
+  health(): Promise<unknown>;
+  deployment(): Promise<unknown>;
+  devices(): Promise<unknown>;
+  messages(query?: { limit?: number; deviceId?: string; direction?: string }): Promise<unknown>;
+  sendSms(
+    input: { to: string; body: string; deviceId?: string; idempotencyKey?: string },
+    options?: { token?: string }
+  ): Promise<unknown>;
+  ask(
+    message: string,
+    options?: { idempotencyKey?: string; token?: string }
+  ): Promise<unknown>;
+  request(
+    input: {
+      path: string;
+      method?: string;
+      body?: unknown;
+      headers?: Record<string, string>;
+      token?: string;
+    },
+    needsCredential?: boolean
+  ): Promise<{ status: number; body: unknown; bookmark: string | null }>;
+}
+
+interface Env {
+  DAKFLARE: Service<DakFlareBinding>;
+}
+```
+
+The `token` fields matter only in `agent_token` mode; leaving them out is what makes that mode
+impossible to use, so they are part of the declaration rather than an afterthought.
+
+## Sending something
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const { to, body } = await request.json<{ to: string; body: string }>();
+
+    // Idempotent by key: the same key returns the same command instead of a second SMS.
+    const sent = await env.DAKFLARE.sendSms({
+      to,
+      body,
+      idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
+    });
+
+    return Response.json(sent);
+  },
+};
+```
+
+In `agent_token` mode the same call carries the credential:
+
+```ts
+await env.DAKFLARE.sendSms({ to, body }, { token: env.DAKFLARE_AGENT_TOKEN });
+```
+
+## Reaching a route the shortcuts do not cover
+
+`request()` is the escape hatch over everything under `/v1`, with the same authentication rules.
+A route added to the HTTP API is callable the day it ships, which is what keeps the two surfaces
+from drifting:
+
+```ts
+const saved = await env.DAKFLARE.request({
+  path: "/v1/admin/workflows/wf_bkash",
+  method: "PUT",
+  body: { name: "bKash receipts", enabled: true, graph },
+});
+```
+
+`request()` returns the status instead of throwing on 2xx; a 4xx or 5xx is refused the same way the
+shortcuts are.
+
+## Refusals
+
+A failure is a thrown error carrying a code, a status and the route's own sentence. Branch on the
+code, never on the message:
+
+```ts
+try {
+  await env.DAKFLARE.sendSms({ to, body });
+} catch (error) {
+  if (error instanceof Error && "code" in error) {
+    // binding_untrusted      · trusted mode with no ADMIN_TOKEN on the deployment
+    // binding_token_required · agent_token mode and no token was passed
+    // idempotency_conflict   · the key is bound to a different message
+    // turn_in_progress       · another turn holds that key right now
+    // sms_cap / write_cap    · the window's ceiling is spent
+  }
+  throw error;
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `binding_untrusted` | `trusted` mode, but the deployment has no `ADMIN_TOKEN` to act as |
+| `binding_token_required` | `agent_token` mode, and the call passed no token |
+| `idempotency_conflict` | that key already answered a different message |
+| `turn_in_progress` | another turn is running under this key |
+| `sms_cap` / `write_cap` / `daily_sms_cap` | the autonomy ceiling is spent |
+| the route's own code | anything the HTTP API would have returned |
+
+Next: [from a Cloudflare Workflow](/docs/service-binding/workflow), where a retrying step makes the
+idempotency key load-bearing.

@@ -11,6 +11,9 @@ const config = {
       // anyone who was given the origin rather than a page. Permanent: the origin will keep this
       // shape, and a cached redirect saves a round trip.
       { source: "/", destination: "/docs", permanent: true },
+      // The service-binding material was one guide and is now a chapter; keep the old address
+      // working for anyone who bookmarked it or fetched it from a cached llms-full.txt.
+      { source: "/docs/guides/worker-service-binding", destination: "/docs/service-binding", permanent: true },
     ];
   },
   async rewrites() {

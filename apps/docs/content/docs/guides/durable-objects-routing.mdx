@@ -57,7 +57,7 @@ entrypoint = "DakFlareApi"
 
 `dakflare-worker` is not published to npm, so declare the methods you call rather than importing
 a type that cannot be resolved — the guide
-[Call DakFlare from a Worker or a Workflow](/docs/guides/worker-service-binding) has the full
+[Service binding](/docs/service-binding) has the full
 interface, a `WorkflowEntrypoint` example and the retry rule.
 
 ```ts
@@ -86,7 +86,7 @@ Every `DakFlareApi` method (`health`, `deployment`, `devices`, `messages`, `send
 `DakFlareApi` exposes `request()` as a typed escape hatch to any `/v1/*` route through the exact same auth, rate-limit, and validation pipeline (`worker/src/binding-api.ts`). Use `PUT /v1/admin/workflows/:id` to load or update a custom JSON flow template from another Cloudflare Worker or Cloudflare Workflow:
 
 ```ts
-/** The part of the `DakFlareApi` binding this task calls; see the worker-service-binding guide for the complete interface. */
+/** The part of the `DakFlareApi` binding this task calls; see the service-binding chapter for the complete interface. */
 interface DakFlareBinding {
   request(input: {
     path: string;

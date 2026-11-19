@@ -1,0 +1,69 @@
+---
+title: Service binding
+description: Call this deployment from another Worker or a Cloudflare Workflow as a typed service, and what a binding is allowed to do.
+---
+
+DakFlare exports a **`WorkerEntrypoint`** called `DakFlareApi`. A second Worker in the same
+Cloudflare account — or a Cloudflare Workflow, which runs inside one — can bind this script as a
+service and call typed methods instead of building a `Request` and remembering which header carries
+the credential.
+
+```ts
+const sent = await env.DAKFLARE.sendSms({ to: "+8801711000111", body: "Payment settled." });
+const fleet = await env.DAKFLARE.devices();
+const turn = await env.DAKFLARE.ask("How many rules are enabled?");
+```
+
+Every method delegates to the same router the public API uses. Scopes, rate limiters, audit rows,
+idempotency and the D1 session bookmark behave exactly as they do for an HTTP caller — this is a
+calling convention, not a second code path.
+
+## The consumer's config
+
+```toml
+# the consumer Worker's wrangler.toml
+[[services]]
+binding = "DAKFLARE"
+service = "dakflare-worker"
+entrypoint = "DakFlareApi"
+```
+
+The consumer needs a compatibility date that supports RPC entrypoints; this repository's Worker runs
+`compatibility_date = "2026-04-07"` with `nodejs_compat`, which is what the entrypoint is built and
+tested against.
+
+## Who may act
+
+`BINDING_AUTH` on the **producer** decides, read per call so a deploy changes it without a warm
+isolate holding the old answer:
+
+| Mode | Credential | What a bound Worker can do |
+|---|---|---|
+| `trusted` (default) | none — the binding is the credential | everything the deployment can, including sending SMS and spending money |
+| `agent_token` | a `dkf_agt_` token passed per call | whatever that token's scopes allow; an act additionally needs a live authority grant |
+
+`trusted` is the default because a single-owner account is already the trust boundary, and it is
+also why the limits below matter. If `BINDING_AUTH=trusted` and the deployment has no
+`ADMIN_TOKEN`, every credentialed call refuses with `binding_untrusted` naming both ways out,
+rather than running unauthenticated.
+
+## What a binding cannot do
+
+- **It cannot cross accounts.** Service bindings, queues, workflows and rate-limit namespaces are
+  account-scoped. From another account, call the HTTP API with a `dkf_agt_` token.
+- **A raw Durable Object binding bypasses all of it.** Binding `AssistantAgent` or `DeviceGateway`
+  directly gives you their RPC methods with no session, no scope, no rate limit and no audit row —
+  the binding is the authorisation. Use `DakFlareApi` unless you are deliberately operating the
+  object.
+- **It cannot see another machine's transcript by accident.** The entrypoint sends
+  `X-Dakflare-Client: binding`, so its conversation and attachments are its own. `ADMIN_TOKEN`
+  remains one shared credential: this separates cooperating clients by declared identity, not
+  cryptographically.
+
+## Where to go next
+
+| | |
+|---|---|
+| [From a Worker](/docs/service-binding/worker) | the local interface, the calls, the error shape |
+| [From a Cloudflare Workflow](/docs/service-binding/workflow) | `step.do`, the retry rule, and why the idempotency key is the whole safety story |
+| [Method reference](/docs/service-binding/reference) | every method, its route, its arguments and its credential |

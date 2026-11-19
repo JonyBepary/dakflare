@@ -1,0 +1,91 @@
+---
+title: From a Cloudflare Workflow
+description: Use the binding inside a Workflow step, and the one rule that makes a retrying step safe.
+---
+
+A Workflow is a class in a Worker. It receives the same `env`, so the binding is used exactly as it
+is from a Worker — inside `step.do`, where the platform may run it more than once.
+
+```ts
+import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+
+interface Payload {
+  to: string;
+  invoice: string;
+}
+
+export class InvoiceFollowUp extends WorkflowEntrypoint<Env, Payload> {
+  async run(event: WorkflowEvent<Payload>, step: WorkflowStep) {
+    const { to, invoice } = event.payload;
+
+    const first = await step.do("first notice", async () =>
+      this.env.DAKFLARE.sendSms({
+        to,
+        body: `Invoice ${invoice} is due.`,
+        // A step retries. The key is what makes the retry a replay instead of a second SMS.
+        idempotencyKey: `invoice-${invoice}-notice-1`,
+      }),
+    );
+
+    await step.sleep("wait three days", "3 days");
+
+    await step.do("second notice", async () =>
+      this.env.DAKFLARE.sendSms({
+        to,
+        body: `Invoice ${invoice} is still due.`,
+        idempotencyKey: `invoice-${invoice}-notice-2`,
+      }),
+    );
+
+    return first;
+  }
+}
+```
+
+Export the class (`exports.workflow({ name: "invoice-follow-up" })` in `cloudflare.config.ts`, or the
+equivalent `workflows` entry in `wrangler.toml`) and `cf deploy` attaches it. The consumer's service
+binding is declared exactly as in [the overview](/docs/service-binding):
+
+```toml
+[[services]]
+binding = "DAKFLARE"
+service = "dakflare-worker"
+entrypoint = "DakFlareApi"
+
+[[workflows]]
+name = "invoice-follow-up"
+binding = "INVOICE_FOLLOW_UP"
+class_name = "InvoiceFollowUp"
+```
+
+## The two rules that make it safe
+
+1. **Every `step.do` can run more than once.** Derive the `idempotencyKey` from the event and the
+   step's purpose — never from `Date.now()`, a random value, or the step's attempt number. A key that
+   changes on retry buys a second SMS.
+2. **A step's result is durable; its side effect is not.** If a step sends and then fails before
+   returning, the retry re-enters the closure. The key is what turns that into a no-op: the second
+   `sendSms` with the same key returns the recorded command.
+
+A step that runs out of retries is what `step.do` reports; it does not retry forever. If a notice
+must not be missed, put the ceiling in the workflow (`retries: { limit: 5, delay: "30 seconds" }`)
+and let a failed workflow be visible rather than silently swallowed.
+
+## `step.sleep` is not the flow interpreter's `delay`
+
+They look similar and are not:
+
+| | Runs where | After a restart | Reported as |
+|---|---|---|---|
+| `step.sleep` | Cloudflare's Workflow engine | resumes at the same step | durable |
+| a `delay` node in a `dakflare.flow/v2` graph | the handset | depends on the phone | the run reports `partial`, and the Worker runs the rest |
+
+A flow the handset could only partly perform says so, and the Worker executes the actions after that
+boundary — the state-machine reference has the exact rule. Use `step.sleep` for orchestration you
+control; use a flow `delay` when the phone must act while the gateway is unreachable.
+
+## This repository's own Workflow
+
+`flow-execution-workflow` (bound here as `FLOW_WORKFLOW`, class `FlowExecutionWorkflow`) is the
+Worker's own delay and webhook runner. A consumer can bind it, but its event payload is internal:
+it is invoked by the flow fallback, and its shape is not a contract. Bind `DakFlareApi` instead.
