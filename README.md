@@ -22,7 +22,7 @@ Bengal station by station) with the **Cloudflare** edge where the coordinator li
 | **Android app** (Tauri + Rust core) | Owns the SIM, is the default SMS app, holds a P-256 identity wrapped by Android Keystore, runs the flow engine on-device, mirrors what it did |
 | **Worker** | Verifies every device request against a canonical string and a replay guard, serves the console, hosts accounts, channels, flows, the agent control plane, and the Clef decision client behind it |
 | **Durable Objects** | `DeviceGateway` per handset (command queue, replay nonces, ack and offline alarms), `AuthGuard` (account lockout), `AuthorityGuard` (grant windows) |
-| **D1** | Fleet, messages, conversations, rules, flows, agents, approvals, grants, audit. Eight migrations, `0001` through `0008` |
+| **D1** | Fleet, messages, conversations, rules, flows, agents, approvals, grants, attachments, audit. Sixteen migrations, `0001` through `0016` |
 | **Queues and Workflows** | `dakflare-webhook-queue` for outbound webhooks; `FlowExecutionWorkflow` for flow delays longer than five seconds |
 | **Channels** | SMS through the handset, Telegram and WhatsApp Cloud webhooks, all stored as conversations |
 | **KV** | FCM bearer-token cache |
@@ -40,7 +40,7 @@ AndroidKeyStore AES-GCM key. A copied database alone cannot impersonate the phon
 | `cli/` | `dakflare`, a zero-dependency Node 22+ operator CLI |
 | `simulator/` | the Android app (Tauri + Rust core, Kotlin telephony, Svelte UI) and the on-device flow engine |
 | `design/` | design tokens and the token preview |
-| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, and `history/` for point-in-time plans |
+| `docs/` | the master spec, the agent surface reference, runbooks, console and workflow notes, `STATE_MACHINES.md` (every state machine and whether it is guarded, declared or derived), and `history/` for point-in-time plans |
 | `skills/` | four `SKILL.md` packages for agents: provision, messaging, flows, agents |
 | `contracts/` | the MCP tool contract (`mcp-tools.json`) |
 | `test-support/` | local dev stack, protocol and flow vectors, platform and skills gates |
@@ -110,6 +110,12 @@ compares with a log.
   revert with one undo step, and "Auto-tag with Clef" in the pattern sheet.
 - **Approvals**: the queue of time-boxed authority an agent is waiting for, with the duration ladder,
   and the live grants already handed out, with a countdown and a revoke.
+- **Assistant**: one floating panel over every page. It keeps the operator's transcript (reading
+  it back on open, clearing it in place), takes up to three attachments — text is read into the
+  prompt, images are named and the panel says the model cannot see them — and carries an
+  idempotency key per turn, so a retry replays the recorded answer instead of buying a second one.
+  A proposal card names the write it offers, and says when it exists because the agent's own
+  attempt was refused.
 - **Audit log**: every privileged action, who took it and what it touched.
 - **Security**: sign-in factors (passkey, authenticator, password) and invites.
 
