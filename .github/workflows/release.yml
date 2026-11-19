@@ -58,8 +58,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
+          # A tag with a suffix is a pre-release, and GitHub must agree: `--prerelease` keeps it
+          # out of "Latest", so an alpha cannot become the version a newcomer installs.
+          kind=""
+          case "$GITHUB_REF_NAME" in
+            *-alpha*|*-beta*|*-rc*) kind="--prerelease --latest=false" ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
             "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz" \
             "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz.sha256" \
             --title "DakFlare $GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+            $kind

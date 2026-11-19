@@ -22,6 +22,23 @@ The workflow refuses a tag that disagrees with either file — that is the whole
 `check-versions.mjs` exists. A release that ships code calling itself something else is the
 failure this prevents, and it is a one-line check rather than a memory.
 
+## Pre-releases
+
+A suffix in the tag makes GitHub treat the release as a pre-release, which is the point: an alpha
+must never become the version a newcomer installs.
+
+```bash
+# the version string, not just the tag, carries the suffix — one version everywhere
+#   cli/bin/dakflare.js  → CLI_VERSION = '6.3.0-alpha.1'
+#   worker/package.json  → "version": "6.3.0-alpha.1"
+git tag v6.3.0-alpha.1 && git push origin v6.3.0-alpha.1
+```
+
+The workflow passes `--prerelease --latest=false` when the tag contains `-alpha`, `-beta` or
+`-rc`, so "Latest" stays on the last final release. A suffix only on the tag, with a clean version
+in the code, is refused by `check-versions.mjs`: two names for one build is how a release ends up
+lying about itself.
+
 ## What gets published
 
 `dakflare-cli-<version>.tar.gz` plus its `.sha256`, containing:
