@@ -1962,10 +1962,15 @@ function acceptStageWorkflowPatch(payload: Record<string, unknown>): AcceptOutco
 /**
  * `POST /v1/admin/assistant/proposals/:id/accept`
  *
- * Reads only an unconsumed, unexpired row. Marks it consumed ONLY after the
- * kind's work succeeded: a refusal (bad payload, rule linter, storage error)
- * leaves the proposal usable, so the operator can fix the draft and retry
- * rather than being handed a dead id.
+ * Claim first, act second. The conditional UPDATE that sets `consumed_at` is
+ * the mutual exclusion: exactly one concurrent accept can move the row out of
+ * `NULL`, so two clicks (or a retry after a timeout) cannot both create a rule
+ * or template. The loser gets 409 and learns the proposal was already applied.
+ *
+ * The failure mode we deliberately make possible instead is "claimed but not
+ * applied": if the effect refuses or throws, the claim is released so the
+ * operator can retry. A consumed proposal whose effect never happened is the
+ * worse failure — it looks done and can never be retried.
  */
 export async function handleAssistantProposalAccept(
   env: Env,
@@ -2012,33 +2017,76 @@ export async function handleAssistantProposalAccept(
     );
   }
 
-  let outcome: AcceptOutcome;
-  switch (row.kind) {
-    case "create_rule":
-      outcome = await acceptCreateRule(env, actor, payload);
-      break;
-    case "create_template":
-      outcome = acceptCreateTemplate(payload);
-      break;
-    case "stage_workflow_patch":
-      outcome = acceptStageWorkflowPatch(payload);
-      break;
-    default:
-      // A row with an unknown kind was not written by this Worker.
-      return Response.json(
-        { error: "not_found", message: `unknown proposal kind "${row.kind}"` },
-        { status: 409 }
-      );
+  // A row with an unknown kind was not written by this Worker. Refuse it before
+  // taking the claim: there is no effect to release the claim around.
+  if (
+    row.kind !== "create_rule" &&
+    row.kind !== "create_template" &&
+    row.kind !== "stage_workflow_patch"
+  ) {
+    return Response.json(
+      { error: "not_found", message: `unknown proposal kind "${row.kind}"` },
+      { status: 409 }
+    );
   }
 
-  if (!outcome.ok) return outcome.response;
-
-  await env.DB.prepare(
+  // The claim. Exactly one concurrent accept sees `changes === 1`.
+  const claim = await env.DB.prepare(
     `UPDATE assistant_proposals SET consumed_at = ?
-       WHERE id = ? AND consumed_at IS NULL`
+       WHERE id = ? AND consumed_at IS NULL AND expires_at > ?`
   )
-    .bind(now, proposalId)
+    .bind(now, proposalId, now)
     .run();
+  if ((claim.meta?.changes ?? 0) !== 1) {
+    return Response.json(
+      {
+        error: "already_applied",
+        message: "this proposal was already applied by another request",
+      },
+      { status: 409 }
+    );
+  }
+
+  const releaseClaim = async (): Promise<void> => {
+    await env.DB.prepare(
+      `UPDATE assistant_proposals SET consumed_at = NULL
+         WHERE id = ? AND consumed_at = ?`
+    )
+      .bind(proposalId, now)
+      .run();
+  };
+
+  let outcome: AcceptOutcome;
+  try {
+    switch (row.kind) {
+      case "create_rule":
+        outcome = await acceptCreateRule(env, actor, payload);
+        break;
+      case "create_template":
+        outcome = acceptCreateTemplate(payload);
+        break;
+      case "stage_workflow_patch":
+        outcome = acceptStageWorkflowPatch(payload);
+        break;
+      default:
+        // Claimed already, so release before refusing: a row this Worker did not
+        // write must stay consumable by whoever did, not be burned by a 409.
+        await releaseClaim();
+        return Response.json(
+          { error: "not_found", message: `unknown proposal kind "${row.kind}"` },
+          { status: 409 }
+        );
+    }
+  } catch (error) {
+    // Storage/linter fault: release the claim so a retry can still apply it.
+    await releaseClaim();
+    throw error;
+  }
+
+  if (!outcome.ok) {
+    await releaseClaim();
+    return outcome.response;
+  }
 
   logAssistant("accept", { kind: row.kind, proposal: proposalId.slice(0, 12) });
 

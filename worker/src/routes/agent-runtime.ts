@@ -540,6 +540,47 @@ const ATTACHMENT_READ_ACTION = "list agent attachments";
 /** Multipart overhead above the file itself (boundary, headers, fields). */
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
+/**
+ * Read a request body into memory without ever exceeding `limit` bytes.
+ *
+ * `content-length` is only a hint: a chunked upload can omit it and an
+ * understated one can lie. The reader is the actual enforcement, and it cancels
+ * the stream the moment the next chunk would cross the limit, so a hostile body
+ * is never buffered past the cap. Returns `tooLarge` separately from a read
+ * error so the caller can answer 413 rather than 400.
+ */
+async function readBoundedBody(
+  req: Request,
+  limit: number
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; tooLarge: boolean }> {
+  if (req.body === null) return { ok: true, bytes: new Uint8Array(0) };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, tooLarge: false };
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, bytes };
+}
+
 function attachmentDto(row: AttachmentRow): Record<string, unknown> {
   return {
     id: row.id,
@@ -587,22 +628,43 @@ export async function handleAgentAttachmentUpload(
     );
   }
 
-  // Fast path: a declared length larger than the file cap plus multipart
-  // overhead is refused without reading the stream.
-  const declared = Number(req.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES + MULTIPART_OVERHEAD_BYTES) {
-    return Response.json(
+  const bodyLimit = MAX_ATTACHMENT_BYTES + MULTIPART_OVERHEAD_BYTES;
+  const tooLarge = (): Response =>
+    Response.json(
       {
         error: "attachment_too_large",
         message: `a file may be at most ${MAX_ATTACHMENT_BYTES} bytes (1 MiB)`,
       },
       { status: 413 }
     );
+
+  // Fast path: a declared length larger than the file cap plus multipart
+  // overhead is refused without reading the stream.
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > bodyLimit) return tooLarge();
+
+  // The real cap: read through a bounded stream, so a chunked or understated
+  // upload is refused as soon as it crosses the limit instead of being buffered
+  // whole by `formData()` first.
+  const bounded = await readBoundedBody(req, bodyLimit);
+  if (!bounded.ok) {
+    if (bounded.tooLarge) return tooLarge();
+    return Response.json(
+      {
+        error: "bad_request",
+        message: "the body must be multipart/form-data with one `file` field",
+      },
+      { status: 400 }
+    );
   }
+
+  const contentType = req.headers.get("content-type");
+  const headers = new Headers();
+  if (contentType !== null) headers.set("content-type", contentType);
 
   let form: FormData;
   try {
-    form = await req.formData();
+    form = await new Response(bounded.bytes, { headers }).formData();
   } catch {
     return Response.json(
       {

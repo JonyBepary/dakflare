@@ -119,8 +119,16 @@ type TaskOutcome = "consumed" | "rescheduled";
  * only on the right-hand side, so no transition can ever leave them:
  *   - `SENT -> DISPATCHED` (a stale ack): `DISPATCHED` accepts only `LEASED`, so
  *     it is a no-op;
- *   - `DELIVERED -> SENT`: `SENT` accepts only `DISPATCHED`, so it is a no-op;
+ *   - `DELIVERED -> SENT` (a late ack): `SENT` accepts only `DISPATCHED`, so it
+ *     is a no-op;
  *   - `EXPIRED -> *`: nothing accepts `EXPIRED` as a predecessor.
+ *
+ * `DELIVERED` accepts `DISPATCHED` as well as `SENT`: a status report is
+ * evidence and may arrive out of order. A phone that reports delivered before
+ * it reports sent would otherwise strand the command at `SENT` forever, because
+ * the handset does not re-send an ack. `LEASED` is deliberately not a
+ * predecessor: no phone path sends a delivery receipt while it still holds the
+ * command un-dispatched.
  *
  * `LEASED -> DISPATCHED` additionally requires the matching `claim_token`; see
  * `transition`. `PENDING` is a target only from a lease that expired.
@@ -130,7 +138,7 @@ const ALLOWED_PREDECESSORS: Readonly<Record<string, readonly string[]>> = {
   PENDING: ["LEASED"],
   DISPATCHED: ["LEASED"],
   SENT: ["DISPATCHED"],
-  DELIVERED: ["SENT"],
+  DELIVERED: ["DISPATCHED", "SENT"],
   FAILED: ["DISPATCHED", "SENT"],
   EXPIRED: ["PENDING", "LEASED", "DISPATCHED"],
 };

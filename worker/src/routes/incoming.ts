@@ -357,9 +357,17 @@ export async function handleIncomingBatch(
     );
     // Outbound rows are an upsert: the SAME (device_id, local_id) row goes
     // `queued` → `sent` → `delivered` (or `failed`) as the radio reports it.
-    // The WHERE makes an identical replay a no-op, so `meta.changes` still
-    // distinguishes "written" from "already there", and a collision with an
-    // inbound row of the same local_id can never rewrite its state.
+    // The WHERE is a predecessor guard, not just a "value changed" test: a late
+    // or duplicated device report must never move `delivered` back to `sent`,
+    // `queued` or `failed`. The allowed predecessors are:
+    //   NULL      → any state (the phone had not reported before)
+    //   queued    → sent, delivered, failed
+    //   sent      → delivered, failed
+    //   delivered → nothing (terminal)
+    //   failed    → nothing (terminal)
+    // The same-state check makes an identical replay a no-op, so `meta.changes`
+    // still distinguishes "written" from "already there", and a collision with
+    // an inbound row of the same local_id can never rewrite its state.
     const outboundStmt = env.DB.prepare(
       `INSERT INTO messages
          (id, device_id, local_id, direction, peer, body, received_at, auto_reply,
@@ -369,8 +377,14 @@ export async function handleIncomingBatch(
          reply_state = excluded.reply_state,
          reply_error = excluded.reply_error
        WHERE messages.direction = 'out'
-         AND (messages.reply_state IS NOT excluded.reply_state
-              OR messages.reply_error IS NOT excluded.reply_error)`
+         AND messages.reply_state IS NOT excluded.reply_state
+         AND (
+           messages.reply_state IS NULL
+           OR (messages.reply_state = 'queued'
+               AND excluded.reply_state IN ('sent', 'delivered', 'failed'))
+           OR (messages.reply_state = 'sent'
+               AND excluded.reply_state IN ('delivered', 'failed'))
+         )`
     );
     let results: D1Result[];
     try {
