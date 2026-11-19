@@ -20,11 +20,27 @@ npm start        # serve the build
 | | |
 |---|---|
 | `/docs/...` | 20 pages in six sections — start, guides, reference, architecture, agents — with the sidebar and per-page actions from `content/docs/**/meta.json` |
-| `/docs/{slug}.md` | the same page as clean markdown, and `/docs/...` with `Accept: text/markdown` is rewritten to it by `middleware.ts` |
+| `/docs/{slug}.md` | the same page as clean markdown, generated from the MDX at build, and `/docs/...` with `Accept: text/markdown` is rewritten to it by `middleware.ts` |
 | `/llms.txt`, `/llms-full.txt` | the index and the whole bundle, for an agent that wants one fetch |
 | `/openapi.json` | the edge API as OpenAPI 3.1, which also drives the playground |
 | `/mcp` | an MCP endpoint (`/api/mcp`), so an agent can read the docs over the protocol it already speaks |
 | `/SKILL.md`, `/AGENTS.md` | in `public/`, served as static files |
+
+## One source, two renderings
+
+`content/docs/**/*.mdx` is the only file you edit. `scripts/sync-markdown.mjs` generates the
+markdown copies that `/docs/{slug}.md` serves into `public/md/` — on `predev` and `prebuild`, so
+they cannot go stale, and `npm run check:md` compares instead of writing if you want to see the
+difference. `public/md/` is git-ignored.
+
+That generation is not a convenience. Those copies used to be hand-kept, and the cost was real:
+four pages repeated a wrong command count, and an import was corrected in the MDX while its
+markdown twin kept the old one. Two files, one truth.
+
+The transform is the one the copies were made with: frontmatter becomes an H1 and a blockquote,
+code fences are never touched, and two markers decide what a machine reader sees —
+`{/* llms-ignore:start */}` drops a block, `{/* llms-only:start */}` names the page's own heading
+for that audience.
 
 ## Stack, and why the versions are what they are
 

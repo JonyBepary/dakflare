@@ -8,7 +8,10 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "check": "next build",
-    "postinstall": "fumadocs-mdx"
+    "postinstall": "fumadocs-mdx",
+    "predev": "node scripts/sync-markdown.mjs",
+    "prebuild": "node scripts/sync-markdown.mjs",
+    "check:md": "node scripts/sync-markdown.mjs --check"
   },
   "dependencies": {
     "fumadocs-core": "^16.19.4",

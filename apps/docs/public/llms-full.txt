@@ -1407,7 +1407,7 @@ The Wasm module imports **zero host functions** (`WebAssembly.instantiate(flowMo
 
 ---
 
-<!-- source: /docs/agents/index.md -->
+<!-- source: /docs/agents.md -->
 
 # Docs for Agents
 
