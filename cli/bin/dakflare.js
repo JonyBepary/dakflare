@@ -292,6 +292,22 @@ const ERROR_RULES = {
   },
   bad_request: { exit: 2, category: 'usage' },
 
+  // `fix` names the two ways a target can be absent or ambiguous. A malformed
+  // run key and two targets at once are the caller's document (usage); a key or
+  // a flow that does not exist is a not-found, like every other unknown id.
+  invalid_flow_run_id: {
+    exit: 2,
+    category: 'usage',
+    fix: 'a run id is device_id/local_id/flow_id/flow_version, as flow_runs returns it',
+  },
+  ambiguous_flow_target: { exit: 2, category: 'usage', fix: 'use --flow or --run, not both' },
+  flow_run_not_found: { exit: 3, category: 'not_found' },
+  no_flow_runs: {
+    exit: 3,
+    category: 'not_found',
+    fix: 'let the flow run once, or target a message with --message-id',
+  },
+
   internal: { exit: 1, category: 'internal' },
   bad_response: { exit: 1, category: 'internal' },
   cancelled: { exit: 1, category: 'internal' },
@@ -607,9 +623,16 @@ const COMMAND_SPECS = {
     summary: 'Explain a flow failure as a root-cause card (v7.1)',
     effect: 'read',
     usage:
-      'dakflare fix --flow <id> [--message-id <id>] [--message <text>] [--pattern <regex>] [--ndjson] [--dry-run]',
+      'dakflare fix (--flow <id> | --run <run-id>) [--message-id <id>] [--message <text>] [--pattern <regex>] [--ndjson] [--dry-run]',
     flags: {
-      flow: { type: 'string', required: true, note: 'the flow, sent as flow_run_id' },
+      flow: {
+        type: 'string',
+        note: "the flow, sent as flow_id; diagnoses against its most recent stored run",
+      },
+      run: {
+        type: 'string',
+        note: 'one stored run, sent as flow_run_id (device_id/local_id/flow_id/flow_version)',
+      },
       'message-id': { type: 'string', note: 'the stored message to explain' },
       message: { type: 'string', note: 'diagnose this body directly instead of a stored row' },
       pattern: { type: 'string', note: 'also check this pattern for a word-boundary cut' },
@@ -621,6 +644,7 @@ const COMMAND_SPECS = {
     },
     examples: [
       'dakflare fix --flow wf_bkash --message-id 6cb13963-f33c-49d0-b87f-2cc72844a426',
+      'dakflare fix --run dev1/local-1/wf_bkash/3 --pattern "REF" --json',
       'dakflare fix --flow wf_bkash --message "Paid 500 at REF 12A45" --pattern "REF" --json',
       'dakflare fix --flow wf_bkash --message-id 6cb13963 --ndjson',
     ],
@@ -939,6 +963,7 @@ const VALUE_FLAGS = new Set([
   'node',
   'corpus-limit',
   'flow',
+  'run',
   'message-id',
   'message',
   'pattern',
@@ -4932,13 +4957,18 @@ function printRootCauseCard(card) {
 }
 
 /**
- * `dakflare fix --flow <id> [--message-id <id>]` — why did this fail.
+ * `dakflare fix (--flow <id> | --run <run-id>) [--message-id <id>]` — why did
+ * this fail.
  *
- * `--flow` is sent as `flow_run_id`: the Worker has no run-id column and says so
- * in `resolveFlowIds`, trying the value as a flow id first and a message local id
- * second. `--message` and `--pattern` exist so a card can be reproduced without a
- * stored row, which is also how the tests exercise the invisible-Unicode case.
+ * The two targets are different questions and go in different fields:
+ * `--flow` sends `flow_id` (the Worker diagnoses against the flow's newest run),
+ * and `--run` sends `flow_run_id` (one exact run, keyed
+ * `device_id/local_id/flow_id/flow_version`). `--message` and `--pattern` exist
+ * so a card can be reproduced without a stored row, which is also how the tests
+ * exercise the invisible-Unicode case.
  */
+const FLOW_RUN_ID_SHAPE = /^[^/]+\/[^/]+\/[^/]+\/(?:0|[1-9]\d*)$/;
+
 async function commandFix(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('fix');
@@ -4946,7 +4976,29 @@ async function commandFix(argv) {
   const stream = ndjsonEnabled(flags);
   const phase = ndjson(stream);
 
-  const flowId = stringFlag(flags, 'flow', { required: true });
+  const flowId = stringFlag(flags, 'flow');
+  const runId = stringFlag(flags, 'run');
+  if (flowId === undefined && runId === undefined) {
+    throw new CliError('one of --flow or --run is required', 2, {
+      error: 'input_required',
+      missing: ['--flow or --run'],
+    });
+  }
+  if (flowId !== undefined && runId !== undefined) {
+    throw new CliError(
+      'use either --flow or --run, not both: a flow and one run are different questions.',
+      2,
+      { error: 'ambiguous_flow_target' }
+    );
+  }
+  if (runId !== undefined && !FLOW_RUN_ID_SHAPE.test(runId)) {
+    throw new CliError(
+      '--run must be device_id/local_id/flow_id/flow_version, as flow_runs prints it.',
+      2,
+      { error: 'invalid_flow_run_id' }
+    );
+  }
+
   const messageId = stringFlag(flags, 'message-id');
   const message = stringFlag(flags, 'message');
   const pattern = stringFlag(flags, 'pattern');
@@ -4955,16 +5007,18 @@ async function commandFix(argv) {
   }
 
   const body = {
-    flow_run_id: flowId,
+    ...(flowId === undefined ? {} : { flow_id: flowId }),
+    ...(runId === undefined ? {} : { flow_run_id: runId }),
     ...(messageId === undefined ? {} : { message_id: messageId }),
     ...(message === undefined ? {} : { message }),
     ...(pattern === undefined ? {} : { pattern }),
   };
+  const target = flowId === undefined ? { flow_run_id: runId } : { flow_id: flowId };
   const pathname = '/v1/agent/diagnose';
 
   if (flags['dry-run'] === true) {
     if (stream !== null) {
-      phase('understand', { flow_id: flowId, message_id: messageId ?? null, dry_run: true });
+      phase('understand', { ...target, message_id: messageId ?? null, dry_run: true });
       phase('result', { dry_run: true, sent: false, request: { method: 'POST', path: pathname, body } });
       return 0;
     }
@@ -4983,7 +5037,7 @@ async function commandFix(argv) {
   try {
     cfg = requireConfig();
     phase('understand', {
-      flow_id: flowId,
+      ...target,
       message_id: messageId ?? null,
       inline_message: message !== undefined,
     });
@@ -5007,7 +5061,7 @@ async function commandFix(argv) {
     if (stream !== null) return 0;
 
     if (MODE.json) {
-      emitJson({ ok: true, flow_id: flowId, card }, MODE);
+      emitJson({ ok: true, ...target, card }, MODE);
       return 0;
     }
     printRootCauseCard(card);
@@ -7360,18 +7414,23 @@ authority for one apply, so it is not printed into a pipeline by accident.
 A required approval is not a failure: the command exits 0 and names the handle,
 because the handle is what a human's approval is for.`, 
 
-  fix: `Usage: dakflare fix --flow <id> [options]
+  fix: `Usage: dakflare fix (--flow <id> | --run <run-id>) [options]
 
 Prints the root-cause card for one failure: the code, a one-line summary, the
 character offset, a before/bad/after window with the offending bytes visible,
 the encoding and segment count, and the proposed pattern patch when there is one.
 
-  --flow <id>          the flow, sent as flow_run_id (required)
+  --flow <id>          a flow, sent as flow_id; its newest stored run is diagnosed
+  --run <run-id>       one run, sent as flow_run_id
+                       (device_id/local_id/flow_id/flow_version, as flow_runs prints it)
   --message-id <id>    explain this stored message
   --message <text>     diagnose this body directly, with no stored row
   --pattern <regex>    also check whether the pattern cuts a reference in half
   --ndjson             one JSON object per phase, one per line
   --dry-run            print the request and send nothing
+
+Use --flow or --run, not both. A flow with no stored runs is refused by name
+(exit 3) rather than guessed at; a malformed run id is usage (exit 2).
 
 Invisible characters are rendered as <U+XXXX> and control bytes as \\uXXXX, so a
 zero-width space is visible in the highlight rather than silently shortening it.

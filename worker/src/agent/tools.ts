@@ -15,7 +15,7 @@ import type { AdminActor } from "../audit";
 import type { AgentTool, ToolResult } from "./types";
 import { createActTools, type ActDispatch } from "./act";
 import { handleHealth } from "../routes/health";
-import { handleAgentDiagnose, handleAgentTelemetry } from "../routes/agent";
+import { handleAgentDiagnose, handleAgentTelemetry, flowRunIdOf } from "../routes/agent";
 import { handleWorkflowGet, handleWorkflowPut } from "../routes/workflows";
 import { handleSend } from "../routes/send";
 import {
@@ -385,27 +385,36 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
     {
       name: "diagnose",
       description:
-        "Diagnose one failure into a root-cause card. Accepts a message id; the message body is never echoed.",
+        "Diagnose one failure into a root-cause card. Accepts a message id, one flow run (`flow_run_id`: `device_id/local_id/flow_id/flow_version`, the `run_id` field flow_runs returns), a whole flow (`flow_id`, diagnosed against its most recent run), a message body, or a pattern to lint. `flow_run_id` and `flow_id` are alternatives; sending both is refused. The message body is never echoed.",
       kind: "read",
       parameters: {
         type: "object",
         properties: {
           message_id: { type: "string" },
-          flow_run_id: { type: "string" },
+          flow_run_id: {
+            type: "string",
+            description:
+              "One stored run: device_id/local_id/flow_id/flow_version. Unknown or malformed ids are refused by name.",
+          },
+          flow_id: {
+            type: "string",
+            description:
+              "A flow; diagnoses against its most recent stored run. A flow with no runs is refused by name.",
+          },
           message: { type: "string" },
           pattern: { type: "string" },
         },
       },
       async execute(input, ctx) {
         const body: Record<string, unknown> = {};
-        for (const key of ["message_id", "flow_run_id", "message", "pattern"]) {
+        for (const key of ["message_id", "flow_run_id", "flow_id", "message", "pattern"]) {
           if (typeof input[key] === "string") body[key] = input[key];
         }
         if (Object.keys(body).length === 0) {
           return {
             ok: false,
             reason: "bad_request",
-            message: "one of message_id, flow_run_id, message or pattern is required",
+            message: "one of message_id, flow_run_id, flow_id, message or pattern is required",
           };
         }
         return fromResponse(
@@ -433,7 +442,7 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
     {
       name: "flow_runs",
       description:
-        "Read recent workflow runs, newest first, to put history beside diagnose and flow_ast. Returns {count, runs}. This schema has no run-id, status, started_at/finished_at, failed_step or error column: a run is keyed by (device_id, local_id, flow_id, flow_version), its status is `outcome`, and its time is `created_at` (ISO in the result). Optional flow_id and status filters; status matches the `outcome` column. Limit is 1-20 (default 10).",
+        "Read recent workflow runs, newest first, to put history beside diagnose and flow_ast. Returns {count, runs}. This schema has no generated run-id, status, started_at/finished_at, failed_step or error column: a run is keyed by (device_id, local_id, flow_id, flow_version), its status is `outcome`, and its time is `created_at` (ISO in the result). Each row exposes that key as `run_id`, which diagnose accepts. Optional flow_id and status filters; status matches the `outcome` column. Limit is 1-20 (default 10).",
       kind: "read",
       parameters: {
         type: "object",
@@ -478,6 +487,12 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
           }>();
 
         const runs = (rows.results ?? []).map((row) => ({
+          run_id: flowRunIdOf({
+            device_id: row.device_id,
+            local_id: row.local_id,
+            flow_id: row.flow_id,
+            flow_version: Number(row.flow_version),
+          }),
           device_id: row.device_id,
           local_id: row.local_id,
           flow_id: row.flow_id,

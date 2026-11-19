@@ -235,8 +235,9 @@ Rotation is delete-and-recreate, because the secret cannot be recovered by desig
 
 ### MCP
 
-`/mcp` serves the same seven tools (`list_devices`, `read_messages`, `command_status`,
-`list_flows`, `get_flow`, `trace`, `send_sms`) over streamable HTTP; `/v1/mcp` keeps the tokens
+`/mcp` serves the same nine tools (`list_devices`, `read_messages`, `command_status`,
+`list_flows`, `get_flow`, `trace`, `triage`, `telemetry`, `send_sms`) over streamable HTTP;
+`/v1/mcp` keeps the tokens
 already deployed against it. `POST` carries JSON-RPC, `GET` holds the SSE stream of a stateful
 session and `DELETE` ends it. `Accept` must include `application/json` or `text/event-stream`.
 Discovery is public at `/.well-known/oauth-protected-resource` (RFC 9728) and

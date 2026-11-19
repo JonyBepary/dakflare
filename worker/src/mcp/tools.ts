@@ -24,6 +24,7 @@ import { handleCommandStatus } from "../routes/status";
 import { handleMessagesList } from "../routes/incoming";
 import { handleDevicesList } from "../routes/pair";
 import { handleWorkflowGet, handleWorkflowsList } from "../routes/workflows";
+import { handleAgentTelemetry, handleAgentTriage } from "../routes/agent";
 import { traceMessage } from "../lib/reply-fate-trace";
 import { GRANT_LADDER_S, SCOPE_CAPS } from "../lib/agent-scopes";
 
@@ -109,6 +110,7 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
           z.object({
             device_id: z.string(),
             label: z.string().nullable().optional(),
+            sim_slot: z.number().int().nullable().optional(),
             last_seen: z.number().nullable().optional(),
             fcm: z.boolean().optional(),
           })
@@ -126,6 +128,7 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         const mapped = devices.map((row) => ({
           device_id: String(row.device_id ?? ""),
           label: typeof row.label === "string" ? row.label : null,
+          sim_slot: typeof row.sim_slot === "number" ? row.sim_slot : null,
           last_seen: typeof row.last_seen === "number" ? row.last_seen : null,
           fcm: Boolean(row.fcm_token),
         }));
@@ -296,6 +299,99 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         return {
           text: workflow === null ? "No such flow." : `Flow ${workflow.id} v${workflow.version}.`,
           structured: { workflow },
+        };
+      },
+    },
+
+    {
+      name: "triage",
+      requiredScope: "messages:read",
+      title: "Triage a message",
+      description:
+        "Classify one inbound message: intent, prompt-injection probability, template specificity, the role of each supplied span, and the deterministic balance-vs-principal invariant. Reads only; the message body is not stored or echoed.",
+      inputSchema: z.object({
+        message: z.string().min(1).max(4_096).describe("The inbound message text."),
+        sender: z.string().min(1).max(64).describe("The sender, as the phone reported it."),
+        spans: z
+          .array(
+            z.object({
+              index: z.int().min(0).max(10_000),
+              text: z.string().min(1).max(512),
+            })
+          )
+          .max(20)
+          .optional()
+          .describe("Candidate spans to classify individually."),
+      }),
+      outputSchema: z.object({
+        intent: z
+          .object({
+            choice: z.string(),
+            probability: z.number(),
+            confidence: z.number(),
+          })
+          .nullable(),
+        injection: z.object({ probability: z.number() }).nullable(),
+        specificity: z.object({ score: z.number().nullable() }).nullable(),
+        roles: z.array(
+          z.object({
+            index: z.number(),
+            role: z.string(),
+            probability: z.number(),
+          })
+        ),
+        invariant: z.object({ balanceAtLeastPrincipal: z.boolean().nullable() }),
+        source: z.string(),
+      }),
+      run: async (args, environment) => {
+        const { status, data } = await callRoute(
+          (request) => handleAgentTriage(request, environment),
+          "POST",
+          "/v1/agent/triage",
+          args
+        );
+        if (status !== 200) return refusal(status, data);
+        const invariant = data.invariant as
+          | { balanceAtLeastPrincipal?: unknown }
+          | null
+          | undefined;
+        return {
+          text:
+            data.source === "unavailable"
+              ? "Triage is unavailable; the deterministic invariant is still reported."
+              : `Triaged by ${String(data.source)}; invariant ${invariant?.balanceAtLeastPrincipal === false ? "FAILED" : "holds"}.`,
+          structured: data,
+        };
+      },
+    },
+
+    {
+      name: "telemetry",
+      requiredScope: "devices:read",
+      title: "Fleet telemetry",
+      description:
+        "Map one operator question to a single bounded telemetry plan (fleet health, stuck outbox, SIM ranking, workflow failures, authority audit or extraction drift) and return its rows. No raw SQL and no fan-out over devices.",
+      inputSchema: z.object({
+        question: z.string().min(1).max(500).describe("The question to answer."),
+      }),
+      outputSchema: z.object({
+        plan: z.string(),
+        rows: z.array(z.record(z.string(), z.unknown())),
+        truncated: z.boolean(),
+        took_ms: z.number(),
+      }),
+      run: async (args, environment, actor) => {
+        const { status, data } = await callRoute(
+          (request) => handleAgentTelemetry(request, environment, actor),
+          "POST",
+          "/v1/agent/telemetry",
+          args
+        );
+        if (status !== 200) return refusal(status, data);
+        const rows = Array.isArray(data.rows) ? data.rows.length : 0;
+        return {
+          text: `${String(data.plan)}: ${rows} row${rows === 1 ? "" : "s"}${data.truncated === true ? ", truncated" : ""}.`,
+          structured: data,
         };
       },
     },

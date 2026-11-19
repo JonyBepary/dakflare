@@ -104,13 +104,21 @@ With no AI binding or an unreachable provider: `source: "unavailable"`, every mo
 `fleet_health`, `stuck_outbox`, `sim_signal_ranking`, `workflow_failures`,
 `authority_audit`, `unmatched_drift`. Anything else is `400` with the plan list. Each plan is
 one `env.DB.batch` of constant SQL with bound parameters: 25 rows per query, 50 total,
-`took_ms` returned. There is no raw SQL and no fan-out over devices; `stuck_outbox` reads
-`messages` rows whose `reply_state` never reached a terminal value.
+`took_ms` returned. Each statement fetches one row beyond its cap so `truncated` is true only
+when a row was actually dropped; a page of exactly the cap is complete. There is no raw SQL and
+no fan-out over devices; `stuck_outbox` reads `messages` rows whose `reply_state` never reached a
+terminal value.
 
 ### diagnose
 
-Accepts `message_id`, `flow_run_id`, `message` or `pattern`, and returns a card for one of six
-codes:
+Accepts `message_id`, `flow_run_id`, `flow_id`, `message` or `pattern`, and returns a card for one of six
+codes. `flow_run_id` is a real run key, `/`-joined as
+`device_id/local_id/flow_id/flow_version` (the `run_id` the `flow_runs` tool returns); it is never
+tried as a flow id or a message local id, and a value that matches no run is `404
+flow_run_not_found`. `flow_id` is the separate question "diagnose this flow" and reads its most
+recent stored run; a flow with none is `404 no_flow_runs`. Sending both `flow_run_id` and `flow_id`
+is `400 ambiguous_flow_target`. A `pattern` on its own lints the pattern for the unanchored
+multi-word reference defect; supply a body to test it against one.
 
 | Code | Meaning |
 |---|---|
@@ -162,7 +170,7 @@ JSON-RPC errors: `-32700` parse, `-32600` envelope or session, `-32601` unknown 
 |---|---|
 | `dakflare schema --flow-v2 [--json]` | the canonical flow IR schema (`cli/schema/flow-v2.json`) |
 | `dakflare ask "<intent>" --flow <id> [--ndjson|--dry-run]` | synthesize a patch; streams understand, propose, verify, result |
-| `dakflare fix --flow <id> [--message-id] [--message] [--pattern]` | diagnose a failure and print the card |
+| `dakflare fix (--flow <id> \| --run <run-id>) [--message-id] [--message] [--pattern]` | diagnose a failure and print the card |
 | `dakflare flow test --flow <id> --corpus <jsonl>` | run the corpus against the built `flow.wasm` locally |
 | `dakflare flow apply --token <handle> [--totp]` | spend a synthesis handle through approvals |
 

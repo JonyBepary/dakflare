@@ -64,13 +64,19 @@ export function isTokenScope(value: unknown): value is TokenScope {
  * "sandbox" in a self-hosted gateway, every SMS leaves a real radio and costs
  * real money, so the distinction is between "the agent may ask" and "a human
  * said yes to these recipients until this time".
+ *
+ * Membership follows an act: `save workflows` / `delete workflows` check a live
+ * `flow_deploy_prod`, `save rules` / `delete rules` check `rules:write`, and
+ * outbound webhook delivery checks `webhooks:write`. `flows:write` is
+ * deliberately absent — the only thing it reaches is `synthesize agent patches`,
+ * which judges a diff and mints a handle for `flow_deploy_prod` to spend, so no
+ * act would enforce a grant for it.
  */
 export const GRANT_REQUIRED_SCOPES: ReadonlySet<string> = new Set([
   "sms:send:production",
   "enable_shortcode",
   "dlq_bulk_replay",
   "flow_deploy_prod",
-  "flows:write",
   "rules:write",
   "webhooks:write",
 ]);
@@ -111,7 +117,6 @@ export const SCOPE_CAPS: Readonly<Record<string, ScopeCap>> = {
   enable_shortcode: { max_ttl_s: 900, requires: "rule" },
   dlq_bulk_replay: { max_ttl_s: 900, requires: "device" },
   flow_deploy_prod: { max_ttl_s: 86_400, requires: "flow" },
-  "flows:write": { max_ttl_s: 86_400, requires: "flow" },
   "rules:write": { max_ttl_s: 86_400, requires: null },
   "webhooks:write": { max_ttl_s: 86_400, requires: null },
   "messages:read": { max_ttl_s: 2_592_000, requires: null },

@@ -231,31 +231,45 @@ const PLAN_KEYWORDS: ReadonlyArray<{ plan: TelemetryPlan; pattern: RegExp }> = [
   { plan: "fleet_health", pattern: /fleet|devices?.*(?:up|down|online|offline|health)|how many devices/i },
 ];
 
+/** One bounded statement plus the page size it was written for. */
+export interface TelemetryQuery {
+  group: string;
+  /** Rows this statement may contribute to the answer. */
+  limit: number;
+  stmt: D1PreparedStatement;
+}
+
 /**
  * One batch, bounded statements, no user SQL.
  *
  * `now` is a parameter, not `Date.now()` inside SQL, so the plan is a pure
  * function of its arguments and the answer can be replayed.
+ *
+ * Every statement asks for `limit + 1` rows. The extra row is never returned; it
+ * is the evidence that a cut actually happened, so `truncated` is true only when
+ * a row beyond the cap exists (a page of exactly `limit` rows is complete).
  */
 const PLAN_QUERIES: Record<
   TelemetryPlan,
-  (env: Env, now: number) => Array<{ group: string; stmt: D1PreparedStatement }>
+  (env: Env, now: number) => TelemetryQuery[]
 > = {
   fleet_health: (env) => [
     {
       group: "devices",
+      limit: PER_QUERY_LIMIT,
       stmt: env.DB.prepare(
         `SELECT device_id, label, last_seen, sim_slot FROM devices
           WHERE archived_at IS NULL AND revoked_at IS NULL
-          ORDER BY last_seen ASC LIMIT ${PER_QUERY_LIMIT}`
+          ORDER BY last_seen ASC LIMIT ${PER_QUERY_LIMIT + 1}`
       ),
     },
     {
       group: "alerts",
+      limit: PER_QUERY_LIMIT,
       stmt: env.DB.prepare(
         `SELECT device_id, kind, raised_at FROM alerts
           WHERE resolved_at IS NULL
-          ORDER BY raised_at ASC LIMIT ${PER_QUERY_LIMIT}`
+          ORDER BY raised_at ASC LIMIT ${PER_QUERY_LIMIT + 1}`
       ),
     },
   ],
@@ -265,6 +279,7 @@ const PLAN_QUERIES: Record<
   stuck_outbox: (env, now) => [
     {
       group: "outbound_not_terminal",
+      limit: MAX_TELEMETRY_ROWS,
       stmt: env.DB
         .prepare(
           `SELECT id, device_id, peer, reply_state, reply_command_id, received_at
@@ -272,7 +287,7 @@ const PLAN_QUERIES: Record<
             WHERE direction = 'out'
               AND (reply_state IS NULL OR LOWER(reply_state) NOT IN ('delivered', 'failed', 'expired'))
               AND received_at < ?
-            ORDER BY received_at ASC LIMIT ${MAX_TELEMETRY_ROWS}`
+            ORDER BY received_at ASC LIMIT ${MAX_TELEMETRY_ROWS + 1}`
         )
         .bind(now - 5 * 60_000),
     },
@@ -280,24 +295,26 @@ const PLAN_QUERIES: Record<
   sim_signal_ranking: (env) => [
     {
       group: "sims",
+      limit: MAX_TELEMETRY_ROWS,
       stmt: env.DB.prepare(
         `SELECT device_id, sim_slot, carrier_name, radio_state, consecutive_fails,
                 sent_current_hour, max_per_hour, updated_at
            FROM device_sims
           ORDER BY consecutive_fails DESC, sent_current_hour DESC
-          LIMIT ${MAX_TELEMETRY_ROWS}`
+          LIMIT ${MAX_TELEMETRY_ROWS + 1}`
       ),
     },
   ],
   workflow_failures: (env, now) => [
     {
       group: "failed_runs",
+      limit: MAX_TELEMETRY_ROWS,
       stmt: env.DB
         .prepare(
           `SELECT device_id, local_id, flow_id, flow_version, outcome, created_at
              FROM flow_runs
             WHERE outcome IN ('error', 'halted') AND created_at > ?
-            ORDER BY created_at DESC LIMIT ${MAX_TELEMETRY_ROWS}`
+            ORDER BY created_at DESC LIMIT ${MAX_TELEMETRY_ROWS + 1}`
         )
         .bind(now - 24 * 60 * 60_000),
     },
@@ -305,34 +322,68 @@ const PLAN_QUERIES: Record<
   authority_audit: (env) => [
     {
       group: "grants",
+      limit: PER_QUERY_LIMIT,
       stmt: env.DB.prepare(
         `SELECT id, scope, granted_by, granted_at, expires_at, revoked_at, use_count
            FROM authority_grants
-          ORDER BY granted_at DESC LIMIT ${PER_QUERY_LIMIT}`
+          ORDER BY granted_at DESC LIMIT ${PER_QUERY_LIMIT + 1}`
       ),
     },
     {
       group: "pending_approvals",
+      limit: PER_QUERY_LIMIT,
       stmt: env.DB.prepare(
         `SELECT id, scope, state, requested_at, expires_at
            FROM approval_requests
           WHERE state = 'PENDING'
-          ORDER BY requested_at DESC LIMIT ${PER_QUERY_LIMIT}`
+          ORDER BY requested_at DESC LIMIT ${PER_QUERY_LIMIT + 1}`
       ),
     },
   ],
   unmatched_drift: (env) => [
     {
       group: "extract_misses",
+      limit: MAX_TELEMETRY_ROWS,
       // `body_preview` is deliberately NOT selected: a telemetry answer is
       // counts-shaped, and a preview is still a piece of someone's message.
       stmt: env.DB.prepare(
         `SELECT id, device_id, flow_id, field, at FROM extract_misses
-          ORDER BY at DESC LIMIT ${MAX_TELEMETRY_ROWS}`
+          ORDER BY at DESC LIMIT ${MAX_TELEMETRY_ROWS + 1}`
       ),
     },
   ],
 };
+
+/**
+ * Cut fetched pages down to the advertised caps.
+ *
+ * A page is truncated when it carried MORE rows than its cap (that is what the
+ * `limit + 1` fetch is for) or when the total cap would drop a row it holds.
+ * A page of exactly the cap is not truncated.
+ */
+export function collectTelemetryRows(
+  queries: ReadonlyArray<{ group: string; limit: number }>,
+  results: ReadonlyArray<D1Result<Record<string, unknown>>>
+): { rows: Array<Record<string, unknown>>; truncated: boolean } {
+  const rows: Array<Record<string, unknown>> = [];
+  let truncated = false;
+
+  results.forEach((result, position) => {
+    const entry = queries[position];
+    if (entry === undefined) return;
+    const page = result.results ?? [];
+    if (page.length > entry.limit) truncated = true;
+    for (const row of page.slice(0, entry.limit)) {
+      if (rows.length >= MAX_TELEMETRY_ROWS) {
+        truncated = true;
+        break;
+      }
+      rows.push({ group: entry.group, ...row });
+    }
+  });
+
+  return { rows, truncated };
+}
 
 /** Ask the model, then fall back to keywords. `null` means "not a plan". */
 async function resolvePlan(
@@ -425,33 +476,20 @@ export async function handleAgentTelemetry(
     return err("storage_unavailable", 503);
   }
 
-  const rows: Array<Record<string, unknown>> = [];
-  let hitCap = false;
-  results.forEach((result, position) => {
-    const group = queries[position]?.group ?? "rows";
-    const page = result.results ?? [];
-    if (page.length >= PER_QUERY_LIMIT) hitCap = true;
-    for (const row of page) {
-      if (rows.length >= MAX_TELEMETRY_ROWS) {
-        hitCap = true;
-        break;
-      }
-      rows.push({ group, ...row });
-    }
-  });
+  const { rows, truncated } = collectTelemetryRows(queries, results);
 
   const tookMs = Date.now() - started;
   logAgent("telemetry", {
     plan,
     rows: rows.length,
-    truncated: hitCap,
+    truncated,
     took_ms: tookMs,
   });
 
   return Response.json({
     plan,
     rows,
-    truncated: hitCap,
+    truncated,
     took_ms: tookMs,
   });
 }
@@ -480,7 +518,10 @@ export interface RootCauseCard {
 const DiagnoseBody = z
   .object({
     message_id: z.string().min(1).max(128).optional(),
+    /** One exact stored run: `device_id/local_id/flow_id/flow_version`. */
     flow_run_id: z.string().min(1).max(128).optional(),
+    /** A flow; diagnoses against its most recent stored run. */
+    flow_id: z.string().min(1).max(128).optional(),
     message: z.string().min(1).max(4_096).optional(),
     pattern: z.string().min(1).max(512).optional(),
   })
@@ -488,8 +529,13 @@ const DiagnoseBody = z
     (value) =>
       value.message !== undefined ||
       value.message_id !== undefined ||
-      value.flow_run_id !== undefined,
-    { message: "one of message, message_id or flow_run_id is required" }
+      value.flow_run_id !== undefined ||
+      value.flow_id !== undefined ||
+      value.pattern !== undefined,
+    {
+      message:
+        "one of message, message_id, flow_run_id, flow_id or pattern is required",
+    }
   );
 
 /**
@@ -691,28 +737,123 @@ async function loadApprovalState(env: Env, id: string): Promise<ApprovalStateRow
 }
 
 /**
- * Resolve the flow ids a `flow_run_id` could name.
+ * The stored key of a flow run, joined into one opaque id.
  *
- * `flow_runs` has no run-id column (its key is device+local+flow+version), so the
- * supplied value is tried as a `flow_id` first and as a message `local_id`
- * second. That is the only honest mapping the schema supports.
+ * `flow_runs` has no generated run-id column: its key is
+ * (device_id, local_id, flow_id, flow_version). That key IS the run's identity,
+ * so it is exposed as one slash-separated string and parsed back exactly. The
+ * `flow_runs` agent tool returns this value as `run_id`.
  */
-async function resolveFlowIds(
-  env: Env,
-  runId: string
-): Promise<{ flowIds: string[]; outcomes: string[] }> {
-  const rows = await env.DB.prepare(
-    `SELECT flow_id, outcome FROM flow_runs
-      WHERE flow_id = ? OR local_id = ?
-      ORDER BY created_at DESC LIMIT 5`
-  )
-    .bind(runId, runId)
-    .all<{ flow_id: string; outcome: string }>();
-  const results = rows.results ?? [];
+export function flowRunIdOf(parts: {
+  device_id: string;
+  local_id: string;
+  flow_id: string;
+  flow_version: number;
+}): string {
+  return [parts.device_id, parts.local_id, parts.flow_id, parts.flow_version].join("/");
+}
+
+const FLOW_RUN_ID_PATTERN = /^([^/]+)\/([^/]+)\/([^/]+)\/(0|[1-9]\d*)$/;
+
+export interface ParsedFlowRunId {
+  deviceId: string;
+  localId: string;
+  flowId: string;
+  flowVersion: number;
+}
+
+/** Parse `device_id/local_id/flow_id/flow_version`; `null` means malformed. */
+export function parseFlowRunId(value: string): ParsedFlowRunId | null {
+  const match = FLOW_RUN_ID_PATTERN.exec(value);
+  if (match === null) return null;
   return {
-    flowIds: [...new Set(results.map((row) => row.flow_id))],
-    outcomes: results.map((row) => row.outcome),
+    deviceId: match[1],
+    localId: match[2],
+    flowId: match[3],
+    flowVersion: Number(match[4]),
   };
+}
+
+type FlowRunResolution =
+  | { ok: true; flowId: string; outcome: string }
+  | { ok: false; response: Response };
+
+/**
+ * Resolve a `flow_run_id` to the one stored run it names.
+ *
+ * It is never tried as a `flow_id` or a message `local_id`: a field named
+ * `flow_run_id` must mean a run id. A malformed value is a 400 naming the shape,
+ * and a key that matches no row is a 404 naming the id, so the caller learns that
+ * the run it means does not exist rather than receiving a diagnosis of some
+ * other row.
+ */
+async function resolveFlowRun(env: Env, runId: string): Promise<FlowRunResolution> {
+  const parsed = parseFlowRunId(runId);
+  if (parsed === null) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "invalid_flow_run_id",
+          message:
+            "flow_run_id must be the run key device_id/local_id/flow_id/flow_version, as returned by the flow_runs tool",
+        },
+        { status: 400 }
+      ),
+    };
+  }
+
+  const row = await env.DB.prepare(
+    `SELECT flow_id, outcome FROM flow_runs
+      WHERE device_id = ? AND local_id = ? AND flow_id = ? AND flow_version = ?
+      LIMIT 1`
+  )
+    .bind(parsed.deviceId, parsed.localId, parsed.flowId, parsed.flowVersion)
+    .first<{ flow_id: string; outcome: string }>();
+
+  if (row === null) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "flow_run_not_found", message: `no flow run has id ${runId}` },
+        { status: 404 }
+      ),
+    };
+  }
+
+  return { ok: true, flowId: row.flow_id, outcome: row.outcome };
+}
+
+/**
+ * Resolve a `flow_id` to the most recent stored run for that flow.
+ *
+ * `dakflare fix --flow` asks about a flow, not one run, so the newest run is the
+ * subject. A flow with no runs is refused by name rather than answered from an
+ * invented outcome.
+ */
+async function resolveLatestFlowRun(env: Env, flowId: string): Promise<FlowRunResolution> {
+  const row = await env.DB.prepare(
+    `SELECT flow_id, outcome FROM flow_runs
+      WHERE flow_id = ?
+      ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(flowId)
+    .first<{ flow_id: string; outcome: string }>();
+
+  if (row === null) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "no_flow_runs",
+          message: `flow ${flowId} has no stored runs to diagnose`,
+        },
+        { status: 404 }
+      ),
+    };
+  }
+
+  return { ok: true, flowId: row.flow_id, outcome: row.outcome };
 }
 
 interface GrantRowLite {
@@ -811,6 +952,20 @@ export async function handleAgentDiagnose(req: Request, env: Env): Promise<Respo
   if (!parsed.ok) return parsed.response;
   const input = parsed.data;
 
+  // Two different questions arrived in one body. Answering either would hide
+  // the other, so the caller is told which field to drop.
+  if (input.flow_run_id !== undefined && input.flow_id !== undefined) {
+    logAgent("diagnose.rejected", { reason: "ambiguous_flow_target" });
+    return Response.json(
+      {
+        error: "ambiguous_flow_target",
+        message:
+          "supply flow_run_id for one stored run or flow_id for a flow's latest run, not both",
+      },
+      { status: 400 }
+    );
+  }
+
   const row = input.message_id === undefined ? null : await loadMessage(env, input.message_id);
   const text = input.message ?? row?.body ?? "";
   const segment = segmentText(text);
@@ -850,6 +1005,40 @@ export async function handleAgentDiagnose(req: Request, env: Env): Promise<Respo
           invisible.codepoint > 0xffff ? 2 : 1
         ),
       }
+    );
+  }
+
+  /*
+   * A pattern with no body is still a valid question: it lints the pattern
+   * itself. The cardinal defect this code names — a literal reference matched
+   * without word boundaries — is visible in the pattern source, so a pattern
+   * alone can report it. Anything else is answered with the honest statement
+   * that no body was supplied to test, never with a fabricated diagnosis.
+   */
+  if (input.pattern !== undefined && text.length === 0) {
+    try {
+      new RegExp(input.pattern);
+    } catch {
+      return Response.json(
+        { error: "bad_request", message: "pattern is not a valid regular expression" },
+        { status: 400 }
+      );
+    }
+    const anchored =
+      input.pattern.startsWith("\\b") ||
+      input.pattern.startsWith("^") ||
+      input.pattern.endsWith("\\b") ||
+      input.pattern.endsWith("$");
+    if (!anchored && /\s/.test(input.pattern.trim())) {
+      return finish(
+        "ERR_MULTIWORD_REF_MISMATCH",
+        "the pattern contains whitespace and no word boundary, so a multi-word reference can be matched in half; anchor the capture before testing it against a body.",
+        { fix: { kind: "pattern_patch", pattern: `\\b(?:${input.pattern})\\b` } }
+      );
+    }
+    return finish(
+      null,
+      "the pattern compiles and has no boundary defect this linter can see; supply a message, message_id or flow_run_id to test it against a body."
     );
   }
 
@@ -895,41 +1084,45 @@ export async function handleAgentDiagnose(req: Request, env: Env): Promise<Respo
   }
 
   /* 4. authority grant --------------------------------------------------- */
-  if (input.flow_run_id !== undefined) {
-    const { flowIds, outcomes } = await resolveFlowIds(env, input.flow_run_id);
-    if (flowIds.length > 0) {
-      const grants = await env.DB.prepare(
-        `SELECT id, scope, target_json, expires_at, revoked_at
-           FROM authority_grants
-          ORDER BY granted_at DESC LIMIT 100`
-      ).all<GrantRowLite>();
-      const now = Date.now();
-      const relevant = (grants.results ?? []).filter((grant) => {
-        try {
-          const target = JSON.parse(grant.target_json) as { flow_id?: unknown };
-          return typeof target.flow_id === "string" && flowIds.includes(target.flow_id);
-        } catch {
-          return false;
-        }
-      });
-      const live = relevant.filter(
-        (grant) => grant.revoked_at === null && grant.expires_at > now
-      );
-      const failedOutcome = outcomes.some(
-        (outcome) => outcome === "error" || outcome === "halted"
-      );
-      if (relevant.length > 0 && live.length === 0) {
-        return finish(
-          "ERR_AUTHORITY_GUARD_EXPIRED_OR_HASH_MISMATCH",
-          `every grant naming flow ${flowIds[0]} is expired or revoked; the run had no live authority, and a body_hash mismatch is the other way this presents.`
-        );
+  if (input.flow_run_id !== undefined || input.flow_id !== undefined) {
+    const run =
+      input.flow_id !== undefined
+        ? await resolveLatestFlowRun(env, input.flow_id)
+        : await resolveFlowRun(env, input.flow_run_id ?? "");
+    if (!run.ok) return run.response;
+    const flowIds = [run.flowId];
+    const outcomes = [run.outcome];
+    const grants = await env.DB.prepare(
+      `SELECT id, scope, target_json, expires_at, revoked_at
+         FROM authority_grants
+        ORDER BY granted_at DESC LIMIT 100`
+    ).all<GrantRowLite>();
+    const now = Date.now();
+    const relevant = (grants.results ?? []).filter((grant) => {
+      try {
+        const target = JSON.parse(grant.target_json) as { flow_id?: unknown };
+        return typeof target.flow_id === "string" && flowIds.includes(target.flow_id);
+      } catch {
+        return false;
       }
-      if (relevant.length === 0 && failedOutcome) {
-        return finish(
-          "ERR_AUTHORITY_GUARD_EXPIRED_OR_HASH_MISMATCH",
-          `flow ${flowIds[0]} ended in a failed outcome and no authority grant ever named it.`
-        );
-      }
+    });
+    const live = relevant.filter(
+      (grant) => grant.revoked_at === null && grant.expires_at > now
+    );
+    const failedOutcome = outcomes.some(
+      (outcome) => outcome === "error" || outcome === "halted"
+    );
+    if (relevant.length > 0 && live.length === 0) {
+      return finish(
+        "ERR_AUTHORITY_GUARD_EXPIRED_OR_HASH_MISMATCH",
+        `every grant naming flow ${flowIds[0]} is expired or revoked; the run had no live authority, and a body_hash mismatch is the other way this presents.`
+      );
+    }
+    if (relevant.length === 0 && failedOutcome) {
+      return finish(
+        "ERR_AUTHORITY_GUARD_EXPIRED_OR_HASH_MISMATCH",
+        `flow ${flowIds[0]} ended in a failed outcome and no authority grant ever named it.`
+      );
     }
   }
 

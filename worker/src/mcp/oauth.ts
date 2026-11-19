@@ -56,13 +56,24 @@ function resourceMetadataUrl(request: Request): string {
   return new URL("/.well-known/oauth-protected-resource", new URL(request.url).origin).toString();
 }
 
+/**
+ * Where the MCP surface is actually documented.
+ *
+ * The Worker serves no `/docs` page, so discovery points at the repository
+ * document that answers the question instead of at a path this deployment would
+ * 404. `mcp/oauth.ts` and `docs/AGENT_SURFACE.md` are in the same repository, so
+ * the link can only rot by the document being renamed in the same change.
+ */
+export const MCP_DOCUMENTATION_URL =
+  "https://github.com/JonyBepary/dakflare/blob/main/docs/AGENT_SURFACE.md";
+
 /** RFC 9728 §2: what this resource is, and how to present a token to it. */
 export function protectedResourceMetadata(request: Request, env?: OAuthEnv): Record<string, unknown> {
   return {
     resource: mcpResourceUrl(request),
     authorization_servers: [issuerFor(request, env)],
     bearer_methods_supported: ["header"],
-    resource_documentation: new URL("/docs/mcp", new URL(request.url).origin).toString(),
+    resource_documentation: MCP_DOCUMENTATION_URL,
   };
 }
 

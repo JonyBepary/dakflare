@@ -2701,7 +2701,7 @@ async function cmdSuite() {
     const list = await mcpCall(full.token, 'tools/list');
     const tools = list.data?.result?.tools ?? [];
     rep.check('tools/list -> 200', list.status, 200);
-    rep.check('seven tools', tools.length, 7);
+    rep.check('nine tools', tools.length, 9);
     rep.check('...every one carries an outputSchema',
       tools.every((tool) => tool.outputSchema !== undefined), true);
     rep.check('...the result carries ttlMs and cacheScope',
@@ -2878,7 +2878,7 @@ async function cmdSuite() {
       }
     );
     const lines = (bridged.stdout ?? '').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
-    rep.check('the CLI bridge answers tools/list', (lines[0]?.result?.tools ?? []).length, 7);
+    rep.check('the CLI bridge answers tools/list', (lines[0]?.result?.tools ?? []).length, 9);
     rep.checkFn('...with the same tool names as the endpoint', () => {
       const bridgeNames = (lines[0].result.tools ?? []).map((tool) => tool.name).sort();
       const workerNames = tools.map((tool) => tool.name).sort();
@@ -3504,8 +3504,8 @@ async function cmdSuite() {
         });
         const listPayload = await parseMcpBody(listRes);
         rep.check('POST /mcp tools/list -> 200', listRes.status, 200);
-        rep.checkFn('...lists all 7 scoped tools', () =>
-          Array.isArray(listPayload?.result?.tools) && listPayload.result.tools.length === 7
+        rep.checkFn('...lists all 9 scoped tools', () =>
+          Array.isArray(listPayload?.result?.tools) && listPayload.result.tools.length === 9
         );
 
         const mcpCfgDir = writeCliHome(mcpCliHome, mcpToken);
@@ -3547,8 +3547,8 @@ async function cmdSuite() {
         const stdioTools = stdioMessages.find((m) => m.id === 2);
         rep.check('dakflare mcp serve exits 0 on EOF', stdioRun.status, 0);
         rep.check('...stdio initialize responds with protocolVersion', typeof stdioInit?.result?.protocolVersion, 'string');
-        rep.checkFn('...stdio tools/list returns all 7 tools', () =>
-          Array.isArray(stdioTools?.result?.tools) && stdioTools.result.tools.length === 7
+        rep.checkFn('...stdio tools/list returns all 9 tools', () =>
+          Array.isArray(stdioTools?.result?.tools) && stdioTools.result.tools.length === 9
         );
       }
 

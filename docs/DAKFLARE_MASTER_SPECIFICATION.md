@@ -223,9 +223,10 @@ the queue has minted, with a countdown and a revoke (`GET /v1/admin/grants?live=
 
 ### 5.4 MCP
 
-`/mcp` serves seven tools over the same token:
+`/mcp` serves nine tools over the same token:
 
-`list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `trace`, `send_sms`.
+`list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `trace`, `triage`,
+`telemetry`, `send_sms`.
 
 `/v1/mcp` remains for tokens already deployed against it. `POST` carries JSON-RPC, `GET` holds the
 SSE stream of a stateful session and `DELETE` ends it; `Accept` must include `application/json` or
