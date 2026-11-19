@@ -1,0 +1,67 @@
+# Agent Authority, Grants & Webhooks
+
+> Configure scoped agent tokens, time-boxed authority grants, AssistantAgent autonomy windows, and HMAC-signed inbound webhooks.
+
+DakFlare separates **what an agent may attempt** (token scopes) from **what an agent may execute right now** (time-boxed human grants) and **how much money it can spend** (hourly and daily caps).
+
+## Scopes vs. Grants
+
+### Token Scopes (`worker/src/lib/agent-scopes.ts`)
+
+| Category | Scopes |
+| --- | --- |
+| **Read** | `messages:read`, `devices:read`, `flows:read`, `audit:read` |
+| **Reversible / Cheap Write** | `sms:send`, `messages:purge`, `alerts:write`, `flows:write`, `devices:write`, `rules:write`, `webhooks:write` |
+| **Costly / Production Write (always grant-gated)** | `sms:send:production`, `enable_shortcode`, `dlq_bulk_replay`, `flow_deploy_prod` |
+| **Never Grantable (hard-refused)** | `devices:revoke`, `auth:reset` |
+
+### Grant Duration Ladder & Scope Ceilings
+
+Operators choose from 8 rungs (`1m`, `5m`, `15m`, `30m`, `1h`, `1d`, `7d`, `30d`), clamped automatically by per-scope ceilings (`SCOPE_CAPS`):
+
+| Scope | Max TTL | Required Target Constraint |
+| --- | --- | --- |
+| `sms:send:production` | `3600s` (1 hour) | `recipients` or `device_id` |
+| `enable_shortcode` | `900s` (15 minutes) | `rule_id` |
+| `dlq_bulk_replay` | `900s` (15 minutes) | `device_id` |
+| `flow_deploy_prod` | `86400s` (1 day) | `flow_id` (plus `body_hash` for `ag1_` handles) |
+| `rules:write`, `webhooks:write` | `86400s` (1 day) | optional |
+| `messages:read`, `devices:read`, `flows:read`, `audit:read` | `2592000s` (30 days) | optional |
+
+Every agent token also carries an independent hourly SMS quota (default `20/hour`). Exceeding it returns `429 agent_quota_exceeded` with `resets_at`.
+
+## AssistantAgent Autonomy Windows
+
+When `AGENT_RUNTIME = "on"`, the floating **Ask** panel connects to the pinned `AssistantAgent` Durable Object (`POST /v1/admin/agent/ticket` → WebSocket upgrade under `/agents/assistant/assistant`):
+- **Default mode**: Read and propose only. Proposals require an explicit human click (`POST /v1/admin/assistant/proposals/:id/accept`), protected by an atomic claim (`409 already_applied` on duplicate clicks).
+- **Autonomy window**: An owner/admin enables bounded autonomy (`POST /v1/admin/agent/autonomy`), specifying TTL, `sms_cap`, `daily_sms_cap` (default 20), write caps, and optional `allow_rules`.
+- **Session binding**: An autonomy window belongs strictly to the operator who opened it. Another operator's act is refused with `autonomy_other_session`.
+- **Fail-closed journaling**: Every act writes a `tool_calls` row before executing and derives its effect idempotency key from `call_id` (the LLM never supplies idempotency keys).
+
+## Signed Inbound Webhooks (`POST /v1/webhooks/:id`)
+
+External services can wake the agent without a human session:
+
+1. **Create a hook** (human session only; `assertHuman` rejects agent tokens):
+   ```bash
+   curl -X POST https://<worker>.workers.dev/v1/admin/webhooks \
+     -H "Cookie: __Secure-better-auth.session_token=..." \
+     -H "Content-Type: application/json" \
+     -d '{"name":"billing-alerts","description":"Summarize failed invoice alerts"}'
+   ```
+   The signing `secret` is returned **once**. D1 stores `secret_hash` (SHA-256) and `secret_sealed` (AES-256-GCM under `WEBHOOK_SECRET_KEY`).
+
+2. **Deliver signed events**:
+   - `x-dakflare-signature: sha256=<lowercase hex HMAC-SHA256 over raw body bytes>`
+   - `x-dakflare-delivery: <unique delivery id>` (primary key for idempotency; repeats return the stored answer with `replayed: true` without invoking the model again)
+
+3. **Zero-autonomy guarantee**: Webhook turns execute as synthetic actor `webhook:<id>` (`role: "webhook"`). `authorizeAct` refuses every write with `webhook_cannot_act` even if an autonomy window is open.
+
+### Rotating a Webhook Secret
+
+There is intentionally no rotate endpoint:
+1. Create a second webhook via `POST /v1/admin/webhooks` and copy the new `id` + `secret`.
+2. Update the upstream caller and verify a `200` response with `replayed: false`.
+3. Delete the old webhook via `DELETE /v1/admin/webhooks/:old_id`.
+
+> **Warning on `WEBHOOK_SECRET_KEY`**: Rotating `WEBHOOK_SECRET_KEY` invalidates every sealed webhook secret in D1 simultaneously (ingress returns `500`). Only rotate it during a planned window when you recreate every hook.

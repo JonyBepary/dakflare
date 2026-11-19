@@ -1,0 +1,121 @@
+# First Wasm Flow
+
+> Author, validate, test locally against flow.wasm, deploy, and heal a dakflare.flow/v2 auto-reply graph.
+
+DakFlare evaluates inbound messages using a deterministic directed acyclic graph (`dakflare.flow/v2`). The exact same Rust crate (`simulator/flow`) runs natively on the Android handset and compiles to WebAssembly (`worker/src/wasm/flow.wasm` and `dashboard/static/flow.wasm`) for the Worker fallback and browser simulation panel.
+
+## Step 1: Inspect the Canonical Flow Schema
+
+Retrieve the machine-readable JSON Schema directly from the CLI:
+
+```bash
+dakflare schema --flow-v2 --json
+```
+
+Key constraints enforced by the validator (`worker/src/lib/flow-ir.ts` and `simulator/flow/src/ir.rs`):
+- **Acyclic graph**: Cycles are refused with the exact offending edge.
+- **Strict variable scoping**: Every `{{ variable }}` reference must be bound on *every* incoming path (intersection semantics). Built-ins `sender`, `body`, and `received_at` are always bound by the `trigger` node.
+- **RE2-compatible regex**: `extract` patterns must use `(?<name>...)` named capture groups (`(?P<name>...)` is refused) and pass the RE2 lint.
+- **Zero coordinates required**: Omit `position` and `ui_layout`; the Worker computes deterministic `rank-v1` coordinates on save.
+
+## Step 2: Author a `dakflare.flow/v2` Document
+
+Create `order-reply.json`:
+
+```json
+{
+  "id": "wf_orders",
+  "name": "Order confirmation",
+  "enabled": true,
+  "graph": {
+    "schema": "dakflare.flow/v2",
+    "nodes": [
+      {
+        "id": "t1",
+        "type": "trigger",
+        "data": {
+          "kind": "incoming",
+          "sender": { "mode": "any" },
+          "body": { "mode": "keyword", "value": "order" }
+        }
+      },
+      {
+        "id": "x1",
+        "type": "extract",
+        "data": {
+          "source": "body",
+          "pattern": "order (?<order>[A-Z0-9]{6})",
+          "flags": "i"
+        }
+      },
+      {
+        "id": "s1",
+        "type": "send_sms",
+        "data": {
+          "to": "{{sender}}",
+          "body": "Order {{order}} confirmed."
+        }
+      },
+      {
+        "id": "e1",
+        "type": "stop",
+        "data": {}
+      }
+    ],
+    "edges": [
+      { "id": "e_t1_x1", "source": "t1", "target": "x1" },
+      { "id": "e_x1_s1", "source": "x1", "target": "s1" },
+      { "id": "e_s1_e1", "source": "s1", "target": "e1" }
+    ]
+  }
+}
+```
+
+## Step 3: Dry-Run and Apply via CLI
+
+Preview the structural diff without writing to D1:
+
+```bash
+dakflare flows apply order-reply.json --dry-run --agent
+```
+
+`data.dry_run_diff` reports added/removed/modified nodes and edges, capture variables gained or lost, and whether layout coordinates changed. Apply the flow:
+
+```bash
+dakflare flows apply order-reply.json --agent
+```
+
+Semantic exit codes:
+- `0` — saved and synced to paired handsets on their next `GET /v1/flows` sync.
+- `2` — `workflow_invalid` (prints exact issue paths such as `nodes[1].data.pattern: must declare at least one named group`).
+- `5` — `version_conflict` (`expected_previous_version` mismatch; pass `--force` only when intentionally overwriting).
+
+## Step 4: Test Locally Against `flow.wasm`
+
+Create a JSONL corpus `corpus.jsonl`:
+
+```json
+{"sender":"+8801711000111","body":"Please confirm order AB12CD","received_at":1763500000000}
+{"sender":"+8801711000111","body":"Hello there","received_at":1763500001000}
+```
+
+Execute the corpus locally against the compiled WebAssembly engine:
+
+```bash
+dakflare flow test --flow wf_orders --corpus corpus.jsonl --agent
+```
+
+The first message yields `"outcome": "delivered"` with one `send_sms` action (`"Order AB12CD confirmed."`). The second yields `"outcome": "filtered"`.
+
+## Step 5: Handle Delays, Webhooks, and Extraction Drift
+
+- **Handset vs. Worker split**: If your flow adds a `delay` (>5 seconds uses `FlowExecutionWorkflow`) or a `webhook` (dispatched via `WEBHOOK_QUEUE` with SSRF protection), the handset runs the prefix locally, marks the `flow_runs` row `partial`, and the Worker resumes from that exact boundary without duplicating already-sent SMS steps.
+- **Healing drift**: When an upstream sender changes SMS phrasing, two failed extractions within an hour raise an `extraction_drift` alert. Synthesize and verify a replacement regex against real message history before writing:
+
+```bash
+dakflare extract synthesize --samples new-samples.json --group order --verify-d1-limit 500
+dakflare flows heal wf_orders --samples new-samples.json --group order --dry-run
+dakflare flows heal wf_orders --samples new-samples.json --group order
+```
+
+`flows heal` refuses to write (exit `6`) if even one historically matched message captures a different byte-for-byte value under the new pattern.

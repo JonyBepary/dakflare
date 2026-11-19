@@ -1,0 +1,45 @@
+# DakFlare
+
+> Sovereign multi-platform messaging hub and SMS gateway on Cloudflare Workers and Android.
+
+## Machine-Readable Artifacts
+
+- [Full Documentation Bundle](/llms-full.txt): Complete concatenated Markdown of all DakFlare documentation pages.
+- [OpenAPI 3.1 Specification](/openapi.json): Strict REST API contract with security schemes, examples, and error shapes.
+- [Agent Skill (SKILL.md)](/SKILL.md): Curated single-file skill encoding DakFlare invariants, CLI rules, Wasm ABI, and pitfalls.
+- [Repository Agent Guide (AGENTS.md)](/AGENTS.md): Instructions and verification gates for coding agents editing the repository.
+- [Docs MCP Endpoint](/mcp): Stateless JSON-RPC 2.0 endpoint (`list_sections`, `search_docs`, `get_doc_page`, `get_openapi_operation`).
+
+## Start Here (Tutorials)
+
+- [Quickstart](/docs/start/quickstart.md): CLI-executable end-to-end setup: provision Cloudflare, deploy Worker, pair Android handset, send SMS.
+- [First Wasm Flow](/docs/start/first-wasm-flow.md): Author, validate, test locally against flow.wasm, deploy, and heal a dakflare.flow/v2 graph.
+- [Connect an MCP Agent](/docs/start/connect-mcp-agent.md): Mint a scoped dkf_agt_ token, wire Claude Code/Cursor/OpenCode to /mcp, and approve a gated send_sms.
+
+## How-To Guides
+
+- [Android Handset & Pairing](/docs/guides/android-node-pairing.md): Build, sign, install, pair, and verify dev.dakflare.simulator with Android Keystore P-256 identity.
+- [Durable Objects, Channels & Routing](/docs/guides/durable-objects-routing.md): Operate DeviceGateway/AuthGuard/AuthorityGuard/AssistantAgent, WS/poll fallback, Telegram/WhatsApp, and DakFlareApi.
+- [Visual Workflow Editor & WebMCP](/docs/guides/visual-workflow-editor.md): Use Steps/Map/Source, PatternSheet Clef auto-tagging, ghost patches, and the 4 browser WebMCP tools.
+- [Agent Authority, Grants & Webhooks](/docs/guides/agent-authority-and-webhooks.md): Configure scopes, 8-rung grant ladder, AssistantAgent autonomy windows, and HMAC-signed webhooks.
+- [Self-Hosting & Production Operations](/docs/guides/self-hosting-production.md): Sync cloudflare.config.ts/wrangler.toml, apply D1 migrations 0001-0017, avoid cf traps, verify and restore.
+
+## Reference
+
+- [REST API Reference](/docs/reference/api-reference.md): Complete HTTP endpoints across Device Protocol, Auth, Fleet/SMS, Automation, Agent Analysis/Runtime, Webhooks, Channels.
+- [Interactive API Playground](/docs/reference/api-playground.md): Interactive fumadocs-openapi playground backed by /openapi.json.
+- [MCP & WebMCP Tools](/docs/reference/mcp-tools.md): Schemas, scopes, OAuth RFC 9728/8414/8707, elicitation, JSON-RPC errors for 9 MCP tools and 4 WebMCP tools.
+- [Wasm Flow ABI & IR v2](/docs/reference/wasm-flow-abi.md): Hand-rolled C ABI (alloc/dealloc/run_json/validate_json/synthesize_json/layout_json/trace_json) and dakflare.flow/v2 spec.
+- [CLI, Bindings & Error Codes](/docs/reference/cli-and-env.md): All 28 dakflare CLI commands, exit codes (0/1/2/3/4/5/6/75), Cloudflare bindings, env vars, secrets, and 17 §8 errors.
+- [State Machines](/docs/reference/state-machines.md): Guarded, declared, and derived state transitions for commands, replies, approvals, grants, turns, and lockouts.
+- [Canonical Glossary](/docs/reference/glossary.md): Locked identifiers (device_id, command_id, local_id, dkf_agt_, ag1_, etc.) with anti-drift rules.
+
+## Architecture
+
+- [Sovereign Edge Model](/docs/architecture/sovereign-edge-model.md): Why dedicated Android radio + single-tenant Cloudflare Worker beats telecom SaaS, plus honest known gaps.
+- [P-256 Identity & Authentication](/docs/architecture/security-p256-identity.md): 5-line canonical string, IEEE P1363 signatures, AndroidKeyStore wrapping, replay guard, and Better Auth factors.
+- [Wasm & Agent Isolation](/docs/architecture/wasm-and-agent-isolation.md): Zero-import flow.wasm determinism, Clef System 1 closed-set decisions, assertHuman, and fail-closed journaling.
+
+## Docs for Agents
+
+- [Docs for Agents](/docs/agents.md): Machine-readable endpoints: /llms.txt, /llms-full.txt, /{path}.md, Accept: text/markdown, /openapi.json, /SKILL.md, /mcp.

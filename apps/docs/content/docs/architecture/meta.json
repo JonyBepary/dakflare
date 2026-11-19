@@ -1,0 +1,4 @@
+{
+  "title": "Architecture",
+  "pages": ["sovereign-edge-model", "security-p256-identity", "wasm-and-agent-isolation"]
+}

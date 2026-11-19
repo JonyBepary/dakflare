@@ -1,0 +1,38 @@
+# Visual Workflow Editor & WebMCP
+
+> Design and simulate dakflare.flow/v2 pipelines in the SvelteKit console and expose live graph tools to browser agents via WebMCP.
+
+The workflow editor at `/admin/workflows/edit` edits canonical `dakflare.flow/v2` documents without coupling storage to canvas pixels.
+
+## Editor Surfaces
+
+- **Steps (default)**: Linear outline of nodes and branches for fast keyboard navigation (`Ctrl+K` StepFinder, grouped undo/redo, `Ctrl+S` save, unsaved-change leave guard).
+- **Map**: Interactive Svelte Flow canvas laid out deterministically from the Worker's `rank-v1` positions.
+- **Source**: Read-only canonical JSON inspector (`SourceSheet.svelte`).
+- **Simulation Panel**: Runs `dashboard/static/flow.wasm` directly in the browser against sample messages—zero network round trip, byte-for-byte identical to the handset and Worker engines.
+- **Pattern Sheet (`PatternSheet.svelte`)**: Highlight variable spans (`trigger`, `extract`, `ignore`) in a sample message, run local Wasm `synthesize_template_json`, or click **Auto-tag with Clef** to classify span roles via `POST /v1/agent/triage`.
+
+## Staged Ghost Patches
+
+When a patch is proposed by the palette composer (`agent-patch.ts`), the Assistant, or a WebMCP client, it never mutates the live graph directly:
+1. Map and Steps render a dashed **Preview** ghost overlay.
+2. The top banner displays **STAGED PATCH · NOT APPLIED**, the stated intent, whether a judge scored it (`judged: false` for external WebMCP patches), and any graph validation errors.
+3. While a ghost patch is staged, all other edit paths are locked.
+4. **Accept** (`Enter`) commits the patch to editor state as a single undo step (disabled if validation fails); **Revert** (`Escape`) discards it. Nothing writes to D1 until the operator explicitly saves (`Ctrl+S`).
+
+## WebMCP Browser Tools
+
+When mounted in a WebMCP-capable browser (for example, Chromium launched with `--enable-features=WebMCP`), `dashboard/src/lib/components/workflow/webmcp.ts` registers four imperative tools on `document.modelContext` (falling back to `navigator.modelContext`) and automatically unregisters them via `AbortController` on unmount:
+
+| Tool | Hints | Inputs | Purpose |
+| --- | --- | --- | --- |
+| `dakflare_get_flow_ast` | `readOnlyHint: true` | `{}` | Returns live `{ flow_id, name, enabled, dirty, staged_patch, graph }` |
+| `dakflare_stage_flow_patch` | `consequentialHint: true`, `destructiveHint: true` | `{ intent, patch: { nodes, edges } }` | Validates and stages a ghost preview; never saves |
+| `dakflare_synthesize_pattern` | `destructiveHint: false` | `{ sample, spans? }` | Runs local Wasm template synthesis; saves nothing |
+| `dakflare_diagnose_message` | `readOnlyHint: true` | `{ message, pattern? }` | Calls `POST /v1/agent/diagnose` (15s timeout) |
+
+Two forms also expose declarative WebMCP attributes (`toolname`, `tooldescription`, `toolparamtitle`, `toolparamdescription`) via `webmcp-attributes.ts`:
+- `dakflare_ask_agent` (`StepFinder.svelte`)
+- `dakflare_autotag_spans` (`PatternSheet.svelte`)
+
+Neither form ever emits `toolautosubmit`—verified by `node --experimental-strip-types dashboard/scripts/webmcp-check.mjs` (20 assertions).

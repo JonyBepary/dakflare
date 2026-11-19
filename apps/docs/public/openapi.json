@@ -1,0 +1,1155 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DakFlare Edge API",
+    "version": "6.3.0-alpha.1",
+    "summary": "Sovereign multi-platform messaging hub, Android SMS gateway, Wasm flow engine, and agent control plane on Cloudflare Workers.",
+    "license": {
+      "name": "AGPL-3.0-only"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://{worker}.workers.dev",
+      "variables": {
+        "worker": {
+          "default": "dakflare-worker"
+        }
+      }
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "DeviceP256Auth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Signature",
+        "description": "ECDSA P-256 (IEEE P1363 64-byte base64) over METHOD\\nPATH\\nX-Timestamp\\nX-Nonce\\nSHA256(body). Requires X-Device-Id, X-Timestamp (13-digit UTC ms, \u00b1300s), X-Nonce (32 hex chars), and X-Signature. Query strings are forbidden."
+      },
+      "AgentBearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Scoped agent token prefixed with dkf_agt_. Costly scopes also require a live time-boxed authority grant."
+      },
+      "AdminMachineToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "ADMIN_TOKEN paired with X-Dakflare-Client: cli (or binding)."
+      },
+      "BetterAuthSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Secure-better-auth.session_token",
+        "description": "Host-only HttpOnly Secure SameSite=Lax operator session cookie (7-day TTL)."
+      },
+      "WebhookHmac": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-dakflare-signature",
+        "description": "sha256=<lowercase hex HMAC-SHA256 over raw body bytes>, paired with x-dakflare-delivery."
+      }
+    },
+    "schemas": {
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "unexpected_query",
+              "bad_request",
+              "rule_rejected",
+              "workflow_invalid",
+              "missing_auth_headers",
+              "malformed_header",
+              "timestamp_out_of_window",
+              "bad_signature_length",
+              "invalid_signature",
+              "device_unknown",
+              "nonce_replay",
+              "rate_limited",
+              "payload_too_large",
+              "device_exists",
+              "daily_quota_exceeded",
+              "storage_unavailable",
+              "idempotency_key_not_supported_in_batch"
+            ]
+          },
+          "details": {
+            "type": "array",
+            "description": "Present on workflow_invalid (admin-only).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "SendSmsRequest": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "to",
+          "body"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$",
+            "examples": [
+              "dev63f3953f417d587f"
+            ]
+          },
+          "to": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "E.164 recipient phone number.",
+            "examples": [
+              "+8801540196080"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Optional deduplication key; retries with the same key return the original command_id with replayed: true."
+          }
+        }
+      },
+      "SendSmsQueuedResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "command_id",
+          "state"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "command_id": {
+            "type": "string",
+            "examples": [
+              "cmdf_01j9x7m2k8p3q4r5"
+            ]
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "LEASED",
+              "DISPATCHED",
+              "SENT",
+              "DELIVERED",
+              "FAILED",
+              "EXPIRED"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApprovalRequiredResponse": {
+        "type": "object",
+        "required": [
+          "sent",
+          "error",
+          "approval_request"
+        ],
+        "properties": {
+          "sent": {
+            "const": false
+          },
+          "error": {
+            "const": "approval_required"
+          },
+          "approval_request": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object"
+              },
+              "max_ttl_s": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/device/pair": {
+      "post": {
+        "tags": [
+          "Device Protocol"
+        ],
+        "summary": "Pair an Android handset using a single-use pairing code",
+        "description": "Spends a pairing code minted by POST /v1/admin/pairing-code and registers the handset's P-256 public key in D1.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "device_id",
+                  "public_key_spki_b64"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  "public_key_spki_b64": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Handset paired"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (version mismatch, already decided approval, or existing device_id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "device_exists"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or agent/device quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "rate_limited"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sms/incoming/batch": {
+      "post": {
+        "tags": [
+          "Device Protocol"
+        ],
+        "summary": "Upload inbound SMS batch from handset",
+        "security": [
+          {
+            "DeviceP256Auth": []
+          }
+        ],
+        "description": "Accepts up to 500 inbound SMS rows, idempotent by local_id. Evaluates rules (priority DESC) then flows if the handset did not already reply.",
+        "responses": {
+          "200": {
+            "description": "Batch accepted"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or agent/device quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "rate_limited"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sms/outgoing/poll": {
+      "post": {
+        "tags": [
+          "Device Protocol"
+        ],
+        "summary": "Poll and lease pending outbound commands",
+        "security": [
+          {
+            "DeviceP256Auth": []
+          }
+        ],
+        "description": "Fallback delivery path when GET /v1/device/ws is closed. Leases PENDING commands for LEASE_MS (60,000 ms default).",
+        "responses": {
+          "200": {
+            "description": "Leased commands"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or agent/device quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "rate_limited"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sms/status/batch": {
+      "post": {
+        "tags": [
+          "Device Protocol"
+        ],
+        "summary": "Report outbound command delivery status updates",
+        "security": [
+          {
+            "DeviceP256Auth": []
+          }
+        ],
+        "description": "Accepts up to 500 state updates (SENT, DELIVERED, FAILED with optional error_code and error_message). Enforces monotonic transitions in DeviceGateway.",
+        "responses": {
+          "200": {
+            "description": "Statuses recorded"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sms/send": {
+      "post": {
+        "tags": [
+          "Messaging"
+        ],
+        "summary": "Queue one outbound SMS command",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "description": "Queues an outbound SMS in the target handset's DeviceGateway DO. Asynchronous: poll GET /v1/sms/commands/{command_id} for terminal DELIVERED/FAILED/EXPIRED state. Agent tokens require sms:send scope plus a live sms:send:production grant; without a grant returns 202 approval_required and sends nothing.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendSmsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command queued (or replayed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSmsQueuedResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Agent missing live authority grant; approval request created and nothing sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequiredResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or agent/device quota exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "rate_limited"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sms/commands/{command_id}": {
+      "get": {
+        "tags": [
+          "Messaging"
+        ],
+        "summary": "Read outbound command delivery state",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "device_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Command state (SENT is radio acceptance, not delivery)"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices": {
+      "get": {
+        "tags": [
+          "Fleet"
+        ],
+        "summary": "List paired handsets",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "include_archived",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fleet list"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "get": {
+        "tags": [
+          "Messaging"
+        ],
+        "summary": "List messages newest-first with reply fate",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message log"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/workflows/{id}": {
+      "get": {
+        "tags": [
+          "Automation"
+        ],
+        "summary": "Fetch canonical dakflare.flow/v2 workflow",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow IR and rank-v1 layout"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Automation"
+        ],
+        "summary": "Validate and save a dakflare.flow/v2 workflow",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "Validates DAG acyclicity, variable path intersection, RE2 regexes, and SSRF webhook rules. Computes rank-v1 layout automatically. Agent tokens require flow_deploy_prod grant.",
+        "responses": {
+          "200": {
+            "description": "Workflow saved"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (version mismatch, already decided approval, or existing device_id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "device_exists"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/triage": {
+      "post": {
+        "tags": [
+          "Agent Analysis"
+        ],
+        "summary": "Classify inbound message via Clef System 1",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "description": "Returns closed-set intent, prompt-injection probability, template specificity, span roles, and deterministic balanceAtLeastPrincipal invariant. Body capped at 8 KiB.",
+        "responses": {
+          "200": {
+            "description": "Typed triage verdict (returns source: unavailable if model unreachable)"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/telemetry": {
+      "post": {
+        "tags": [
+          "Agent Analysis"
+        ],
+        "summary": "Run one of six bounded D1 telemetry plans",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "description": "Maps a natural-language question to fleet_health, stuck_outbox, sim_signal_ranking, workflow_failures, authority_audit, or unmatched_drift.",
+        "responses": {
+          "200": {
+            "description": "Bounded telemetry rows (max 50)"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/diagnose": {
+      "post": {
+        "tags": [
+          "Agent Analysis"
+        ],
+        "summary": "Diagnose message, pattern, or flow run failure",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "description": "Accepts message_id, flow_run_id (device_id/local_id/flow_id/flow_version), flow_id, message, or pattern. Never echoes full body; returns 16/8/16 offset highlight.",
+        "responses": {
+          "200": {
+            "description": "Root-cause diagnostic card"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "flow_run_not_found or no_flow_runs"
+          }
+        }
+      }
+    },
+    "/v1/agent/synthesize": {
+      "post": {
+        "tags": [
+          "Agent Analysis"
+        ],
+        "summary": "Judge candidate flow patch and mint single-use ag1_ handle",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "description": "Scores faithfulness and mints an ag1_ apply_token bound to the patch SHA-256 body_hash (max_uses: 1). Applies nothing; returns 503 ai_unavailable if judge is unreachable.",
+        "responses": {
+          "200": {
+            "description": "Verdict and apply_token"
+          },
+          "503": {
+            "description": "ai_unavailable"
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{id}": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "HMAC-signed inbound webhook to wake AssistantAgent",
+        "security": [
+          {
+            "WebhookHmac": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-dakflare-delivery",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unique delivery ID; repeats return stored answer with replayed: true."
+          }
+        ],
+        "description": "Runs as synthetic actor webhook:<id> which can read and propose but never act (authorizeAct refuses with webhook_cannot_act).",
+        "responses": {
+          "200": {
+            "description": "Agent response (or replayed)"
+          },
+          "400": {
+            "description": "Validation or malformed request error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Webhook disabled"
+          },
+          "413": {
+            "description": "Payload too large"
+          },
+          "502": {
+            "description": "Agent turn failed"
+          }
+        }
+      }
+    },
+    "/v1/admin/health": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Deployment health, schema version, and binding status",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentBearerToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Health payload"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/mode": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Public pre-auth discovery of enabled sign-in factors",
+        "responses": {
+          "200": {
+            "description": "Enabled doors (passkey, password mode, magic link)"
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "MCP"
+        ],
+        "summary": "Streamable HTTP MCP JSON-RPC 2.0 endpoint",
+        "security": [
+          {
+            "AgentBearerToken": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "description": "Exposes 9 scope-filtered tools (list_devices, read_messages, command_status, list_flows, get_flow, triage, telemetry, trace, send_sms). Accept header must include application/json or text/event-stream (else 406).",
+        "responses": {
+          "200": {
+            "description": "JSON-RPC response or SSE stream"
+          },
+          "401": {
+            "description": "Authentication failed (missing/invalid credentials, expired timestamp, or nonce replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "invalid_signature"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "Missing acceptable Accept header"
+          }
+        }
+      }
+    }
+  }
+}

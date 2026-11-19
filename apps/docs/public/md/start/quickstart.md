@@ -1,0 +1,141 @@
+# Quickstart
+
+> Provision Cloudflare resources, deploy dakflare-worker, create the owner account, pair one Android handset, and send your first SMS via CLI.
+
+This tutorial takes you from a clean checkout to a live DakFlare deployment on your Cloudflare account with one paired Android handset and one verified outbound SMS. Every step is executable from the terminal without dashboard screenshots.
+
+## Prerequisites
+
+- **Node.js 22+** (required by the zero-dependency `dakflare` CLI)
+- **Cloudflare `cf` CLI** authenticated to your account (`cf auth login`)
+- **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
+- **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/guides/android-node-pairing/))
+
+## Step 1: Clone and Install Dependencies
+
+```bash
+git clone https://github.com/JonyBepary/dakflare
+cd dakflare
+npm install -g .          # installs the `dakflare` binary globally (or run `node cli/bin/dakflare.js`)
+cd worker && npm install && cd ..
+```
+
+Verify the CLI is available and speaks its machine contract:
+
+```bash
+dakflare capabilities --agent
+```
+
+Expected output: a single compact JSON document with `"ok": true` listing all 28 commands, their effects, and flags.
+
+## Step 2: Generate Local Secrets
+
+Generate fresh cryptographic secrets into `worker/.dev.vars` (git-ignored):
+
+```bash
+dakflare init --local
+```
+
+This creates `worker/.dev.vars` containing:
+- `ADMIN_TOKEN` — machine credential for CLI and service bindings
+- `BETTER_AUTH_SECRET` — signs `__Secure-better-auth.session_token` cookies and encrypts TOTP secrets
+- `AUTH_PEPPER` — versioned pepper string (`v2:<b64 32B>,v1:<b64 32B>`) for password verification
+
+> Never commit `worker/.dev.vars`. Secrets are pushed to Cloudflare via `cf workers secrets update` or `dakflare up` and persist across future deploys.
+
+## Step 3: Provision, Migrate, and Deploy
+
+Sign in to Cloudflare locally and run `dakflare up`:
+
+```bash
+cf auth login
+dakflare up --email you@example.com --dry-run   # preview the plan without mutating Cloudflare
+dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 17 migrations, deploy, bootstrap owner
+```
+
+What `dakflare up` executes in order:
+1. Finds or creates D1 database `sms_gateway` and KV namespace `KV`, writing their IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
+2. Applies D1 migrations `0001_baseline.sql` through `0017_alert_acknowledged_by.sql`.
+3. Uploads secrets from `worker/.dev.vars` to `dakflare-worker`.
+4. Builds `dashboard/` into `worker/public/admin` and deploys `dakflare-worker` via `cf deploy`.
+5. Bootstraps the first `owner` account (`POST /v1/admin/bootstrap`) and prints a one-time invite URL.
+6. Mints an initial handset pairing code (`POST /v1/admin/pairing-code`).
+
+### Manual Equivalent (Step by Step)
+
+If you prefer manual provisioning instead of `dakflare up`:
+
+```bash
+cd worker
+cp wrangler.template.toml wrangler.toml
+cp cloudflare.config.template.ts cloudflare.config.ts
+npx wrangler d1 create sms_gateway              # copy database_id into BOTH cloudflare.config.ts and wrangler.toml
+npx wrangler kv namespace create KV             # copy id into BOTH files
+npx cf d1 migrations apply <D1_DATABASE_ID>     # cf requires the UUID, never the database name
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
+npm run deploy                                  # builds dashboard + runs cf deploy
+```
+
+> **Important `cf` behavior**: `cf deploy` can intermittently exit `1` on a working deploy due to a Cloudflare Workflows API 500 (`workflows.api.error.internal_server`). Always verify deployment evidence with `npm run verify:deploy` in `worker/` and `./worker/scripts/smoke.sh https://<your-worker>.workers.dev`.
+
+## Step 4: Configure the CLI and Redeem the Owner Invite
+
+Point the CLI at your deployed Worker (stored in `~/.config/dakflare/config.json`, mode `600`):
+
+```bash
+dakflare init --url https://<your-worker>.workers.dev --token-file worker/.dev.vars
+dakflare doctor --agent
+```
+
+Confirm `doctor` reports healthy config, schema, migrations (`17` applied), and bindings. Open the printed owner invite URL on the Worker's own HTTPS hostname (never through a localhost proxy—the session cookie is host-only), redeem it, and enroll a **Passkey**.
+
+## Step 5: Pair One Android Handset
+
+Mint a pairing code with a terminal QR code:
+
+```bash
+dakflare pair --label "Primary SIM" --qr
+```
+
+In the DakFlare Android app (**Device** tab), scan the QR code or enter the Worker URL and pairing code. The handset generates a P-256 keypair inside Android Keystore (`keystore:v1:<iv>:<ciphertext>`), calls `POST /v1/device/pair`, and appears in your fleet:
+
+```bash
+dakflare devices --agent
+```
+
+Note the returned `device_id` (for example, `dev63f3953f417d587f`).
+
+## Step 6: Send and Verify Your First SMS
+
+Always pass `--idempotency-key` when a retry is possible so a network timeout never sends a duplicate SMS:
+
+```bash
+dakflare send \
+  --device dev63f3953f417d587f \
+  --to +8801540196080 \
+  --body "DakFlare edge gateway online" \
+  --idempotency-key "quickstart-001" \
+  --agent
+```
+
+`dakflare send` waits up to 10 seconds by default and exits semantically:
+- **Exit `0`**: The handset radio accepted the message (`SENT`) or carrier confirmed delivery (`DELIVERED` when `--until DELIVERED` is passed).
+- **Exit `75`**: Still in flight (`PENDING`, `LEASED`, or `DISPATCHED`). **Do not re-run `send`.** Poll the returned `command_id` instead:
+
+```bash
+dakflare status <command_id> --device dev63f3953f417d587f --wait 60s --agent
+```
+
+> **`SENT` is not delivery.** `verification.passed` is `true` only when `state === "DELIVERED"`.
+
+## Verification Checklist
+
+Run the full health check before moving on:
+
+```bash
+dakflare doctor
+```
+
+Next: [Build your first Wasm auto-reply flow](/start/first-wasm-flow/) or [connect an MCP agent](/start/connect-mcp-agent/).

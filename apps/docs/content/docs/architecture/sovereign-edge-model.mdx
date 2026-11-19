@@ -1,0 +1,26 @@
+---
+title: Sovereign Edge Model
+description: Architectural rationale for pairing a dedicated Android handset radio with a single-tenant Cloudflare Worker instead of third-party telecom SaaS.
+---
+
+DakFlare is built around one thesis: **the handset is the radio, the Worker is the coordinator, and the operator owns both.**
+
+## Why Handset + Cloudflare Edge
+
+1. **Zero Telecom SaaS Markup or Account Lock-In**: Standard SMS APIs charge per-segment markups, enforce rigid sender-ID approval pipelines, and store your private message traffic on third-party servers. Running a dedicated Android handset on your own SIM eliminates per-message intermediaries while keeping local carrier reachability.
+2. **Offline-First Automation**: Because the Rust `simulator/flow` interpreter runs natively on the handset, simple auto-reply graphs execute even when cellular data or edge connectivity drops—and synchronize provenance back to D1 once connectivity returns.
+3. **Single-Tenant Edge Scalability**: Running the coordinator on your own Cloudflare account gives global TLS termination, hibernating WebSockets (`DeviceGateway`), SQLite Durable Objects, D1 (`sms_gateway`), Queues (`WEBHOOK_QUEUE`), and Workflows (`FlowExecutionWorkflow`) at pennies per month—while keeping credentials strictly on the operator's machine (zero Cloudflare tokens in CI).
+
+## Repository & Data Architecture
+
+- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 17 D1 migrations (`0001_baseline.sql`–`0017_alert_acknowledged_by.sql`), 4 SQLite Durable Objects, 3 channel adapters (SMS, Telegram, WhatsApp Cloud), `flow.wasm`, Clef System 1, and `/mcp`.
+- **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
+- **`dashboard/`**: SvelteKit 5 static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
+- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (28 commands).
+
+## Honest Architectural Boundaries (Known Gaps)
+
+- **MMS** is not supported (surfaces an explicit notification instead of dropping silently).
+- **Plugin registry & arbitrary third-party Wasm plugins**: Schema tables (`plugin_repos`, `installed_plugins`) exist from migration `0007`, but only the first-party compiled `flow.wasm` interpreter runs today.
+- **`server-kdf` password mode** requires Cloudflare Workers Paid tier (server-side PBKDF2 exceeds the 10 ms Free-tier CPU budget; `client-derived` is the default).
+- **Revoked devices are tombstones**: `DELETE /v1/admin/devices/:id` sets `revoked_at` and strips credentials while preserving message history; re-pairing the same `device_id` revives the row.

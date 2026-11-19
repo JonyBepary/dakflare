@@ -1,0 +1,99 @@
+---
+title: CLI, Bindings & Error Codes
+description: Reference for all 28 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+---
+
+## `dakflare` CLI Machine Contract
+
+- Zero dependencies, Node 22+, config stored at `~/.config/dakflare/config.json` (mode `600`).
+- `--agent` (or `--json`): emits one compact JSON document per invocation, never prompts, never emits ANSI colors.
+- Pass `--yes` on destructive or interactive commands in automation.
+
+### Semantic Exit Codes
+
+| Exit Code | Meaning | Agent Action |
+| --- | --- | --- |
+| `0` | Success | Proceed |
+| `1` | Failed check or terminal error (`FAILED`, `EXPIRED`) | Inspect `error` payload |
+| `2` | Usage error or invalid schema (`workflow_invalid`) | Fix flags or document |
+| `3` | Resource not found | Verify ID with `devices` / `list_flows` |
+| `4` | Permission denied (`401` / `403`) | Check token scopes or human credential |
+| `5` | Conflict (`version_conflict`, `409` approval race) | Re-read state before retrying |
+| `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
+| `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
+
+### Command Inventory (28 Commands)
+
+- **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
+- **Messaging**: `send`, `status`, `audit`
+- **Auth & Control Plane**: `auth bootstrap`, `auth invite`, `auth invites`, `auth reset`, `auth mint-agent-token`, `auth agent-tokens`, `auth revoke-agent-token`, `auth approvals`, `auth approve`, `auth reject`, `auth grants`, `auth grants revoke`
+- **Automation**: `flows apply`, `flows heal`, `rules list`, `rules apply`, `rules update`, `rules delete`, `rules test`, `extract synthesize`
+- **Agent Work**: `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
+- **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`
+- **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
+
+## Cloudflare Bindings (`worker/cloudflare.config.ts` & `worker/wrangler.toml`)
+
+| Binding | Type | Resource / Class |
+| --- | --- | --- |
+| `DB` | D1 Database | `sms_gateway` (17 migrations: `0001`–`0017`) |
+| `KV` | KV Namespace | FCM HTTP v1 bearer-token cache |
+| `MEDIA_BUCKET` | R2 Bucket | `dakflare-media` (24h `agent_attachments` storage) |
+| `DEVICE` | Durable Object (SQLite) | `DeviceGateway` |
+| `AUTH_GUARD` | Durable Object (SQLite) | `AuthGuard` |
+| `AUTHORITY_GUARD` | Durable Object (SQLite) | `AuthorityGuard` |
+| `ASSISTANT` | Durable Object (SQLite) | `AssistantAgent` |
+| `WEBHOOK_QUEUE` | Queue (producer & consumer) | `dakflare-webhook-queue` (`max_batch_size=10`, `max_retries=3`) |
+| `FLOW_WORKFLOW` | Workflow | `FlowExecutionWorkflow` (`flow-execution-workflow`) |
+| `AI` | Workers AI | Clef System 1 & optional chat provider |
+| `ASSETS` | Static Assets | `worker/public` (landing page + `/admin` SvelteKit console) |
+| Rate Limiters | 7 namespaces (`1001`–`1007`) | `PAIR_LIMITER` (30/60s), `ADMIN_LIMITER` (600/60s), `DEVICE_LIMITER` (600/60s), `AUTH_FAIL_LIMITER` (120/60s), `PAIR_GLOBAL_LIMITER` (300/60s), `AUTH_ACCOUNT_LIMITER` (5/60s), `AUTH_IP_LIMITER` (20/60s) |
+
+## Environment Variables & Secrets
+
+### Secrets (Set via `cf workers secrets update`, Never in `wrangler.toml`)
+
+- `ADMIN_TOKEN` — required; admin routes fail closed with `401` when unset
+- `BETTER_AUTH_SECRET` — signs session cookies & encrypts TOTP secrets (absent → `/api/auth` & `/v1/auth/*` return `503`)
+- `AUTH_PEPPER` — `v2:<b64 32B>,v1:<b64 32B>`
+- `RESEND_API_KEY` — optional; enables magic-link sign-in door
+- `FCM_SERVICE_ACCOUNT_JSON` — optional; enables FCM HTTP v1 wake pushes
+- `AI_PROVIDER_API_KEY` (fallbacks: `AI_CHAT_API_KEY`, `TOKENLAB_API_KEY`) — optional external AI gateway key
+- `WEBHOOK_SECRET_KEY` — AES-256-GCM key sealing inbound webhook secrets
+
+### Key `[vars]` Defaults
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENT_RUNTIME` | `"off"` | `"off"` returns `503` on `/agents/*`; `"on"` enables `AssistantAgent` |
+| `BINDING_AUTH` | `"trusted"` | `DakFlareApi` service binding auth: `"trusted"` or `"agent_token"` |
+| `AUTH_PASSWORD_MODE` | `"client-derived"` | `"off"`, `"client-derived"` (browser PBKDF2), or `"server-kdf"` (paid tier) |
+| `AUTH_LOCKOUT_WINDOW_SECONDS` | `"900"` | Lockout window in `AuthGuard` |
+| `MAGIC_LINK_TTL_SECONDS` | `"900"` | Single-use magic link expiry |
+| `MESSAGE_RETENTION_DAYS` | `"90"` | Daily cron (`17 3 * * *`) retention cutoff |
+| `INCOMING_ROWS_PER_DAY` | `"10000"` | Per-device daily inbound write quota |
+| `AI_DAILY_TOKEN_BUDGET` | `"20000"` | Daily token budget for stateless console assistant |
+| `LEASE_MS` / `ACK_TIMEOUT_MS` | `60000` / `8000` | Outbound command lease & WS ack timeout (ms) |
+| `OFFLINE_ALERT_MS` / `STALE_SOCKET_MS` / `NONCE_WINDOW_MS` | `900000` / `120000` / `300000` | Offline alert, stale socket, and P-256 replay window (ms) |
+
+## Uniform §8 Error Code Catalog (`worker/src/lib/errors.ts`)
+
+| Error Code | HTTP | Meaning & Recovery |
+| --- | --- | --- |
+| `unexpected_query` | `400` | Signed device route received a query string; strip query params |
+| `bad_request` | `400` | Malformed JSON or missing required field |
+| `rule_rejected` | `400` | Rule failed flow-graph compilation |
+| `workflow_invalid` | `400` | Admin-only; includes `details: [{ path, message }]` |
+| `idempotency_key_not_supported_in_batch` | `400` | Do not send `idempotency_key` to `/v1/sms/send/batch` |
+| `missing_auth_headers` | `401` | One or more of `X-Device-Id`, `X-Timestamp`, `X-Nonce`, `X-Signature` missing |
+| `malformed_header` | `401` | Header failed regex validation |
+| `timestamp_out_of_window` | `401` | `X-Timestamp` outside ±300,000 ms; sync handset clock |
+| `bad_signature_length` | `401` | Decoded `X-Signature` is not 64 bytes (IEEE P1363 `r \|\| s`) |
+| `invalid_signature` | `401` | ECDSA verification failed against stored P-256 public key |
+| `device_unknown` | `401` | `device_id` not registered or revoked |
+| `nonce_replay` | `401` | `X-Nonce` already spent within `NONCE_WINDOW_MS`; generate a new 16-byte nonce |
+| `device_exists` | `409` | Pairing attempted unauthorized rebind of an active `device_id` |
+| `payload_too_large` | `413` | Body exceeded `MAX_BODY_BYTES` (262,144 bytes) |
+| `rate_limited` | `429` | Rate limiter bucket exhausted; back off |
+| `daily_quota_exceeded` | `429` | Device exhausted `INCOMING_ROWS_PER_DAY`; retry tomorrow |
+| `storage_unavailable` | `503` | Backing D1/DO write failed; batch was NOT written—safe to retry |

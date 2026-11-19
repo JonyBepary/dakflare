@@ -1,0 +1,23 @@
+# Canonical Glossary
+
+> Locked canonical identifiers and nouns across DakFlare's codebase, API, CLI, and documentation to prevent terminology drift.
+
+Use these exact identifiers across code, API payloads, CLI flags, prompts, and documentation. Never substitute synonyms.
+
+| Canonical Term | Exact Definition | Never Call This |
+| --- | --- | --- |
+| `device_id` | Paired handset identifier (`^[A-Za-z0-9_-]{8,64}$`, e.g. `dev63f3953f417d587f`) | `handsetId`, `phone_id`, `radio_node_id` |
+| `command_id` | Outbound SMS command identifier returned by `POST /v1/sms/send` (e.g. `cmdf_...`) | `job_id`, `sms_id`, `message_job` |
+| `local_id` | Handset-assigned idempotency key for an inbound SMS row | `sms_local_key`, `phone_msg_id` |
+| `dkf_agt_` | Prefix for scoped agent bearer tokens (SHA-256 digest stored in D1 `agent_tokens`) | `api_key`, `bot_token`, `service_token` |
+| `ag1_` | Prefix for single-use authority apply handles minted by `POST /v1/agent/synthesize` | `patch_token`, `deploy_key` |
+| `DeviceGateway` | Per-handset SQLite Durable Object (`DEVICE` binding) | `HandsetDO`, `SmsRouterDO` |
+| `AuthGuard` | Global SQLite Durable Object (`AUTH_GUARD`) owning per-account & per-IP lockouts | `RateLimitDO`, `LoginGuard` |
+| `AuthorityGuard` | Global SQLite Durable Object (`AUTHORITY_GUARD`) owning live grant windows | `GrantDO`, `ApprovalDO` |
+| `AssistantAgent` | Pinned singleton SQLite Durable Object (`ASSISTANT`, name `assistant`) for the stateful agent runtime | `ChatDO`, `AgentSessionDO` |
+| `FlowExecutionWorkflow` | Cloudflare Workflow (`FLOW_WORKFLOW`) executing flow delays >5 seconds | `DelayWorker`, `FlowQueue` |
+| `DakFlareApi` | Typed Cloudflare Worker-to-Worker RPC service binding entrypoint (`worker/src/binding-api.ts`) | `InternalApi`, `WorkerRpc` |
+| `dakflare.flow/v2` | Canonical acyclic flow IR schema (`cli/schema/flow-v2.json`) | `flow-v1`, `canvas-json`, `plugin-manifest` |
+| `SENT` vs. `DELIVERED` | `SENT` = handset radio accepted the message; `DELIVERED` = carrier status report confirmed arrival | Treating `SENT` as delivered |
+| `poll-only` | Handset wake mode when `fcm_token` is absent (GMS-free LineageOS); polls `/v1/sms/outgoing/poll` | `broken push`, `offline-only` |
+| `System 1` / `Clef` | Typed probability-over-closed-set decision client (`worker/src/lib/system1.ts`) | Free-form LLM classifier |

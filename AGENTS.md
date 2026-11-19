@@ -75,6 +75,7 @@ install them into another repository unchanged.
 | `design/` | the landing page sources and tokens |
 | `test-support/` | conformance harness, shared protocol vectors, dev stack |
 | `docs/` | every document, indexed by `docs/README.md`: the master spec, the agent surface and runtime, `WORKER_BINDING.md`, runbooks, console and design notes, `STATE_MACHINES.md`, and `history/` for point-in-time plans |
+| `apps/docs/` | the Fumadocs site; `npm run build` there, and it renders the documents in `docs/` for readers and agents |
 
 ## How this owner wants work done
 

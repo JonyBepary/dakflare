@@ -1,0 +1,1455 @@
+<!-- source: /docs/index.md -->
+
+# DakFlare — Sovereign Multi-Platform Messaging Hub & SMS Gateway
+
+DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates four SQLite-backed Durable Objects (`DeviceGateway`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 17 migrations `0001`–`0017`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
+
+## Navigation Index (Ordered by Onboarding Priority)
+
+- **Start Here (Tutorials)**: `/start/quickstart.md`, `/start/first-wasm-flow.md`, `/start/connect-mcp-agent.md`
+- **How-To Guides**: `/guides/android-node-pairing.md`, `/guides/durable-objects-routing.md`, `/guides/visual-workflow-editor.md`, `/guides/agent-authority-and-webhooks.md`, `/guides/self-hosting-production.md`
+- **Reference**: `/reference/api-reference.md`, `/reference/mcp-tools.md`, `/reference/wasm-flow-abi.md`, `/reference/cli-and-env.md`, `/reference/state-machines.md`, `/reference/glossary.md`
+- **Architecture**: `/architecture/sovereign-edge-model.md`, `/architecture/security-p256-identity.md`, `/architecture/wasm-and-agent-isolation.md`
+- **Machine Endpoints**: `/llms.txt`, `/llms-full.txt`, `/openapi.json`, `/SKILL.md`, `/AGENTS.md`, `POST /mcp`
+
+## System Topology at a Glance
+
+| Layer | Implementation | Responsibility |
+| --- | --- | --- |
+| **Handset Radio** | `simulator/` (Tauri v2 + Rust `core/` + Kotlin `bridge/` + Svelte 5) | Owns the SIM, holds `android.app.role.SMS`, wraps P-256 identity in Android Keystore, runs `simulator/flow` offline, syncs via WebSocket or polling |
+| **Edge Coordinator** | `worker/` (`dakflare-worker`, TypeScript on Cloudflare Workers) | Verifies P-256 signatures & nonces, hosts REST API, Better Auth, channels (SMS, Telegram, WhatsApp Cloud), `flow.wasm` fallback, Clef System 1, and `/mcp` |
+| **Durable Objects** | `DeviceGateway` (`DEVICE`), `AuthGuard` (`AUTH_GUARD`), `AuthorityGuard` (`AUTHORITY_GUARD`), `AssistantAgent` (`ASSISTANT`) | Per-device command queue/replay/alarms, account & IP lockout, live grant windows, and stateful streaming agent runtime |
+| **Durable Storage & Async** | D1 (`DB` / `sms_gateway`), KV (`KV`), R2 (`MEDIA_BUCKET`), Queue (`WEBHOOK_QUEUE`), Workflow (`FLOW_WORKFLOW`) | 17-migration SQLite ledger, FCM token cache, 24h agent attachments, SSRF-guarded webhook retries, >5s flow delays |
+| **Operator Console** | `dashboard/` (SvelteKit 5 `adapter-static` → `worker/public/admin`) | Served at `/admin`; fleet presence, messages, Svelte Flow editor with WebMCP, approvals/grants, floating Assistant, audit log, security |
+| **Operator CLI** | `cli/` (`dakflare`, zero-dependency Node 22+) | 28 commands, `--agent` single-JSON contract, semantic exit codes (`0, 1, 2, 3, 4, 5, 6, 75`), `dakflare mcp serve` stdio bridge |
+
+---
+
+<!-- source: /docs/start/quickstart.md -->
+
+# Quickstart
+
+> Provision Cloudflare resources, deploy dakflare-worker, create the owner account, pair one Android handset, and send your first SMS via CLI.
+
+This tutorial takes you from a clean checkout to a live DakFlare deployment on your Cloudflare account with one paired Android handset and one verified outbound SMS. Every step is executable from the terminal without dashboard screenshots.
+
+## Prerequisites
+
+- **Node.js 22+** (required by the zero-dependency `dakflare` CLI)
+- **Cloudflare `cf` CLI** authenticated to your account (`cf auth login`)
+- **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
+- **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/guides/android-node-pairing/))
+
+## Step 1: Clone and Install Dependencies
+
+```bash
+git clone https://github.com/JonyBepary/dakflare
+cd dakflare
+npm install -g .          # installs the `dakflare` binary globally (or run `node cli/bin/dakflare.js`)
+cd worker && npm install && cd ..
+```
+
+Verify the CLI is available and speaks its machine contract:
+
+```bash
+dakflare capabilities --agent
+```
+
+Expected output: a single compact JSON document with `"ok": true` listing all 28 commands, their effects, and flags.
+
+## Step 2: Generate Local Secrets
+
+Generate fresh cryptographic secrets into `worker/.dev.vars` (git-ignored):
+
+```bash
+dakflare init --local
+```
+
+This creates `worker/.dev.vars` containing:
+- `ADMIN_TOKEN` — machine credential for CLI and service bindings
+- `BETTER_AUTH_SECRET` — signs `__Secure-better-auth.session_token` cookies and encrypts TOTP secrets
+- `AUTH_PEPPER` — versioned pepper string (`v2:<b64 32B>,v1:<b64 32B>`) for password verification
+
+> Never commit `worker/.dev.vars`. Secrets are pushed to Cloudflare via `cf workers secrets update` or `dakflare up` and persist across future deploys.
+
+## Step 3: Provision, Migrate, and Deploy
+
+Sign in to Cloudflare locally and run `dakflare up`:
+
+```bash
+cf auth login
+dakflare up --email you@example.com --dry-run   # preview the plan without mutating Cloudflare
+dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 17 migrations, deploy, bootstrap owner
+```
+
+What `dakflare up` executes in order:
+1. Finds or creates D1 database `sms_gateway` and KV namespace `KV`, writing their IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
+2. Applies D1 migrations `0001_baseline.sql` through `0017_alert_acknowledged_by.sql`.
+3. Uploads secrets from `worker/.dev.vars` to `dakflare-worker`.
+4. Builds `dashboard/` into `worker/public/admin` and deploys `dakflare-worker` via `cf deploy`.
+5. Bootstraps the first `owner` account (`POST /v1/admin/bootstrap`) and prints a one-time invite URL.
+6. Mints an initial handset pairing code (`POST /v1/admin/pairing-code`).
+
+### Manual Equivalent (Step by Step)
+
+If you prefer manual provisioning instead of `dakflare up`:
+
+```bash
+cd worker
+cp wrangler.template.toml wrangler.toml
+cp cloudflare.config.template.ts cloudflare.config.ts
+npx wrangler d1 create sms_gateway              # copy database_id into BOTH cloudflare.config.ts and wrangler.toml
+npx wrangler kv namespace create KV             # copy id into BOTH files
+npx cf d1 migrations apply <D1_DATABASE_ID>     # cf requires the UUID, never the database name
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
+npm run deploy                                  # builds dashboard + runs cf deploy
+```
+
+> **Important `cf` behavior**: `cf deploy` can intermittently exit `1` on a working deploy due to a Cloudflare Workflows API 500 (`workflows.api.error.internal_server`). Always verify deployment evidence with `npm run verify:deploy` in `worker/` and `./worker/scripts/smoke.sh https://<your-worker>.workers.dev`.
+
+## Step 4: Configure the CLI and Redeem the Owner Invite
+
+Point the CLI at your deployed Worker (stored in `~/.config/dakflare/config.json`, mode `600`):
+
+```bash
+dakflare init --url https://<your-worker>.workers.dev --token-file worker/.dev.vars
+dakflare doctor --agent
+```
+
+Confirm `doctor` reports healthy config, schema, migrations (`17` applied), and bindings. Open the printed owner invite URL on the Worker's own HTTPS hostname (never through a localhost proxy—the session cookie is host-only), redeem it, and enroll a **Passkey**.
+
+## Step 5: Pair One Android Handset
+
+Mint a pairing code with a terminal QR code:
+
+```bash
+dakflare pair --label "Primary SIM" --qr
+```
+
+In the DakFlare Android app (**Device** tab), scan the QR code or enter the Worker URL and pairing code. The handset generates a P-256 keypair inside Android Keystore (`keystore:v1:<iv>:<ciphertext>`), calls `POST /v1/device/pair`, and appears in your fleet:
+
+```bash
+dakflare devices --agent
+```
+
+Note the returned `device_id` (for example, `dev63f3953f417d587f`).
+
+## Step 6: Send and Verify Your First SMS
+
+Always pass `--idempotency-key` when a retry is possible so a network timeout never sends a duplicate SMS:
+
+```bash
+dakflare send \
+  --device dev63f3953f417d587f \
+  --to +8801540196080 \
+  --body "DakFlare edge gateway online" \
+  --idempotency-key "quickstart-001" \
+  --agent
+```
+
+`dakflare send` waits up to 10 seconds by default and exits semantically:
+- **Exit `0`**: The handset radio accepted the message (`SENT`) or carrier confirmed delivery (`DELIVERED` when `--until DELIVERED` is passed).
+- **Exit `75`**: Still in flight (`PENDING`, `LEASED`, or `DISPATCHED`). **Do not re-run `send`.** Poll the returned `command_id` instead:
+
+```bash
+dakflare status <command_id> --device dev63f3953f417d587f --wait 60s --agent
+```
+
+> **`SENT` is not delivery.** `verification.passed` is `true` only when `state === "DELIVERED"`.
+
+## Verification Checklist
+
+Run the full health check before moving on:
+
+```bash
+dakflare doctor
+```
+
+Next: [Build your first Wasm auto-reply flow](/start/first-wasm-flow/) or [connect an MCP agent](/start/connect-mcp-agent/).
+
+---
+
+<!-- source: /docs/start/first-wasm-flow.md -->
+
+# First Wasm Flow
+
+> Author, validate, test locally against flow.wasm, deploy, and heal a dakflare.flow/v2 auto-reply graph.
+
+DakFlare evaluates inbound messages using a deterministic directed acyclic graph (`dakflare.flow/v2`). The exact same Rust crate (`simulator/flow`) runs natively on the Android handset and compiles to WebAssembly (`worker/src/wasm/flow.wasm` and `dashboard/static/flow.wasm`) for the Worker fallback and browser simulation panel.
+
+## Step 1: Inspect the Canonical Flow Schema
+
+Retrieve the machine-readable JSON Schema directly from the CLI:
+
+```bash
+dakflare schema --flow-v2 --json
+```
+
+Key constraints enforced by the validator (`worker/src/lib/flow-ir.ts` and `simulator/flow/src/ir.rs`):
+- **Acyclic graph**: Cycles are refused with the exact offending edge.
+- **Strict variable scoping**: Every `{{ variable }}` reference must be bound on *every* incoming path (intersection semantics). Built-ins `sender`, `body`, and `received_at` are always bound by the `trigger` node.
+- **RE2-compatible regex**: `extract` patterns must use `(?<name>...)` named capture groups (`(?P<name>...)` is refused) and pass the RE2 lint.
+- **Zero coordinates required**: Omit `position` and `ui_layout`; the Worker computes deterministic `rank-v1` coordinates on save.
+
+## Step 2: Author a `dakflare.flow/v2` Document
+
+Create `order-reply.json`:
+
+```json
+{
+  "id": "wf_orders",
+  "name": "Order confirmation",
+  "enabled": true,
+  "graph": {
+    "schema": "dakflare.flow/v2",
+    "nodes": [
+      {
+        "id": "t1",
+        "type": "trigger",
+        "data": {
+          "kind": "incoming",
+          "sender": { "mode": "any" },
+          "body": { "mode": "keyword", "value": "order" }
+        }
+      },
+      {
+        "id": "x1",
+        "type": "extract",
+        "data": {
+          "source": "body",
+          "pattern": "order (?<order>[A-Z0-9]{6})",
+          "flags": "i"
+        }
+      },
+      {
+        "id": "s1",
+        "type": "send_sms",
+        "data": {
+          "to": "{{sender}}",
+          "body": "Order {{order}} confirmed."
+        }
+      },
+      {
+        "id": "e1",
+        "type": "stop",
+        "data": {}
+      }
+    ],
+    "edges": [
+      { "id": "e_t1_x1", "source": "t1", "target": "x1" },
+      { "id": "e_x1_s1", "source": "x1", "target": "s1" },
+      { "id": "e_s1_e1", "source": "s1", "target": "e1" }
+    ]
+  }
+}
+```
+
+## Step 3: Dry-Run and Apply via CLI
+
+Preview the structural diff without writing to D1:
+
+```bash
+dakflare flows apply order-reply.json --dry-run --agent
+```
+
+`data.dry_run_diff` reports added/removed/modified nodes and edges, capture variables gained or lost, and whether layout coordinates changed. Apply the flow:
+
+```bash
+dakflare flows apply order-reply.json --agent
+```
+
+Semantic exit codes:
+- `0` — saved and synced to paired handsets on their next `GET /v1/flows` sync.
+- `2` — `workflow_invalid` (prints exact issue paths such as `nodes[1].data.pattern: must declare at least one named group`).
+- `5` — `version_conflict` (`expected_previous_version` mismatch; pass `--force` only when intentionally overwriting).
+
+## Step 4: Test Locally Against `flow.wasm`
+
+Create a JSONL corpus `corpus.jsonl`:
+
+```json
+{"sender":"+8801711000111","body":"Please confirm order AB12CD","received_at":1763500000000}
+{"sender":"+8801711000111","body":"Hello there","received_at":1763500001000}
+```
+
+Execute the corpus locally against the compiled WebAssembly engine:
+
+```bash
+dakflare flow test --flow wf_orders --corpus corpus.jsonl --agent
+```
+
+The first message yields `"outcome": "delivered"` with one `send_sms` action (`"Order AB12CD confirmed."`). The second yields `"outcome": "filtered"`.
+
+## Step 5: Handle Delays, Webhooks, and Extraction Drift
+
+- **Handset vs. Worker split**: If your flow adds a `delay` (>5 seconds uses `FlowExecutionWorkflow`) or a `webhook` (dispatched via `WEBHOOK_QUEUE` with SSRF protection), the handset runs the prefix locally, marks the `flow_runs` row `partial`, and the Worker resumes from that exact boundary without duplicating already-sent SMS steps.
+- **Healing drift**: When an upstream sender changes SMS phrasing, two failed extractions within an hour raise an `extraction_drift` alert. Synthesize and verify a replacement regex against real message history before writing:
+
+```bash
+dakflare extract synthesize --samples new-samples.json --group order --verify-d1-limit 500
+dakflare flows heal wf_orders --samples new-samples.json --group order --dry-run
+dakflare flows heal wf_orders --samples new-samples.json --group order
+```
+
+`flows heal` refuses to write (exit `6`) if even one historically matched message captures a different byte-for-byte value under the new pattern.
+
+---
+
+<!-- source: /docs/start/connect-mcp-agent.md -->
+
+# Connect an MCP Agent
+
+> Mint a scoped dkf_agt_ token, connect Claude Code, Cursor, or OpenCode to DakFlare's Streamable HTTP /mcp endpoint or stdio bridge, and approve a gated SMS send.
+
+An AI agent never holds `ADMIN_TOKEN`. Instead, it authenticates with a scoped `dkf_agt_` bearer token whose **scopes** bound what it may attempt and whose **time-boxed authority grants** bound what it may actually execute.
+
+## Step 1: Mint a Scoped Agent Token
+
+Mint a token with read scopes plus `sms:send` (printed once; D1 stores only its SHA-256 digest):
+
+```bash
+dakflare auth mint-agent-token \
+  --name "claude-code" \
+  --scope devices:read,messages:read,flows:read,sms:send \
+  --max-per-hour 20
+```
+
+Save the printed `dkf_agt_...` value to a mode-`600` file (for example, `~/.dakflare-agent-token`).
+
+> `devices:revoke` and `auth:reset` are in `NEVER_GRANTABLE`—no token can be minted with them, and no approval grant can ever authorize them.
+
+## Step 2: Connect Your MCP Client
+
+### Option A: Stdio Bridge (`dakflare mcp serve`)
+
+Best for Claude Code, Cursor, Windsurf, and OpenCode local configs. `dakflare mcp serve` speaks stdio JSON-RPC to the editor and Streamable HTTP (`POST`/`GET`/`DELETE /mcp`) with `Mcp-Session-Id` tracking to your Worker:
+
+```json
+{
+  "mcpServers": {
+    "dakflare": {
+      "command": "dakflare",
+      "args": ["mcp", "serve", "--token-file", "/home/you/.dakflare-agent-token"]
+    }
+  }
+}
+```
+
+### Option B: Direct Streamable HTTP (`/mcp`)
+
+Point any Streamable HTTP MCP client at `https://<your-worker>.workers.dev/mcp`:
+- Header `Authorization: Bearer dkf_agt_...`
+- Header `Accept: application/json, text/event-stream` (requests omitting both return `406`)
+- Public OAuth discovery metadata is served at `/.well-known/oauth-protected-resource` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414), with RFC 8707 audience binding.
+
+## Step 3: Verify Tool Discovery
+
+`tools/list` is the permission surface: tools not covered by the token's scopes are omitted completely (calling them returns JSON-RPC `-32601`). With `devices:read,messages:read,flows:read,sms:send`, the client sees all 9 tools:
+- `list_devices`, `telemetry` (`devices:read`)
+- `read_messages`, `command_status`, `trace`, `triage` (`messages:read`)
+- `list_flows`, `get_flow` (`flows:read`)
+- `send_sms` (`sms:send` + live `sms:send:production` grant)
+
+## Step 4: Execute a Gated `send_sms` Round
+
+When the agent calls `send_sms` without a live grant, DakFlare sends nothing. Instead:
+1. On Streamable HTTP `/mcp`, the server initiates MCP **elicitation** (`elicitation/create` over SSE) asking the human operator for `confirm_deployment`, a 6-digit `totp_code`, and `max_uses` (or returns a Multi-Round-Trip `input_required` envelope naming the `approval_request_id`).
+2. Alternatively, approve the pending request via CLI or the console's `/admin/approvals` page:
+
+```bash
+dakflare auth approvals
+dakflare auth approve <request-id> --for 15m
+```
+
+3. The agent retries `send_sms` with the same `idempotency_key`. The server re-reads D1 and `AuthorityGuard`, verifies the live grant covers the exact recipient(s) or `device_id`, decrements `max_uses`, and queues the command.
+
+## Step 5: Inspect Live Grants and Revoke Anytime
+
+```bash
+dakflare auth grants --live
+dakflare auth grants revoke <grant-id> --yes
+dakflare auth revoke-agent-token <token-id> --yes
+```
+
+Revocation takes effect immediately on the very next request.
+
+---
+
+<!-- source: /docs/guides/android-node-pairing.md -->
+
+# Android Handset & Pairing
+
+> Build, sign, install, pair, and verify the Tauri v2 + Rust Android SMS radio app (dev.dakflare.simulator).
+
+The Android app (`simulator/`, package `dev.dakflare.simulator`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
+
+## Toolchain & Debug Build
+
+Install JDK 21, Android SDK 37, NDK 27, and Rust Android targets under `$HOME` (~8 GB disk space):
+
+```bash
+simulator/scripts/android-setup.sh
+source ~/.config/dakflare/android-env.sh
+cd simulator
+npm install && npm run check && npm run build
+npx tauri android build --debug --apk --target aarch64
+adb install -r -g src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+Run Rust unit tests without the Android toolchain:
+
+```bash
+cd simulator/core && cargo test
+cd simulator/flow && cargo test
+```
+
+## Pairing Lifecycle
+
+1. **Mint a single-use pairing code** on the operator terminal:
+   ```bash
+   dakflare pair --label "LineageOS Pixel" --ttl 600 --qr
+   ```
+2. **Enrol the handset**: Open **Device** in the app and scan the QR code (or paste the Worker URL and code).
+3. **Key wrapping**: `KeyVault.kt` generates an AES-256-GCM wrapping key inside `AndroidKeyStore` (non-exportable) and wraps the P-256 private key at rest in the local libSQL database as `keystore:v1:<iv>:<ciphertext>`.
+4. **Registration**: The handset submits its `device_id`, P-256 public key, and pairing code to `POST /v1/device/pair`. The Worker marks the pairing code claimed and stores the public key in D1 `devices`.
+
+> **Do not uninstall the app to troubleshoot pairing.** Uninstalling deletes the local libSQL database, the Keystore-wrapped identity, and the Android battery optimization whitelist. Always diagnose with `dakflare doctor` and `dakflare devices` first. If identity is truly lost, run `dakflare revoke <device_id> --yes` and re-pair.
+
+## Default SMS Role & Foreground Service
+
+- **Role**: The handset holds `android.app.role.SMS` so `SmsReceiver.kt` receives `SMS_DELIVER`, writes to `SmsProvider.kt` (`content://sms`), and posts one silent notification per thread with inline reply (`SmsReplyReceiver.kt`).
+- **MMS**: Not supported; an incoming MMS push produces an explicit notification rather than silently dropping.
+- **Persistence**: `GatewayService.kt` runs as a `remoteMessaging` foreground service flushing pending rows every 15 minutes, and `BootReceiver.kt` restores it after reboot.
+
+## Wake Capability: `poll-only` vs. FCM Push
+
+The Worker supports FCM HTTP v1 wake pushes (`worker/src/lib/fcm.ts`, bearer token cached in `KV`) whenever a `devices` row carries an `fcm_token`. However, `dev.dakflare.simulator` deliberately does **not** register an FCM token because target handsets run GMS-free LineageOS (`com.google.android.gms` absent). The handset operates honestly as `poll-only`—maintaining a persistent WebSocket (`GET /v1/device/ws`) when online and falling back to `POST /v1/sms/outgoing/poll`.
+
+## On-Device Verification (8 Checks)
+
+Against a rooted debug handset connected over ADB:
+
+```bash
+simulator/scripts/device-check.sh
+simulator/scripts/device-check.sh --reboot   # also verifies BootReceiver recovery
+```
+
+The script verifies: attached handset, `android.app.role.SMS` holder, `keystore:v1:` wrapped key, injected inbound PDU (`SmsInject.java`), `content://sms` provider row, outbound send, notification reply action, and foreground `GatewayService`. A `SKIP` is not a pass.
+
+## Release APK Signing
+
+Signing material stays outside the repository at `~/.config/dakflare/dakflare-release.jks` and `~/.config/dakflare/release-keystore.txt` (both mode `600`). Gradle refuses a release build without the keystore so it can never fall back to the debug key:
+
+```bash
+simulator/scripts/release-apk.sh
+dakflare key fingerprint   # prints the release certificate SHA-256
+```
+
+**Losing the release keystore permanently prevents updating existing installations under `dev.dakflare.simulator`.**
+
+---
+
+<!-- source: /docs/guides/durable-objects-routing.md -->
+
+# Durable Objects, Channels & Routing
+
+> Operate DakFlare's four Durable Objects, WebSocket vs. polling delivery, idempotent sends, Telegram/WhatsApp Cloud channels, and DakFlareApi service bindings.
+
+## The Four SQLite-Backed Durable Objects
+
+All four classes are exported in `worker/cloudflare.config.ts` and `worker/wrangler.toml` with `storage = "sqlite"`:
+
+| Binding | Class | Instance Key | Responsibility |
+| --- | --- | --- | --- |
+| `DEVICE` | `DeviceGateway` | One per `device_id` | Command queue (`PENDING` → terminal), lease & ack alarms, P-256 nonce replay ledger, WebSocket hibernation, DLQ (`dead_letters` after 5 task attempts) |
+| `AUTH_GUARD` | `AuthGuard` | Global singleton | Dual-scope sign-in lockout counters: per-account (5 attempts) and per-IP (20 attempts) within `AUTH_LOCKOUT_WINDOW_SECONDS` (900s) |
+| `AUTHORITY_GUARD` | `AuthorityGuard` | Global singleton | Live time-boxed agent authority grant windows and atomic approval race arbitration |
+| `ASSISTANT` | `AssistantAgent` | Pinned singleton (`assistant`) | Stateful operator chat (`agents/sessions`), resumable SSE/WS turn streams (`agents/streams`), `tool_calls` fail-closed journal, autonomy enforcement |
+
+> **One-way door**: Adding or renaming a Durable Object class requires matching `exports` in `cloudflare.config.ts` and a full `cf deploy` (never a version-only upload).
+
+## Outbound Delivery: WebSocket + Polling Fallback
+
+1. `POST /v1/sms/send` writes a `PENDING` command into the target handset's `DeviceGateway` Durable Object (deduplicated by optional `idempotency_key`).
+2. **Primary path**: If the handset has an open WebSocket (`GET /v1/device/ws`), `DeviceGateway` leases the command (`LEASED`, default `LEASE_MS = 60000`), dispatches it (`DISPATCHED`), and arms an ack timer (`ACK_TIMEOUT_MS = 8000`).
+3. **Fallback path**: If the socket is closed, the handset calls `POST /v1/sms/outgoing/poll`, receives leased commands, sends via `SmsSender.kt`, and reports `SENT`, `DELIVERED`, or `FAILED` (`error_code`, `error_message`) via `POST /v1/sms/status/batch`.
+4. **Lease expiry & safety**: If a lease expires without acknowledgement, the command returns to `PENDING` (or becomes `EXPIRED` once past its TTL) without duplicating socket dispatch. Never lower `LEASE_MS` below real radio send latency in production.
+
+### Inspecting Live Sockets and Dead Letters
+
+```bash
+dakflare ws inspect --device <device_id>
+dakflare dlq --device <device_id> --limit 50
+dakflare trace <command_id> --device <device_id>
+```
+
+## Multi-Channel Routing (SMS, Telegram, WhatsApp Cloud)
+
+Inbound messages across all three channels normalize into one `conversations` row keyed by `(channel, account_id, peer_id)` and enter the same **Rules (`priority DESC`) → Flows** pipeline:
+
+| Channel | Ingress Endpoint | Verification Header | Outbound Endpoint |
+| --- | --- | --- | --- |
+| **SMS** | `POST /v1/sms/incoming/batch` | P-256 `X-Signature` | `POST /v1/sms/send` |
+| **Telegram** | `POST /v1/channels/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` | `POST /v1/channels/telegram/send` |
+| **WhatsApp Cloud** | `POST /v1/channels/whatsapp/webhook` (`GET` verify + `POST` ingress) | `X-Hub-Signature-256` | `POST /v1/channels/whatsapp/send` |
+
+> **Current state note**: Both Telegram and WhatsApp inserts currently write `session_state = 'WINDOW_OPEN'`. Automated transitions to `TEMPLATE_ONLY` and `OPTED_OUT` are declared in `0007_multi_platform_and_conversations.sql` but do not yet have background writers (see [State Machines](/reference/state-machines/)).
+
+## Calling DakFlare from Another Cloudflare Worker (`DakFlareApi`)
+
+Another Worker or Cloudflare Workflow in the same account can bind the typed RPC entrypoint `DakFlareApi` instead of constructing raw HTTP requests or bypassing auth via raw DO stubs:
+
+```toml
+# consumer wrangler.toml
+[[services]]
+binding = "DAKFLARE"
+service = "dakflare-worker"
+entrypoint = "DakFlareApi"
+```
+
+```ts
+
+export default {
+  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareApi> }) {
+    const sent = await env.DAKFLARE.sendSms({
+      to: "+8801711000111",
+      body: "Payment settled.",
+      idempotencyKey: "inv-9021",
+    });
+    return Response.json(sent);
+  },
+};
+```
+
+Every `DakFlareApi` method (`health`, `deployment`, `devices`, `messages`, `sendSms`, `ask`, `request`) routes through `handleFetch` with `X-Dakflare-Client: binding`, preserving scopes, rate limiters, idempotency, and audit rows. Control authorization via `BINDING_AUTH`:
+- `trusted` (default): the Cloudflare account boundary is the credential (refuses with `binding_untrusted` if `ADMIN_TOKEN` is unset).
+- `agent_token`: requires a `dkf_agt_` token per call plus live grants for costly scopes.
+
+## Loading a Custom `dakflare.flow/v2` JSON Template via Worker Binding
+
+`DakFlareApi` exposes `request()` as a typed escape hatch to any `/v1/*` route through the exact same auth, rate-limit, and validation pipeline (`worker/src/binding-api.ts`). Use `PUT /v1/admin/workflows/:id` to load or update a custom JSON flow template from another Cloudflare Worker or Cloudflare Workflow:
+
+```ts
+
+interface Env {
+  DAKFLARE: Service<DakFlareApi>;
+  DAKFLARE_AGENT_TOKEN?: string; // only needed if BINDING_AUTH=agent_token
+}
+
+const customTemplate = {
+  name: "Invoice OTP & Receipt Handler",
+  enabled: true,
+  device_id: "dev63f3953f417d587f",
+  graph: {
+    schema: "dakflare.flow/v2",
+    nodes: [
+      { id: "t1", type: "trigger", data: { kind: "incoming", body: { mode: "keyword", value: "INV-" } } },
+      { id: "x1", type: "extract", data: { source: "body", pattern: "INV-(?<invoice>[0-9]{6})" } },
+      { id: "s1", type: "send_sms", data: { to: "{{sender}}", body: "Invoice {{invoice}} logged." } },
+      { id: "e1", type: "stop", data: {} },
+    ],
+    edges: [
+      { id: "e1", source: "t1", target: "x1" },
+      { id: "e2", source: "x1", target: "s1" },
+      { id: "e3", source: "s1", target: "e1" },
+    ],
+  },
+};
+
+export default {
+  async fetch(_req: Request, env: Env): Promise<Response> {
+    try {
+      // 1. Load & validate the custom JSON template (Worker computes rank-v1 layout automatically)
+      const saved = await env.DAKFLARE.request({
+        path: "/v1/admin/workflows/wf_invoice_custom",
+        method: "PUT",
+        body: customTemplate,
+        ...(env.DAKFLARE_AGENT_TOKEN ? { token: env.DAKFLARE_AGENT_TOKEN } : {}),
+      });
+
+      // 2. Or send an outbound SMS directly from a Cloudflare Workflow / Worker
+      const sent = await env.DAKFLARE.sendSms({
+        deviceId: "dev63f3953f417d587f",
+        to: "+8801540196080",
+        body: "Custom template deployed.",
+        idempotencyKey: "deploy-wf-invoice-custom",
+      });
+
+      return Response.json({ saved: saved.body, sent });
+    } catch (err) {
+      if (err instanceof BindingError) {
+        return Response.json({ error: err.code, message: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  },
+};
+```
+
+> **Execution model note**: `dakflare.flow/v2` workflows are event-driven (`trigger.data.kind === "incoming"`): once saved via `PUT /v1/admin/workflows/:id`, the workflow syncs to the handset (`GET /v1/flows`) and runs automatically on matching inbound SMS/Telegram/WhatsApp messages. There is no ad-hoc `POST /v1/workflows/:id/run` endpoint in `worker/src/index.ts`; for imperative outbound dispatch from another Worker, call `env.DAKFLARE.sendSms(...)` or `env.DAKFLARE.request({ path: "/v1/channels/telegram/send", method: "POST", body: ... })`.
+
+---
+
+<!-- source: /docs/guides/visual-workflow-editor.md -->
+
+# Visual Workflow Editor & WebMCP
+
+> Design and simulate dakflare.flow/v2 pipelines in the SvelteKit console and expose live graph tools to browser agents via WebMCP.
+
+The workflow editor at `/admin/workflows/edit` edits canonical `dakflare.flow/v2` documents without coupling storage to canvas pixels.
+
+## Editor Surfaces
+
+- **Steps (default)**: Linear outline of nodes and branches for fast keyboard navigation (`Ctrl+K` StepFinder, grouped undo/redo, `Ctrl+S` save, unsaved-change leave guard).
+- **Map**: Interactive Svelte Flow canvas laid out deterministically from the Worker's `rank-v1` positions.
+- **Source**: Read-only canonical JSON inspector (`SourceSheet.svelte`).
+- **Simulation Panel**: Runs `dashboard/static/flow.wasm` directly in the browser against sample messages—zero network round trip, byte-for-byte identical to the handset and Worker engines.
+- **Pattern Sheet (`PatternSheet.svelte`)**: Highlight variable spans (`trigger`, `extract`, `ignore`) in a sample message, run local Wasm `synthesize_template_json`, or click **Auto-tag with Clef** to classify span roles via `POST /v1/agent/triage`.
+
+## Staged Ghost Patches
+
+When a patch is proposed by the palette composer (`agent-patch.ts`), the Assistant, or a WebMCP client, it never mutates the live graph directly:
+1. Map and Steps render a dashed **Preview** ghost overlay.
+2. The top banner displays **STAGED PATCH · NOT APPLIED**, the stated intent, whether a judge scored it (`judged: false` for external WebMCP patches), and any graph validation errors.
+3. While a ghost patch is staged, all other edit paths are locked.
+4. **Accept** (`Enter`) commits the patch to editor state as a single undo step (disabled if validation fails); **Revert** (`Escape`) discards it. Nothing writes to D1 until the operator explicitly saves (`Ctrl+S`).
+
+## WebMCP Browser Tools
+
+When mounted in a WebMCP-capable browser (for example, Chromium launched with `--enable-features=WebMCP`), `dashboard/src/lib/components/workflow/webmcp.ts` registers four imperative tools on `document.modelContext` (falling back to `navigator.modelContext`) and automatically unregisters them via `AbortController` on unmount:
+
+| Tool | Hints | Inputs | Purpose |
+| --- | --- | --- | --- |
+| `dakflare_get_flow_ast` | `readOnlyHint: true` | `{}` | Returns live `{ flow_id, name, enabled, dirty, staged_patch, graph }` |
+| `dakflare_stage_flow_patch` | `consequentialHint: true`, `destructiveHint: true` | `{ intent, patch: { nodes, edges } }` | Validates and stages a ghost preview; never saves |
+| `dakflare_synthesize_pattern` | `destructiveHint: false` | `{ sample, spans? }` | Runs local Wasm template synthesis; saves nothing |
+| `dakflare_diagnose_message` | `readOnlyHint: true` | `{ message, pattern? }` | Calls `POST /v1/agent/diagnose` (15s timeout) |
+
+Two forms also expose declarative WebMCP attributes (`toolname`, `tooldescription`, `toolparamtitle`, `toolparamdescription`) via `webmcp-attributes.ts`:
+- `dakflare_ask_agent` (`StepFinder.svelte`)
+- `dakflare_autotag_spans` (`PatternSheet.svelte`)
+
+Neither form ever emits `toolautosubmit`—verified by `node --experimental-strip-types dashboard/scripts/webmcp-check.mjs` (20 assertions).
+
+---
+
+<!-- source: /docs/guides/agent-authority-and-webhooks.md -->
+
+# Agent Authority, Grants & Webhooks
+
+> Configure scoped agent tokens, time-boxed authority grants, AssistantAgent autonomy windows, and HMAC-signed inbound webhooks.
+
+DakFlare separates **what an agent may attempt** (token scopes) from **what an agent may execute right now** (time-boxed human grants) and **how much money it can spend** (hourly and daily caps).
+
+## Scopes vs. Grants
+
+### Token Scopes (`worker/src/lib/agent-scopes.ts`)
+
+| Category | Scopes |
+| --- | --- |
+| **Read** | `messages:read`, `devices:read`, `flows:read`, `audit:read` |
+| **Reversible / Cheap Write** | `sms:send`, `messages:purge`, `alerts:write`, `flows:write`, `devices:write`, `rules:write`, `webhooks:write` |
+| **Costly / Production Write (always grant-gated)** | `sms:send:production`, `enable_shortcode`, `dlq_bulk_replay`, `flow_deploy_prod` |
+| **Never Grantable (hard-refused)** | `devices:revoke`, `auth:reset` |
+
+### Grant Duration Ladder & Scope Ceilings
+
+Operators choose from 8 rungs (`1m`, `5m`, `15m`, `30m`, `1h`, `1d`, `7d`, `30d`), clamped automatically by per-scope ceilings (`SCOPE_CAPS`):
+
+| Scope | Max TTL | Required Target Constraint |
+| --- | --- | --- |
+| `sms:send:production` | `3600s` (1 hour) | `recipients` or `device_id` |
+| `enable_shortcode` | `900s` (15 minutes) | `rule_id` |
+| `dlq_bulk_replay` | `900s` (15 minutes) | `device_id` |
+| `flow_deploy_prod` | `86400s` (1 day) | `flow_id` (plus `body_hash` for `ag1_` handles) |
+| `rules:write`, `webhooks:write` | `86400s` (1 day) | optional |
+| `messages:read`, `devices:read`, `flows:read`, `audit:read` | `2592000s` (30 days) | optional |
+
+Every agent token also carries an independent hourly SMS quota (default `20/hour`). Exceeding it returns `429 agent_quota_exceeded` with `resets_at`.
+
+## AssistantAgent Autonomy Windows
+
+When `AGENT_RUNTIME = "on"`, the floating **Ask** panel connects to the pinned `AssistantAgent` Durable Object (`POST /v1/admin/agent/ticket` → WebSocket upgrade under `/agents/assistant/assistant`):
+- **Default mode**: Read and propose only. Proposals require an explicit human click (`POST /v1/admin/assistant/proposals/:id/accept`), protected by an atomic claim (`409 already_applied` on duplicate clicks).
+- **Autonomy window**: An owner/admin enables bounded autonomy (`POST /v1/admin/agent/autonomy`), specifying TTL, `sms_cap`, `daily_sms_cap` (default 20), write caps, and optional `allow_rules`.
+- **Session binding**: An autonomy window belongs strictly to the operator who opened it. Another operator's act is refused with `autonomy_other_session`.
+- **Fail-closed journaling**: Every act writes a `tool_calls` row before executing and derives its effect idempotency key from `call_id` (the LLM never supplies idempotency keys).
+
+## Signed Inbound Webhooks (`POST /v1/webhooks/:id`)
+
+External services can wake the agent without a human session:
+
+1. **Create a hook** (human session only; `assertHuman` rejects agent tokens):
+   ```bash
+   curl -X POST https://<worker>.workers.dev/v1/admin/webhooks \
+     -H "Cookie: __Secure-better-auth.session_token=..." \
+     -H "Content-Type: application/json" \
+     -d '{"name":"billing-alerts","description":"Summarize failed invoice alerts"}'
+   ```
+   The signing `secret` is returned **once**. D1 stores `secret_hash` (SHA-256) and `secret_sealed` (AES-256-GCM under `WEBHOOK_SECRET_KEY`).
+
+2. **Deliver signed events**:
+   - `x-dakflare-signature: sha256=<lowercase hex HMAC-SHA256 over raw body bytes>`
+   - `x-dakflare-delivery: <unique delivery id>` (primary key for idempotency; repeats return the stored answer with `replayed: true` without invoking the model again)
+
+3. **Zero-autonomy guarantee**: Webhook turns execute as synthetic actor `webhook:<id>` (`role: "webhook"`). `authorizeAct` refuses every write with `webhook_cannot_act` even if an autonomy window is open.
+
+### Rotating a Webhook Secret
+
+There is intentionally no rotate endpoint:
+1. Create a second webhook via `POST /v1/admin/webhooks` and copy the new `id` + `secret`.
+2. Update the upstream caller and verify a `200` response with `replayed: false`.
+3. Delete the old webhook via `DELETE /v1/admin/webhooks/:old_id`.
+
+> **Warning on `WEBHOOK_SECRET_KEY`**: Rotating `WEBHOOK_SECRET_KEY` invalidates every sealed webhook secret in D1 simultaneously (ingress returns `500`). Only rotate it during a planned window when you recreate every hook.
+
+---
+
+<!-- source: /docs/guides/self-hosting-production.md -->
+
+# Self-Hosting & Production Operations
+
+> Keep the three Cloudflare configs synchronized, apply D1 migrations safely, avoid cf CLI traps, verify deploys, and restore from D1 Time Travel.
+
+DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 6 hermetic verification jobs (`worker`, `skills`, `dashboard`, `simulator`, `rust`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
+
+## Keep the Three Config Files in Sync
+
+| File | Consumer | Purpose |
+| --- | --- | --- |
+| `worker/cloudflare.config.ts` | `cf` (`cf deploy`, `cf d1 migrations`) | Production bindings, Durable Object exports, queues, workflows, vars |
+| `worker/wrangler.toml` | `wrangler` (`wrangler dev`, `tail`, `d1 export`) | Local dev stack with DO SQLite & alarms, log tailing, backups |
+| `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1`) | Preview lane with `remote = true` D1 and KV |
+
+Always run the drift gate before deploying:
+
+```bash
+cd worker && npm run typecheck && npm run check:config
+```
+
+## Production Secrets
+
+Set secrets via `cf workers secrets update` (prompts interactively so values never hit `argv`):
+
+```bash
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
+# Optional capabilities:
+npx cf workers secrets update RESEND_API_KEY --worker dakflare-worker --type secret_text
+npx cf workers secrets update FCM_SERVICE_ACCOUNT_JSON --worker dakflare-worker --type secret_text
+npx cf workers secrets update AI_PROVIDER_API_KEY --worker dakflare-worker --type secret_text
+npx cf workers secrets update WEBHOOK_SECRET_KEY --worker dakflare-worker --type secret_text
+```
+
+## Schema Migration Order of Operations
+
+Migrations (`0001_baseline.sql` through `0017_alert_acknowledged_by.sql`) are **never** applied by CI:
+
+1. **Snapshot first**: Record a D1 Time Travel bookmark or run `npx wrangler d1 export sms_gateway --remote --output backup.sql`.
+2. **Apply by database UUID** (`cf` rejects database names):
+   ```bash
+   cd worker
+   npx cf d1 migrations list  <D1_DATABASE_ID>
+   npx cf d1 migrations apply <D1_DATABASE_ID>
+   ```
+3. **Deploy code from a clean tree**:
+   ```bash
+   cd worker && npm run deploy
+   ```
+   `npm run deploy` runs `scripts/assert-clean-dashboard.mjs` first so uncommitted edits in `dashboard/src` cannot leak into `worker/public/admin`.
+
+## Known `cf` CLI Traps
+
+1. **Aborted destructive commands exit `0`**: Always verify resource state instead of trusting exit codes.
+2. **D1 migrations require the UUID**: Passing `sms_gateway` fails with `Expected a D1 database ID`.
+3. **`cf deploy` can exit `1` on a successful deploy**: An intermittent Cloudflare Workflows API `500` (`workflows.api.error.internal_server`) can fire after the Worker, cron, and queues have already uploaded. Always verify with evidence:
+   ```bash
+   cd worker && npm run verify:deploy
+   ./scripts/smoke.sh https://<your-worker>.workers.dev
+   dakflare doctor
+   ```
+4. **Log tailing stays on Wrangler**: `cf` cannot stream logs yet; use `npx wrangler tail`.
+
+## Rollback & Backup
+
+- **Worker code**: Prefer `git revert <commit>` on `main` followed by `cd worker && npm run deploy` so `main` matches production. Inspect versions with `npx cf workers versions list`.
+- **D1 data**: Restore in place up to 30 days back using D1 Time Travel:
+  ```bash
+  npx wrangler d1 time-travel restore sms_gateway --remote --timestamp=<ISO8601>
+  ```
+  Note: D1 restore does **not** roll back Durable Object SQLite state, KV entries, secrets, or the handset's local libSQL database.
+
+---
+
+<!-- source: /docs/reference/api-reference.md -->
+
+# REST API Reference
+
+> Complete HTTP endpoint reference for DakFlare's device protocol, authentication, admin fleet & messaging, automation, agent analysis, runtime, webhooks, and channels.
+
+Machine-readable OpenAPI 3.1.0 specification: [`/openapi.json`](/openapi.json).
+
+## Authentication Schemes
+
+| Surface | Credential | Notes |
+| --- | --- | --- |
+| **Device Protocol** | P-256 ECDSA headers: `X-Device-Id`, `X-Timestamp`, `X-Nonce`, `X-Signature` | Signed over `METHOD\nPATH\nTS\nNONCE\nSHA256(body)`. Query strings on signed routes return `400 unexpected_query`. |
+| **Operator Browser** | Cookie `__Secure-better-auth.session_token` (or legacy `dakflare_admin`) | Host-only, `HttpOnly`, `Secure`, `SameSite=Lax`, 7-day TTL. |
+| **Machine / CLI** | `Authorization: Bearer <ADMIN_TOKEN>` + `X-Dakflare-Client: cli` (or `binding`) | Full admin surface. Fails closed with `401` when `ADMIN_TOKEN` is unset. |
+| **Agent Token** | `Authorization: Bearer dkf_agt_<secret>` | Scoped by `SCOPE_FOR_ACTION`; costly actions also require a live time-boxed grant. |
+| **Inbound Webhook** | `x-dakflare-signature: sha256=<hex>` + `x-dakflare-delivery: <id>` | HMAC-SHA256 over raw body bytes; synthetic actor `webhook:<id>` (read/propose only). |
+
+## 1. Device Protocol Endpoints
+
+| Method & Path | Auth | Purpose |
+| --- | --- | --- |
+| `POST /v1/device/pair` | Pairing code in body | Register or rotate a handset's P-256 public key using a single-use pairing code |
+| `GET /v1/device/ws` | P-256 Device Auth | Upgrade to persistent hibernating WebSocket on `DeviceGateway` |
+| `POST /v1/sms/incoming/batch` | P-256 Device Auth | Upload up to 500 inbound SMS rows (idempotent by `local_id`, triggers rules/flows) |
+| `POST /v1/sms/outgoing/poll` | P-256 Device Auth | Lease pending outbound commands when WebSocket is down |
+| `POST /v1/sms/status/batch` | P-256 Device Auth | Report up to 500 command delivery updates (`SENT`, `DELIVERED`, `FAILED` + optional `error_code`/`error_message`) |
+| `GET /v1/rules` | P-256 Device Auth | Sync active auto-reply rules to handset |
+| `GET /v1/flows` | P-256 Device Auth | Sync active `dakflare.flow/v2` graphs to handset |
+| `GET /v1/device/approvals` | P-256 Device Auth | List pending authority approvals visible on the handset |
+| `POST /v1/device/approvals/:id/approve` | P-256 Device Auth | Approve a pending request from the handset |
+| `POST /v1/device/approvals/:id/reject` | P-256 Device Auth | Reject a pending request from the handset |
+
+## 2. Authentication & Session Endpoints
+
+| Method & Path | Auth | Purpose |
+| --- | --- | --- |
+| `GET /v1/auth/mode` | Public | Discover enabled sign-in doors (passkey, password mode, magic link availability) |
+| `GET /v1/auth/challenge` | Cookie | Check whether a second-factor TOTP challenge is live (`{ pending }`) |
+| `POST /v1/auth/redeem` | Invite token | Spend a single-use invite and mint the first session |
+| `POST /v1/auth/salt` | Public | Fetch per-address salt and PBKDF2 iteration count (`210000`) for client-derived mode |
+| `POST /v1/auth/sign-in/password` | Public | Password first factor (`{ material }` in `client-derived` mode) |
+| `POST /v1/auth/password` | Session (fresh) | Set or change account password |
+| `DELETE /v1/auth/password` | Session (fresh) | Remove password factor |
+| `POST /v1/auth/magic-link` | Public | Request a magic sign-in link (always `202` for known and unknown addresses) |
+| `POST /v1/auth/magic-link/consume` | Public | Spend magic link token (only via button POST, never GET) |
+| `GET /v1/auth/totp` | Session | Check TOTP status |
+| `POST /v1/auth/totp/enable` | Session (fresh + passkey) | Enroll TOTP authenticator |
+| `POST /v1/auth/totp/disable` | Session (fresh) | Disable TOTP and clear pending challenges |
+| `POST /v1/auth/totp/regenerate` | Session (fresh) | Regenerate single-use backup codes |
+| `GET /v1/auth/me` | Session | Return authenticated user profile and role (`owner`, `admin`, `member`), or `401` |
+| `/api/auth/*` | Better Auth | WebAuthn passkey registration/assertion, TOTP verify, sign-out |
+
+## 3. Fleet, Messaging & Provenance Endpoints
+
+| Method & Path | Scope / Role | Purpose |
+| --- | --- | --- |
+| `GET /v1/admin/health` | `devices:read` | Deployment health, migration count, bindings, version |
+| `POST /v1/admin/pairing-code` | `devices:write` | Mint a single-use handset pairing code |
+| `GET /v1/devices` | `devices:read` | List paired handsets (`?include_archived=1`) |
+| `GET /v1/device/:id/status` | `devices:read` | Live presence, socket count, and DO stats for one handset |
+| `POST /v1/admin/devices/:id/archive` | `devices:write` | Archive a handset |
+| `POST /v1/admin/devices/:id/unarchive` | `devices:write` | Restore an archived handset |
+| `DELETE /v1/admin/devices/:id` | Human only (`null` scope) | Permanently revoke handset (tombstone `revoked_at`, clears key & FCM) |
+| `GET /v1/admin/devices/:id/commands` | `messages:read` | List outbound commands on one handset |
+| `GET /v1/messages` | `messages:read` | Query message log (`?device_id=&limit=&direction=`) |
+| `DELETE /v1/messages` | `messages:purge` | Purge stored messages |
+| `POST /v1/sms/send` | `sms:send` (+ `sms:send:production` grant for agents) | Queue one outbound SMS (supports `idempotency_key`) |
+| `POST /v1/sms/send/batch` | `sms:send` | Queue up to 200 outbound SMS (rejects `idempotency_key` with `400 idempotency_key_not_supported_in_batch`) |
+| `GET /v1/sms/commands/:id` | `messages:read` | Poll delivery state (`?device_id=`), alias `GET /v1/commands/:id` |
+| `GET /v1/admin/trace/:id` | `messages:read` | Cross-store provenance trace across D1, `DeviceGateway`, and `audit_log` |
+| `GET /v1/admin/alerts` | `messages:read` | List operator alerts (`device_offline`, `extraction_drift`) |
+| `POST /v1/admin/alerts/:id/ack` | `alerts:write` | Acknowledge one alert |
+| `POST /v1/admin/alerts/ack-all` | `alerts:write` | Acknowledge all open alerts |
+| `GET /v1/admin/dlq` | `devices:read` | Read dead-lettered alarm tasks for `?device_id=` |
+| `GET /v1/admin/ws` | `devices:read` | Inspect active WebSockets for `?device_id=` |
+| `GET /v1/admin/audit` | `audit:read` | Read append-only privileged audit log |
+
+### Example: `POST /v1/sms/send`
+
+**Request**
+```http
+POST /v1/sms/send HTTP/1.1
+Authorization: Bearer dkf_agt_...
+Content-Type: application/json
+
+{
+  "device_id": "dev63f3953f417d587f",
+  "to": "+8801540196080",
+  "body": "Order AB12CD confirmed.",
+  "idempotency_key": "order-ab12cd-confirm"
+}
+```
+
+**Success (`200 OK`)**
+```json
+{
+  "ok": true,
+  "command_id": "cmdf_01j9x7m2k8p3q4r5",
+  "device_id": "dev63f3953f417d587f",
+  "state": "PENDING",
+  "replayed": false
+}
+```
+
+**Agent Missing Grant (`202 Accepted` — Nothing Sent)**
+```json
+{
+  "sent": false,
+  "error": "approval_required",
+  "approval_request": {
+    "id": "apr_01j9x7n0v1w2x3y4",
+    "scope": "sms:send:production",
+    "target": { "recipients": ["+8801540196080"] },
+    "max_ttl_s": 3600
+  }
+}
+```
+
+**Validation Error (`400 Bad Request`)**
+```json
+{
+  "error": "bad_request"
+}
+```
+
+## 4. Automation (Rules & Workflows)
+
+| Method & Path | Scope | Purpose |
+| --- | --- | --- |
+| `GET /v1/admin/rules` | `flows:read` | List auto-reply rules by `priority DESC` |
+| `POST /v1/rules` | `rules:write` | Create an auto-reply rule (compiled & validated as a flow graph) |
+| `PUT /v1/admin/rules/:id` / `PUT /v1/rules/:id` | `rules:write` | Update rule fields or enabled flag |
+| `DELETE /v1/admin/rules/:id` | `rules:write` | Delete a rule |
+| `POST /v1/admin/rules/test` | `flows:read` | Dry-run all rules against a sample `{ peer, body, device_id? }` |
+| `GET /v1/admin/workflows` | `flows:read` | List all `dakflare.flow/v2` workflows |
+| `GET /v1/admin/workflows/:id` | `flows:read` | Get canonical IR, version, and `ui_layout` |
+| `PUT /v1/admin/workflows/:id` | `flow_deploy_prod` | Validate, compute `rank-v1` layout, and save workflow (`400 workflow_invalid` with `details[]`, `409` on stale `expected_previous_version`) |
+| `DELETE /v1/admin/workflows/:id` | `flow_deploy_prod` | Delete a workflow |
+
+## 5. Agent Analysis, Control Plane, Runtime & Webhooks
+
+| Method & Path | Scope / Gate | Purpose |
+| --- | --- | --- |
+| `POST /v1/agent/triage` | `messages:read` | Clef System 1 batch: intent, injection risk, specificity, span roles, deterministic `balanceAtLeastPrincipal` |
+| `POST /v1/agent/telemetry` | `devices:read` | Execute 1 of 6 fixed D1 plans (`fleet_health`, `stuck_outbox`, `sim_signal_ranking`, `workflow_failures`, `authority_audit`, `unmatched_drift`) |
+| `POST /v1/agent/diagnose` | `messages:read` | Return root-cause card (`ERR_UNICODE_ZERO_WIDTH_UCS2`, `ERR_MULTIWORD_REF_MISMATCH`, etc.) with 16/8/16 offset window |
+| `POST /v1/agent/synthesize` | `flows:write` | Judge candidate patch and mint single-use `ag1_` `apply_token` (`503 ai_unavailable` if judge unreachable) |
+| `POST/GET/DELETE /v1/admin/agent-tokens[/:id]` | Human only | Mint, list, and revoke `dkf_agt_` tokens |
+| `GET /v1/admin/approvals`, `POST /v1/admin/approvals/:id/approve\|reject` | Human only | Manage HITL approval queue (`409` if another operator already decided) |
+| `GET /v1/admin/grants`, `DELETE /v1/admin/grants/:id` | Human only | Inspect and revoke live authority grants |
+| `POST /v1/admin/agent/ticket` | Human only | Mint single-use 60s WebSocket ticket for `/agents/assistant/assistant` |
+| `POST /v1/admin/agent/say`, `GET/DELETE /v1/admin/agent/conversation` | Human only | Run idempotent turn or read/clear operator transcript in `AssistantAgent` |
+| `POST/GET/DELETE /v1/admin/agent/attachments[/:id]` | Human only | Manage R2-backed turn attachments (≤1 MiB, max 3 per operator, 24h TTL) |
+| `GET/POST/DELETE /v1/admin/agent/autonomy`, `GET /v1/admin/agent/runtime` | Human only | Read/enable/revoke bounded autonomy window and runtime status |
+| `POST/GET/DELETE /v1/admin/webhooks[/:id]`, `GET /v1/admin/webhooks/:id/deliveries` | Human only | Manage HMAC-signed inbound agent webhooks |
+| `POST /v1/webhooks/:id` | HMAC-SHA256 | Signed external webhook ingress (idempotent by `x-dakflare-delivery`) |
+| `GET/PUT /v1/admin/ai/settings`, `GET /v1/admin/ai/models`, `POST /v1/admin/ai/test`, `POST /v1/admin/ai/system1/test`, `POST /v1/admin/assistant/chat`, `POST /v1/admin/assistant/proposals/:id/accept` | Human only | Unified AI provider settings, stateless console assistant, and atomic proposal acceptance |
+
+## 6. Multi-Platform Channels & Operations
+
+- `POST /v1/channels/telegram/webhook` — Telegram webhook ingress (`X-Telegram-Bot-Api-Secret-Token`)
+- `GET` & `POST /v1/channels/whatsapp/webhook` — WhatsApp Cloud verification & ingress (`X-Hub-Signature-256`)
+- `POST /v1/channels/:channel/send` — Send outbound message via `telegram` or `whatsapp`
+- `POST /v1/admin/bootstrap`, `POST /v1/admin/invites`, `GET /v1/admin/invites`, `DELETE /v1/admin/invites/:id`, `POST /v1/admin/auth/reset-user`, `POST /v1/admin/auth/rotate-pepper`
+- `GET /source` — `302` redirect to AGPL-3.0 §13 source repository (`SOURCE_URL`)
+
+---
+
+<!-- source: /docs/reference/api-playground.md -->
+
+# Interactive API Playground
+
+> Interactive OpenAPI 3.1.0 playground powered by fumadocs-openapi for testing DakFlare endpoints.
+
+Try DakFlare's core REST endpoints directly against your deployment using the generated [`/openapi.json`](/openapi.json) specification.
+
+<APIPage
+  document="./public/openapi.json"
+  operations={[
+    { path: "/v1/sms/send", method: "post" },
+    { path: "/v1/sms/commands/{command_id}", method: "get" },
+    { path: "/v1/devices", method: "get" },
+    { path: "/v1/messages", method: "get" },
+    { path: "/v1/admin/workflows/{id}", method: "put" },
+    { path: "/v1/agent/triage", method: "post" },
+    { path: "/v1/agent/telemetry", method: "post" },
+    { path: "/v1/agent/diagnose", method: "post" },
+    { path: "/v1/agent/synthesize", method: "post" },
+    { path: "/v1/webhooks/{id}", method: "post" },
+    { path: "/mcp", method: "post" }
+  ]}
+/>
+
+---
+
+<!-- source: /docs/reference/mcp-tools.md -->
+
+# MCP & WebMCP Tools
+
+> Complete schema, scope, OAuth discovery, elicitation, and JSON-RPC error reference for DakFlare's 9 Streamable HTTP MCP tools and 4 browser WebMCP tools.
+
+## Streamable HTTP MCP Server (`/mcp`)
+
+- **Endpoints**: `POST /mcp` (JSON-RPC requests & batches), `GET /mcp` (SSE stream for stateful sessions), `DELETE /mcp` (terminate session). Legacy `POST /v1/mcp` remains supported for stateless `_meta` clients.
+- **Required Header**: `Accept` must include `application/json` or `text/event-stream` (otherwise HTTP `406`).
+- **Session Tracking**: Stateful clients track `Mcp-Session-Id`; stateless clients pass `params._meta`.
+- **OAuth Discovery (Public)**:
+  - `GET /.well-known/oauth-protected-resource` (RFC 9728)
+  - `GET /.well-known/oauth-authorization-server` (RFC 8414)
+  - Audience binding enforced per RFC 8707; `401` responses include `WWW-Authenticate` pointing to the metadata document.
+- **Stdio Bridge**: `dakflare mcp serve --token-file <path>`
+
+> **Contract Drift Note**: `worker/src/mcp/tools.ts` currently registers **9 tools** (including `triage` and `telemetry`), whereas `contracts/mcp-tools.json` reflects the earlier 7-tool snapshot. Run `node worker/scripts/mcp-contract.mjs --write` to regenerate `contracts/mcp-tools.json`.
+
+## The 9 MCP Tools (`worker/src/mcp/tools.ts`)
+
+`tools/list` filters dynamically by the caller's token scopes. Calling an unregistered tool returns JSON-RPC `-32601`.
+
+| Tool | Required Scope | Inputs | Output Summary |
+| --- | --- | --- | --- |
+| `list_devices` | `devices:read` | `{ archived?: boolean }` | `{ devices: [{ device_id, label, sim_slot, last_seen, fcm }] }` |
+| `read_messages` | `messages:read` | `{ device_id (Mcp-Param-Device-Id), limit?: 1..200 }` | `{ messages: [{ id, local_id, direction, peer, body, received_at, reply_verdict }], limit }` |
+| `command_status` | `messages:read` | `{ command_id, device_id }` | `{ command: { command_id, state, to? } \| null }` |
+| `list_flows` | `flows:read` | `{}` | `{ workflows: [{ id, name, enabled, node_count }] }` |
+| `get_flow` | `flows:read` | `{ id }` | `{ workflow: { id, name, version, graph } \| null }` |
+| `triage` | `messages:read` | `{ message (1..4096), sender (1..64), spans?: [{ index, text }] (max 20) }` | `{ intent, injection, specificity, roles, invariant: { balanceAtLeastPrincipal }, source }` |
+| `telemetry` | `devices:read` | `{ question (1..500) }` | `{ plan, rows, truncated, took_ms }` |
+| `trace` | `messages:read` | `{ id, device_id? }` | `{ verdict, kind, why: string[] }` |
+| `send_sms` | `sms:send` (+ grant) | `{ device_id, to (E.164), body (<=4096), idempotency_key? (<=128) }` | `{ command_id?, sent, approval_request_id? }` or MRTR `input_required` |
+
+> **Header Binding (`x-mcp-header`)**: `read_messages.device_id` declares `x-mcp-header: "Device-Id"`, mapped to request header `Mcp-Param-Device-Id`. A header/argument mismatch returns JSON-RPC `-32020`.
+
+## Elicitation & Multi-Round-Trip (`send_sms`)
+
+Mutating tools never execute on an unapproved agent token:
+1. If no live `sms:send:production` grant covers the target, `send_sms` returns an MCP `input_required` result (or SSE `elicitation/create` prompt requiring `confirm_deployment`, 6-digit `totp_code`, and `max_uses`).
+2. Grants minted via elicitation are clamped by `SCOPE_CAPS` and capped at 15 minutes.
+3. On retry, the tool re-reads the authority store in D1/`AuthorityGuard`; client-supplied `inputResponses` can never widen permissions.
+
+## JSON-RPC Error Codes
+
+| Code | Meaning |
+| --- | --- |
+| `-32700` | Parse error |
+| `-32600` | Invalid JSON-RPC envelope or session |
+| `-32601` | Unknown or out-of-scope tool |
+| `-32602` | Invalid params, or payload mutated after confirmation |
+| `-32603` | Internal server error |
+| `-32000` | Not acceptable (`Accept` header missing JSON/SSE) |
+| `-32001` | Session not found |
+| `-32002` | Elicitation declined by operator |
+| `-32003` | Elicitation timed out |
+| `-32004` | TOTP code rejected |
+| `-32020` | `Mcp-Param-*` header mismatch |
+
+## Browser WebMCP Tools (`/admin/workflows/edit`)
+
+Registered on `document.modelContext` (fallback `navigator.modelContext`) while the workflow editor is mounted:
+
+| Tool | Annotations | Behavior |
+| --- | --- | --- |
+| `dakflare_get_flow_ast` | `readOnlyHint: true`, `destructiveHint: false` | Returns live `{ flow_id, name, enabled, dirty, staged_patch, graph }` |
+| `dakflare_stage_flow_patch` | `readOnlyHint: false`, `consequentialHint: true`, `destructiveHint: true` | Validates and stages a dashed ghost preview (`STAGED PATCH · NOT APPLIED`); never saves |
+| `dakflare_synthesize_pattern` | `destructiveHint: false` | Runs local `flow.wasm` template synthesis from `sample` and optional `spans` |
+| `dakflare_diagnose_message` | `readOnlyHint: true`, `destructiveHint: false` | Calls `POST /v1/agent/diagnose` with a 15s timeout |
+
+---
+
+<!-- source: /docs/reference/wasm-flow-abi.md -->
+
+# Wasm Flow ABI & IR v2
+
+> Hand-rolled WebAssembly C ABI for simulator/flow-wasm and complete dakflare.flow/v2 intermediate representation specification.
+
+DakFlare compiles its pure-Rust flow engine (`simulator/flow`) to `wasm32-unknown-unknown` (`simulator/flow-wasm/build.sh` → `worker/src/wasm/flow.wasm` and `dashboard/static/flow.wasm`) without `wasm-bindgen`, so Cloudflare Workers can instantiate the module synchronously with zero loader glue.
+
+## Binary Framing Contract
+
+Every call passes UTF-8 JSON into linear memory and returns a pointer to a length-prefixed frame:
+
+```text
+[ 4 bytes: u32 little-endian payload length ][ payload UTF-8 JSON bytes ]
+```
+
+**Critical safety rule**: Always construct fresh `DataView` / `Uint8Array` views over `wasm.memory.buffer` *after* calling any exported function—allocation inside Wasm can grow linear memory and detach previously captured ArrayBuffer views. Always call `dealloc(outPtr, 4 + length)` and `dealloc(inputPtr, inputLen)` to free both buffers.
+
+## Exported C ABI Functions (`simulator/flow-wasm/src/lib.rs`)
+
+| Export | Signature | Input JSON | Output JSON |
+| --- | --- | --- | --- |
+| `alloc` | `(len: usize) -> *mut u8` | — | Allocates `len` bytes in Wasm memory |
+| `dealloc` | `(ptr: *mut u8, len: usize) -> void` | — | Frees a buffer returned by `alloc` or a `*_json` function |
+| `run_json` | `(ptr, len) -> *mut u8` | `{ graph, message: { sender, body, received_at } }` | `FlowResult`: `{ matched, outcome, actions, variables, steps, error? }` |
+| `validate_json` | `(ptr, len) -> *mut u8` | Raw flow graph object | `{ ok: true, graph }` (stamped with `schema` & `rank-v1` `ui_layout`) or `{ ok: false, issues }` |
+| `layout_json` | `(ptr, len) -> *mut u8` | Raw flow graph object | `{ ok: true, algorithm: "rank-v1", positions: { [id]: { x, y } } }` |
+| `trace_json` | `(ptr, len) -> *mut u8` | `{ graph, message }` | Validates then runs: `{ ok: true, trace: FlowResult }` or `{ ok: false, issues }` |
+| `synthesize_json` | `(ptr, len) -> *mut u8` | `{ samples: [{ body, value }], negatives?: string[], group?: string }` | `{ ok: true, result: { pattern, group, precision, recall, ... } }` or `{ ok: false, reason, message }` |
+| `synthesize_template_json` | `(ptr, len) -> *mut u8` | `{ sample_body, spans: TemplateSpan[], additional_samples? }` | `{ ok: true, result: { pattern, trigger_phrases, variables, test_results } }` |
+| `suggest_spans_json` | `(ptr, len) -> *mut u8` | `{ body: string }` | `{ ok: true, spans: TemplateSpan[] }` |
+
+## Canonical Flow IR (`dakflare.flow/v2`)
+
+Derived from `cli/schema/flow-v2.json` and `worker/src/lib/flow-ir.ts`:
+
+### Node Kinds (9 Total)
+
+| `type` | Required `data` Fields | Outgoing `sourceHandle` Rules |
+| --- | --- | --- |
+| `trigger` | `kind: "incoming"`, optional `sender: { mode: any\|exact\|prefix\|regex, value? }`, `body: { mode: any\|keyword\|regex, value? }` | 1 unlabelled edge; binds `sender`, `body`, `received_at` |
+| `extract` | `pattern` (RE2, 1–512 chars, ≥1 `(?<name>...)` group), optional `source: "body"\|"sender"`, `flags: ""\|"i"` | 1 unlabelled edge; binds named capture groups |
+| `set_var` | `name` (`^[A-Za-z_][A-Za-z0-9_]{0,31}$`, not builtin), `value` (template ≤2048 chars) | 1 unlabelled edge |
+| `condition` | `left` (template), `op: equals\|not_equals\|contains\|matches\|exists`, `right?` (required unless `exists`) | 2 edges: `true` and `false` |
+| `switch` | `value` (template), `cases: string[]` (1–8 items) | `case:0` .. `case:<n-1>` plus `default` |
+| `delay` | `seconds` (integer `1..300`) | 1 unlabelled edge (>5s runs in `FlowExecutionWorkflow`) |
+| `webhook` | `url` (`^https://`, SSRF-checked: no loopback/private/CGNAT/metadata), optional `body` template | 1 unlabelled edge (dispatched via `WEBHOOK_QUEUE`) |
+| `send_sms` | `to` (1–32 chars), `body` (1–4096 chars) | 1 unlabelled edge |
+| `stop` | `{ reason?: string }` | 0 outgoing edges |
+
+### Structural Limits
+
+| Constraint | Limit |
+| --- | --- |
+| Max nodes (`flow-v2.json` / `config.ts`) | 200 in IR schema (50 in legacy `MAX_WORKFLOW_NODES` guard) |
+| Max edges (`flow-v2.json` / `config.ts`) | 400 in IR schema (100 in legacy `MAX_WORKFLOW_EDGES` guard) |
+| Max graph serialized size | 65,536 bytes (`MAX_WORKFLOW_GRAPH_BYTES`) |
+| Node / edge ID pattern | `^[A-Za-z0-9_-]{1,64}$` |
+| Variable template syntax | `{{ name }}` or `{{ vars.name }}` (must be bound on every incoming path) |
+| Topology | Strictly acyclic DAG; cycles rejected with offending edge |
+
+---
+
+<!-- source: /docs/reference/cli-and-env.md -->
+
+# CLI, Bindings & Error Codes
+
+> Reference for all 28 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+
+## `dakflare` CLI Machine Contract
+
+- Zero dependencies, Node 22+, config stored at `~/.config/dakflare/config.json` (mode `600`).
+- `--agent` (or `--json`): emits one compact JSON document per invocation, never prompts, never emits ANSI colors.
+- Pass `--yes` on destructive or interactive commands in automation.
+
+### Semantic Exit Codes
+
+| Exit Code | Meaning | Agent Action |
+| --- | --- | --- |
+| `0` | Success | Proceed |
+| `1` | Failed check or terminal error (`FAILED`, `EXPIRED`) | Inspect `error` payload |
+| `2` | Usage error or invalid schema (`workflow_invalid`) | Fix flags or document |
+| `3` | Resource not found | Verify ID with `devices` / `list_flows` |
+| `4` | Permission denied (`401` / `403`) | Check token scopes or human credential |
+| `5` | Conflict (`version_conflict`, `409` approval race) | Re-read state before retrying |
+| `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
+| `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
+
+### Command Inventory (28 Commands)
+
+- **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
+- **Messaging**: `send`, `status`, `audit`
+- **Auth & Control Plane**: `auth bootstrap`, `auth invite`, `auth invites`, `auth reset`, `auth mint-agent-token`, `auth agent-tokens`, `auth revoke-agent-token`, `auth approvals`, `auth approve`, `auth reject`, `auth grants`, `auth grants revoke`
+- **Automation**: `flows apply`, `flows heal`, `rules list`, `rules apply`, `rules update`, `rules delete`, `rules test`, `extract synthesize`
+- **Agent Work**: `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
+- **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`
+- **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
+
+## Cloudflare Bindings (`worker/cloudflare.config.ts` & `worker/wrangler.toml`)
+
+| Binding | Type | Resource / Class |
+| --- | --- | --- |
+| `DB` | D1 Database | `sms_gateway` (17 migrations: `0001`–`0017`) |
+| `KV` | KV Namespace | FCM HTTP v1 bearer-token cache |
+| `MEDIA_BUCKET` | R2 Bucket | `dakflare-media` (24h `agent_attachments` storage) |
+| `DEVICE` | Durable Object (SQLite) | `DeviceGateway` |
+| `AUTH_GUARD` | Durable Object (SQLite) | `AuthGuard` |
+| `AUTHORITY_GUARD` | Durable Object (SQLite) | `AuthorityGuard` |
+| `ASSISTANT` | Durable Object (SQLite) | `AssistantAgent` |
+| `WEBHOOK_QUEUE` | Queue (producer & consumer) | `dakflare-webhook-queue` (`max_batch_size=10`, `max_retries=3`) |
+| `FLOW_WORKFLOW` | Workflow | `FlowExecutionWorkflow` (`flow-execution-workflow`) |
+| `AI` | Workers AI | Clef System 1 & optional chat provider |
+| `ASSETS` | Static Assets | `worker/public` (landing page + `/admin` SvelteKit console) |
+| Rate Limiters | 7 namespaces (`1001`–`1007`) | `PAIR_LIMITER` (30/60s), `ADMIN_LIMITER` (600/60s), `DEVICE_LIMITER` (600/60s), `AUTH_FAIL_LIMITER` (120/60s), `PAIR_GLOBAL_LIMITER` (300/60s), `AUTH_ACCOUNT_LIMITER` (5/60s), `AUTH_IP_LIMITER` (20/60s) |
+
+## Environment Variables & Secrets
+
+### Secrets (Set via `cf workers secrets update`, Never in `wrangler.toml`)
+
+- `ADMIN_TOKEN` — required; admin routes fail closed with `401` when unset
+- `BETTER_AUTH_SECRET` — signs session cookies & encrypts TOTP secrets (absent → `/api/auth` & `/v1/auth/*` return `503`)
+- `AUTH_PEPPER` — `v2:<b64 32B>,v1:<b64 32B>`
+- `RESEND_API_KEY` — optional; enables magic-link sign-in door
+- `FCM_SERVICE_ACCOUNT_JSON` — optional; enables FCM HTTP v1 wake pushes
+- `AI_PROVIDER_API_KEY` (fallbacks: `AI_CHAT_API_KEY`, `TOKENLAB_API_KEY`) — optional external AI gateway key
+- `WEBHOOK_SECRET_KEY` — AES-256-GCM key sealing inbound webhook secrets
+
+### Key `[vars]` Defaults
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENT_RUNTIME` | `"off"` | `"off"` returns `503` on `/agents/*`; `"on"` enables `AssistantAgent` |
+| `BINDING_AUTH` | `"trusted"` | `DakFlareApi` service binding auth: `"trusted"` or `"agent_token"` |
+| `AUTH_PASSWORD_MODE` | `"client-derived"` | `"off"`, `"client-derived"` (browser PBKDF2), or `"server-kdf"` (paid tier) |
+| `AUTH_LOCKOUT_WINDOW_SECONDS` | `"900"` | Lockout window in `AuthGuard` |
+| `MAGIC_LINK_TTL_SECONDS` | `"900"` | Single-use magic link expiry |
+| `MESSAGE_RETENTION_DAYS` | `"90"` | Daily cron (`17 3 * * *`) retention cutoff |
+| `INCOMING_ROWS_PER_DAY` | `"10000"` | Per-device daily inbound write quota |
+| `AI_DAILY_TOKEN_BUDGET` | `"20000"` | Daily token budget for stateless console assistant |
+| `LEASE_MS` / `ACK_TIMEOUT_MS` | `60000` / `8000` | Outbound command lease & WS ack timeout (ms) |
+| `OFFLINE_ALERT_MS` / `STALE_SOCKET_MS` / `NONCE_WINDOW_MS` | `900000` / `120000` / `300000` | Offline alert, stale socket, and P-256 replay window (ms) |
+
+## Uniform §8 Error Code Catalog (`worker/src/lib/errors.ts`)
+
+| Error Code | HTTP | Meaning & Recovery |
+| --- | --- | --- |
+| `unexpected_query` | `400` | Signed device route received a query string; strip query params |
+| `bad_request` | `400` | Malformed JSON or missing required field |
+| `rule_rejected` | `400` | Rule failed flow-graph compilation |
+| `workflow_invalid` | `400` | Admin-only; includes `details: [{ path, message }]` |
+| `idempotency_key_not_supported_in_batch` | `400` | Do not send `idempotency_key` to `/v1/sms/send/batch` |
+| `missing_auth_headers` | `401` | One or more of `X-Device-Id`, `X-Timestamp`, `X-Nonce`, `X-Signature` missing |
+| `malformed_header` | `401` | Header failed regex validation |
+| `timestamp_out_of_window` | `401` | `X-Timestamp` outside ±300,000 ms; sync handset clock |
+| `bad_signature_length` | `401` | Decoded `X-Signature` is not 64 bytes (IEEE P1363 `r \|\| s`) |
+| `invalid_signature` | `401` | ECDSA verification failed against stored P-256 public key |
+| `device_unknown` | `401` | `device_id` not registered or revoked |
+| `nonce_replay` | `401` | `X-Nonce` already spent within `NONCE_WINDOW_MS`; generate a new 16-byte nonce |
+| `device_exists` | `409` | Pairing attempted unauthorized rebind of an active `device_id` |
+| `payload_too_large` | `413` | Body exceeded `MAX_BODY_BYTES` (262,144 bytes) |
+| `rate_limited` | `429` | Rate limiter bucket exhausted; back off |
+| `daily_quota_exceeded` | `429` | Device exhausted `INCOMING_ROWS_PER_DAY`; retry tomorrow |
+| `storage_unavailable` | `503` | Backing D1/DO write failed; batch was NOT written—safe to retry |
+
+---
+
+<!-- source: /docs/reference/state-machines.md -->
+
+# State Machines
+
+> Authoritative inventory of DakFlare's guarded, declared, and derived state machines across outbound commands, replies, approvals, grants, agent turns, and auth.
+
+Every state machine in DakFlare is classified by how its transitions are enforced:
+- **Guarded**: One atomic SQL predicate or function owns the transition; no route can bypass it.
+- **Declared**: Schema enumerates valid states, but enforcement lives in route predicates or lacks a writer.
+- **Derived**: Computed dynamically from timestamps and counters at read time.
+
+## Outbound Command Delivery (**Guarded**)
+
+Owned by `worker/src/durable-object.ts` (`ALLOWED_PREDECESSORS`):
+
+```text
+PENDING -> LEASED -> DISPATCHED -> SENT -> DELIVERED
+                  \-> FAILED (with optional error_code & error_message)
+PENDING | LEASED | DISPATCHED -> EXPIRED (error_code: "expired")
+```
+
+- **Terminal states**: `DELIVERED`, `FAILED`, `EXPIRED` (no transition ever leaves them).
+- **Out-of-order safety**: `DELIVERED` accepts `DISPATCHED` as well as `SENT` because carrier delivery reports can arrive before radio ack; late `SENT` after `DELIVERED` is a no-op; `LEASED` cannot jump directly to `DELIVERED`.
+- **Canonical lifecycle projection** (`worker/src/lib/canonical-lifecycle.ts`, **Derived**): maps raw state into `(state, substate, is_terminal, settled, remediation)` including `SETTLED_SENT` after 5 minutes of silence (`SMS_SETTLED_GRACE_MS`).
+
+## Inbound Reply Fate (**Guarded**)
+
+Owned by `worker/src/routes/incoming.ts`:
+- **States**: `null` → `queued` → `sent` → `delivered` / `failed`. `delivered` and `failed` are terminal.
+- **Suppression axis (`reply_verdict`)**: `suppressed_cooldown` or `suppressed_hourly_cap` (`0004_provenance.sql`).
+
+## Flow Run (**Guarded on Handset & Worker**)
+
+- **States**: `delivered`, `partial`, `halted`, `filtered`, `no_trigger`, `error`.
+- When the handset encounters a `delay` or `webhook` node it cannot execute locally, it marks the run `partial` (`simulator/core/src/carrier.rs`). The Worker skips SMS steps already executed before the boundary and resumes the remaining actions (`worker/src/flow/dispatch.ts`).
+
+## Authority, Autonomy & Agent Runtime
+
+| Machine | States | Enforcement |
+| --- | --- | --- |
+| **Approval Request** | `PENDING` → `APPROVED` / `REJECTED` / `EXPIRED` / `CANCELLED` | **Declared** (`0003` CHECK + atomic single-winner claim; loser gets `409`) |
+| **Authority Grant** | `live` → `revoked` / `expired` / `exhausted` | **Derived** (`agent/grants.ts`; note: all three non-live endings currently surface as `grant_expired`) |
+| **Autonomy Window** | `off`, `open`, `expired`, `other-session` | **Derived** on every act; ordered refusals: `autonomy_off`, `autonomy_expired`, `autonomy_other_session`, `no_grant`, `grant_expired`, `sms_cap`, `write_cap`, `webhook_cannot_act` |
+| **Runtime WS Ticket** | `issued` → `spent` / `expired` | **Guarded** (atomic conditional `DELETE ... WHERE expires_at > ?` in `lib/agent-runtime.ts`) |
+| **Assistant Proposal** | `pending` → `consumed` / `expired` | **Guarded** (conditional claim before effect; duplicate click gets `409 already_applied`; failed effect releases claim) |
+| **Agent Turn** | `running` → `done` / `failed` | **Guarded** for completed replay (`<key>:answer` returns `replayed: true`) |
+| **Scheduled DO Work** | `pending` → `running` → `consumed` / `rescheduled` → `dead_letters` (5 attempts) | **Guarded** (`durable-object.ts`) |
+| **Auth Lockout** | `ok` → `counting` → `locked` | **Guarded** across two scopes in `AuthGuard`: per-account (5) and per-IP (20) |
+
+## Known Unwritten / Declared-Only Columns
+
+- `device_sims.radio_state` (`READY`, `DEGRADED`, `NO_SERVICE`, `LOCKED`): declared in `0002`, read by telemetry, no handset writer yet.
+- `conversations.session_state` (`NO_SESSION`, `WINDOW_OPEN`, `TEMPLATE_ONLY`, `OPTED_OUT`): Telegram and WhatsApp inserts currently hard-code `WINDOW_OPEN`.
+- `alerts` (`extraction_drift`): `device_offline` auto-resolves on handset contact; drift alerts do not auto-resolve yet.
+
+---
+
+<!-- source: /docs/reference/glossary.md -->
+
+# Canonical Glossary
+
+> Locked canonical identifiers and nouns across DakFlare's codebase, API, CLI, and documentation to prevent terminology drift.
+
+Use these exact identifiers across code, API payloads, CLI flags, prompts, and documentation. Never substitute synonyms.
+
+| Canonical Term | Exact Definition | Never Call This |
+| --- | --- | --- |
+| `device_id` | Paired handset identifier (`^[A-Za-z0-9_-]{8,64}$`, e.g. `dev63f3953f417d587f`) | `handsetId`, `phone_id`, `radio_node_id` |
+| `command_id` | Outbound SMS command identifier returned by `POST /v1/sms/send` (e.g. `cmdf_...`) | `job_id`, `sms_id`, `message_job` |
+| `local_id` | Handset-assigned idempotency key for an inbound SMS row | `sms_local_key`, `phone_msg_id` |
+| `dkf_agt_` | Prefix for scoped agent bearer tokens (SHA-256 digest stored in D1 `agent_tokens`) | `api_key`, `bot_token`, `service_token` |
+| `ag1_` | Prefix for single-use authority apply handles minted by `POST /v1/agent/synthesize` | `patch_token`, `deploy_key` |
+| `DeviceGateway` | Per-handset SQLite Durable Object (`DEVICE` binding) | `HandsetDO`, `SmsRouterDO` |
+| `AuthGuard` | Global SQLite Durable Object (`AUTH_GUARD`) owning per-account & per-IP lockouts | `RateLimitDO`, `LoginGuard` |
+| `AuthorityGuard` | Global SQLite Durable Object (`AUTHORITY_GUARD`) owning live grant windows | `GrantDO`, `ApprovalDO` |
+| `AssistantAgent` | Pinned singleton SQLite Durable Object (`ASSISTANT`, name `assistant`) for the stateful agent runtime | `ChatDO`, `AgentSessionDO` |
+| `FlowExecutionWorkflow` | Cloudflare Workflow (`FLOW_WORKFLOW`) executing flow delays >5 seconds | `DelayWorker`, `FlowQueue` |
+| `DakFlareApi` | Typed Cloudflare Worker-to-Worker RPC service binding entrypoint (`worker/src/binding-api.ts`) | `InternalApi`, `WorkerRpc` |
+| `dakflare.flow/v2` | Canonical acyclic flow IR schema (`cli/schema/flow-v2.json`) | `flow-v1`, `canvas-json`, `plugin-manifest` |
+| `SENT` vs. `DELIVERED` | `SENT` = handset radio accepted the message; `DELIVERED` = carrier status report confirmed arrival | Treating `SENT` as delivered |
+| `poll-only` | Handset wake mode when `fcm_token` is absent (GMS-free LineageOS); polls `/v1/sms/outgoing/poll` | `broken push`, `offline-only` |
+| `System 1` / `Clef` | Typed probability-over-closed-set decision client (`worker/src/lib/system1.ts`) | Free-form LLM classifier |
+
+---
+
+<!-- source: /docs/architecture/sovereign-edge-model.md -->
+
+# Sovereign Edge Model
+
+> Architectural rationale for pairing a dedicated Android handset radio with a single-tenant Cloudflare Worker instead of third-party telecom SaaS.
+
+DakFlare is built around one thesis: **the handset is the radio, the Worker is the coordinator, and the operator owns both.**
+
+## Why Handset + Cloudflare Edge
+
+1. **Zero Telecom SaaS Markup or Account Lock-In**: Standard SMS APIs charge per-segment markups, enforce rigid sender-ID approval pipelines, and store your private message traffic on third-party servers. Running a dedicated Android handset on your own SIM eliminates per-message intermediaries while keeping local carrier reachability.
+2. **Offline-First Automation**: Because the Rust `simulator/flow` interpreter runs natively on the handset, simple auto-reply graphs execute even when cellular data or edge connectivity drops—and synchronize provenance back to D1 once connectivity returns.
+3. **Single-Tenant Edge Scalability**: Running the coordinator on your own Cloudflare account gives global TLS termination, hibernating WebSockets (`DeviceGateway`), SQLite Durable Objects, D1 (`sms_gateway`), Queues (`WEBHOOK_QUEUE`), and Workflows (`FlowExecutionWorkflow`) at pennies per month—while keeping credentials strictly on the operator's machine (zero Cloudflare tokens in CI).
+
+## Repository & Data Architecture
+
+- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 17 D1 migrations (`0001_baseline.sql`–`0017_alert_acknowledged_by.sql`), 4 SQLite Durable Objects, 3 channel adapters (SMS, Telegram, WhatsApp Cloud), `flow.wasm`, Clef System 1, and `/mcp`.
+- **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
+- **`dashboard/`**: SvelteKit 5 static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
+- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (28 commands).
+
+## Honest Architectural Boundaries (Known Gaps)
+
+- **MMS** is not supported (surfaces an explicit notification instead of dropping silently).
+- **Plugin registry & arbitrary third-party Wasm plugins**: Schema tables (`plugin_repos`, `installed_plugins`) exist from migration `0007`, but only the first-party compiled `flow.wasm` interpreter runs today.
+- **`server-kdf` password mode** requires Cloudflare Workers Paid tier (server-side PBKDF2 exceeds the 10 ms Free-tier CPU budget; `client-derived` is the default).
+- **Revoked devices are tombstones**: `DELETE /v1/admin/devices/:id` sets `revoked_at` and strips credentials while preserving message history; re-pairing the same `device_id` revives the row.
+
+---
+
+<!-- source: /docs/architecture/security-p256-identity.md -->
+
+# P-256 Identity & Authentication
+
+> Hardware-wrapped P-256 device signing, canonical string construction, replay protection, and Better Auth multi-factor operator security.
+
+## Zero Shared Secrets Between Handset and Edge
+
+Every device request is authenticated with asymmetric **ECDSA P-256** (`worker/src/auth/canonical.ts`, `worker/src/auth/ecdsa.ts`):
+
+1. **Hardware Key Wrapping**: On Android, `KeyVault.kt` creates a non-exportable AES-256-GCM key inside `AndroidKeyStore` and wraps the handset's P-256 private key before storing it in local libSQL as `keystore:v1:<iv>:<ciphertext>`. D1 stores only the public key. Exfiltrating either database cannot impersonate the handset.
+2. **Canonical 5-Line String**:
+   ```text
+   METHOD
+   PATH
+   TIMESTAMP
+   NONCE
+   SHA256(raw_body_bytes)
+   ```
+   - Separated by `0x0A` (`\n`), **no trailing newline**, **no query string** (any query parameter on a signed device route fails with `400 unexpected_query`).
+   - Empty bodies (e.g., `GET`) use SHA-256 of zero bytes (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+3. **Strict Header Grammar**:
+   - `X-Device-Id`: `^[A-Za-z0-9_-]{8,64}$`
+   - `X-Timestamp`: `^\d{13}$` (UTC epoch ms, must be within ±300,000 ms of edge clock)
+   - `X-Nonce`: `^[0-9a-f]{32}$` (16 random bytes, lowercase hex)
+   - `X-Signature`: standard Base64 (`=` padded) of the 64-byte IEEE P1363 `r || s` signature
+4. **Atomic Replay Guard**: `DeviceGateway` records every spent `X-Nonce` inside its SQLite storage for `NONCE_WINDOW_MS` (300,000 ms). A reused nonce returns `401 nonce_replay` before any write occurs.
+5. **Cross-Language Test Vectors**: `test-support/protocol-vectors.json` is verified identically by the TypeScript harness, Rust `simulator/core`, and `test-support/independent-canonical-check.py`.
+
+## Operator Authentication & Sessions
+
+Registration is strictly **invite-only** (no public sign-up). Four sign-in factors are supported:
+1. **Passkey (WebAuthn)** — primary, phishing-resistant; `AUTH_RP_ID` pinned to the deployment hostname.
+2. **TOTP** — optional second factor (requires a passkey to enroll); disabling deletes the secret and clears all pending challenges.
+3. **Password** — optional; defaults to `AUTH_PASSWORD_MODE=client-derived` (210,000-round PBKDF2 in the browser) to stay inside Workers Free 10 ms CPU limits.
+4. **Magic Link** — advertised only when `RESEND_API_KEY` is configured; consumed exclusively via button `POST /v1/auth/magic-link/consume` so email scanners cannot burn links.
+
+- **Host-only session cookies**: `__Secure-better-auth.session_token` (`HttpOnly`, `Secure`, `SameSite=Lax`, 7 days) is bound strictly to the Worker's origin—never open the console through a localhost reverse proxy.
+- **Dual-scope lockout**: `AuthGuard` enforces 5 attempts/account and 20 attempts/IP per 900s window.
+
+---
+
+<!-- source: /docs/architecture/wasm-and-agent-isolation.md -->
+
+# Wasm & Agent Isolation
+
+> How DakFlare guarantees deterministic flow evaluation across Rust/Wasm runtimes and enforces fail-closed authority isolation for AI agents.
+
+## Deterministic Single-Engine Flow Execution
+
+Instead of maintaining separate JavaScript and Rust rule evaluators that inevitably drift, DakFlare compiles **one** pure-Rust crate (`simulator/flow`) to three targets:
+1. **Android Handset** (`simulator/core` native Rust) — offline synchronous evaluation.
+2. **Cloudflare Worker** (`worker/src/wasm/flow.wasm`) — fallback & continuation past `delay`/`webhook` nodes.
+3. **Browser Console** (`dashboard/static/flow.wasm`) — instant simulation & regex synthesis in `/admin/workflows/edit`.
+
+### Pure Evaluation, Caller-Owned Effects
+
+The Wasm module imports **zero host functions** (`WebAssembly.instantiate(flowModule, {})`). It cannot make network calls, read clocks, or touch storage. It receives `{ graph, message }` and returns a pure list of `FlowAction` intents (`send_sms`, `delay`, `webhook`). The host enforces all side-effect safety:
+- `webhook` URLs are validated as `https://` and SSRF-guarded against loopback, RFC 1918 private ranges, CGNAT, and cloud metadata IPs before enqueueing on `WEBHOOK_QUEUE`.
+- `delay` steps >5 seconds hand off to durable `FlowExecutionWorkflow` checkpoints.
+
+## Fail-Closed Agent Isolation
+
+1. **Closed-Set System 1 vs. Prose Assistant**: `/v1/agent/*` uses Cloudflare Clef (`worker/src/lib/system1.ts`) to return typed probabilities (`choice`, `noul`, `score`) over closed sets—never free-form prose masquerading as telemetry. When unreachable, endpoints return less (`source: "unavailable"`) rather than hallucinating.
+2. **Authority Cannot Self-Approve**: `createGrant` and `decideApproval` enforce `assertHuman(actor)`. Even if the `AssistantAgent` Durable Object imports them, it cannot mint its own grants.
+3. **Effect-Shaped Grants & Fail-Closed Journaling**:
+   - Every act in `AssistantAgent` writes a `tool_calls` row in SQLite *before* executing and derives its effect idempotency key from `call_id` (the LLM never picks idempotency keys).
+   - Every act re-checks the live grant, autonomy window owner, per-window cap, and deployment-wide `daily_sms_cap` at call time.
+   - Replayed tool calls return the recorded result (`replayed: true`) and refund grant uses so retries never burn `max_uses`.
+4. **Schema Rollback Safety**: `AssistantAgent` maintains its own `schema_version` ledger inside `blockConcurrencyWhile` and fails closed with `503 agent_schema_ahead` if a Worker rollback encounters newer Durable Object SQLite state.
+
+---
+
+<!-- source: /docs/agents/index.md -->
+
+# Docs for Agents
+
+> Machine-readable endpoints, llms.txt indexes, per-page Markdown content negotiation, OpenAPI 3.1, SKILL.md, and the Docs MCP server for AI coding agents.
+
+DakFlare treats AI coding agents (Claude Code, Cursor, Windsurf, OpenCode, and autonomous workflows) as a first-class audience served from the same source of truth as the human documentation.
+
+## Machine-Readable Endpoints
+
+| Endpoint | Format | Purpose |
+| --- | --- | --- |
+| [`/llms.txt`](/llms.txt) | Markdown index | Concise navigation index ordered by onboarding priority with one-line descriptions |
+| [`/llms-full.txt`](/llms-full.txt) | Concatenated Markdown | Complete documentation bundle with `llms-ignore` JSX stripped and `llms-only` context preserved |
+| `/{any-path}.md` | `text/markdown; charset=utf-8` | Clean source Markdown for any page (e.g. `/start/quickstart.md`, `/reference/api-reference.md`) |
+| `Accept: text/markdown` | HTTP content negotiation | Any doc URL returns clean Markdown with `Vary: Accept` and `x-markdown-tokens` budget header |
+| [`/openapi.json`](/openapi.json) | OpenAPI 3.1.0 JSON | Complete REST API contract with security schemes, request/response examples, and error shapes |
+| [`/SKILL.md`](/SKILL.md) | Agent Skill Markdown | Curated single-file skill encoding DakFlare invariants, CLI rules, Wasm ABI, and Do/Don't guardrails |
+| [`/AGENTS.md`](/AGENTS.md) | Repository Agent Guide | Repo-root instructions for coding agents working directly inside `dakflare` |
+| `POST /mcp` | JSON-RPC 2.0 (Docs MCP) | Live retrieval tools: `list_sections`, `search_docs`, `get_doc_page`, `get_openapi_operation` |
+
+## Fetching Markdown Directly
+
+```bash
+# Via explicit .md route
+curl -sS https://docs.dakflare.dev/start/quickstart.md
+
+# Via HTTP content negotiation (returns x-markdown-tokens header)
+curl -i -H "Accept: text/markdown" https://docs.dakflare.dev/reference/mcp-tools/
+```
+
+## Querying the Docs MCP Server
+
+```bash
+curl -sS -X POST https://docs.dakflare.dev/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_openapi_operation","arguments":{"path":"/v1/sms/send"}}}'
+```
+
+## Installing DakFlare's Task-Specific Skills
+
+In addition to the unified [`/SKILL.md`](/SKILL.md), the repository ships four modular skills under `skills/` compatible with `npx skills add`:
+- `skills/dakflare-provision/SKILL.md` — install, deploy, repair, pair, revoke
+- `skills/dakflare-messaging/SKILL.md` — async send, idempotency, delivery status
+- `skills/dakflare-flows/SKILL.md` — `dakflare.flow/v2` authoring, validation, drift healing
+- `skills/dakflare-agents/SKILL.md` — `dkf_agt_` tokens, grants, approvals, `/mcp`

@@ -1,0 +1,12 @@
+{
+  "title": "Reference",
+  "pages": [
+    "api-reference",
+    "api-playground",
+    "mcp-tools",
+    "wasm-flow-abi",
+    "cli-and-env",
+    "state-machines",
+    "glossary"
+  ]
+}

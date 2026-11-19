@@ -1,0 +1,70 @@
+---
+title: Android Handset & Pairing
+description: Build, sign, install, pair, and verify the Tauri v2 + Rust Android SMS radio app (dev.dakflare.simulator).
+---
+
+The Android app (`simulator/`, package `dev.dakflare.simulator`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
+
+## Toolchain & Debug Build
+
+Install JDK 21, Android SDK 37, NDK 27, and Rust Android targets under `$HOME` (~8 GB disk space):
+
+```bash
+simulator/scripts/android-setup.sh
+source ~/.config/dakflare/android-env.sh
+cd simulator
+npm install && npm run check && npm run build
+npx tauri android build --debug --apk --target aarch64
+adb install -r -g src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+Run Rust unit tests without the Android toolchain:
+
+```bash
+cd simulator/core && cargo test
+cd simulator/flow && cargo test
+```
+
+## Pairing Lifecycle
+
+1. **Mint a single-use pairing code** on the operator terminal:
+   ```bash
+   dakflare pair --label "LineageOS Pixel" --ttl 600 --qr
+   ```
+2. **Enrol the handset**: Open **Device** in the app and scan the QR code (or paste the Worker URL and code).
+3. **Key wrapping**: `KeyVault.kt` generates an AES-256-GCM wrapping key inside `AndroidKeyStore` (non-exportable) and wraps the P-256 private key at rest in the local libSQL database as `keystore:v1:<iv>:<ciphertext>`.
+4. **Registration**: The handset submits its `device_id`, P-256 public key, and pairing code to `POST /v1/device/pair`. The Worker marks the pairing code claimed and stores the public key in D1 `devices`.
+
+> **Do not uninstall the app to troubleshoot pairing.** Uninstalling deletes the local libSQL database, the Keystore-wrapped identity, and the Android battery optimization whitelist. Always diagnose with `dakflare doctor` and `dakflare devices` first. If identity is truly lost, run `dakflare revoke <device_id> --yes` and re-pair.
+
+## Default SMS Role & Foreground Service
+
+- **Role**: The handset holds `android.app.role.SMS` so `SmsReceiver.kt` receives `SMS_DELIVER`, writes to `SmsProvider.kt` (`content://sms`), and posts one silent notification per thread with inline reply (`SmsReplyReceiver.kt`).
+- **MMS**: Not supported; an incoming MMS push produces an explicit notification rather than silently dropping.
+- **Persistence**: `GatewayService.kt` runs as a `remoteMessaging` foreground service flushing pending rows every 15 minutes, and `BootReceiver.kt` restores it after reboot.
+
+## Wake Capability: `poll-only` vs. FCM Push
+
+The Worker supports FCM HTTP v1 wake pushes (`worker/src/lib/fcm.ts`, bearer token cached in `KV`) whenever a `devices` row carries an `fcm_token`. However, `dev.dakflare.simulator` deliberately does **not** register an FCM token because target handsets run GMS-free LineageOS (`com.google.android.gms` absent). The handset operates honestly as `poll-only`—maintaining a persistent WebSocket (`GET /v1/device/ws`) when online and falling back to `POST /v1/sms/outgoing/poll`.
+
+## On-Device Verification (8 Checks)
+
+Against a rooted debug handset connected over ADB:
+
+```bash
+simulator/scripts/device-check.sh
+simulator/scripts/device-check.sh --reboot   # also verifies BootReceiver recovery
+```
+
+The script verifies: attached handset, `android.app.role.SMS` holder, `keystore:v1:` wrapped key, injected inbound PDU (`SmsInject.java`), `content://sms` provider row, outbound send, notification reply action, and foreground `GatewayService`. A `SKIP` is not a pass.
+
+## Release APK Signing
+
+Signing material stays outside the repository at `~/.config/dakflare/dakflare-release.jks` and `~/.config/dakflare/release-keystore.txt` (both mode `600`). Gradle refuses a release build without the keystore so it can never fall back to the debug key:
+
+```bash
+simulator/scripts/release-apk.sh
+dakflare key fingerprint   # prints the release certificate SHA-256
+```
+
+**Losing the release keystore permanently prevents updating existing installations under `dev.dakflare.simulator`.**

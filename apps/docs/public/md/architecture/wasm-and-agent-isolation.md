@@ -1,0 +1,26 @@
+# Wasm & Agent Isolation
+
+> How DakFlare guarantees deterministic flow evaluation across Rust/Wasm runtimes and enforces fail-closed authority isolation for AI agents.
+
+## Deterministic Single-Engine Flow Execution
+
+Instead of maintaining separate JavaScript and Rust rule evaluators that inevitably drift, DakFlare compiles **one** pure-Rust crate (`simulator/flow`) to three targets:
+1. **Android Handset** (`simulator/core` native Rust) — offline synchronous evaluation.
+2. **Cloudflare Worker** (`worker/src/wasm/flow.wasm`) — fallback & continuation past `delay`/`webhook` nodes.
+3. **Browser Console** (`dashboard/static/flow.wasm`) — instant simulation & regex synthesis in `/admin/workflows/edit`.
+
+### Pure Evaluation, Caller-Owned Effects
+
+The Wasm module imports **zero host functions** (`WebAssembly.instantiate(flowModule, {})`). It cannot make network calls, read clocks, or touch storage. It receives `{ graph, message }` and returns a pure list of `FlowAction` intents (`send_sms`, `delay`, `webhook`). The host enforces all side-effect safety:
+- `webhook` URLs are validated as `https://` and SSRF-guarded against loopback, RFC 1918 private ranges, CGNAT, and cloud metadata IPs before enqueueing on `WEBHOOK_QUEUE`.
+- `delay` steps >5 seconds hand off to durable `FlowExecutionWorkflow` checkpoints.
+
+## Fail-Closed Agent Isolation
+
+1. **Closed-Set System 1 vs. Prose Assistant**: `/v1/agent/*` uses Cloudflare Clef (`worker/src/lib/system1.ts`) to return typed probabilities (`choice`, `noul`, `score`) over closed sets—never free-form prose masquerading as telemetry. When unreachable, endpoints return less (`source: "unavailable"`) rather than hallucinating.
+2. **Authority Cannot Self-Approve**: `createGrant` and `decideApproval` enforce `assertHuman(actor)`. Even if the `AssistantAgent` Durable Object imports them, it cannot mint its own grants.
+3. **Effect-Shaped Grants & Fail-Closed Journaling**:
+   - Every act in `AssistantAgent` writes a `tool_calls` row in SQLite *before* executing and derives its effect idempotency key from `call_id` (the LLM never picks idempotency keys).
+   - Every act re-checks the live grant, autonomy window owner, per-window cap, and deployment-wide `daily_sms_cap` at call time.
+   - Replayed tool calls return the recorded result (`replayed: true`) and refund grant uses so retries never burn `max_uses`.
+4. **Schema Rollback Safety**: `AssistantAgent` maintains its own `schema_version` ledger inside `blockConcurrencyWhile` and fails closed with `503 agent_schema_ahead` if a Worker rollback encounters newer Durable Object SQLite state.

@@ -1,0 +1,10 @@
+{
+  "title": "How-To Guides",
+  "pages": [
+    "android-node-pairing",
+    "durable-objects-routing",
+    "visual-workflow-editor",
+    "agent-authority-and-webhooks",
+    "self-hosting-production"
+  ]
+}

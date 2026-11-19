@@ -1,0 +1,164 @@
+# REST API Reference
+
+> Complete HTTP endpoint reference for DakFlare's device protocol, authentication, admin fleet & messaging, automation, agent analysis, runtime, webhooks, and channels.
+
+Machine-readable OpenAPI 3.1.0 specification: [`/openapi.json`](/openapi.json).
+
+## Authentication Schemes
+
+| Surface | Credential | Notes |
+| --- | --- | --- |
+| **Device Protocol** | P-256 ECDSA headers: `X-Device-Id`, `X-Timestamp`, `X-Nonce`, `X-Signature` | Signed over `METHOD\nPATH\nTS\nNONCE\nSHA256(body)`. Query strings on signed routes return `400 unexpected_query`. |
+| **Operator Browser** | Cookie `__Secure-better-auth.session_token` (or legacy `dakflare_admin`) | Host-only, `HttpOnly`, `Secure`, `SameSite=Lax`, 7-day TTL. |
+| **Machine / CLI** | `Authorization: Bearer <ADMIN_TOKEN>` + `X-Dakflare-Client: cli` (or `binding`) | Full admin surface. Fails closed with `401` when `ADMIN_TOKEN` is unset. |
+| **Agent Token** | `Authorization: Bearer dkf_agt_<secret>` | Scoped by `SCOPE_FOR_ACTION`; costly actions also require a live time-boxed grant. |
+| **Inbound Webhook** | `x-dakflare-signature: sha256=<hex>` + `x-dakflare-delivery: <id>` | HMAC-SHA256 over raw body bytes; synthetic actor `webhook:<id>` (read/propose only). |
+
+## 1. Device Protocol Endpoints
+
+| Method & Path | Auth | Purpose |
+| --- | --- | --- |
+| `POST /v1/device/pair` | Pairing code in body | Register or rotate a handset's P-256 public key using a single-use pairing code |
+| `GET /v1/device/ws` | P-256 Device Auth | Upgrade to persistent hibernating WebSocket on `DeviceGateway` |
+| `POST /v1/sms/incoming/batch` | P-256 Device Auth | Upload up to 500 inbound SMS rows (idempotent by `local_id`, triggers rules/flows) |
+| `POST /v1/sms/outgoing/poll` | P-256 Device Auth | Lease pending outbound commands when WebSocket is down |
+| `POST /v1/sms/status/batch` | P-256 Device Auth | Report up to 500 command delivery updates (`SENT`, `DELIVERED`, `FAILED` + optional `error_code`/`error_message`) |
+| `GET /v1/rules` | P-256 Device Auth | Sync active auto-reply rules to handset |
+| `GET /v1/flows` | P-256 Device Auth | Sync active `dakflare.flow/v2` graphs to handset |
+| `GET /v1/device/approvals` | P-256 Device Auth | List pending authority approvals visible on the handset |
+| `POST /v1/device/approvals/:id/approve` | P-256 Device Auth | Approve a pending request from the handset |
+| `POST /v1/device/approvals/:id/reject` | P-256 Device Auth | Reject a pending request from the handset |
+
+## 2. Authentication & Session Endpoints
+
+| Method & Path | Auth | Purpose |
+| --- | --- | --- |
+| `GET /v1/auth/mode` | Public | Discover enabled sign-in doors (passkey, password mode, magic link availability) |
+| `GET /v1/auth/challenge` | Cookie | Check whether a second-factor TOTP challenge is live (`{ pending }`) |
+| `POST /v1/auth/redeem` | Invite token | Spend a single-use invite and mint the first session |
+| `POST /v1/auth/salt` | Public | Fetch per-address salt and PBKDF2 iteration count (`210000`) for client-derived mode |
+| `POST /v1/auth/sign-in/password` | Public | Password first factor (`{ material }` in `client-derived` mode) |
+| `POST /v1/auth/password` | Session (fresh) | Set or change account password |
+| `DELETE /v1/auth/password` | Session (fresh) | Remove password factor |
+| `POST /v1/auth/magic-link` | Public | Request a magic sign-in link (always `202` for known and unknown addresses) |
+| `POST /v1/auth/magic-link/consume` | Public | Spend magic link token (only via button POST, never GET) |
+| `GET /v1/auth/totp` | Session | Check TOTP status |
+| `POST /v1/auth/totp/enable` | Session (fresh + passkey) | Enroll TOTP authenticator |
+| `POST /v1/auth/totp/disable` | Session (fresh) | Disable TOTP and clear pending challenges |
+| `POST /v1/auth/totp/regenerate` | Session (fresh) | Regenerate single-use backup codes |
+| `GET /v1/auth/me` | Session | Return authenticated user profile and role (`owner`, `admin`, `member`), or `401` |
+| `/api/auth/*` | Better Auth | WebAuthn passkey registration/assertion, TOTP verify, sign-out |
+
+## 3. Fleet, Messaging & Provenance Endpoints
+
+| Method & Path | Scope / Role | Purpose |
+| --- | --- | --- |
+| `GET /v1/admin/health` | `devices:read` | Deployment health, migration count, bindings, version |
+| `POST /v1/admin/pairing-code` | `devices:write` | Mint a single-use handset pairing code |
+| `GET /v1/devices` | `devices:read` | List paired handsets (`?include_archived=1`) |
+| `GET /v1/device/:id/status` | `devices:read` | Live presence, socket count, and DO stats for one handset |
+| `POST /v1/admin/devices/:id/archive` | `devices:write` | Archive a handset |
+| `POST /v1/admin/devices/:id/unarchive` | `devices:write` | Restore an archived handset |
+| `DELETE /v1/admin/devices/:id` | Human only (`null` scope) | Permanently revoke handset (tombstone `revoked_at`, clears key & FCM) |
+| `GET /v1/admin/devices/:id/commands` | `messages:read` | List outbound commands on one handset |
+| `GET /v1/messages` | `messages:read` | Query message log (`?device_id=&limit=&direction=`) |
+| `DELETE /v1/messages` | `messages:purge` | Purge stored messages |
+| `POST /v1/sms/send` | `sms:send` (+ `sms:send:production` grant for agents) | Queue one outbound SMS (supports `idempotency_key`) |
+| `POST /v1/sms/send/batch` | `sms:send` | Queue up to 200 outbound SMS (rejects `idempotency_key` with `400 idempotency_key_not_supported_in_batch`) |
+| `GET /v1/sms/commands/:id` | `messages:read` | Poll delivery state (`?device_id=`), alias `GET /v1/commands/:id` |
+| `GET /v1/admin/trace/:id` | `messages:read` | Cross-store provenance trace across D1, `DeviceGateway`, and `audit_log` |
+| `GET /v1/admin/alerts` | `messages:read` | List operator alerts (`device_offline`, `extraction_drift`) |
+| `POST /v1/admin/alerts/:id/ack` | `alerts:write` | Acknowledge one alert |
+| `POST /v1/admin/alerts/ack-all` | `alerts:write` | Acknowledge all open alerts |
+| `GET /v1/admin/dlq` | `devices:read` | Read dead-lettered alarm tasks for `?device_id=` |
+| `GET /v1/admin/ws` | `devices:read` | Inspect active WebSockets for `?device_id=` |
+| `GET /v1/admin/audit` | `audit:read` | Read append-only privileged audit log |
+
+### Example: `POST /v1/sms/send`
+
+**Request**
+```http
+POST /v1/sms/send HTTP/1.1
+Authorization: Bearer dkf_agt_...
+Content-Type: application/json
+
+{
+  "device_id": "dev63f3953f417d587f",
+  "to": "+8801540196080",
+  "body": "Order AB12CD confirmed.",
+  "idempotency_key": "order-ab12cd-confirm"
+}
+```
+
+**Success (`200 OK`)**
+```json
+{
+  "ok": true,
+  "command_id": "cmdf_01j9x7m2k8p3q4r5",
+  "device_id": "dev63f3953f417d587f",
+  "state": "PENDING",
+  "replayed": false
+}
+```
+
+**Agent Missing Grant (`202 Accepted` — Nothing Sent)**
+```json
+{
+  "sent": false,
+  "error": "approval_required",
+  "approval_request": {
+    "id": "apr_01j9x7n0v1w2x3y4",
+    "scope": "sms:send:production",
+    "target": { "recipients": ["+8801540196080"] },
+    "max_ttl_s": 3600
+  }
+}
+```
+
+**Validation Error (`400 Bad Request`)**
+```json
+{
+  "error": "bad_request"
+}
+```
+
+## 4. Automation (Rules & Workflows)
+
+| Method & Path | Scope | Purpose |
+| --- | --- | --- |
+| `GET /v1/admin/rules` | `flows:read` | List auto-reply rules by `priority DESC` |
+| `POST /v1/rules` | `rules:write` | Create an auto-reply rule (compiled & validated as a flow graph) |
+| `PUT /v1/admin/rules/:id` / `PUT /v1/rules/:id` | `rules:write` | Update rule fields or enabled flag |
+| `DELETE /v1/admin/rules/:id` | `rules:write` | Delete a rule |
+| `POST /v1/admin/rules/test` | `flows:read` | Dry-run all rules against a sample `{ peer, body, device_id? }` |
+| `GET /v1/admin/workflows` | `flows:read` | List all `dakflare.flow/v2` workflows |
+| `GET /v1/admin/workflows/:id` | `flows:read` | Get canonical IR, version, and `ui_layout` |
+| `PUT /v1/admin/workflows/:id` | `flow_deploy_prod` | Validate, compute `rank-v1` layout, and save workflow (`400 workflow_invalid` with `details[]`, `409` on stale `expected_previous_version`) |
+| `DELETE /v1/admin/workflows/:id` | `flow_deploy_prod` | Delete a workflow |
+
+## 5. Agent Analysis, Control Plane, Runtime & Webhooks
+
+| Method & Path | Scope / Gate | Purpose |
+| --- | --- | --- |
+| `POST /v1/agent/triage` | `messages:read` | Clef System 1 batch: intent, injection risk, specificity, span roles, deterministic `balanceAtLeastPrincipal` |
+| `POST /v1/agent/telemetry` | `devices:read` | Execute 1 of 6 fixed D1 plans (`fleet_health`, `stuck_outbox`, `sim_signal_ranking`, `workflow_failures`, `authority_audit`, `unmatched_drift`) |
+| `POST /v1/agent/diagnose` | `messages:read` | Return root-cause card (`ERR_UNICODE_ZERO_WIDTH_UCS2`, `ERR_MULTIWORD_REF_MISMATCH`, etc.) with 16/8/16 offset window |
+| `POST /v1/agent/synthesize` | `flows:write` | Judge candidate patch and mint single-use `ag1_` `apply_token` (`503 ai_unavailable` if judge unreachable) |
+| `POST/GET/DELETE /v1/admin/agent-tokens[/:id]` | Human only | Mint, list, and revoke `dkf_agt_` tokens |
+| `GET /v1/admin/approvals`, `POST /v1/admin/approvals/:id/approve\|reject` | Human only | Manage HITL approval queue (`409` if another operator already decided) |
+| `GET /v1/admin/grants`, `DELETE /v1/admin/grants/:id` | Human only | Inspect and revoke live authority grants |
+| `POST /v1/admin/agent/ticket` | Human only | Mint single-use 60s WebSocket ticket for `/agents/assistant/assistant` |
+| `POST /v1/admin/agent/say`, `GET/DELETE /v1/admin/agent/conversation` | Human only | Run idempotent turn or read/clear operator transcript in `AssistantAgent` |
+| `POST/GET/DELETE /v1/admin/agent/attachments[/:id]` | Human only | Manage R2-backed turn attachments (≤1 MiB, max 3 per operator, 24h TTL) |
+| `GET/POST/DELETE /v1/admin/agent/autonomy`, `GET /v1/admin/agent/runtime` | Human only | Read/enable/revoke bounded autonomy window and runtime status |
+| `POST/GET/DELETE /v1/admin/webhooks[/:id]`, `GET /v1/admin/webhooks/:id/deliveries` | Human only | Manage HMAC-signed inbound agent webhooks |
+| `POST /v1/webhooks/:id` | HMAC-SHA256 | Signed external webhook ingress (idempotent by `x-dakflare-delivery`) |
+| `GET/PUT /v1/admin/ai/settings`, `GET /v1/admin/ai/models`, `POST /v1/admin/ai/test`, `POST /v1/admin/ai/system1/test`, `POST /v1/admin/assistant/chat`, `POST /v1/admin/assistant/proposals/:id/accept` | Human only | Unified AI provider settings, stateless console assistant, and atomic proposal acceptance |
+
+## 6. Multi-Platform Channels & Operations
+
+- `POST /v1/channels/telegram/webhook` — Telegram webhook ingress (`X-Telegram-Bot-Api-Secret-Token`)
+- `GET` & `POST /v1/channels/whatsapp/webhook` — WhatsApp Cloud verification & ingress (`X-Hub-Signature-256`)
+- `POST /v1/channels/:channel/send` — Send outbound message via `telegram` or `whatsapp`
+- `POST /v1/admin/bootstrap`, `POST /v1/admin/invites`, `GET /v1/admin/invites`, `DELETE /v1/admin/invites/:id`, `POST /v1/admin/auth/reset-user`, `POST /v1/admin/auth/rotate-pepper`
+- `GET /source` — `302` redirect to AGPL-3.0 §13 source repository (`SOURCE_URL`)

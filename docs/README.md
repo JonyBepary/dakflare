@@ -7,6 +7,12 @@ it there, and `skills/*/SKILL.md` because that directory shape is what `npx skil
 
 Start at the root `README.md` for what the product is. This page is the map of everything else.
 
+**The same material is also a site.** `apps/docs` is a Fumadocs application that renders the
+guides, the reference and the architecture notes for a reader who does not want to browse a
+repository — including `/docs/{slug}.md` (every page as clean markdown), `/llms.txt`, and an MCP
+endpoint, so an agent can read it as easily as a person. This directory remains the source of
+truth; the site is a presentation of it, and should be corrected here first.
+
 ## The product
 
 | | |

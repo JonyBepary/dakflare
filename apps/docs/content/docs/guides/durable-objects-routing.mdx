@@ -1,0 +1,140 @@
+---
+title: Durable Objects, Channels & Routing
+description: Operate DakFlare's four Durable Objects, WebSocket vs. polling delivery, idempotent sends, Telegram/WhatsApp Cloud channels, and DakFlareApi service bindings.
+---
+
+## The Four SQLite-Backed Durable Objects
+
+All four classes are exported in `worker/cloudflare.config.ts` and `worker/wrangler.toml` with `storage = "sqlite"`:
+
+| Binding | Class | Instance Key | Responsibility |
+| --- | --- | --- | --- |
+| `DEVICE` | `DeviceGateway` | One per `device_id` | Command queue (`PENDING` → terminal), lease & ack alarms, P-256 nonce replay ledger, WebSocket hibernation, DLQ (`dead_letters` after 5 task attempts) |
+| `AUTH_GUARD` | `AuthGuard` | Global singleton | Dual-scope sign-in lockout counters: per-account (5 attempts) and per-IP (20 attempts) within `AUTH_LOCKOUT_WINDOW_SECONDS` (900s) |
+| `AUTHORITY_GUARD` | `AuthorityGuard` | Global singleton | Live time-boxed agent authority grant windows and atomic approval race arbitration |
+| `ASSISTANT` | `AssistantAgent` | Pinned singleton (`assistant`) | Stateful operator chat (`agents/sessions`), resumable SSE/WS turn streams (`agents/streams`), `tool_calls` fail-closed journal, autonomy enforcement |
+
+> **One-way door**: Adding or renaming a Durable Object class requires matching `exports` in `cloudflare.config.ts` and a full `cf deploy` (never a version-only upload).
+
+## Outbound Delivery: WebSocket + Polling Fallback
+
+1. `POST /v1/sms/send` writes a `PENDING` command into the target handset's `DeviceGateway` Durable Object (deduplicated by optional `idempotency_key`).
+2. **Primary path**: If the handset has an open WebSocket (`GET /v1/device/ws`), `DeviceGateway` leases the command (`LEASED`, default `LEASE_MS = 60000`), dispatches it (`DISPATCHED`), and arms an ack timer (`ACK_TIMEOUT_MS = 8000`).
+3. **Fallback path**: If the socket is closed, the handset calls `POST /v1/sms/outgoing/poll`, receives leased commands, sends via `SmsSender.kt`, and reports `SENT`, `DELIVERED`, or `FAILED` (`error_code`, `error_message`) via `POST /v1/sms/status/batch`.
+4. **Lease expiry & safety**: If a lease expires without acknowledgement, the command returns to `PENDING` (or becomes `EXPIRED` once past its TTL) without duplicating socket dispatch. Never lower `LEASE_MS` below real radio send latency in production.
+
+### Inspecting Live Sockets and Dead Letters
+
+```bash
+dakflare ws inspect --device <device_id>
+dakflare dlq --device <device_id> --limit 50
+dakflare trace <command_id> --device <device_id>
+```
+
+## Multi-Channel Routing (SMS, Telegram, WhatsApp Cloud)
+
+Inbound messages across all three channels normalize into one `conversations` row keyed by `(channel, account_id, peer_id)` and enter the same **Rules (`priority DESC`) → Flows** pipeline:
+
+| Channel | Ingress Endpoint | Verification Header | Outbound Endpoint |
+| --- | --- | --- | --- |
+| **SMS** | `POST /v1/sms/incoming/batch` | P-256 `X-Signature` | `POST /v1/sms/send` |
+| **Telegram** | `POST /v1/channels/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` | `POST /v1/channels/telegram/send` |
+| **WhatsApp Cloud** | `POST /v1/channels/whatsapp/webhook` (`GET` verify + `POST` ingress) | `X-Hub-Signature-256` | `POST /v1/channels/whatsapp/send` |
+
+> **Current state note**: Both Telegram and WhatsApp inserts currently write `session_state = 'WINDOW_OPEN'`. Automated transitions to `TEMPLATE_ONLY` and `OPTED_OUT` are declared in `0007_multi_platform_and_conversations.sql` but do not yet have background writers (see [State Machines](/reference/state-machines/)).
+
+## Calling DakFlare from Another Cloudflare Worker (`DakFlareApi`)
+
+Another Worker or Cloudflare Workflow in the same account can bind the typed RPC entrypoint `DakFlareApi` instead of constructing raw HTTP requests or bypassing auth via raw DO stubs:
+
+```toml
+# consumer wrangler.toml
+[[services]]
+binding = "DAKFLARE"
+service = "dakflare-worker"
+entrypoint = "DakFlareApi"
+```
+
+```ts
+import type { DakFlareApi } from "dakflare-worker/binding-api";
+
+export default {
+  async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareApi> }) {
+    const sent = await env.DAKFLARE.sendSms({
+      to: "+8801711000111",
+      body: "Payment settled.",
+      idempotencyKey: "inv-9021",
+    });
+    return Response.json(sent);
+  },
+};
+```
+
+Every `DakFlareApi` method (`health`, `deployment`, `devices`, `messages`, `sendSms`, `ask`, `request`) routes through `handleFetch` with `X-Dakflare-Client: binding`, preserving scopes, rate limiters, idempotency, and audit rows. Control authorization via `BINDING_AUTH`:
+- `trusted` (default): the Cloudflare account boundary is the credential (refuses with `binding_untrusted` if `ADMIN_TOKEN` is unset).
+- `agent_token`: requires a `dkf_agt_` token per call plus live grants for costly scopes.
+
+## Loading a Custom `dakflare.flow/v2` JSON Template via Worker Binding
+
+`DakFlareApi` exposes `request()` as a typed escape hatch to any `/v1/*` route through the exact same auth, rate-limit, and validation pipeline (`worker/src/binding-api.ts`). Use `PUT /v1/admin/workflows/:id` to load or update a custom JSON flow template from another Cloudflare Worker or Cloudflare Workflow:
+
+```ts
+import type { DakFlareApi } from "dakflare-worker/binding-api";
+import { BindingError } from "dakflare-worker/binding";
+
+interface Env {
+  DAKFLARE: Service<DakFlareApi>;
+  DAKFLARE_AGENT_TOKEN?: string; // only needed if BINDING_AUTH=agent_token
+}
+
+const customTemplate = {
+  name: "Invoice OTP & Receipt Handler",
+  enabled: true,
+  device_id: "dev63f3953f417d587f",
+  graph: {
+    schema: "dakflare.flow/v2",
+    nodes: [
+      { id: "t1", type: "trigger", data: { kind: "incoming", body: { mode: "keyword", value: "INV-" } } },
+      { id: "x1", type: "extract", data: { source: "body", pattern: "INV-(?<invoice>[0-9]{6})" } },
+      { id: "s1", type: "send_sms", data: { to: "{{sender}}", body: "Invoice {{invoice}} logged." } },
+      { id: "e1", type: "stop", data: {} },
+    ],
+    edges: [
+      { id: "e1", source: "t1", target: "x1" },
+      { id: "e2", source: "x1", target: "s1" },
+      { id: "e3", source: "s1", target: "e1" },
+    ],
+  },
+};
+
+export default {
+  async fetch(_req: Request, env: Env): Promise<Response> {
+    try {
+      // 1. Load & validate the custom JSON template (Worker computes rank-v1 layout automatically)
+      const saved = await env.DAKFLARE.request({
+        path: "/v1/admin/workflows/wf_invoice_custom",
+        method: "PUT",
+        body: customTemplate,
+        ...(env.DAKFLARE_AGENT_TOKEN ? { token: env.DAKFLARE_AGENT_TOKEN } : {}),
+      });
+
+      // 2. Or send an outbound SMS directly from a Cloudflare Workflow / Worker
+      const sent = await env.DAKFLARE.sendSms({
+        deviceId: "dev63f3953f417d587f",
+        to: "+8801540196080",
+        body: "Custom template deployed.",
+        idempotencyKey: "deploy-wf-invoice-custom",
+      });
+
+      return Response.json({ saved: saved.body, sent });
+    } catch (err) {
+      if (err instanceof BindingError) {
+        return Response.json({ error: err.code, message: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  },
+};
+```
+
+> **Execution model note**: `dakflare.flow/v2` workflows are event-driven (`trigger.data.kind === "incoming"`): once saved via `PUT /v1/admin/workflows/:id`, the workflow syncs to the handset (`GET /v1/flows`) and runs automatically on matching inbound SMS/Telegram/WhatsApp messages. There is no ad-hoc `POST /v1/workflows/:id/run` endpoint in `worker/src/index.ts`; for imperative outbound dispatch from another Worker, call `env.DAKFLARE.sendSms(...)` or `env.DAKFLARE.request({ path: "/v1/channels/telegram/send", method: "POST", body: ... })`.

@@ -1,0 +1,72 @@
+# Self-Hosting & Production Operations
+
+> Keep the three Cloudflare configs synchronized, apply D1 migrations safely, avoid cf CLI traps, verify deploys, and restore from D1 Time Travel.
+
+DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 6 hermetic verification jobs (`worker`, `skills`, `dashboard`, `simulator`, `rust`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
+
+## Keep the Three Config Files in Sync
+
+| File | Consumer | Purpose |
+| --- | --- | --- |
+| `worker/cloudflare.config.ts` | `cf` (`cf deploy`, `cf d1 migrations`) | Production bindings, Durable Object exports, queues, workflows, vars |
+| `worker/wrangler.toml` | `wrangler` (`wrangler dev`, `tail`, `d1 export`) | Local dev stack with DO SQLite & alarms, log tailing, backups |
+| `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1`) | Preview lane with `remote = true` D1 and KV |
+
+Always run the drift gate before deploying:
+
+```bash
+cd worker && npm run typecheck && npm run check:config
+```
+
+## Production Secrets
+
+Set secrets via `cf workers secrets update` (prompts interactively so values never hit `argv`):
+
+```bash
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
+npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
+npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
+# Optional capabilities:
+npx cf workers secrets update RESEND_API_KEY --worker dakflare-worker --type secret_text
+npx cf workers secrets update FCM_SERVICE_ACCOUNT_JSON --worker dakflare-worker --type secret_text
+npx cf workers secrets update AI_PROVIDER_API_KEY --worker dakflare-worker --type secret_text
+npx cf workers secrets update WEBHOOK_SECRET_KEY --worker dakflare-worker --type secret_text
+```
+
+## Schema Migration Order of Operations
+
+Migrations (`0001_baseline.sql` through `0017_alert_acknowledged_by.sql`) are **never** applied by CI:
+
+1. **Snapshot first**: Record a D1 Time Travel bookmark or run `npx wrangler d1 export sms_gateway --remote --output backup.sql`.
+2. **Apply by database UUID** (`cf` rejects database names):
+   ```bash
+   cd worker
+   npx cf d1 migrations list  <D1_DATABASE_ID>
+   npx cf d1 migrations apply <D1_DATABASE_ID>
+   ```
+3. **Deploy code from a clean tree**:
+   ```bash
+   cd worker && npm run deploy
+   ```
+   `npm run deploy` runs `scripts/assert-clean-dashboard.mjs` first so uncommitted edits in `dashboard/src` cannot leak into `worker/public/admin`.
+
+## Known `cf` CLI Traps
+
+1. **Aborted destructive commands exit `0`**: Always verify resource state instead of trusting exit codes.
+2. **D1 migrations require the UUID**: Passing `sms_gateway` fails with `Expected a D1 database ID`.
+3. **`cf deploy` can exit `1` on a successful deploy**: An intermittent Cloudflare Workflows API `500` (`workflows.api.error.internal_server`) can fire after the Worker, cron, and queues have already uploaded. Always verify with evidence:
+   ```bash
+   cd worker && npm run verify:deploy
+   ./scripts/smoke.sh https://<your-worker>.workers.dev
+   dakflare doctor
+   ```
+4. **Log tailing stays on Wrangler**: `cf` cannot stream logs yet; use `npx wrangler tail`.
+
+## Rollback & Backup
+
+- **Worker code**: Prefer `git revert <commit>` on `main` followed by `cd worker && npm run deploy` so `main` matches production. Inspect versions with `npx cf workers versions list`.
+- **D1 data**: Restore in place up to 30 days back using D1 Time Travel:
+  ```bash
+  npx wrangler d1 time-travel restore sms_gateway --remote --timestamp=<ISO8601>
+  ```
+  Note: D1 restore does **not** roll back Durable Object SQLite state, KV entries, secrets, or the handset's local libSQL database.
