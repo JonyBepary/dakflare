@@ -50,6 +50,15 @@ install them into another repository unchanged.
   key returns the same `command_id` instead of a second SMS.
 - **The CLI never touches Cloudflare.** Only provisioning does, through `cf`. Do not add
   a Cloudflare SDK to the CLI; `fetch` is built in and `cf` owns auth.
+- **A webhook can answer but never act.** Its actor is `webhook:<id>`, so `authorizeAct`
+  refuses every effect with `webhook_cannot_act` even when an autonomy window is open. A hook
+  secret cannot be re-read: rotation is create, cut over, delete. Rotating
+  `WEBHOOK_SECRET_KEY` invalidates every sealed secret at once and needs each hook recreated —
+  `docs/AGENT_RUNTIME.md` has the procedure, `docs/ADR_001_AGENT_RUNTIME.md` the reasons.
+- **A deploy is verified by evidence.** `cf deploy` can exit `1` on a deploy that worked, so
+  `npm run verify:deploy` checks the version, live routes, the workflow binding and the
+  migration ledger. `npm run deploy` refuses a dirty console tree, because `cf deploy` uploads
+  whatever build sits in `worker/public/admin`.
 
 ## Repository shape
 
