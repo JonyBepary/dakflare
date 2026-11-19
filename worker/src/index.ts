@@ -1716,6 +1716,11 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
           body: messageBody,
           ...(typeof body.media_url === "string" ? { mediaUrl: body.media_url } : {}),
           ...(typeof body.template_id === "string" ? { templateId: body.template_id } : {}),
+          // Outside the 24-hour window, Messenger allows a 7-day HUMAN_AGENT message and
+          // Instagram allows a private reply to a comment. Passing them through is what makes
+          // those two policies reachable from the route rather than only from the SDK.
+          ...(body.use_human_agent_tag === true ? { useHumanAgentTag: true } : {}),
+          ...(typeof body.comment_id === "string" ? { commentId: body.comment_id } : {}),
         });
         const status = result.success
           ? 200

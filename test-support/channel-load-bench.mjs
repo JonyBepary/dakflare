@@ -205,29 +205,27 @@ async function main() {
   latencies.sort((a, b) => a - b);
   const at = (p) => latencies[Math.min(latencies.length - 1, Math.floor((p / 100) * latencies.length))] ?? 0;
 
-  // `/v1/messages` pages by `received_at` alone, and its cap is 200 rows. A burst writes many
-  // rows in the same millisecond, and the cursor is exclusive, so a page boundary inside a
-  // same-millisecond group skips the rest of it. That is a known limitation of the route, not of
-  // the pipeline: this bench therefore reads each device in one page and refuses a workload where
-  // one account would need more than the cap.
-  const perAccount = Math.ceil(TOTAL / accounts.length);
-  if (perAccount > 200) {
-    throw new Error(
-      `this workload puts ${perAccount} events on one account, over the 200-row page cap of ` +
-        `/v1/messages, whose cursor cannot cross same-millisecond rows. Raise CONNECTORS.`
-    );
-  }
+  // `/v1/messages` now carries a compound cursor (`next_cursor.before` + `.before_id`), so a
+  // burst that writes hundreds of rows into the same millisecond pages cleanly. Follow it until
+  // it is null rather than assuming one page holds everything.
   const stored = [];
   for (const account of accounts) {
     const deviceId = `channel:${CHANNEL}:${account.accountId}`;
-    const response = await admin(
-      "GET",
-      `/v1/messages?device_id=${encodeURIComponent(deviceId)}&limit=200`
-    );
-    if (!response.ok) throw new Error(`messages read failed: ${response.status}`);
-    const payload = await response.json();
-    for (const row of payload.messages ?? []) {
-      if (String(row.local_id ?? "").includes(TAG)) stored.push(row);
+    let cursor = null;
+    for (let page = 0; page < 50; page += 1) {
+      const params = new URLSearchParams({ device_id: deviceId, limit: "200" });
+      if (cursor !== null) {
+        params.set("before", String(cursor.before));
+        params.set("before_id", cursor.before_id);
+      }
+      const response = await admin("GET", `/v1/messages?${params.toString()}`);
+      if (!response.ok) throw new Error(`messages read failed: ${response.status}`);
+      const payload = await response.json();
+      for (const row of payload.messages ?? []) {
+        if (String(row.local_id ?? "").includes(TAG)) stored.push(row);
+      }
+      cursor = payload.next_cursor ?? null;
+      if (cursor === null) break;
     }
   }
   const storedIds = new Set(stored.map((row) => row.local_id));

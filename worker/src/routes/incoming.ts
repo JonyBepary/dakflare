@@ -571,23 +571,42 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
 
   const limit = clampLimit(requestUrl.searchParams.get("limit"));
   const beforeRaw = requestUrl.searchParams.get("before");
-  const before =
-    beforeRaw === null || beforeRaw.trim() === "" ? Number.MAX_SAFE_INTEGER : Number(beforeRaw);
+  const beforeIdRaw = requestUrl.searchParams.get("before_id");
+  const hasBefore = beforeRaw !== null && beforeRaw.trim() !== "";
+  const before = hasBefore ? Number(beforeRaw) : Number.MAX_SAFE_INTEGER;
   if (!Number.isFinite(before)) return err("bad_request", 400);
+  const beforeId =
+    beforeIdRaw !== null && beforeIdRaw.trim() !== "" ? beforeIdRaw.trim() : null;
+  if (beforeId !== null && !hasBefore) return err("bad_request", 400);
 
-  const rows = await env.DB.prepare(
-    `SELECT m.id, m.device_id, m.local_id, m.direction, m.peer, m.body, m.received_at,
-            m.auto_reply, m.reply_source, m.reply_ref, m.reply_command_id, m.reply_state,
-            m.reply_error, m.reply_verdict, m.channel, m.conversation_id,
-            c.session_state, c.window_expires_at
-       FROM messages m
-       LEFT JOIN conversations c ON c.id = m.conversation_id
-      WHERE m.device_id = ? AND m.received_at < ?
-      ORDER BY m.received_at DESC, m.id DESC
-      LIMIT ?`
-  )
-    .bind(deviceId, before, limit)
-    .all<Record<string, unknown>>();
+  const rows =
+    beforeId !== null
+      ? await env.DB.prepare(
+          `SELECT m.id, m.device_id, m.local_id, m.direction, m.peer, m.body, m.received_at,
+                  m.auto_reply, m.reply_source, m.reply_ref, m.reply_command_id, m.reply_state,
+                  m.reply_error, m.reply_verdict, m.channel, m.conversation_id,
+                  c.session_state, c.window_expires_at
+             FROM messages m
+             LEFT JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.device_id = ? AND (m.received_at < ? OR (m.received_at = ? AND m.id < ?))
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT ?`
+        )
+          .bind(deviceId, before, before, beforeId, limit)
+          .all<Record<string, unknown>>()
+      : await env.DB.prepare(
+          `SELECT m.id, m.device_id, m.local_id, m.direction, m.peer, m.body, m.received_at,
+                  m.auto_reply, m.reply_source, m.reply_ref, m.reply_command_id, m.reply_state,
+                  m.reply_error, m.reply_verdict, m.channel, m.conversation_id,
+                  c.session_state, c.window_expires_at
+             FROM messages m
+             LEFT JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.device_id = ? AND m.received_at < ?
+            ORDER BY m.received_at DESC, m.id DESC
+            LIMIT ?`
+        )
+          .bind(deviceId, before, limit)
+          .all<Record<string, unknown>>();
 
   const messages = (rows.results ?? []).map((m) => {
     if (m.direction === "out") {
@@ -608,7 +627,16 @@ export async function handleMessagesList(env: Env, requestUrl: URL): Promise<Res
     };
   });
 
-  return Response.json({ messages, limit });
+  // The cursor is taken from the row, not from the mapped message: an inbound row is spread
+  // as-is but an outbound one is reshaped, and the union types do not carry the raw columns.
+  const resultRows = rows.results ?? [];
+  const lastRow = resultRows.length === limit ? resultRows[resultRows.length - 1] : null;
+  const next_cursor =
+    lastRow === null || lastRow === undefined
+      ? null
+      : { before: Number(lastRow.received_at), before_id: String(lastRow.id) };
+
+  return Response.json({ messages, limit, next_cursor });
 }
 
 /**

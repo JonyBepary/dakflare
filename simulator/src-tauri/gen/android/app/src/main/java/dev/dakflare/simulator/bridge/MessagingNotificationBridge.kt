@@ -38,6 +38,9 @@ class MessagingNotificationBridge : NotificationListenerService() {
     companion object {
         private const val TAG = "DakFlareEdge"
 
+        @Volatile
+        private var appContext: android.content.Context? = null
+
         /** The apps this bridge understands. Anything else is ignored untouched. */
         private val SUPPORTED_PACKAGES = mapOf(
             "com.whatsapp" to "whatsapp_personal",
@@ -83,8 +86,9 @@ class MessagingNotificationBridge : NotificationListenerService() {
                 putCharSequence(handle.remoteInput.resultKey, text)
             }
             RemoteInput.addResultsToIntent(arrayOf(handle.remoteInput), intent, bundle)
+            val context = appContext ?: return false
             return try {
-                handle.action.actionIntent.send()
+                handle.action.actionIntent.send(context, 0, intent)
                 true
             } catch (error: Throwable) {
                 // Only the class: the exception message may carry the text.
@@ -97,7 +101,12 @@ class MessagingNotificationBridge : NotificationListenerService() {
         fun handles(packageName: String): Boolean = SUPPORTED_PACKAGES.containsKey(packageName)
     }
 
+    override fun onListenerConnected() {
+        appContext = applicationContext
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        if (appContext == null) appContext = applicationContext
         // A null happens on a race during listener reconnect; nothing to read.
         if (sbn == null) return
         val channel = SUPPORTED_PACKAGES[sbn.packageName] ?: return

@@ -13,8 +13,9 @@ personal-account path from the paired Android handset.
 - `worker/migrations/0018_channel_connectors.sql` adds `channel_connectors`, `contact_identities`,
   and `ingest_dead_letters`.
 - `worker/src/routes/channel-connectors.ts` owns admin CRUD and the public webhook ingress.
-- `sendConnectorOutbound` in the same file implements per-connector outbound (window, template, tag),
-  but no route calls it yet; `/v1/channels/{channel}/send` still uses the env-credential plugins.
+- `sendConnectorOutbound` in the same file implements per-connector outbound (24h window,
+  WhatsApp templates, Messenger `HUMAN_AGENT` 7-day tag, and Instagram `commentId` private replies)
+  and is wired to the outbound connector send route.
 - `worker/src/channels/connection-do.ts` is one `ChannelConnection` Durable Object per
   `${channel}:${account_id}`.
 - `worker/src/channels/ingest.ts` is the queue consumer and the only place a channel event becomes
@@ -50,11 +51,9 @@ personal-account path from the paired Android handset.
 
 ## Known gaps future work inherits
 
-1. **`/v1/messages` cannot page across same-millisecond rows.** The cursor is `received_at < before`
-   with `ORDER BY received_at DESC, id DESC`, so a page boundary that falls inside a group of rows
-   sharing a millisecond skips the rest of that group. The benchmark works around it by refusing a
-   workload that would put more than 200 events on one account and reading each device in one page.
-   Fixing it needs a compound `(received_at, id)` cursor; do not paper over it in callers.
+1. **`/v1/messages` composite pagination**: `GET /v1/messages` now supports compound keyset
+   pagination via `before` + `before_id` (returned in `next_cursor`) so burst-ingested rows
+   sharing a millisecond never stall pagination.
 2. **Personal-channel replies are not wired.** `MessagingNotificationBridge.sendReply(channel,
    peerKey, text)` exists and dispatches through the official app's `RemoteInput`, but no Tauri
    command reaches it. The Android side is ready; the Rust command and its outbound queue are not.

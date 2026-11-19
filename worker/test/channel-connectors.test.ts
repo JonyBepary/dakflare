@@ -799,3 +799,161 @@ describe("connector outbound", () => {
     }
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * Escape hatches outside the 24-hour window
+ * ------------------------------------------------------------------------- */
+
+async function createInstagramConnector(): Promise<{ id: string; accountId: string }> {
+  const accountId = unique("ig");
+  const response = await handleConnectorCreate(
+    jsonRequest("https://example.com/v1/admin/channel-connectors", {
+      channel: "instagram",
+      account_id: accountId,
+      label: "Test IG",
+      secret: {
+        appSecret: APP_SECRET,
+        verifyToken: "verify-token-value",
+        accessToken: "ig-access-token-value",
+      },
+    }),
+    testEnv,
+    owner
+  );
+  expect(response.status).toBe(201);
+  const body = (await response.json()) as { id: string };
+  return { id: body.id, accountId };
+}
+
+/** An inbound message opens the window; STOP closes the door for good. */
+async function seedWindow(
+  channel: string,
+  accountId: string,
+  connectorId: string,
+  peerId: string,
+  body: string,
+  eventId: string
+): Promise<void> {
+  const stub = testEnv.CHANNEL_CONN.getByName(`${channel}:${accountId}`);
+  await stub.ingestEvents([
+    {
+      connectorId,
+      channel,
+      accountId,
+      eventKind: "inbound_message",
+      eventId,
+      peerId,
+      body,
+      timestamp: Date.now(),
+    },
+  ]);
+}
+
+describe("outside the 24-hour window", () => {
+  it("refuses a plain Messenger reply with window_expired and does not call the API", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = await sendConnectorOutbound(testEnv, "messenger", id, {
+        to: "psid-cold",
+        body: "hello?",
+      });
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("window_expired");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    void accountId;
+  });
+
+  it("allows a Messenger HUMAN_AGENT message outside the window", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        calls.push({ body: JSON.parse(String(init.body)) });
+        return Response.json({ message_id: "mid.human.1" });
+      })
+    );
+    try {
+      // No inbound message: the 24-hour window is closed. The tag is what permits it.
+      const result = await sendConnectorOutbound(testEnv, "messenger", id, {
+        to: "psid-cold",
+        body: "we are picking this up",
+        useHumanAgentTag: true,
+      });
+      expect(result.success).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body.messaging_type).toBe("MESSAGE_TAG");
+      expect(calls[0].body.tag).toBe("HUMAN_AGENT");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    void accountId;
+  });
+
+  it("allows an Instagram comment private reply outside the window", async () => {
+    const { id } = await createInstagramConnector();
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init.body)) });
+        return Response.json({ message_id: "ig.sent.1" });
+      })
+    );
+    try {
+      const result = await sendConnectorOutbound(testEnv, "instagram", id, {
+        to: "igsid-cold",
+        body: "thanks for the comment",
+        commentId: "comment_123",
+      });
+      expect(result.success).toBe(true);
+      expect(calls).toHaveLength(1);
+      // Meta's private-reply shape targets the comment, not a peer id: without this the bypass
+      // above would be a policy violation dressed up as a feature.
+      expect(calls[0].body.recipient).toEqual({ comment_id: "comment_123" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still refuses an Instagram plain reply outside the window", async () => {
+    const { id } = await createInstagramConnector();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = await sendConnectorOutbound(testEnv, "instagram", id, {
+        to: "igsid-cold",
+        body: "hello?",
+      });
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("window_expired");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses an opted-out peer even with the tag", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    await seedWindow("messenger", accountId, id, "psid-stop", "STOP", "mid.stop.1");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = await sendConnectorOutbound(testEnv, "messenger", id, {
+        to: "psid-stop",
+        body: "are you there?",
+        useHumanAgentTag: true,
+      });
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("opted_out");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

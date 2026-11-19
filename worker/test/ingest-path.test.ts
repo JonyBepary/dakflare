@@ -17,6 +17,7 @@
  */
 
 import { env } from "cloudflare:test";
+import { handleMessagesList } from "../src/routes/incoming";
 import { describe, expect, it } from "vitest";
 
 import { consumeIngestBatch, consumeIngestDeadLetter } from "../src/channels/ingest";
@@ -514,5 +515,110 @@ describe("POST /v1/edge/incoming/batch", () => {
       .bind(`channel:sms:${deviceId}`, "dup-1")
       .first<{ n: number }>();
     expect(stored?.n).toBe(1);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Queue failure: the dedupe ledger must not outlive a delivery that never happened
+ * ------------------------------------------------------------------------- */
+
+describe("ingestEvents queue failure", () => {
+  it("rolls the ledger back so a retry is accepted, not deduplicated", async () => {
+    const accountId = `rollback-${Date.now()}`;
+    const stub = env.CHANNEL_CONN.getByName(`messenger:${accountId}`);
+    const queue = env.INGEST_QUEUE as unknown as { sendBatch: (messages: unknown) => Promise<void> };
+    const proto = Object.getPrototypeOf(queue) as { sendBatch: (messages: unknown) => Promise<void> };
+    const original = proto.sendBatch;
+    let failOnce = true;
+    proto.sendBatch = async function (messages: unknown) {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("queue unavailable");
+      }
+      return original.call(this, messages);
+    };
+
+    const event = {
+      connectorId: "conn_rollback",
+      channel: "messenger",
+      accountId,
+      eventKind: "inbound_message" as const,
+      eventId: `mid.rollback.${accountId}`,
+      peerId: "psid-rollback",
+      body: "first delivery attempt",
+      timestamp: Date.now(),
+    };
+
+    try {
+      // The queue refused, so nothing was delivered: the call answers a retryable outcome
+      // rather than throwing across the RPC boundary (which the runtime reports as an uncaught
+      // exception for a condition the caller is meant to handle).
+      const first = await stub.ingestEvents([event]);
+      expect(first).toMatchObject({ ok: false, error: "queue_unavailable", accepted: 0, deduplicated: 0 });
+
+      // Meta retries the same event id. If the ledger had kept the row, this would answer
+      // `deduplicated: 1` and the message would be lost without a trace.
+      const retried = await stub.ingestEvents([{ ...event, body: "retry" }]);
+      expect(retried).toMatchObject({ ok: true, accepted: 1, deduplicated: 0 });
+    } finally {
+      proto.sendBatch = original;
+    }
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Keyset pagination across rows that share a millisecond
+ * ------------------------------------------------------------------------- */
+
+describe("GET /v1/messages same-millisecond paging", () => {
+  it("returns five rows sharing one millisecond across three pages, no duplicates, none skipped", async () => {
+    const deviceId = `paging-${Date.now()}`;
+    const receivedAt = Date.now();
+    const ids = ["page-a", "page-b", "page-c", "page-d", "page-e"];
+    for (const [index, id] of ids.entries()) {
+      await env.DB.prepare(
+        `INSERT INTO messages (id, device_id, local_id, direction, peer, body, received_at)
+         VALUES (?, ?, ?, 'in', ?, ?, ?)`
+      )
+        .bind(id, deviceId, `local-${id}`, "+8801700000000", `body ${index}`, receivedAt)
+        .run();
+    }
+
+    const seen: string[] = [];
+    let cursor: { before: number; before_id: string } | null = null;
+    for (let page = 0; page < 5; page += 1) {
+      const url = new URL("https://example.com/v1/messages");
+      url.searchParams.set("device_id", deviceId);
+      url.searchParams.set("limit", "2");
+      if (cursor !== null) {
+        url.searchParams.set("before", String(cursor.before));
+        url.searchParams.set("before_id", cursor.before_id);
+      }
+      const response = await handleMessagesList(env, url);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        messages: Array<{ id: string; received_at: number }>;
+        next_cursor: { before: number; before_id: string } | null;
+      };
+      for (const row of body.messages) {
+        // Every row on this device is one of ours; the same millisecond is deliberate.
+        expect(row.received_at).toBe(receivedAt);
+        seen.push(row.id);
+      }
+      cursor = body.next_cursor;
+      if (cursor === null) break;
+    }
+
+    expect(seen).toHaveLength(ids.length);
+    expect(new Set(seen).size).toBe(ids.length);
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
+  it("refuses before_id without before, rather than guessing a position", async () => {
+    const url = new URL("https://example.com/v1/messages");
+    url.searchParams.set("device_id", "anything");
+    url.searchParams.set("before_id", "page-a");
+    const response = await handleMessagesList(env, url);
+    expect(response.status).toBe(400);
   });
 });

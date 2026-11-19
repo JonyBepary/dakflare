@@ -198,6 +198,10 @@ export async function handleEdgeIncomingBatch(
     for (const [channel, events] of byChannel) {
       const stub = env.CHANNEL_CONN.getByName(`${channel}:${deviceId}`);
       const result = await stub.ingestEvents(events);
+      if (!result.ok) {
+        console.error(`[edge-incoming] ingest queue unavailable for ${channel}:${deviceId}`);
+        return err("storage_unavailable", 503);
+      }
       accepted += result.accepted;
       deduplicated += result.deduplicated;
     }

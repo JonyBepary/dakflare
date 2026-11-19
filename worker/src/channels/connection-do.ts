@@ -47,6 +47,18 @@ export interface IngestResult {
   deduplicated: number;
 }
 
+/**
+ * What `ingestEvents` answers.
+ *
+ * A queue outage is a *retryable outcome* for this object, not an exception: throwing across the
+ * RPC boundary makes the runtime log an uncaught error for a condition the caller is expected to
+ * handle, and it gives the caller no way to tell "nothing was stored" from "a bug". The ledger is
+ * rolled back before this is returned, so the platform's own retry is deduplicated correctly.
+ */
+export type IngestOutcome =
+  | ({ ok: true } & IngestResult)
+  | { ok: false; error: "queue_unavailable"; accepted: 0; deduplicated: 0 };
+
 export interface WindowCheckResult {
   open: boolean;
   optedOut: boolean;
@@ -101,7 +113,7 @@ export class ChannelConnection extends DurableObject<ChannelConnectionEnv> {
    * Synchronous on purpose: no `await` inside `transactionSync`, so the read-check-write cannot
    * interleave with another request. The queue push happens after the transaction commits.
    */
-  async ingestEvents(events: NormalizedChannelEvent[]): Promise<IngestResult> {
+  async ingestEvents(events: NormalizedChannelEvent[]): Promise<IngestOutcome> {
     const now = Date.now();
     const fresh: NormalizedChannelEvent[] = [];
     let deduplicated = 0;
@@ -158,10 +170,24 @@ export class ChannelConnection extends DurableObject<ChannelConnectionEnv> {
     }
 
     if (fresh.length > 0) {
-      await this.env.INGEST_QUEUE.sendBatch(fresh.map((body) => ({ body })));
+      try {
+        await this.env.INGEST_QUEUE.sendBatch(fresh.map((body) => ({ body })));
+      } catch (error) {
+        // The delivery never happened, so the ledger must not claim it did: roll the rows back
+        // before answering, or the platform's retry is refused as a duplicate and the message is
+        // lost with no trace. The window update is left in place — it is idempotent and a repeat
+        // of it changes nothing.
+        this.ctx.storage.transactionSync(() => {
+          for (const event of fresh) {
+            this.sql.exec("DELETE FROM seen_events WHERE event_id = ?", event.eventId);
+          }
+        });
+        console.error(`[channel-conn] ingest queue refused ${fresh.length} events: ${String(error)}`);
+        return { ok: false, error: "queue_unavailable", accepted: 0, deduplicated: 0 };
+      }
     }
 
-    return { accepted: fresh.length, deduplicated };
+    return { ok: true, accepted: fresh.length, deduplicated };
   }
 
   /** The 24-hour window and opt-out state, from local storage: zero D1 reads per outbound check. */

@@ -883,7 +883,17 @@ export async function sendConnectorOutbound(
     return sendWhatsAppCloudOutbound(params, whatsapp, { session });
   }
 
-  if (!window.open) {
+  const messengerParams = params as OutboundMessageParams & {
+    useHumanAgentTag?: boolean;
+    commentId?: string;
+  };
+  const allowOutside24h =
+    (normalized === "messenger" && messengerParams.useHumanAgentTag === true) ||
+    (normalized === "instagram" &&
+      typeof messengerParams.commentId === "string" &&
+      messengerParams.commentId.trim() !== "");
+
+  if (!window.open && !allowOutside24h) {
     return sendFailure("window_expired", "24h_customer_service_window_expired");
   }
 
@@ -1127,6 +1137,11 @@ export async function handleChannelWebhook(
   try {
     const stub = env.CHANNEL_CONN.getByName(`${normalized}:${connector.accountId}`);
     const result = await stub.ingestEvents(events);
+    if (!result.ok) {
+      // 500 is the correct answer: the platform retries, and the ledger was rolled back so the
+      // retry is accepted rather than deduplicated away.
+      return json({ error: "ingest_unavailable", message: "the ingest queue refused the batch" }, 500);
+    }
     return json({ ok: true, accepted: result.accepted, deduplicated: result.deduplicated });
   } catch (error) {
     // 5xx is the correct answer: Meta/Telegram retry, and the DO may simply
