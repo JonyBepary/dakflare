@@ -6,7 +6,7 @@ import { source, openapi } from "@/lib/source";
 import { PageActions } from "@/components/PageActions";
 import { OpenAPIPage } from "@/components/OpenAPIPage";
 
-const DEFAULT_SCHEMA_ID = "./public/openapi.json";
+import { OPENAPI_SCHEMA_ID as DEFAULT_SCHEMA_ID } from "@/lib/source";
 
 interface APIPageMdxProps {
   document?: string;

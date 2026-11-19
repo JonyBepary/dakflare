@@ -7,3 +7,6 @@ next-env.d.ts
 *.tsbuildinfo
 # Generated from content/docs by scripts/sync-markdown.mjs; never edit by hand.
 public/md
+.open-next/
+.wrangler/
+.dev.vars

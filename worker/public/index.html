@@ -1588,6 +1588,9 @@ a:hover { color: var(--coral-800); }
       <a href="#security">Security</a>
       <a href="#flows">Flows</a>
       <a href="#run">Self-host</a>
+      <!-- Absolute because the documentation is its own deployment; a fork points these at its own. -->
+      <a href="https://dakflare-docs.sohelahmedjony.workers.dev/docs">Docs</a>
+      <a href="https://dakflare-docs.sohelahmedjony.workers.dev/docs/reference/api-playground">API</a>
     </nav>
 
     <div class="mast-actions">
@@ -2370,7 +2373,7 @@ a:hover { color: var(--coral-800); }
 
       <div class="path-foot">
         <p><strong>Works with no internet at all.</strong> Flows run on the handset first, so the reply still leaves over cellular while the Worker is unreachable.</p>
-        <p><strong>Outbound API and CLI ready.</strong> To send an OTP or an alert from a server, call <code>POST /v1/sms/send</code> or run <code>dakflare send</code>. The Durable Object wakes the phone over WebSocket or FCM push.</p>
+        <p><strong>Outbound API and CLI ready.</strong> To send an OTP or an alert from a server, call <code>POST /v1/sms/send</code> or run <code>dakflare send</code>. The <a href="https://dakflare-docs.sohelahmedjony.workers.dev/docs/reference/api-playground">interactive reference</a> has every route with its request and response, and the raw <a href="https://dakflare-docs.sohelahmedjony.workers.dev/openapi.json">OpenAPI 3.1 document</a> is one fetch away. The Durable Object wakes the phone over WebSocket or FCM push.</p>
       </div>
     </div>
   </section>
@@ -2800,9 +2803,9 @@ dakflare doctor</pre>
     </div>
 
     <div class="foot-base">
-      <span>DakFlare v5.1.0</span>
+      <span>DakFlare 6.3.0-alpha.1</span>
       <span>AGPL-3.0-only</span>
-      <span><a href="/source">/source</a> · <a href="/admin/">/admin</a></span>
+      <span><a href="/source">/source</a> · <a href="https://dakflare-docs.sohelahmedjony.workers.dev/docs">/docs</a> · <a href="https://dakflare-docs.sohelahmedjony.workers.dev/docs/reference/api-playground">/api</a> · <a href="/admin/">/admin</a></span>
     </div>
   </div>
 </footer>

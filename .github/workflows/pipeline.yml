@@ -110,9 +110,13 @@ jobs:
           cache-dependency-path: apps/docs/package-lock.json
       - run: npm ci
       - run: npm run typecheck
-      # Prerenders all 20 pages and proves the OpenAPI page, the markdown routes and the MCP
+      # Prerenders every page and proves the OpenAPI page, the markdown routes and the MCP
       # endpoint still resolve against the installed Fumadocs majors.
       - run: npm run build
+      # And build the Worker bundle, which is what actually serves. `next build` passed while the
+      # deployed app answered 404 for every route: two routes read the filesystem, and a Worker
+      # has none. The bundle build is the step that would have caught it before a deploy did.
+      - run: npm run build:worker
 
   simulator:
     name: Simulator types
