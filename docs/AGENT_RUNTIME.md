@@ -1,5 +1,9 @@
 # The agent runtime
 
+Decisions and the alternatives that were rejected are recorded in
+[`ADR_001_AGENT_RUNTIME.md`](./ADR_001_AGENT_RUNTIME.md); this file is the contract the code
+has to keep.
+
 Status: pass 3, stage A. This document is the contract for the acting agent. Read
 `AGENT_SURFACE.md` first for the authority rule it has to survive.
 
@@ -207,6 +211,27 @@ The turn runs `say()` with the synthetic actor `webhook:<id>` (`role: "webhook"`
 actor has no human session, so `authorizeAct` refuses every act with `webhook_cannot_act`
 even when the autonomy row is ownerless; the answer is stored on the delivery row and
 returned, and a failed turn stores its reason and answers `502`.
+
+### Rotating a webhook secret
+
+There is no rotate endpoint: a secret cannot be re-read once shown, and the API deliberately
+has no path that returns one. Rotation is create, cut over, delete:
+
+1. `POST /v1/admin/webhooks` with the same URL and description. The response carries a new `id`
+   and a new `secret`; the old hook keeps working, so there is no window in which the service
+   has nothing valid to sign with.
+2. Put the new `id` and the new secret in the caller, then send one signed request and confirm
+   `2xx` with `replayed: false` and an answer. A signature made with the old secret against the
+   new id is a `401` — that is the check that the cut-over actually happened.
+3. `DELETE /v1/admin/webhooks/:id` for the old hook, and confirm its deliveries stop.
+
+**Rotating `WEBHOOK_SECRET_KEY` is not a per-hook operation.** Each hook's secret is sealed
+under that Worker key (AES-256-GCM), so a new key cannot open the old seals: every existing
+hook starts answering `500` on ingress until it is deleted and recreated. Rotate it in a
+window where you intend to re-create every hook, and keep the old key available in the
+secret store until each one has been cut over — deleting it first turns a rotation into an
+outage. This is the one case where the sealed copy is a liability rather than a convenience,
+and it is the reason the key is documented here rather than only in the migration.
 
 ## Stages
 
