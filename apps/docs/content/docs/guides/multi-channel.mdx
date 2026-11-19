@@ -1,0 +1,219 @@
+---
+title: Multi-Channel Connectors
+description: How DakFlare runs official APIs in the Worker and personal sessions on the handset, with per-account Durable Objects, Queue-to-D1 ingestion, sealed credentials, and the edge batch endpoint.
+---
+
+DakFlare treats WhatsApp Business Cloud, Telegram, Facebook Messenger, and Instagram as first-class
+mediums beside SMS. There is still no VPS: official APIs run in the Worker, and personal accounts run
+on the paired Android handset. The two paths meet at the same `channel_connectors` table, the same
+per-account Durable Object, and the same `messages` / `conversations` rows.
+
+## Two Execution Tiers
+
+| Tier | Where it runs | What it covers |
+| --- | --- | --- |
+| `worker_do` | Cloudflare Worker + one `ChannelConnection` Durable Object per account | Official webhook and REST APIs: WhatsApp Cloud and Coexistence, Telegram Bot and Business Bot, Facebook Messenger, and Instagram's three login modes. Uses `crypto.subtle` and `fetch`; no platform SDK. |
+| `edge_device` | The Android handset (`dev.dakflare.simulator`) | Personal sessions observed from notifications: `whatsapp_personal`, `telegram_personal`, `messenger_personal`, `instagram_personal`. |
+
+The handset bridge is `MessagingNotificationBridge.kt`. It is an Android
+`NotificationListenerService` that reads the notification stream of the installed messaging app and
+keeps each notification's `RemoteInput` reply action as a handle. Replying uses `RemoteInput` through
+the official app, so it needs the user's notification-access grant and nothing else: no credential is
+extracted, no unofficial protocol is spoken, and there is no account-ban surface. Normalised rows
+travel through `simulator/core/src/edge_channels.rs` over the existing P-256 signed device transport
+to `POST /v1/edge/incoming/batch`.
+
+Heavy protocol clients (`Lonami/grammers` for Telegram MTProto, a WhatsApp linked-device session) are
+behind optional Cargo features. The default build compiles the notification path only; the feature
+hooks are stubs, not a second transport.
+
+## One Durable Object per Account
+
+Every external account is its own SQLite-backed `ChannelConnection`:
+
+```ts
+env.CHANNEL_CONN.getByName(`${channel}:${account_id}`)
+```
+
+Three WhatsApp numbers, two Instagram accounts and three Telegram bots are eight isolated objects,
+not one hot object. The name is the isolation boundary, so a Page id and an Instagram id that happen
+to be the same string still resolve to different objects because the channel prefixes the name.
+
+`ctx.blockConcurrencyWhile()` appears exactly once, in the constructor, to create the local schema. It
+is never held across `fetch`, D1, KV, or Queue calls. The object owns three things locally:
+
+- `seen_events` — the dedupe ledger, an `INSERT … ON CONFLICT DO NOTHING` inside one synchronous
+  transaction, then `SELECT changes()` to distinguish a fresh event from a replay;
+- `peer_windows` — the 24-hour customer-service window and the `STOP` / `START` opt-out, so an
+  outbound window check is a local read rather than a D1 query;
+- `rate_state` — one token bucket per account.
+
+An alarm prunes the ledger and closed windows older than seven days every six hours. Deleting a
+connector calls `revokeAndDestroy()`, which clears the alarm and the storage, so a removed account
+stops billing.
+
+## Ingest: Queue, One Batch, No Lost Rows
+
+The object never writes D1. Fresh events leave through `INGEST_QUEUE`
+(`max_batch_size = 50`, `max_batch_timeout = 2s`), and `channels/ingest.ts` turns one delivery into
+one `env.DB.batch([...])`:
+
+- The message insert is `INSERT OR IGNORE` against `UNIQUE(device_id, local_id)`, the second line of
+  defence against a replayed batch. Channel rows are filed under
+  `device_id = channel:<channel>:<account_id>`.
+- The conversation upsert is keyed by `UNIQUE(channel, account_id, peer_id)` and never moves an open
+  window or `last_inbound_at` backwards.
+- Each statement stays well under D1's 100-bound-parameter ceiling (the three statements use 8, 8,
+  and 6 parameters), so a 50-event delivery is 100 small statements, not 100 wide ones.
+- A failed batch retries every message. After `max_retries = 3`, the queue moves it to
+  `dakflare-ingest-dlq`; that consumer writes the body into `ingest_dead_letters` with the attempt
+  count and timestamp. A lost inbound message is indistinguishable from a customer who was ignored,
+  so nothing is acknowledged unless the write happened.
+
+### `read` Receipts Are Stored as `delivered`
+
+`messages.reply_state` has a `CHECK` constraint of `queued | sent | failed | delivered`. It has no
+`read`. Messenger and Instagram send `read`; WhatsApp sends `read` and `played`. Those receipts are
+folded to `delivered` because a read receipt is proof of delivery, and dropping it would leave a
+delivered message looking merely `sent` forever. A status the column cannot represent is skipped
+rather than written, so a future platform status cannot fail the whole batch. The status update keeps
+the same forward-only rule as the handset path: `delivered` and `failed` are terminal, and a late or
+duplicated receipt cannot regress a settled row.
+
+Telegram's `business_message` and `edited_message` are accepted alongside `message`. Messenger and
+Instagram echoes (`is_echo`) and deletions are skipped, and a Messenger read receipt — which carries
+only a watermark, not a message id — is never enqueued.
+
+## Connectors and Credentials
+
+A connector is one external account. Administration lives on four handlers:
+
+| Method | Path | Effect |
+| --- | --- | --- |
+| `GET` | `/v1/admin/connectors` | List up to 200 connectors, newest first. Secrets are never returned. |
+| `POST` | `/v1/admin/connectors` | Create a connector and seal its credential. |
+| `PATCH` | `/v1/admin/connectors/{id}` | Update label, tier, auth mode, `enabled`, or rotate the secret. |
+| `DELETE` | `/v1/admin/connectors/{id}` | Delete the row, invalidate its cache, and destroy its Durable Object. |
+
+`channel` and `account_id` are immutable after creation, because either one selects the Durable
+Object; changing one would leave the old object holding a live window.
+
+A credential is a JSON object in `secret`. It is sealed with AES-256-GCM using the same
+`WEBHOOK_SECRET_KEY`, `dakflare-webhook-seal-v1` derivation and `v1.<iv>.<ciphertext>` envelope as
+webhook secrets. The plaintext is never stored or returned: a response says only `secret_set` and
+`secret_updated_at`. `secret_hash` is a SHA-256 fingerprint of the canonical JSON, so a rotation can be
+observed without opening the envelope. Rotating `WEBHOOK_SECRET_KEY` therefore invalidates channel
+credentials exactly as it invalidates webhook secrets, and both must be re-entered.
+
+Every admin handler calls `assertHuman`; a `dkf_agt_` agent token or a webhook turn cannot read or
+rotate a credential. A member session is also refused with `403`, because credentials are managed by
+owners and admins. The `ADMIN_TOKEN` machine actor used by the CLI keeps its access. Create, update,
+and delete each write an audit row.
+
+## Webhook Ingress
+
+The connector webhook is `GET|POST /v1/channels/{channel}/{connector_id}/webhook`. It is public by
+design: the platform's own signature over the raw body is the credential.
+
+- `GET` is Meta's subscription handshake (`hub.mode`, `hub.verify_token`, `hub.challenge`) for
+  WhatsApp, Messenger, and Instagram. The verify-token comparison hashes both sides and compares
+  fixed-length digests, so a wrong token cannot be recovered from response latency.
+- `POST` resolves the connector from KV (D1 only on a cache miss), refuses a disabled connector with
+  `403`, reads the raw bytes once (bounded at 256 KiB), verifies the platform signature, parses, and
+  hands the normalised events to the per-account Durable Object. `200` means the object accepted or
+  deduplicated them; D1 has not been written yet.
+
+Signature checks are over the bytes the platform sent, never over re-serialised JSON. WhatsApp,
+Messenger, and Instagram use `X-Hub-Signature-256` with the connector's `appSecret`; Telegram uses
+`X-Telegram-Bot-Api-Secret-Token` with its `secretToken`.
+
+The legacy `/v1/channels/whatsapp/webhook` still works with the deployment-wide
+`WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, and
+`WHATSAPP_PHONE_NUMBER_ID`. Both paths call the same parser and sender, so a message cannot arrive on
+one route and not the other.
+
+### Coexistence Is Only `field: messages`
+
+WhatsApp Coexistence delivers `smb_message_echoes` and `history` beside `messages` in the same
+payload. The parser keeps only `changes[].field === "messages"` and skips every other field by name.
+An echo would otherwise show the operator their own reply as an inbound customer message, and the
+mode-specific fields have no D1 column. A delivery with nothing usable is still answered `200`, so
+Meta does not retry the same unusable payload for 36 hours.
+
+A WhatsApp receipt is keyed `<wamid>:<status>` in the Durable Object so `sent` and `delivered` are
+both stored instead of being collapsed as replays; `ingest.ts` strips the suffix again to match the
+bare `wamid` in `messages.local_id`.
+
+## The Edge Endpoint
+
+`POST /v1/edge/incoming/batch` is the handset's equivalent of a webhook. It authenticates with the
+same P-256 device signature as every other device route, then accepts:
+
+```json
+{
+  "device_id": "dev63f3953f417d587f",
+  "messages": [
+    {
+      "channel": "whatsapp_personal",
+      "local_id": "notif:com.whatsapp:42:1763600000000",
+      "sender": "Alice",
+      "body": "are we still on?",
+      "received_at": 1763600000000
+    }
+  ]
+}
+```
+
+The bounds are 500 rows and 262,144 bytes (262 KiB) for the whole request. Authentication reads the
+body through that byte cap, so an oversized upload never reaches `JSON.parse`; the refusal names
+`limit_bytes`. Per-row caps keep one field from consuming the budget: `channel` matches
+`^[a-z][a-z0-9_]{0,31}$`, `local_id` is 1–128 characters, `sender` is 1–256, `body` is at most 32
+KiB, and `received_at` must be within 180 days in the past and 24 hours in the future. `local_id` is
+the notification's package, id, and post time, so a re-post is one message.
+
+Rows are grouped by channel and handed to ``CHANNEL_CONN.getByName(`${channel}:${deviceId}`)``. Dedupe,
+the 24-hour window, and the queue are therefore identical to the official connector path. The handler
+answers `202` with `{accepted, deduplicated}`; a storage failure answers `503` so the phone retries,
+which is safe because `local_id` is idempotent.
+
+On the handset, `edge_channels.rs` chunks by both limits. A message too large to fit in a batch of its
+own is **not truncated**. It is named in `EdgeFlushed.refused` with its byte size, left pending in the
+local store, and returned to the caller as a refusal while the rows that do fit upload in the same
+pass. A personal message that was shortened would be a lie.
+
+## Benchmark
+
+`test-support/channel-load-bench.mjs` provisions several accounts of one platform, sends a burst with
+deliberate duplicate retries, and reads back the stored rows. Run it against a local stack:
+
+```bash
+./test-support/dev.sh
+ADMIN_TOKEN=dev-admin-token node test-support/channel-load-bench.mjs
+```
+
+It exits `0` only when all three gates pass:
+
+- **0 failed** webhook requests (every request acknowledged);
+- **0 duplicate rows** in D1 (one row per unique event, despite the retries);
+- **p95 under 5,000 ms** (the tail, not the maximum: one slow request is not a regression, and a bad
+  tail hidden behind a good maximum is).
+
+The same command also refuses a workload that would put more than 200 events on one account. That is
+a workaround for `/v1/messages` paging, not a limit of the ingest pipeline; see
+`docs/MULTICHANNEL.md` for the paging gap.
+
+## Sharp Edges
+
+- A webhook `200` is an acknowledgement that the Durable Object accepted or deduplicated the event,
+  not proof of delivery. D1 receives it later through the queue.
+- Telegram is not window-gated in `sendConnectorOutbound`: Bot API chats have no 24-hour service
+  window, and the object's window only tracks inbound messages as a convenience.
+- Inbound ingest and connector administration are wired. `sendConnectorOutbound` implements the
+  per-channel outbound rules (WhatsApp templates, the Messenger `HUMAN_AGENT` tag, the 24-hour
+  window), but **no HTTP route calls it yet**: `/v1/channels/{channel}/send` still uses the legacy
+  env-credential plugins. A connector row alone does not make an outbound send available.
+- The KV connector cache has a 60-second TTL and caches disabled and missing connectors too. A
+  revocation is visible quickly, but the Durable Object — not the cache — remains the correctness
+  boundary.
+- `auth_mode` is stored on the row and never inferred from a token shape. Getting it wrong sends a
+  valid token to the wrong host, which reads as an auth failure rather than a configuration mistake.

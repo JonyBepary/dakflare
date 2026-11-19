@@ -24,7 +24,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Signature",
-        "description": "ECDSA P-256 (IEEE P1363 64-byte base64) over METHOD\\nPATH\\nX-Timestamp\\nX-Nonce\\nSHA256(body). Requires X-Device-Id, X-Timestamp (13-digit UTC ms, \u00b1300s), X-Nonce (32 hex chars), and X-Signature. Query strings are forbidden."
+        "description": "ECDSA P-256 (IEEE P1363 64-byte base64) over METHOD\\nPATH\\nX-Timestamp\\nX-Nonce\\nSHA256(body). Requires X-Device-Id, X-Timestamp (13-digit UTC ms, ±300s), X-Nonce (32 hex chars), and X-Signature. Query strings are forbidden."
       },
       "AgentBearerToken": {
         "type": "http",
@@ -197,6 +197,181 @@
                 "type": "integer"
               }
             }
+          }
+        }
+      },
+      "ConnectorSecret": {
+        "type": "object",
+        "description": "Credential fields for the connector channel. The object is sealed with AES-256-GCM and is never returned. Required fields depend on the channel: whatsapp needs appSecret, verifyToken, accessToken; messenger needs appSecret, verifyToken and accessToken or pageAccessToken; instagram needs appSecret, verifyToken, accessToken; telegram needs botToken and secretToken.",
+        "properties": {
+          "appSecret": {
+            "type": "string"
+          },
+          "verifyToken": {
+            "type": "string"
+          },
+          "accessToken": {
+            "type": "string"
+          },
+          "pageAccessToken": {
+            "type": "string"
+          },
+          "botToken": {
+            "type": "string"
+          },
+          "secretToken": {
+            "type": "string"
+          },
+          "graphVersion": {
+            "type": "string",
+            "examples": [
+              "v21.0"
+            ]
+          }
+        }
+      },
+      "ConnectorView": {
+        "type": "object",
+        "description": "Public connector shape. The sealed credential and its hash are never included.",
+        "required": [
+          "id",
+          "channel",
+          "account_id",
+          "execution_tier",
+          "label",
+          "enabled",
+          "secret_set",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "conn_0123456789abcdef"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "sms",
+              "whatsapp",
+              "telegram",
+              "messenger",
+              "instagram"
+            ]
+          },
+          "account_id": {
+            "type": "string"
+          },
+          "execution_tier": {
+            "type": "string",
+            "enum": [
+              "worker_do",
+              "edge_device"
+            ]
+          },
+          "auth_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stored authentication mode; null for channels that do not use one.",
+            "enum": [
+              "unified_login",
+              "instagram_login",
+              "facebook_login",
+              "cloud_api",
+              "coexistence",
+              "bot_api",
+              "business_bot",
+              "gateway",
+              "mtproto",
+              "linked_device",
+              "android_notif",
+              "sim_radio",
+              null
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "secret_set": {
+            "type": "boolean",
+            "description": "True when a sealed credential exists. The value is never returned."
+          },
+          "secret_updated_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_event_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        }
+      },
+      "EdgeIncomingMessage": {
+        "type": "object",
+        "required": [
+          "channel",
+          "local_id",
+          "sender",
+          "body",
+          "received_at"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "examples": [
+              "whatsapp_personal"
+            ]
+          },
+          "local_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "examples": [
+              "notif:com.whatsapp:42:1763600000000"
+            ]
+          },
+          "sender": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "received_at": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ],
+            "description": "Epoch milliseconds or an ISO timestamp. Must be within 180 days in the past and 24 hours in the future."
           }
         }
       }
@@ -1147,6 +1322,567 @@
           },
           "406": {
             "description": "Missing acceptable Accept header"
+          }
+        }
+      }
+    },
+    "/v1/admin/connectors": {
+      "get": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "List configured per-account channel connectors",
+        "description": "Returns at most 200 connectors, newest first. Secrets are never returned; only secret_set and secret_updated_at are exposed.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "connectors"
+                  ],
+                  "properties": {
+                    "connectors": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ConnectorView"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member session may not read channel credentials"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Register a per-account channel connector and seal its credential",
+        "description": "Requires an owner/admin session or the ADMIN_TOKEN machine actor. A dkf_agt_ agent token and a member session are refused by assertHuman and the mutating-role check. The secret is sealed with AES-256-GCM using WEBHOOK_SECRET_KEY and is never returned.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "channel",
+                  "account_id",
+                  "label",
+                  "secret"
+                ],
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "sms",
+                      "whatsapp",
+                      "telegram",
+                      "messenger",
+                      "instagram"
+                    ]
+                  },
+                  "account_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Platform identity; immutable after creation."
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "execution_tier": {
+                    "type": "string",
+                    "enum": [
+                      "worker_do",
+                      "edge_device"
+                    ],
+                    "default": "worker_do"
+                  },
+                  "auth_mode": {
+                    "type": "string",
+                    "description": "Stored, never inferred. WhatsApp: cloud_api or coexistence. Telegram: bot_api or business_bot. Instagram: unified_login, instagram_login, or facebook_login.",
+                    "enum": [
+                      "unified_login",
+                      "instagram_login",
+                      "facebook_login",
+                      "cloud_api",
+                      "coexistence",
+                      "bot_api",
+                      "business_bot",
+                      "gateway",
+                      "mtproto",
+                      "linked_device",
+                      "android_notif",
+                      "sim_radio"
+                    ]
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "secret": {
+                    "$ref": "#/components/schemas/ConnectorSecret"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Connector created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (unsupported channel, tier, or auth mode; missing credential fields; label/account_id out of range)"
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or member session refused"
+          },
+          "409": {
+            "description": "Duplicate (channel, account_id): connector_exists"
+          },
+          "503": {
+            "description": "WEBHOOK_SECRET_KEY is not configured: connector_secret_unavailable"
+          }
+        }
+      }
+    },
+    "/v1/admin/connectors/{id}": {
+      "patch": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Update a connector or rotate its sealed credential",
+        "description": "channel and account_id are immutable: supplying a different value is a 400. Sending secret replaces the sealed credential and recomputes secret_hash.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "execution_tier": {
+                    "type": "string",
+                    "enum": [
+                      "worker_do",
+                      "edge_device"
+                    ]
+                  },
+                  "auth_mode": {
+                    "type": "string",
+                    "description": "Stored, never inferred. WhatsApp: cloud_api or coexistence. Telegram: bot_api or business_bot. Instagram: unified_login, instagram_login, or facebook_login.",
+                    "enum": [
+                      "unified_login",
+                      "instagram_login",
+                      "facebook_login",
+                      "cloud_api",
+                      "coexistence",
+                      "bot_api",
+                      "business_bot",
+                      "gateway",
+                      "mtproto",
+                      "linked_device",
+                      "android_notif",
+                      "sim_radio"
+                    ]
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "secret": {
+                    "$ref": "#/components/schemas/ConnectorSecret"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated connector",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error, or an attempt to change channel/account_id"
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or member session refused"
+          },
+          "404": {
+            "description": "Connector not found"
+          },
+          "503": {
+            "description": "WEBHOOK_SECRET_KEY is not configured: connector_secret_unavailable"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Delete a connector and destroy its Durable Object",
+        "description": "Deletes the row, invalidates the KV cache, and calls revokeAndDestroy() on the per-account ChannelConnection so its alarm and storage stop billing.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "deleted",
+                    "id"
+                  ],
+                  "properties": {
+                    "deleted": {
+                      "const": true
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or member session refused"
+          },
+          "404": {
+            "description": "Connector not found"
+          }
+        }
+      }
+    },
+    "/v1/channels/{channel}/{connector_id}/webhook": {
+      "get": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Meta hub.challenge webhook verification handshake",
+        "description": "Public by design. Returns the hub.challenge as text/plain when hub.mode=subscribe and hub.verify_token matches the connector verify token in constant time. Implemented for WhatsApp, Messenger, and Instagram; Telegram returns 405.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "whatsapp",
+                "messenger",
+                "instagram"
+              ]
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hub.mode",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "subscribe"
+              ]
+            }
+          },
+          {
+            "name": "hub.verify_token",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hub.challenge",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Echoes hub.challenge",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid verify token, missing parameters, or connector disabled"
+          },
+          "404": {
+            "description": "No connector resolves for this channel and id"
+          },
+          "405": {
+            "description": "Method not used for this channel (Telegram)"
+          },
+          "503": {
+            "description": "The sealed credential could not be opened: connector_secret_unavailable"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Signed per-connection webhook ingress",
+        "description": "Public by design: the platform signature over the raw body is the credential. Resolves the connector from KV (D1 on a miss), refuses a disabled connector, reads the raw bytes once (256 KiB cap), verifies the platform signature, parses, and hands events to the per-account ChannelConnection Durable Object. A 200 means accepted or deduplicated, not written to D1. WhatsApp coexistence stores only changes[].field === \"messages\"; echoes and history are skipped by name.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "whatsapp",
+                "telegram",
+                "messenger",
+                "instagram"
+              ]
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "description": "Connector id or platform account id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events accepted or deduplicated by the Durable Object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "accepted",
+                    "deduplicated"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "accepted": {
+                      "type": "integer"
+                    },
+                    "deduplicated": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid platform signature: invalid_signature"
+          },
+          "403": {
+            "description": "Connector disabled: connector_disabled"
+          },
+          "404": {
+            "description": "Unknown connector, or webhook ingress not implemented for the channel (sms)"
+          },
+          "413": {
+            "description": "Body exceeds 256 KiB: payload_too_large"
+          },
+          "429": {
+            "description": "Rate limited: rate_limited"
+          },
+          "500": {
+            "description": "The Durable Object could not ingest the events: ingest_unavailable"
+          }
+        }
+      }
+    },
+    "/v1/edge/incoming/batch": {
+      "post": {
+        "tags": [
+          "Device Protocol"
+        ],
+        "summary": "P-256 signed personal-channel batch from the Android notification bridge",
+        "description": "Authenticates with the same P-256 device signature as every other device route. Accepts at most 500 rows and 262,144 bytes for the whole request; the auth step enforces the byte cap before JSON.parse. Rows are grouped by channel and handed to CHANNEL_CONN.getByName(`${channel}:${device_id}`), so dedupe, the 24-hour window, and the ingest queue match the official connector path. A 202 means the events reached the Durable Object.",
+        "security": [
+          {
+            "DeviceP256Auth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "messages"
+                ],
+                "properties": {
+                  "device_id": {
+                    "type": "string",
+                    "description": "Optional; if present it must match the signing device."
+                  },
+                  "messages": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "$ref": "#/components/schemas/EdgeIncomingMessage"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Batch accepted and deduplicated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "accepted",
+                    "deduplicated"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "integer"
+                    },
+                    "deduplicated": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (row count, channel slug, field caps, or received_at window)"
+          },
+          "401": {
+            "description": "Invalid P-256 signature or nonce replay"
+          },
+          "413": {
+            "description": "Request body exceeds 262,144 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "limit_bytes"
+                  ],
+                  "properties": {
+                    "error": {
+                      "const": "payload_too_large"
+                    },
+                    "limit_bytes": {
+                      "const": 262144
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable Object ingest failed: storage_unavailable"
           }
         }
       }
