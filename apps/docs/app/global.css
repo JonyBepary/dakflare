@@ -166,11 +166,11 @@
 :root {
   color-scheme: light;
 
-  /* Scrollbars are furniture, not browser chrome: a warm pair from the same
-     roles as every other edge. Both values are role references, so the dark
-     remap below moves them without a second declaration. */
+  /* Scrollbars are furniture, not browser chrome: the thumb is the control
+     edge from the same roles as every other border, and the track is
+     transparent so it takes the colour of whatever surface it crosses — the
+     page, a card, a code panel — instead of laying a strip on top of it. */
   --df-scrollbar-thumb: var(--df-border-control);
-  --df-scrollbar-track: var(--df-surface-page);
 }
 
 .dark {
@@ -179,46 +179,46 @@
 
 html {
   scroll-padding-block-start: var(--df-p-space-6);
-  scrollbar-color: var(--df-scrollbar-thumb) var(--df-scrollbar-track);
+  scrollbar-color: var(--df-scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
-/* Chromium and Safari paint the pseudo-elements when they exist, so both paths
-   read the same two variables and cannot drift apart. The thumb's border is the
-   track colour, which is what gives it air inside the gutter. */
+/* Chromium and Firefox take the standard pair on `html`; WebKit builds that
+   predate `scrollbar-color` take the pseudo-elements below, from the same
+   variable. The thumb's transparent border is what gives it air: the gap shows
+   the surface behind it rather than a track colour. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 
-::-webkit-scrollbar-track {
-  background: var(--df-scrollbar-track);
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
   background: var(--df-scrollbar-thumb);
-  border: 3px solid var(--df-scrollbar-track);
+  background-clip: padding-box;
+  border: 3px solid transparent;
   border-radius: var(--df-p-radius-pill);
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--df-text-meta);
-}
-
-::-webkit-scrollbar-corner {
-  background: var(--df-scrollbar-track);
+  background-clip: padding-box;
 }
 
 /* Fumadocs' own thin scroll container (search results, long menus) paints its
    thumb from `--color-fd-border`, which is a hairline — visible as a line but
-   not as a thumb. Point it at the same pair as everything else. */
+   not as a thumb. Point it at the same colour as everything else. */
 .fd-scroll-container {
-  --df-scrollbar-track: var(--df-surface-card);
-  scrollbar-color: var(--df-scrollbar-thumb) var(--df-scrollbar-track);
+  scrollbar-color: var(--df-scrollbar-thumb) transparent;
 }
 
 .fd-scroll-container::-webkit-scrollbar-thumb {
   background: var(--df-scrollbar-thumb);
+  background-clip: padding-box;
   border: 0;
   border-radius: var(--df-p-radius-pill);
 }
@@ -303,7 +303,6 @@ body {
   background-color: var(--df-surface-well);
   border-color: var(--df-border-hairline);
   font-size: var(--df-p-text-base);
-  --df-scrollbar-track: var(--df-surface-well);
 }
 
 #nd-sidebar a,
@@ -422,10 +421,13 @@ header[class*="grid-area:header"] button {
 
 /* A heading in the TOC is a label, not a place for code slabs: ids render in
    mono at the same size and weight as the rest of the line. The same goes for
-   the phone reading-progress bar, which shows one heading at a time. */
+   the phone reading-progress bar, which shows one heading at a time. The
+   typography preset gives those inline ids a 1px border; left on, every path
+   in the TOC is boxed. */
 #nd-toc code,
 [data-toc-popover-trigger] code {
   padding: 0;
+  border: 0;
   border-radius: 0;
   background: none;
   color: inherit;
@@ -701,7 +703,6 @@ header[class*="grid-area:header"] button {
   border: 1px solid var(--df-border-hairline);
   border-radius: var(--df-p-radius-md);
   background: var(--df-surface-card);
-  --df-scrollbar-track: var(--df-surface-card);
 }
 
 #nd-page .prose table {
@@ -773,13 +774,6 @@ header[class*="grid-area:header"] button {
   border-radius: var(--df-p-radius-md);
   background: var(--df-surface-card);
   overflow: hidden;
-  --df-scrollbar-track: var(--df-surface-card);
-}
-
-/* A code block scrolls sideways on a phone; its scrollbar sits on the panel,
-   not on the page. */
-#nd-page .prose figure pre {
-  scrollbar-color: var(--df-scrollbar-thumb) var(--df-surface-card);
 }
 
 #nd-page .prose figure.shiki figcaption,
