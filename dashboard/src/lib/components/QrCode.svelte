@@ -98,7 +98,15 @@
 
 	/* Always a white card: a QR inverted for dark mode is not reliably scannable.
 	   The two fills are the QR pair, which is the one place the theme must not
-	   reach; the border and shadow are this card's own, mixed from the ink. */
+	   reach; the border and shadow are this card's own, mixed from the ink.
+
+	   The frame is deliberately not on the spacing scale. Its 10px padding and
+	   the 6px gap above the caption measure the quiet zone that makes the code
+	   scan, not the page rhythm: the SVG already carries the specification's four
+	   modules, and this frame is the paper around it. 8px or 12px from
+	   --df-p-space would either crowd the finder patterns or drift with the
+	   caption, and a token used nowhere else would name one value without
+	   explaining it. These two numbers are this component's constant. */
 	.qr-card {
 		padding: 10px;
 		border: 1px solid color-mix(in srgb, var(--df-qr-ink) 14%, var(--line));
