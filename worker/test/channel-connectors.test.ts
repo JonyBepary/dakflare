@@ -30,6 +30,10 @@ import {
   handleConnectorUpdate,
   sendConnectorOutbound,
 } from "../src/routes/channel-connectors";
+import {
+  handleTelegramRegister,
+  setTelegramWebhook,
+} from "../src/routes/telegram-register";
 
 /**
  * The pool supplies real bindings but no `WEBHOOK_SECRET_KEY`; the deployment
@@ -955,5 +959,309 @@ describe("outside the 24-hour window", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Telegram one-click registration and the connector webhook badge
+ * ------------------------------------------------------------------------- */
+
+async function createTelegramConnector(): Promise<{ id: string; accountId: string }> {
+  const accountId = unique("tg_bot");
+  const response = await handleConnectorCreate(
+    jsonRequest("https://example.com/v1/admin/channel-connectors", {
+      channel: "telegram",
+      account_id: accountId,
+      label: "Test Bot",
+      secret: { botToken: "123456:test-bot-token", secretToken: "telegram-hook-secret" },
+    }),
+    testEnv,
+    owner
+  );
+  expect(response.status).toBe(201);
+  const body = (await response.json()) as { id: string };
+  return { id: body.id, accountId };
+}
+
+async function connectorState(
+  id: string
+): Promise<{ last_webhook_at: number | null; last_error: string | null } | null> {
+  return env.DB.prepare(
+    `SELECT last_webhook_at, last_error FROM channel_connectors WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ last_webhook_at: number | null; last_error: string | null }>();
+}
+
+function telegramRegisterRequest(id: string): Request {
+  return new Request(`https://example.com/v1/admin/connectors/${id}/register-webhook`, {
+    method: "POST",
+  });
+}
+
+describe("setTelegramWebhook", () => {
+  it("posts the expected setWebhook JSON and returns ok with the description", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init.body)) });
+        return Response.json({ ok: true, description: "Webhook was set" });
+      })
+    );
+    try {
+      const result = await setTelegramWebhook(
+        "123456:test-bot-token",
+        "https://example.com/v1/channels/telegram/conn_1/webhook",
+        "telegram-hook-secret"
+      );
+      expect(result).toEqual({ ok: true, description: "Webhook was set" });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(
+        "https://api.telegram.org/bot123456:test-bot-token/setWebhook"
+      );
+      expect(calls[0].body).toEqual({
+        url: "https://example.com/v1/channels/telegram/conn_1/webhook",
+        secret_token: "telegram-hook-secret",
+        allowed_updates: [
+          "message",
+          "business_message",
+          "edited_business_message",
+          "deleted_business_messages",
+        ],
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns ok:false for a 500 without throwing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: false, description: "Internal" }, { status: 500 }))
+    );
+    try {
+      const result = await setTelegramWebhook("123456:test-bot-token", "https://example.com/hook");
+      expect(result.ok).toBe(false);
+      expect(result.description).toBe("Internal");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns ok:false when the network rejects", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED");
+      })
+    );
+    try {
+      const result = await setTelegramWebhook("123456:test-bot-token", "https://example.com/hook");
+      expect(result.ok).toBe(false);
+      // The rejection text is not surfaced: it could contain the URL or token.
+      expect(result.description).toBe("network error");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("handleTelegramRegister", () => {
+  it("returns 404 for an unknown connector", async () => {
+    const response = await handleTelegramRegister(
+      telegramRegisterRequest("conn_missing"),
+      testEnv,
+      owner,
+      "conn_missing"
+    );
+    expect(response.status).toBe(404);
+    expect(((await response.json()) as { error: string }).error).toBe("not_found");
+  });
+
+  it("returns 409 not_telegram for a non-Telegram connector", async () => {
+    const { id } = await createMessengerConnector();
+    const response = await handleTelegramRegister(
+      telegramRegisterRequest(id),
+      testEnv,
+      owner,
+      id
+    );
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: string }).error).toBe("not_telegram");
+  });
+
+  it("returns 503 when the sealed credential cannot be opened", async () => {
+    const accountId = unique("tg_unsealed");
+    const id = `conn_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO channel_connectors
+         (id, channel, account_id, execution_tier, auth_mode, label, secret_sealed,
+          secret_hash, enabled, created_by, created_at, updated_at)
+       VALUES (?, 'telegram', ?, 'worker_do', 'bot_api', 'Unsealed Bot', NULL, NULL, 1, 'test', ?, ?)`
+    )
+      .bind(id, accountId, now, now)
+      .run();
+
+    const response = await handleTelegramRegister(
+      telegramRegisterRequest(id),
+      testEnv,
+      owner,
+      id
+    );
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toBe(
+      "connector_secret_unavailable"
+    );
+  });
+
+  it("registers the exact webhook URL and clears last_error", async () => {
+    const { id } = await createTelegramConnector();
+    await env.DB.prepare(`UPDATE channel_connectors SET last_error = 'stale' WHERE id = ?`)
+      .bind(id)
+      .run();
+
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init.body)) });
+        return Response.json({ ok: true, description: "Webhook was set" });
+      })
+    );
+    try {
+      const response = await handleTelegramRegister(
+        telegramRegisterRequest(id),
+        testEnv,
+        owner,
+        id
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        webhook_url: string;
+        description?: string;
+      };
+      expect(body.ok).toBe(true);
+      expect(body.webhook_url).toBe(
+        `https://example.com/v1/channels/telegram/${encodeURIComponent(id)}/webhook`
+      );
+      expect(body.description).toBe("Webhook was set");
+      expect(calls[0].url).toContain("/setWebhook");
+      expect(calls[0].body.url).toBe(body.webhook_url);
+      expect(calls[0].body.secret_token).toBe("telegram-hook-secret");
+
+      const state = await connectorState(id);
+      expect(state?.last_error).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns 502 and stores last_error when Telegram refuses", async () => {
+    const { id } = await createTelegramConnector();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ ok: false, description: "Bad Request: bad webhook" }, { status: 400 })
+      )
+    );
+    try {
+      const response = await handleTelegramRegister(
+        telegramRegisterRequest(id),
+        testEnv,
+        owner,
+        id
+      );
+      expect(response.status).toBe(502);
+      const body = (await response.json()) as {
+        error: string;
+        message: string;
+        webhook_url: string;
+      };
+      expect(body.error).toBe("telegram_rejected");
+      expect(body.message).toBe("Bad Request: bad webhook");
+      expect(body.webhook_url).toBe(
+        `https://example.com/v1/channels/telegram/${encodeURIComponent(id)}/webhook`
+      );
+
+      const state = await connectorState(id);
+      expect(state?.last_error).toBe("telegram setWebhook: Bad Request: bad webhook");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("connector webhook badge", () => {
+  function messengerPayload(accountId: string, mid: string): string {
+    return JSON.stringify({
+      object: "page",
+      entry: [
+        {
+          id: accountId,
+          time: Date.now(),
+          messaging: [
+            {
+              sender: { id: "psid_badge" },
+              timestamp: Date.now(),
+              message: { mid, text: "badge" },
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("sets last_webhook_at and clears last_error on a signed POST", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    await env.DB.prepare(`UPDATE channel_connectors SET last_error = 'invalid signature' WHERE id = ?`)
+      .bind(id)
+      .run();
+
+    const rawBody = messengerPayload(accountId, unique("mid"));
+    const response = await handleChannelWebhook(
+      new Request(`https://example.com/v1/channels/messenger/${id}/webhook`, {
+        method: "POST",
+        headers: { "X-Hub-Signature-256": await signMeta(APP_SECRET, rawBody) },
+        body: rawBody,
+      }),
+      testEnv,
+      "messenger",
+      id
+    );
+    expect(response.status).toBe(200);
+
+    const state = await connectorState(id);
+    expect(state?.last_webhook_at).toBeGreaterThan(0);
+    expect(state?.last_error).toBeNull();
+  });
+
+  it("keeps last_webhook_at and writes invalid signature on a bad signature", async () => {
+    const { id, accountId } = await createMessengerConnector();
+    const previous = Date.now() - 5_000;
+    await env.DB.prepare(
+      `UPDATE channel_connectors SET last_webhook_at = ?, last_error = NULL WHERE id = ?`
+    )
+      .bind(previous, id)
+      .run();
+
+    const rawBody = messengerPayload(accountId, unique("mid"));
+    const response = await handleChannelWebhook(
+      new Request(`https://example.com/v1/channels/messenger/${id}/webhook`, {
+        method: "POST",
+        headers: { "X-Hub-Signature-256": `sha256=${"0".repeat(64)}` },
+        body: rawBody,
+      }),
+      testEnv,
+      "messenger",
+      id
+    );
+    expect(response.status).toBe(401);
+
+    const state = await connectorState(id);
+    expect(state?.last_webhook_at).toBeGreaterThanOrEqual(previous);
+    expect(state?.last_error).toBe("invalid signature");
   });
 });

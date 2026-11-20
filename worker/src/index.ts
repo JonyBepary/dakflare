@@ -142,6 +142,14 @@ import {
 } from "./lib/auth-limits";
 import { MAX_BODY_BYTES, readIntEnv } from "./lib/config";
 import { ChannelConnection } from "./channels/connection-do";
+import { Scheduler } from "./scheduler";
+import {
+  handlePacingList,
+  handlePacingUpdate,
+  handleScheduledCancel,
+  handleScheduledCreate,
+  handleScheduledList,
+} from "./routes/scheduled";
 import { consumeIngestBatch, consumeIngestDeadLetter } from "./channels/ingest";
 import { handleEdgeIncomingBatch } from "./routes/edge-incoming";
 import {
@@ -152,9 +160,18 @@ import {
   handleConnectorUpdate,
   sendConnectorOutbound,
 } from "./routes/channel-connectors";
+import {
+  handleContactsImport,
+  handleContactsList,
+  handleTemplateCreate,
+  handleTemplateDelete,
+  handleTemplateList,
+  handleTemplatePreview,
+} from "./routes/templates";
+import { handleTelegramRegister } from "./routes/telegram-register";
 import type { NormalizedChannelEvent } from "./channels/connection-do";
 
-export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent };
+export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent, Scheduler };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -249,6 +266,11 @@ export interface Env {
   BINDING_AUTH?: string;
   /** One Durable Object per external channel account, named `${channel}:${account_id}`. */
   CHANNEL_CONN: DurableObjectNamespace<ChannelConnection>;
+  /**
+   * One globally named object owning scheduled-send pacing (`scheduler`). D1 is
+   * the queue; this only holds the clock and the token buckets.
+   */
+  SCHEDULER: DurableObjectNamespace<Scheduler>;
   /** Inbound channel events, deduped in the DO and coalesced into one D1 batch per delivery. */
   INGEST_QUEUE: Queue<NormalizedChannelEvent>;
   /**
@@ -778,10 +800,23 @@ export default {
    * copy — which is also the copy that holds SMS bodies and phone numbers.
    */
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext
   ): Promise<void> {
+    // The five-minute tick exists only to wake the Send Scheduler: a row inserted
+    // while the object was asleep, or an alarm lost with an eviction, must not
+    // wait for the daily retention pass. It runs no retention work.
+    if (controller.cron === "*/5 * * * *") {
+      ctx.waitUntil(
+        env.SCHEDULER.getByName("scheduler")
+          .wake()
+          .catch((error) => {
+            console.error(`[scheduler] cron wake failed: ${String(error)}`);
+          })
+      );
+      return;
+    }
     ctx.waitUntil(runRetention(env));
   },
 
@@ -993,7 +1028,7 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     // with the connector's own secret, and is matched after the legacy exact paths above/below.
     const connectorWebhook = pathname.match(/^\/v1\/channels\/([a-z]+)\/([^/]+)\/webhook$/);
     if (connectorWebhook) {
-      return handleChannelWebhook(req, env, connectorWebhook[1], connectorWebhook[2]);
+      return handleChannelWebhook(req, env, connectorWebhook[1], connectorWebhook[2], ctx);
     }
     if (pathname === "/v1/channels/telegram/webhook") {
       if (method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -1274,6 +1309,14 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         handleConnectorList(env, actor)
       );
     }
+    const connectorRegisterMatch = pathname.match(
+      /^\/v1\/admin\/connectors\/([^/]+)\/register-webhook$/
+    );
+    if (method === "POST" && connectorRegisterMatch) {
+      return withAdminAccess(req, env, "write", "register channel webhook", (actor) =>
+        handleTelegramRegister(req, env, actor, decodeURIComponent(connectorRegisterMatch[1]))
+      );
+    }
     const connectorMatch = pathname.match(/^\/v1\/admin\/connectors\/([^/]+)$/);
     if (method === "PATCH" && connectorMatch) {
       return withAdminAccess(req, env, "write", "update channel connectors", (actor) =>
@@ -1283,6 +1326,59 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     if (method === "DELETE" && connectorMatch) {
       return withAdminAccess(req, env, "write", "delete channel connectors", (actor) =>
         handleConnectorDelete(env, actor, connectorMatch[1])
+      );
+    }
+
+    /* ---- message templates and audience -------------------------------- */
+    // Templates and audience rows are operator records, not credentials. Reads
+    // allow a member; writes require a human owner or admin. Route order puts
+    // `/preview` before the bare id form, and `/contacts/import` before the list.
+    if (method === "GET" && pathname === "/v1/admin/templates") {
+      return withAdminAccess(req, env, "read", "read message templates", (actor) =>
+        handleTemplateList(env, actor)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/templates") {
+      return withAdminAccess(req, env, "write", "create message template", (actor) =>
+        handleTemplateCreate(req, env, actor)
+      );
+    }
+    const templatePreviewMatch = pathname.match(/^\/v1\/admin\/templates\/([^/]+)\/preview$/);
+    if (method === "POST" && templatePreviewMatch) {
+      return withAdminAccess(req, env, "read", "preview message template", (actor) =>
+        handleTemplatePreview(req, env, actor, decodeURIComponent(templatePreviewMatch[1]))
+      );
+    }
+    const templateMatch = pathname.match(/^\/v1\/admin\/templates\/([^/]+)$/);
+    if (method === "DELETE" && templateMatch) {
+      return withAdminAccess(req, env, "write", "delete message template", (actor) =>
+        handleTemplateDelete(env, actor, decodeURIComponent(templateMatch[1]))
+      );
+    }
+    if (method === "GET" && pathname === "/v1/admin/contacts") {
+      return withAdminAccess(req, env, "read", "read contacts", (actor) =>
+        handleContactsList(env, url, actor)
+      );
+    }
+    if (method === "POST" && pathname === "/v1/admin/contacts/import") {
+      return withAdminAccess(req, env, "write", "import contacts", (actor) =>
+        handleContactsImport(req, env, actor)
+      );
+    }
+
+    /* ---- pacing policies ---------------------------------------------- */
+    // The console edits the per-target rate, quiet hours and timezone here. The
+    // scheduled create route snapshots the row into `policy_json`, so a later
+    // policy edit does not silently rewrite messages already queued.
+    if (method === "GET" && pathname === "/v1/admin/pacing") {
+      return withAdminAccess(req, env, "read", "manage pacing", (_actor) =>
+        handlePacingList(env)
+      );
+    }
+    const pacingMatch = pathname.match(/^\/v1\/admin\/pacing\/([^/]+)\/([^/]+)$/);
+    if (method === "PUT" && pacingMatch) {
+      return withAdminAccess(req, env, "write", "manage pacing", (actor) =>
+        handlePacingUpdate(req, env, actor, pacingMatch[1], pacingMatch[2])
       );
     }
 
@@ -1660,6 +1756,28 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         handleDevicesList(env, url)
       );
     }
+
+    /* ---- scheduled sends ---------------------------------------------- */
+    // D1 is the queue and the cancellation authority; the Scheduler Durable
+    // Object only owns the clock. Create and cancel are writes; the list is a
+    // read the console and a member may use.
+    if (method === "POST" && pathname === "/v1/scheduled") {
+      return withAdminAccess(req, env, "write", "schedule messages", (actor) =>
+        handleScheduledCreate(req, env, actor)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/scheduled") {
+      return withAdminAccess(req, env, "read", "read scheduled messages", (_actor) =>
+        handleScheduledList(env, url)
+      );
+    }
+    const scheduledCancelMatch = pathname.match(/^\/v1\/scheduled\/([^/]+)$/);
+    if (method === "DELETE" && scheduledCancelMatch) {
+      return withAdminAccess(req, env, "write", "cancel scheduled messages", (actor) =>
+        handleScheduledCancel(req, env, actor, scheduledCancelMatch[1])
+      );
+    }
+
     if (method === "GET" && pathname === "/v1/messages") {
       return withAdminAccess(req, env, "read", "read messages", (_actor) =>
         handleMessagesList(env, url)

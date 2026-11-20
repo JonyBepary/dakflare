@@ -25,7 +25,10 @@ export interface OutboundMessageParams {
   to: string;
   body: string;
   templateId?: string;
-  templateArgs?: Record<string, string>;
+  /** Ordered body parameters for a platform template (`{{1}}`, `{{2}}`, ...). */
+  templateArgs?: string[];
+  /** Platform template language code. Defaults to `en_US` at the sender. */
+  templateLanguage?: string;
   mediaUrl?: string;
   mediaMimeType?: string;
 }

@@ -324,7 +324,17 @@ export async function sendWhatsAppCloudOutbound(
       type: "template",
       template: {
         name: params.templateId,
-        language: { code: "en_US" },
+        language: { code: params.templateLanguage ?? "en_US" },
+        ...(params.templateArgs && params.templateArgs.length > 0
+          ? {
+              components: [
+                {
+                  type: "body",
+                  parameters: params.templateArgs.map((text) => ({ type: "text", text })),
+                },
+              ],
+            }
+          : {}),
       },
     };
   } else {

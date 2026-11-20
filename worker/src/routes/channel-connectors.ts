@@ -104,6 +104,8 @@ interface ConnectorRow {
   secret_hash: string | null;
   enabled: number;
   last_event_at: number | null;
+  last_webhook_at: number | null;
+  last_error: string | null;
   created_by: string;
   created_at: number;
   updated_at: number;
@@ -166,7 +168,7 @@ function adminRefusal(actor: AdminActor): Response | null {
  * or rotate a credential. The ADMIN_TOKEN machine actor is the CLI and keeps
  * its access, so `routes/approvals.ts`'s human rule is preserved, not weakened.
  */
-function connectorAdminRefusal(actor: AdminActor): Response | null {
+export function connectorAdminRefusal(actor: AdminActor): Response | null {
   const refused = adminRefusal(actor);
   if (refused !== null) return refused;
   if (actor.role === "member") {
@@ -256,6 +258,8 @@ function connectorView(row: ConnectorRow): Record<string, unknown> {
     secret_set: hasSecret,
     secret_updated_at: hasSecret ? row.updated_at : null,
     last_event_at: row.last_event_at,
+    last_webhook_at: row.last_webhook_at,
+    last_error: row.last_error,
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -322,7 +326,7 @@ async function resolveConnector(
 
   const byId = await env.DB.prepare(
     `SELECT id, channel, account_id, execution_tier, auth_mode, label, secret_sealed,
-            secret_hash, enabled, last_event_at, created_by, created_at, updated_at
+            secret_hash, enabled, last_event_at, last_webhook_at, last_error, created_by, created_at, updated_at
        FROM channel_connectors WHERE channel = ? AND id = ?`
   )
     .bind(channel, key)
@@ -332,7 +336,7 @@ async function resolveConnector(
     byId ??
     (await env.DB.prepare(
       `SELECT id, channel, account_id, execution_tier, auth_mode, label, secret_sealed,
-              secret_hash, enabled, last_event_at, created_by, created_at, updated_at
+              secret_hash, enabled, last_event_at, last_webhook_at, last_error, created_by, created_at, updated_at
          FROM channel_connectors WHERE channel = ? AND account_id = ?`
     )
       .bind(channel, key)
@@ -362,7 +366,7 @@ async function resolveConnector(
   };
 }
 
-async function openCredentials(
+export async function openCredentials(
   env: Env,
   sealed: string | null
 ): Promise<CredentialBag | null> {
@@ -515,6 +519,8 @@ export async function handleConnectorCreate(
     secret_hash: secretHash,
     enabled,
     last_event_at: null,
+    last_webhook_at: null,
+    last_error: null,
     created_by: actor.label,
     created_at: now,
     updated_at: now,
@@ -539,7 +545,7 @@ export async function handleConnectorList(env: Env, actor: AdminActor): Promise<
 
   const rows = await env.DB.prepare(
     `SELECT id, channel, account_id, execution_tier, auth_mode, label, secret_sealed,
-            secret_hash, enabled, last_event_at, created_by, created_at, updated_at
+            secret_hash, enabled, last_event_at, last_webhook_at, last_error, created_by, created_at, updated_at
        FROM channel_connectors ORDER BY created_at DESC LIMIT 200`
   ).all<ConnectorRow>();
 
@@ -562,7 +568,7 @@ export async function handleConnectorUpdate(
 
   const row = await env.DB.prepare(
     `SELECT id, channel, account_id, execution_tier, auth_mode, label, secret_sealed,
-            secret_hash, enabled, last_event_at, created_by, created_at, updated_at
+            secret_hash, enabled, last_event_at, last_webhook_at, last_error, created_by, created_at, updated_at
        FROM channel_connectors WHERE id = ?`
   )
     .bind(id)
@@ -930,6 +936,20 @@ export async function sendConnectorOutbound(
 }
 
 /* ───────────────────────────── webhook ingress ───────────────────────────── */
+
+/**
+ * Fixed sentences for the connector's `last_error` badge. They are deliberately
+ * a closed set: a body, a peer id or an exception could otherwise become
+ * readable in the console and the API.
+ */
+type WebhookFailure =
+  | "invalid signature"
+  | "payload too large"
+  | "connector disabled"
+  | "credential unavailable"
+  | "parse failed"
+  | "rate limited";
+
 /**
  * `GET|POST /v1/channels/:channel/:connectorId/webhook`.
  *
@@ -937,12 +957,17 @@ export async function sendConnectorOutbound(
  * resolve from KV (D1 only on miss), refuse a disabled connector, read the raw
  * bytes once, verify the platform's credential, parse, hand to the per-account
  * Durable Object, then answer 200. No D1 write happens before the ACK.
+ *
+ * `ctx` is optional only for callers that were written before the badge
+ * existed. When it is present the `last_webhook_at`/`last_error` update is
+ * deferred with `waitUntil`, so it can never delay the platform ACK.
  */
 export async function handleChannelWebhook(
   req: Request,
   env: Env,
   channel: string,
-  connectorId: string
+  connectorId: string,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const normalized = channel.toLowerCase();
   if (!isChannel(normalized)) {
@@ -960,10 +985,41 @@ export async function handleChannelWebhook(
 
   const connector = await resolveConnector(env, normalized, connectorId);
   if (connector === null) return json({ error: "not_found" }, 404);
+
+  // The badge is written for every POST that resolved a row. With a waitUntil
+  // it costs the ACK nothing; without one the update is awaited so a bare test
+  // or legacy caller still observes a consistent row.
+  const record = (failure: WebhookFailure | null): Promise<void> | void => {
+    const task = (async () => {
+      try {
+        await env.DB.prepare(
+          `UPDATE channel_connectors SET last_webhook_at = ?, last_error = ? WHERE id = ?`
+        )
+          .bind(Date.now(), failure, connector.id)
+          .run();
+      } catch {
+        // Best effort: a badge that cannot be written must not fail delivery.
+      }
+    })();
+    if (ctx !== undefined) {
+      ctx.waitUntil(task);
+      return;
+    }
+    return task;
+  };
+  const respond = async (
+    response: Response,
+    failure: WebhookFailure | null
+  ): Promise<Response> => {
+    const pending = record(failure);
+    if (pending !== undefined) await pending;
+    return response;
+  };
+
   if (!connector.enabled) {
-    return json(
-      { error: "connector_disabled", message: "this connector is disabled" },
-      403
+    return respond(
+      json({ error: "connector_disabled", message: "this connector is disabled" }, 403),
+      "connector disabled"
     );
   }
 
@@ -986,7 +1042,7 @@ export async function handleChannelWebhook(
   }
 
   const raw = await readRawBodyBounded(req, MAX_WEBHOOK_BODY_BYTES);
-  if (raw === null) return err("payload_too_large", 413);
+  if (raw === null) return respond(err("payload_too_large", 413), "payload too large");
 
   let messages: Array<{
     channelMessageId: string;
@@ -1002,18 +1058,22 @@ export async function handleChannelWebhook(
     errorCode?: string;
   }> = [];
 
+  try {
   if (normalized === "telegram") {
     const credentials = await openCredentials(env, connector.sealed);
     if (credentials === null || credentials.botToken === undefined) {
-      return json(
-        { error: "connector_secret_unavailable", message: "the credential could not be opened" },
-        503
+      return respond(
+        json(
+          { error: "connector_secret_unavailable", message: "the credential could not be opened" },
+          503
+        ),
+        "credential unavailable"
       );
     }
     const verified = await verifyTelegramWebhook(req, {
       secretToken: credentials.secretToken ?? "",
     });
-    if (!verified) return err("invalid_signature", 401);
+    if (!verified) return respond(err("invalid_signature", 401), "invalid signature");
     messages = parseTelegramWebhook(new TextDecoder().decode(raw));
   } else if (
     normalized === "messenger" ||
@@ -1022,9 +1082,12 @@ export async function handleChannelWebhook(
   ) {
     const credentials = await openCredentials(env, connector.sealed);
     if (credentials === null) {
-      return json(
-        { error: "connector_secret_unavailable", message: "the credential could not be opened" },
-        503
+      return respond(
+        json(
+          { error: "connector_secret_unavailable", message: "the credential could not be opened" },
+          503
+        ),
+        "credential unavailable"
       );
     }
     const verified = await verifyMetaWebhookSignature(
@@ -1032,7 +1095,7 @@ export async function handleChannelWebhook(
       raw,
       credentials.appSecret ?? ""
     );
-    if (!verified) return err("invalid_signature", 401);
+    if (!verified) return respond(err("invalid_signature", 401), "invalid signature");
 
     const text = new TextDecoder().decode(raw);
     if (normalized === "whatsapp") {
@@ -1080,10 +1143,18 @@ export async function handleChannelWebhook(
     // SMS is owned by the device protocol, not a Meta-shaped webhook. A
     // connector row for it is accepted (the schema allows it) but this ingress
     // does not pretend to handle it.
-    return json(
-      { error: "unsupported_channel", message: `webhook ingress is not implemented for ${normalized}` },
-      404
+    return respond(
+      json(
+        { error: "unsupported_channel", message: `webhook ingress is not implemented for ${normalized}` },
+        404
+      ),
+      "parse failed"
     );
+  }
+  } catch {
+    // A malformed body is the platform's problem, not a 500 the platform would
+    // retry all day. Only the fixed sentence is recorded.
+    return respond(json({ error: "parse_failed" }, 400), "parse failed");
   }
 
   const events: NormalizedChannelEvent[] = [];
@@ -1131,7 +1202,7 @@ export async function handleChannelWebhook(
   if (events.length === 0) {
     // A valid delivery with nothing this product understands is still a 200:
     // a non-2xx makes Meta retry the same unusable payload for 36 hours.
-    return json({ ok: true, accepted: 0, deduplicated: 0 });
+    return respond(json({ ok: true, accepted: 0, deduplicated: 0 }), null);
   }
 
   try {
@@ -1140,15 +1211,24 @@ export async function handleChannelWebhook(
     if (!result.ok) {
       // 500 is the correct answer: the platform retries, and the ledger was rolled back so the
       // retry is accepted rather than deduplicated away.
-      return json({ error: "ingest_unavailable", message: "the ingest queue refused the batch" }, 500);
+      return respond(
+        json({ error: "ingest_unavailable", message: "the ingest queue refused the batch" }, 500),
+        null
+      );
     }
-    return json({ ok: true, accepted: result.accepted, deduplicated: result.deduplicated });
+    return respond(
+      json({ ok: true, accepted: result.accepted, deduplicated: result.deduplicated }),
+      null
+    );
   } catch (error) {
     // 5xx is the correct answer: Meta/Telegram retry, and the DO may simply
     // have been evicted mid-call.
-    return json(
-      { error: "ingest_unavailable", message: String(error).slice(0, 120) },
-      500
+    return respond(
+      json(
+        { error: "ingest_unavailable", message: String(error).slice(0, 120) },
+        500
+      ),
+      null
     );
   }
 }

@@ -73,6 +73,13 @@ class_name = "AssistantAgent"
 name = "CHANNEL_CONN"
 class_name = "ChannelConnection"
 
+# The sixth Durable Object: one globally named scheduler holding the clock and
+# the token buckets for scheduled sends. D1 is the queue and the only
+# cancellation authority; this object never stores a message.
+[[durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "Scheduler"
+
 [exports.DeviceGateway]
 type = "durable-object"
 storage = "sqlite"
@@ -92,6 +99,10 @@ storage = "sqlite"
 # SQLite-backed: dedupe, the 24-hour window and the token buckets are `ctx.storage.sql`
 # tables, so this export must say `storage = "sqlite"` or the class starts with SQL disabled.
 [exports.ChannelConnection]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.Scheduler]
 type = "durable-object"
 storage = "sqlite"
 
@@ -321,7 +332,7 @@ directory = "public"
 # /cdn-cgi/local/scheduled — note that is the CRON handler, not DO alarms.
 # ---------------------------------------------------------------------------
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 3 * * *", "*/5 * * * *"]
 
 # ---------------------------------------------------------------------------
 # Workers Logs. Without this the deployment is a black box. Sampling 1.0 is the

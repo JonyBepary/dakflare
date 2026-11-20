@@ -54,6 +54,13 @@ class_name = "AssistantAgent"
 name = "CHANNEL_CONN"
 class_name = "ChannelConnection"
 
+# The sixth Durable Object: one globally named scheduler holding the clock and
+# the token buckets for scheduled sends. D1 is the queue and the only
+# cancellation authority; this object never stores a message.
+[[durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "Scheduler"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceGateway"]
@@ -81,6 +88,13 @@ new_sqlite_classes = ["AssistantAgent"]
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["ChannelConnection"]
+
+# Scheduled sends: one globally named pacer. A new tag because v5 is already
+# applied wherever this config has run; `wrangler.toml` declares the same class
+# through `[exports.Scheduler]` instead of an ordered tag.
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["Scheduler"]
 
 # remote = true -> the real preview database, while the Worker and DO run locally.
 [[d1_databases]]
@@ -209,7 +223,7 @@ SOURCE_URL = "https://github.com/JonyBepary/dakflare"
 directory = "public"
 
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 3 * * *", "*/5 * * * *"]
 
 [observability]
 enabled = true

@@ -60,6 +60,8 @@ export default defineConfig({
 			AssistantAgent: exports.durableObject({ storage: "sqlite" }),
 			// One per external channel account, addressed by `${channel}:${account_id}`.
 			ChannelConnection: exports.durableObject({ storage: "sqlite" }),
+			// The single globally named scheduled-send pacer (D1 is the queue).
+			Scheduler: exports.durableObject({ storage: "sqlite" }),
 			// Multi-step durable flow execution (v7.0).
 			FlowExecutionWorkflow: exports.workflow({ name: "flow-execution-workflow" }),
 		},
@@ -67,6 +69,10 @@ export default defineConfig({
 		triggers: [
 			triggers.scheduled({
 				schedule: "17 3 * * *",
+			}),
+			// Wakes the Scheduler Durable Object only; it runs no retention work.
+			triggers.scheduled({
+				schedule: "*/5 * * * *",
 			}),
 			triggers.queue({
 				name: "dakflare-webhook-queue",
@@ -184,6 +190,10 @@ export default defineConfig({
 			CHANNEL_CONN: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "ChannelConnection",
+			}),
+			SCHEDULER: bindings.durableObject({
+				worker: "dakflare-worker",
+				exportName: "Scheduler",
 			}),
 
 			// ── rate limiting (hardening S3) ────────────────────────────────────

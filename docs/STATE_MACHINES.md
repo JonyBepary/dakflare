@@ -247,9 +247,9 @@ kind is neutral rather than being announced as silence.
 | | |
 |---|---|
 | Machine | A multi-platform channel (WhatsApp, Telegram) and its credentials |
-| States | configured → connected → disabled |
-| Enforced in | `0007_multi_platform_and_conversations.sql` (`conversations`, channel rows in `index.ts`) |
-| Kind | **Declared.** There is no connector table: the channel lives on the message and conversation rows, so "connected" is inferred from traffic rather than stored |
+| States | configured → connected → paused |
+| Enforced in | `0018_channel_connectors.sql` (`channel_connectors`, `enabled`), `0019` adds `last_webhook_at` and `last_error` |
+| Kind | **Declared.** The connector row is the account; `enabled` is stored, while "connected" is inferred from `last_event_at` or `last_webhook_at` traffic rather than a separate state column |
 
 ## Budgets and counters
 
@@ -268,6 +268,15 @@ kind is neutral rather than being announced as silence.
 | States | no state column — `run_at` plus `attempts`; an alarm returns `consumed` / `rescheduled` (`TaskOutcome`), and after 5 attempts the row is moved to the separate `dead_letters` table |
 | Enforced in | `worker/src/durable-object.ts:100` (`ScheduledTaskRow`), `:141` (`MAX_TASK_ATTEMPTS`) |
 | Kind | **Guarded** — a dead letter is a terminal absence, and the attempt ceiling stops a poisoned task from spinning |
+
+## Scheduled message
+
+| | |
+|---|---|
+| Machine | One row in D1 `scheduled_messages`, dispatched by the `Scheduler` object |
+| States | `scheduled → dispatching → sent`; terminal `cancelled`, `skipped_opt_out`, `skipped_window`, `failed`, `unknown`; `delivered` is reserved for a platform receipt and is not written by the Scheduler yet |
+| Enforced in | `0019_templates_and_scheduling.sql`, `worker/src/lib/scheduled.ts` (`claimScheduled`, `cancelScheduled`, `finalizeScheduled`), `worker/src/scheduler.ts` |
+| Kind | **Guarded** by the conditional claim `WHERE status = 'scheduled'`. Cancel wins until the claim, then answers `409 not_cancellable`. `dispatching` is written before the side effect, so a crash cannot double-send: a connector becomes `unknown`, while SMS is requeued because `sched:<id>` makes the enqueue idempotent |
 
 ## Auth
 
