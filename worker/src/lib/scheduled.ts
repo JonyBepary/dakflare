@@ -324,10 +324,14 @@ export interface QuietHoursPolicy {
  */
 export class InvalidTimezoneError extends Error {
   readonly code = "bad_timezone" as const;
+  readonly timezone: string;
 
-  constructor(readonly timezone: string) {
+  // A normal field, not a constructor parameter property: the `__checks__`
+  // scripts are run by Node's strip-only TypeScript, which rejects that syntax.
+  constructor(timezone: string) {
     super(`unknown IANA timezone: ${timezone}`);
     this.name = "InvalidTimezoneError";
+    this.timezone = timezone;
   }
 }
 
