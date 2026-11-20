@@ -4,7 +4,8 @@
 //   node design/landing/build-standalone.mjs
 //
 // Writes design/landing/dakflare-landing.html. Nothing else changes: the page has no
-// scripts, no webfonts, no images and no network requests, so the copy is the page.
+// scripts, no webfonts and no network requests. The one product screenshot is linked
+// relative to the repo copy so the saved page still shows it from disk.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,6 +25,11 @@ let html = readFileSync(SRC, "utf8");
 html = html.replaceAll('href="/source"', `href="${REPO}"`);
 html = html.replaceAll('href="/admin/"', `href="${DEPLOY}/admin/"`);
 html = html.replaceAll('href="/"', 'href="#main"');
+
+// The screenshot lives in the repo; the Worker serves the same file from /screenshots.
+html = html.replaceAll('href="/screenshots/dakflare-console.webp"', 'href="../../docs/assets/dakflare-console.webp"');
+html = html.replaceAll('src="/screenshots/dakflare-console.webp"', 'src="../../docs/assets/dakflare-console.webp"');
+html = html.replaceAll('srcset="/screenshots/phone-settings.webp"', 'srcset="../../docs/assets/phone-settings.webp"');
 
 // Say on the page itself that it is a saved copy, so a reader is not surprised by the
 // links leaving the file.

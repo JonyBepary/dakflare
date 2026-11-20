@@ -113,6 +113,12 @@ flowchart LR
 
 </details>
 
+The operator surface and the handset app, captured from the current build:
+
+[![The DakFlare console at /admin beside the Android handset settings screen: the paced queue and connector cards on the left, the six-row settings hub on the right.](/docs/assets/dakflare-console.webp)](/docs/assets/dakflare-console.webp)
+
+*The console's paced queue and connector cards; the handset's settings hub. The phone holds the SIM and signs every request; the console watches both.*
+
 ## Quick Start
 
 Requires **Node.js 22+** and an authenticated Cloudflare [`cf`](https://developers.cloudflare.com/) CLI (`cf auth login`).

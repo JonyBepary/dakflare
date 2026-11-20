@@ -1059,6 +1059,29 @@ a:hover { color: var(--coral-800); }
 .quiet:hover { color: var(--accent); }
 .console-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .console-link:hover span { transform: translateX(3px); }
+
+/* The product itself: a browser and a handset, not a diagram of one. */
+.shot {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--surface-card);
+  box-shadow: var(--shadow-2);
+}
+.shot img { display: block; width: 100%; height: auto; }
+.shot figcaption {
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+}
+@media (max-width: 640px) {
+  .shot { border-radius: 14px; }
+  .shot figcaption { padding: 10px 14px; font-size: 9px; }
+}
 .btn-primary:hover {
   background: var(--accent-fill-hover);
   border-color: var(--accent-fill-hover);
@@ -2687,10 +2710,34 @@ a:hover { color: var(--coral-800); }
     </div>
   </section>
 
+<section class="sec" id="console">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="sec-num">05 / The console</span>
+        <span class="sec-note">/admin · handset</span>
+      </div>
+
+      <div class="path-intro">
+        <h2>The queue, the channels and the phone, in one place.</h2>
+        <p class="body">A paced queue with quiet hours, connector credentials that are sealed at rest and never shown again, templates that report the SMS bill before sending, and a handset app that holds the SIM. Both surfaces are the product, not a mock.</p>
+      </div>
+
+      <figure class="shot">
+        <a href="/screenshots/dakflare-console.webp" aria-label="Open the console and handset screenshot at full size">
+          <picture>
+            <source media="(max-width: 700px)" srcset="/screenshots/phone-settings.webp" />
+            <img src="/screenshots/dakflare-console.webp" width="1600" height="800" style="width:100%;height:auto;display:block;" alt="The DakFlare operator console at /admin beside the Android handset settings screen. The console shows the paced scheduled-message queue, channel connectors, templates and agent tokens; the handset shows the six-row settings hub." />
+          </picture>
+        </a>
+        <figcaption>The console's paced queue and connector cards, and the handset's settings hub. On a narrow screen, the handset alone.</figcaption>
+      </figure>
+    </div>
+  </section>
+
 <section class="sec" id="run">
     <div class="wrap">
       <div class="sec-head">
-        <span class="sec-num">05 / Self-host for $0</span>
+        <span class="sec-num">06 / Self-host for $0</span>
         <span class="sec-note">One deploy</span>
       </div>
 
