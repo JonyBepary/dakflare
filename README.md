@@ -64,7 +64,7 @@ every request with a P-256 key held in `AndroidKeyStore`. The **Worker** verifie
 Meta's `X-Hub-Signature-256`, or Telegram's secret token — and answers inside Meta's five-second
 window. Storage and coordination live in **six SQLite Durable Objects**, one per unit that needs
 serialisation: `DeviceGateway` per handset, `ChannelConnection` per `(channel, account_id)`,
-`AuthGuard` and `AuthorityGuard` as singletons, and `AssistantAgent` pinned to one name.
+`AuthGuard`, `AuthorityGuard` and `Scheduler` as singletons, and `AssistantAgent` pinned to one name.
 
 Official cloud APIs run directly on Workers; personal sessions stay off them, on the phone. That is
 why five accounts on one platform are five isolated objects rather than one hot one.
@@ -125,21 +125,12 @@ that directory is not on your `PATH`), and runs it once to prove the binary:
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 ```
 
-Then provision from the checkout:
+Then provision. `up` installs any missing dependency, writes `worker/.dev.vars` with a
+`WEBHOOK_SECRET_KEY`, launches `cf auth login` when needed, creates the three queues, applies
+migrations `0001` to `0019`, deploys, saves the CLI config, and prints the pairing QR:
 
 ```bash
-cd dakflare
-cd worker && npm install && cd ..
-
-# 1. Generate local secrets into worker/.dev.vars (never committed)
-dakflare init --local
-
-# 2. Provision D1/KV, apply migrations 0001 to 0019, deploy Worker + console, bootstrap owner & pairing code
-cf auth login
 dakflare up --email you@example.com
-
-# 3. Point the CLI at your Worker and verify end-to-end health
-dakflare init --url https://<your-worker>.workers.dev --token-file worker/.dev.vars
 dakflare doctor
 ```
 
