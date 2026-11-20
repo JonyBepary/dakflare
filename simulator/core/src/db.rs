@@ -43,7 +43,7 @@ pub enum StoreError {
 
 /// Facts the native shell may report. Anything else is refused, so a caller
 /// cannot use the fact setter to overwrite a credential or the target URL.
-pub const DEVICE_FACT_KEYS: [&str; 8] = [
+pub const DEVICE_FACT_KEYS: [&str; 9] = [
     "self_number",
     "configured_phone_number",
     "phone_number",
@@ -52,6 +52,7 @@ pub const DEVICE_FACT_KEYS: [&str; 8] = [
     "permissions",
     "battery_optimized",
     "default_sms_app",
+    "watched_apps",
 ];
 
 /// One fact value is a phone number, a slot, a small JSON object or a package

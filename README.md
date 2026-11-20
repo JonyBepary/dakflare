@@ -199,7 +199,7 @@ dakflare flows heal wf_orders --samples samples.json             # zero-regressi
 - **Streamable HTTP MCP (`/mcp`) & Stdio Bridge (`dakflare mcp serve`):** Serves **9 scope-filtered tools** (`list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `triage`, `telemetry`, `trace`, `send_sms`) with RFC 9728/8414/8707 OAuth discovery and TOTP elicitation for mutating calls.
 - **Browser WebMCP (`/admin/workflows/edit`):** Registers 4 live editor tools (`dakflare_get_flow_ast`, `dakflare_stage_flow_patch`, `dakflare_synthesize_pattern`, `dakflare_diagnose_message`) with dashed ghost-patch staging.
 - **Worker-to-Worker RPC (`DakFlareApi`):** Bind `entrypoint = "DakFlareApi"` from any Worker or Cloudflare Workflow in your account without bypassing scopes, limiters, or audit logs.
-- **Five Installable Agent Skills (`skills/`):** `dakflare-provision`, `dakflare-messaging`, `dakflare-flows`, `dakflare-agents`, and `dakflare-multichannel` (`npx skills add`). `docs/CLI.md` has the 27-command inventory.
+- **Five Installable Agent Skills (`skills/`):** `dakflare-provision`, `dakflare-messaging`, `dakflare-flows`, `dakflare-agents`, and `dakflare-multichannel` (`npx skills add`). `docs/CLI.md` has the 29-command inventory.
 
 ## Verified Benchmarks & Gates
 
@@ -246,7 +246,7 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 | `worker/` | Cloudflare Worker, 5 SQLite Durable Objects, 18 D1 migrations, channels, `flow.wasm`, MCP server |
 | `dashboard/` | Svelte 5 on SvelteKit 3 operator console, built into `worker/public/admin` and served at `/admin` |
 | `simulator/` | Tauri v2 Android handset app (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
-| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (27 commands) + `cli/schema/flow-v2.json` |
+| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (29 commands) + `cli/schema/flow-v2.json` |
 | `apps/docs/` | Dual-audience Fumadocs site (`/llms.txt`, `.md`, `/openapi.json`, `/SKILL.md`, `/mcp`) |
 | `skills/` | Five `SKILL.md` packages for coding agents |
 | `contracts/` | `mcp-tools.json`, generated from `tools/list` by `worker/scripts/mcp-contract.mjs` |
@@ -257,7 +257,7 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 
 - **MMS** is not supported (surfaces an explicit notification rather than dropping silently).
 - **WhatsApp Coexistence** ingests `field: messages` only (`smb_message_echoes` and `history` are skipped by name).
-- **Personal-channel replies** on Android have `MessagingNotificationBridge.sendReply(...)` ready, pending the Tauri command wiring from the Rust core.
+- **Personal-channel replies** are reachable from Tauri (`send_personal_reply`) but no handset or console screen calls the command yet; the connector send route serves `worker_do` connectors only.
 - **Host-only session cookies:** always open `/admin` on the Worker's own HTTPS origin rather than through a localhost proxy.
 
 </details>

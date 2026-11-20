@@ -892,8 +892,184 @@ fn permission_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> S
     }
 }
 
-/// The five checks the gate shows: `battery_exempt`, `sms_role`, `send_sms`,
-/// `receive_sms`, `notifications`.
+/// Rust → Kotlin bridge for personal-channel replies.
+///
+/// A third registered mobile plugin, for the same reason as [`SmsBridge`]: it
+/// dispatches to the Android context without a `JavaVM` of this crate's own. It
+/// is separate from permissions because replying is an effect, and separate
+/// from SMS because a `RemoteInput` reply never touches the radio.
+#[cfg(target_os = "android")]
+struct EdgeChannelBridge(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+fn edge_channel_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("dakflare-edge")
+        .setup(|app, api| {
+            let handle = api
+                .register_android_plugin("dev.dakflare.simulator.bridge", "EdgeChannelPlugin")?;
+            app.manage(EdgeChannelBridge(handle));
+            Ok(())
+        })
+        .build()
+}
+
+/// Turn a reply-plugin failure into the one sentence the UI shows. The Kotlin
+/// side only rejects with its own worded refusals; anything else is a JNI or
+/// deserialisation failure. Nothing here can carry the text or the peer.
+#[cfg(target_os = "android")]
+fn edge_plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> String {
+    use tauri::plugin::mobile::PluginInvokeError;
+
+    match error {
+        PluginInvokeError::InvokeRejected(response) => response
+            .message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The reply could not be sent".to_string()),
+        other => {
+            eprintln!("[edge] mobile plugin failed: {other}");
+            "The reply could not be sent".to_string()
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersonalReplyPayload {
+    channel: String,
+    #[serde(rename = "peerKey")]
+    peer_key: String,
+    text: String,
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct PersonalReplyResult {
+    sent: bool,
+}
+
+/// Send one reply through the personal app's own notification reply action.
+///
+/// The handle is in-memory and belongs to a live notification, so `false` means
+/// there was nothing to answer with: the chat was dismissed, notification access
+/// was revoked, or the app's toggle is off. It is not an error and never means
+/// the message was delivered.
+#[tauri::command]
+async fn send_personal_reply(
+    app: tauri::AppHandle,
+    channel: String,
+    peer_key: String,
+    text: String,
+) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<EdgeChannelBridge>()
+            .ok_or_else(|| "Personal channel replies are not available in this build".to_string())?;
+        let reply = bridge
+            .0
+            .run_mobile_plugin_async::<PersonalReplyResult>(
+                "sendPersonalReply",
+                PersonalReplyPayload {
+                    channel,
+                    peer_key,
+                    text,
+                },
+            )
+            .await
+            .map_err(edge_plugin_error)?;
+        Ok(reply.sent)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, channel, peer_key, text);
+        Err("Personal channel replies require Android Notification Access".into())
+    }
+}
+
+/// The five apps the notification bridge can watch, in the order the console
+/// shows them. Each maps to a package (or, for Telegram, two) in
+/// `MessagingNotificationBridge.WATCHED_APP_KEYS`.
+const WATCHED_APPS: [&str; 5] = [
+    "whatsapp",
+    "whatsapp_business",
+    "telegram",
+    "messenger",
+    "instagram",
+];
+
+/// The one handset fact holding the toggles, shared with the Kotlin reader.
+const WATCHED_APPS_FACT: &str = "watched_apps";
+
+/// Merge one stored JSON fact over the on-by-default set.
+///
+/// A missing fact, a value that is not an object, or a missing key all stay
+/// `true`, so an upgrade without the row does not silence an app. Only an
+/// explicit boolean in the stored object changes anything, and unknown keys are
+/// dropped rather than echoed back.
+fn watched_apps_from(raw: Option<String>) -> serde_json::Map<String, serde_json::Value> {
+    let mut toggles = serde_json::Map::new();
+    for app in WATCHED_APPS {
+        toggles.insert(app.to_string(), serde_json::Value::Bool(true));
+    }
+    let Some(raw) = raw else {
+        return toggles;
+    };
+    let Ok(serde_json::Value::Object(stored)) = serde_json::from_str(&raw) else {
+        return toggles;
+    };
+    for app in WATCHED_APPS {
+        if let Some(enabled) = stored.get(app).and_then(|value| value.as_bool()) {
+            toggles.insert(app.to_string(), serde_json::Value::Bool(enabled));
+        }
+    }
+    toggles
+}
+
+/// The per-app capture toggles, defaulting to on. Read by a settings surface
+/// and by nothing else; the Kotlin bridge reads the same fact independently.
+#[tauri::command]
+async fn get_watched_apps(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let raw = state
+        .store
+        .get_setting(WATCHED_APPS_FACT)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::Value::Object(watched_apps_from(raw)))
+}
+
+/// Persist one toggle, leaving the others as they were.
+///
+/// The value is written through `Store::set_device_fact`, so it lives in the
+/// same `settings` table as every other handset fact and the key stays on the
+/// whitelist. The Kotlin bridge sees the change on the next notification.
+#[tauri::command]
+async fn set_watched_app(
+    state: State<'_, AppState>,
+    app: String,
+    enabled: bool,
+) -> Result<(), String> {
+    if !WATCHED_APPS.contains(&app.as_str()) {
+        return Err("Unknown messaging app".into());
+    }
+    let raw = state
+        .store
+        .get_setting(WATCHED_APPS_FACT)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut toggles = watched_apps_from(raw);
+    toggles.insert(app, serde_json::Value::Bool(enabled));
+    let encoded = serde_json::Value::Object(toggles).to_string();
+    state
+        .store
+        .set_device_fact(WATCHED_APPS_FACT, &encoded)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The five checks the gate shows, plus `notification_listener`:
+/// `battery_exempt`, `sms_role`, `send_sms`, `receive_sms`, `notifications`,
+/// `notification_listener`.
 ///
 /// Read-only. Android is the source of truth; the UI never infers a grant from a
 /// button tap, only from a fresh read after the system dialog closes. A desktop
@@ -921,6 +1097,7 @@ async fn permission_state(app: tauri::AppHandle) -> Result<serde_json::Value, St
             "send_sms": true,
             "receive_sms": true,
             "notifications": true,
+            "notification_listener": true,
         }))
     }
 }
@@ -993,6 +1170,31 @@ async fn request_notifications(app: tauri::AppHandle) -> Result<(), String> {
     {
         let _ = app;
         Err("Notifications are only available on the phone".into())
+    }
+}
+
+/// Open Android's Notification Access screen. Asking, never claiming: the gate
+/// re-reads [`permission_state`] when the app regains focus, because the system
+/// toggles this grant outside any dialog this app owns.
+#[tauri::command]
+async fn request_notification_listener(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app
+            .try_state::<PermissionBridge>()
+            .ok_or_else(|| "Notification Access is not available in this build".to_string())?;
+        bridge
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("requestNotificationListener", ())
+            .await
+            .map_err(permission_plugin_error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Notification Access is only available on the phone".into())
     }
 }
 
@@ -1189,7 +1391,10 @@ pub fn run() {
     // Mobile plugins need an Android class to drive. Desktop keeps the command
     // but reports that sending is phone-only.
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(sms_plugin()).plugin(permission_plugin());
+    let builder = builder
+        .plugin(sms_plugin())
+        .plugin(permission_plugin())
+        .plugin(edge_channel_plugin());
 
     builder
         .setup(|app| {
@@ -1246,6 +1451,10 @@ pub fn run() {
             request_battery_exemption,
             request_sms_permissions,
             request_notifications,
+            request_notification_listener,
+            send_personal_reply,
+            get_watched_apps,
+            set_watched_app,
             take_sms_route,
             list_messages,
             list_messages_page,

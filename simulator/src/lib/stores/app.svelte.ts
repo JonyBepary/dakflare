@@ -830,21 +830,25 @@ class AppStore {
 		}
 	}
 
-	async setOffline(value: boolean) {
+	/**
+	 * `scope` lets the screen that owns the switch show the answer. The Flows
+	 * panel is the default because that is where the switch has always lived.
+	 */
+	async setOffline(value: boolean, scope = 'flows') {
 		if (!this.selectedId) return;
 		this.busy.offline = true;
 		try {
 			await this.call('set_offline', { deviceId: this.selectedId, offline: value });
 			this.offline = value;
 			this.notify(
-				'flows',
+				scope,
 				value
 					? 'Carrier off: messages stay local and nothing is uploaded.'
 					: 'Carrier on: injects upload over the signed endpoint.',
 				'ok'
 			);
 		} catch (error) {
-			this.fail('flows', error);
+			this.fail(scope, error);
 		} finally {
 			this.busy.offline = false;
 		}
@@ -957,18 +961,18 @@ class AppStore {
 		}
 	}
 
-	async clearThread() {
+	async clearThread(scope = 'flows') {
 		if (!this.selectedId) return;
 		this.busy.clear = true;
-		this.clearNotice('flows');
+		this.clearNotice(scope);
 		try {
 			const deleted = await this.call<number>('clear_messages', {
 				deviceId: this.selectedId
 			});
-			this.notify('flows', `Cleared ${count(deleted, 'local message', 'local messages')}.`, 'ok');
+			this.notify(scope, `Cleared ${count(deleted, 'local message', 'local messages')}.`, 'ok');
 			await this.refreshSelected();
 		} catch (error) {
-			this.fail('flows', error);
+			this.fail(scope, error);
 		} finally {
 			this.busy.clear = false;
 		}

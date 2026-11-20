@@ -28,6 +28,7 @@ import android.util.Log
 class MessagingNotificationBridge : NotificationListenerService() {
 
     data class ReplyHandle(
+        val packageName: String,
         val channel: String,
         val peerKey: String,
         val action: Notification.Action,
@@ -41,7 +42,9 @@ class MessagingNotificationBridge : NotificationListenerService() {
         @Volatile
         private var appContext: android.content.Context? = null
 
-        /** The apps this bridge understands. Anything else is ignored untouched. */
+        /**
+         * The apps this bridge understands. Anything else is ignored untouched.
+         */
         private val SUPPORTED_PACKAGES = mapOf(
             "com.whatsapp" to "whatsapp_personal",
             "com.whatsapp.w4b" to "whatsapp_personal",
@@ -50,6 +53,30 @@ class MessagingNotificationBridge : NotificationListenerService() {
             "com.facebook.orca" to "messenger_personal",
             "com.instagram.android" to "instagram_personal",
         )
+
+        /**
+         * The toggle each package belongs to. WhatsApp and WhatsApp Business are
+         * separate installs and separate switches; Telegram's two clients share
+         * one.
+         */
+        private val WATCHED_APP_KEYS = mapOf(
+            "com.whatsapp" to "whatsapp",
+            "com.whatsapp.w4b" to "whatsapp_business",
+            "org.telegram.messenger" to "telegram",
+            "org.thunderdog.challegram" to "telegram",
+            "com.facebook.orca" to "messenger",
+            "com.instagram.android" to "instagram",
+        )
+
+        /**
+         * The one handset fact that holds the per-app toggles. It is a small
+         * JSON object (`{"whatsapp":true,...}`) written by the Rust
+         * `set_watched_app` command through `Store::set_device_fact`, so it lives
+         * in the same SQLite `settings` table as every other handset fact and
+         * the JNI fact whitelist still applies.
+         */
+        private const val WATCHED_APPS_FACT = "watched_apps"
+
 
         /**
          * At most 512 live reply handles. The oldest is evicted, not the whole
@@ -77,16 +104,17 @@ class MessagingNotificationBridge : NotificationListenerService() {
          */
         fun sendReply(channel: String, peerKey: String, text: String): Boolean {
             if (text.isEmpty()) return false
+            val context = appContext ?: return false
             val handle = synchronized(replyHandles) {
                 replyHandles.values.lastOrNull { it.channel == channel && it.peerKey == peerKey }
             } ?: return false
+            if (!watchesApp(context.applicationInfo.dataDir, handle.packageName)) return false
 
             val intent = Intent()
             val bundle = Bundle().apply {
                 putCharSequence(handle.remoteInput.resultKey, text)
             }
             RemoteInput.addResultsToIntent(arrayOf(handle.remoteInput), intent, bundle)
-            val context = appContext ?: return false
             return try {
                 handle.action.actionIntent.send(context, 0, intent)
                 true
@@ -96,6 +124,31 @@ class MessagingNotificationBridge : NotificationListenerService() {
                 false
             }
         }
+
+        /**
+         * Whether the operator still wants this package's messages captured.
+         *
+         * The toggles are stored as one JSON fact, and the default is on for
+         * every listed package: a missing fact, a missing key, a value that is
+         * not a boolean, or a store that is not readable yet all read as on. An
+         * install that upgrades therefore never goes silent, and only an
+         * explicit `false` switches an app off. Reading is fail-open on purpose:
+         * losing a message is worse than storing one the operator had muted, and
+         * the fact is consulted per notification so a toggle takes effect
+         * without a restart.
+         */
+        fun watchesApp(appDir: String, packageName: String): Boolean {
+            val key = WATCHED_APP_KEYS[packageName] ?: return false
+            val raw = NativeBridge.getDeviceFactSafely(appDir, WATCHED_APPS_FACT) ?: return true
+            return try {
+                val json = org.json.JSONObject(raw)
+                if (!json.has(key)) true else json.optBoolean(key, true)
+            } catch (_: Throwable) {
+                // A malformed fact must not mute the channel.
+                true
+            }
+        }
+
 
         /** True when [packageName] is one of the supported apps. */
         fun handles(packageName: String): Boolean = SUPPORTED_PACKAGES.containsKey(packageName)
@@ -110,6 +163,9 @@ class MessagingNotificationBridge : NotificationListenerService() {
         // A null happens on a race during listener reconnect; nothing to read.
         if (sbn == null) return
         val channel = SUPPORTED_PACKAGES[sbn.packageName] ?: return
+        // A package the operator switched off is ignored before its body is
+        // touched, so a muted app costs no store write and no reply handle.
+        if (!watchesApp(applicationInfo.dataDir, sbn.packageName)) return
         val notification = sbn.notification ?: return
 
         // Group summaries aggregate other notifications and ongoing rows are
@@ -168,6 +224,7 @@ class MessagingNotificationBridge : NotificationListenerService() {
             val remoteInput = action.remoteInputs?.firstOrNull { it.allowFreeFormInput } ?: continue
             synchronized(replyHandles) {
                 replyHandles[sbn.key] = ReplyHandle(
+                    packageName = sbn.packageName,
                     channel = channel,
                     peerKey = sender,
                     action = action,

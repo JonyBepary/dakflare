@@ -47,13 +47,15 @@ personal-account path from the paired Android handset.
   not stored. The legacy `/v1/channels/whatsapp/webhook` still works and shares the parser/sender.
 - **The edge endpoint is bounded at 500 rows / 262,144 bytes per request.** A message too large for
   a batch of its own is left pending and reported in `EdgeFlushed.refused`; it is never truncated.
+- **`/v1/messages` paginates on a compound cursor.** `next_cursor` carries `before` and `before_id`,
+  so rows that share a millisecond never stall or duplicate a page.
 - **The benchmark passes only with 0 failed requests, 0 duplicate D1 rows, and p95 under 5 s.**
 
 ## Known gaps future work inherits
 
-1. **`/v1/messages` composite pagination**: `GET /v1/messages` now supports compound keyset
-   pagination via `before` + `before_id` (returned in `next_cursor`) so burst-ingested rows
-   sharing a millisecond never stall pagination.
-2. **Personal-channel replies are not wired.** `MessagingNotificationBridge.sendReply(channel,
-   peerKey, text)` exists and dispatches through the official app's `RemoteInput`, but no Tauri
-   command reaches it. The Android side is ready; the Rust command and its outbound queue are not.
+1. **Personal-channel replies reach the API, not a screen.**
+   `MessagingNotificationBridge.sendReply(channel, peerKey, text)` is reachable from Tauri as
+   `send_personal_reply`, and the watched packages persist as one `watched_apps` device fact, but no
+   handset screen or console control calls the command yet. `POST /v1/channels/<channel>/<id>/send`
+   serves `worker_do` connectors only, so a personal connector cannot be answered from the console
+   at all.

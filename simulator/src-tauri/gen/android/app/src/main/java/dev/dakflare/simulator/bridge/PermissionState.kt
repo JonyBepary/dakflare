@@ -28,8 +28,12 @@ object PermissionState {
     const val SEND_SMS = "send_sms"
     const val RECEIVE_SMS = "receive_sms"
     const val NOTIFICATIONS = "notifications"
+    const val NOTIFICATION_LISTENER = "notification_listener"
 
-    /** `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"receive_sms":bool,"notifications":bool}`. */
+    /**
+     * `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"receive_sms":bool,
+     * "notifications":bool,"notification_listener":bool}`.
+     */
     @JvmStatic
     fun read(context: Context): String {
         val json = JSONObject()
@@ -49,6 +53,7 @@ object PermissionState {
                 PackageManager.PERMISSION_GRANTED,
         )
         json.put(NOTIFICATIONS, notificationsEnabled(context))
+        json.put(NOTIFICATION_LISTENER, notificationListenerEnabled(context))
         return json.toString()
     }
 
@@ -89,4 +94,14 @@ object PermissionState {
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
     }
+
+    /**
+     * Notification Access is a separate grant made in system Settings, and the
+     * system binds [MessagingNotificationBridge] only while it is held. The
+     * enabled-listener set is the public answer; there is no runtime dialog for
+     * it and no other reliable query.
+     */
+    @JvmStatic
+    fun notificationListenerEnabled(context: Context): Boolean =
+        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
 }

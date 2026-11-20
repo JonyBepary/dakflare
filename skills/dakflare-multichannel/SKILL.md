@@ -23,9 +23,26 @@ a personal connector to send a cold message to someone who has never messaged th
 
 ## Register a connector
 
-Connectors are managed through the admin HTTP surface; the CLI does not have a connector command.
-Send an operator session or `ADMIN_TOKEN` with `X-Dakflare-Client: cli`. A `dkf_agt_` token is
-refused, and a member session is refused: credentials are owners-and-admins work.
+Create it with the CLI, which carries the operator credential to the admin surface. A `dkf_agt_`
+token is refused and a member session is refused: credentials are owners-and-admins work.
+
+```bash
+dakflare connectors create \
+  --channel whatsapp \
+  --account-id 123456789012345 \
+  --label "Support line" \
+  --auth-mode cloud_api \
+  --app-secret "$META_APP_SECRET" \
+  --verify-token "$META_VERIFY_TOKEN" \
+  --access-token "$WHATSAPP_TOKEN"
+
+dakflare connectors list                    # webhook URL, secret presence, enabled state
+dakflare connectors update <id> --access-token "$NEW_TOKEN"
+dakflare connectors delete <id> --yes
+```
+
+`--dry-run` prints the request with every credential redacted and sends nothing. Behind the CLI the
+contract is:
 
 ```http
 POST /v1/admin/connectors
@@ -113,8 +130,10 @@ A message too large for a batch of its own is left pending and reported in `Edge
 its byte size. It is never truncated. Tell the operator which message is stuck rather than dropping
 it.
 
-**Known gap:** `MessagingNotificationBridge.sendReply` exists, but no Tauri command reaches it. A
-personal channel can ingest but not yet reply from the console.
+**Not yet on a screen.** `send_personal_reply` reaches
+`MessagingNotificationBridge.sendReply`, and `get_watched_apps` / `set_watched_app` persist which
+packages are watched, but no handset screen or console control calls them yet. A personal channel can
+ingest today; replying needs the screen.
 
 ## If you are changing this code
 

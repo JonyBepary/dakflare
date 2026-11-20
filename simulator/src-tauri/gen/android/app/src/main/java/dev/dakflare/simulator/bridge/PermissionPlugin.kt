@@ -15,7 +15,7 @@ import app.tauri.plugin.Plugin
 import org.json.JSONObject
 
 /**
- * The Kotlin end of the permission gate: read the four checks, and open the one
+ * The Kotlin end of the permission gate: read the checks, and open the one
  * system surface that can fix each of them.
  *
  * [PermissionState] stays the reader, so the same values can be shown, logged and
@@ -31,7 +31,7 @@ import org.json.JSONObject
  * UI trusts.
  */
 class PermissionPlugin(private val host: Activity) : Plugin(host) {
-    /** `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"receive_sms":bool,"notifications":bool}`. */
+    /** `{"battery_exempt":bool,"sms_role":bool,"send_sms":bool,"receive_sms":bool,"notifications":bool,"notification_listener":bool}`. */
     @Command
     fun state(invoke: Invoke) {
         try {
@@ -130,6 +130,27 @@ class PermissionPlugin(private val host: Activity) : Plugin(host) {
         } catch (error: Throwable) {
             Log.e(TAG, "notification request failed: ${error.javaClass.simpleName}")
             invoke.reject("The notification setting could not be opened")
+        }
+    }
+
+    /**
+     * Open Android's Notification Access list. There is no runtime dialog for
+     * this grant: the operator toggles the app in system Settings. The command
+     * resolves once the screen has been launched and the gate re-reads
+     * [PermissionState] on resume, so nothing here claims the grant.
+     */
+    @Command
+    fun requestNotificationListener(invoke: Invoke) {
+        try {
+            if (PermissionState.notificationListenerEnabled(host)) {
+                invoke.resolve()
+                return
+            }
+            host.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            invoke.resolve()
+        } catch (error: Throwable) {
+            Log.e(TAG, "notification listener settings failed: ${error.javaClass.simpleName}")
+            invoke.reject("Notification Access settings could not be opened")
         }
     }
 
