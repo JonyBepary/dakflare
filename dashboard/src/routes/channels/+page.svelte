@@ -213,7 +213,10 @@
 		flash = null;
 		try {
 			const result = await registerTelegramWebhook(item.id);
-			flash = "Telegram now posts to this connector's webhook.";
+			// The URL is the answer to "where does Telegram post now?", and the
+			// banner body wraps it (`.banner :global(.callout > div)`) rather than
+			// letting an unbreakable string leave the card at 390.
+			flash = `Telegram now posts to ${result.webhook_url}.`;
 		} catch (failure) {
 			actionError = describeError(failure);
 		} finally {
