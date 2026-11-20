@@ -161,9 +161,14 @@ Content-Type: application/json
 | `POST /v1/admin/agent/say`, `GET/DELETE /v1/admin/agent/conversation` | Human only | Run idempotent turn or read/clear operator transcript in `AssistantAgent` |
 | `POST/GET/DELETE /v1/admin/agent/attachments[/:id]` | Human only | Manage R2-backed turn attachments (≤1 MiB, max 3 per operator, 24h TTL) |
 | `GET/POST/DELETE /v1/admin/agent/autonomy`, `GET /v1/admin/agent/runtime` | Human only | Read/enable/revoke bounded autonomy window and runtime status |
-| `POST/GET/DELETE /v1/admin/webhooks[/:id]`, `GET /v1/admin/webhooks/:id/deliveries` | Human only | Manage HMAC-signed inbound agent webhooks |
+| `GET` & `POST /v1/admin/webhooks` | Human only | List hooks (`?kind=inbound\|outbound`, default inbound) or create one: `{name}` for inbound, `{kind:"outbound", name, target_url, events?, custom_headers?, timeout_ms?, max_attempts?, device_id?}` for outbound. The signing secret is returned once |
+| `DELETE /v1/admin/webhooks/:id` | Human only | Delete an inbound or outbound hook and cascade its deliveries |
+| `POST /v1/admin/webhooks/:id/test` | Human only | Send one signed test delivery to an outbound hook (`409` for inbound; transport failure is `200` with `ok:false`, `status:0`) |
+| `GET /v1/admin/webhooks/:id/deliveries` | Human only | Read the last 20 delivery attempts for one hook |
 | `POST /v1/webhooks/:id` | HMAC-SHA256 | Signed external webhook ingress (idempotent by `x-dakflare-delivery`) |
 | `GET/PUT /v1/admin/ai/settings`, `GET /v1/admin/ai/models`, `POST /v1/admin/ai/test`, `POST /v1/admin/ai/system1/test`, `POST /v1/admin/assistant/chat`, `POST /v1/admin/assistant/proposals/:id/accept` | Human only | Unified AI provider settings, stateless console assistant, and atomic proposal acceptance |
+
+Outbound hooks are what a flow `webhook` action may call; the Worker signs `<timestamp>.<body>` with HMAC-SHA-256 and sends `X-Dakflare-Timestamp` / `X-Dakflare-Signature: sha256=<hex>`, and the secret is shown once and sealed at rest.
 
 ## 6. Multi-Platform Channels & Operations
 

@@ -32,6 +32,17 @@ runs flows synchronously and makes no outbound calls, so it skips both and logs
 that it did; a flow using one runs partially on the phone and completely in the
 Worker.
 
+A `webhook` URL must be registered first, as an **outbound** hook:
+
+```bash
+dakflare webhooks create --kind outbound --name billing --url https://billing.example.com/hooks/dakflare
+```
+
+The Worker seals its secret, signs `` `<unix-seconds>.<raw-body>` `` with HMAC-SHA-256,
+and sends `X-Dakflare-Timestamp` and `X-Dakflare-Signature: sha256=<hex>`. Verify
+within 300 seconds. A URL that is not registered is refused; loopback, private,
+CGNAT, metadata and non-https hosts are refused at creation and at call time.
+
 ## The two refusals that matter
 
 **A cycle.** Refused with the edge and the node it returns to.

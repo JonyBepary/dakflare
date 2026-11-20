@@ -84,8 +84,10 @@ dakflare templates create --name order_ready --body "Hi {{1}}, order {{2}} is re
 dakflare contacts import audience.csv
 ```
 
-In the queue, `sent` means the transport accepted the message, not that the handset
-delivered it. Delivery is reported on the message row, not the scheduled row.
+In the queue, `sent` means the transport accepted the message. A carrier or platform
+receipt then advances the scheduled row to `delivered` (or `failed` with the reason); an
+inbound `STOP` writes the audience opt-out, so a pending send is skipped rather than
+messaged.
 
 ## The one mistake to avoid
 

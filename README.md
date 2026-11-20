@@ -185,7 +185,9 @@ npm run verify:deploy                           # verify live routes, version, w
 or UCS-2 segment count before it leaves; a CSV audience import fills the variables. A send can be
 queued for a time: the `Scheduler` paces it per SIM or per account (8-15 s of jitter for the radio,
 a token bucket for cloud APIs), moves it past quiet hours instead of dropping it, and refuses a
-cancel after the claim instead of pretending. `docs/SCHEDULING.md` has the claim rules.
+cancel after the claim instead of pretending. Carrier and platform receipts advance the scheduled
+row to `delivered` or `failed`, and an inbound `STOP` writes the audience opt-out. `docs/SCHEDULING.md`
+has the claim and opt-out rules.
 
 ## Wasm Flows
 
@@ -204,15 +206,16 @@ dakflare flows heal wf_orders --samples samples.json             # zero-regressi
 - **Streamable HTTP MCP (`/mcp`) & Stdio Bridge (`dakflare mcp serve`):** Serves **9 scope-filtered tools** (`list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `triage`, `telemetry`, `trace`, `send_sms`) with RFC 9728/8414/8707 OAuth discovery and TOTP elicitation for mutating calls.
 - **Browser WebMCP (`/admin/workflows/edit`):** Registers 4 live editor tools (`dakflare_get_flow_ast`, `dakflare_stage_flow_patch`, `dakflare_synthesize_pattern`, `dakflare_diagnose_message`) with dashed ghost-patch staging.
 - **Worker-to-Worker RPC (`DakFlareApi`):** Bind `entrypoint = "DakFlareApi"` from any Worker or Cloudflare Workflow in your account without bypassing scopes, limiters, or audit logs.
+- **Signed outbound webhooks:** a flow `webhook` action can target a registered `kind='outbound'` endpoint. The Worker seals its secret, signs `<timestamp>.<raw body>` with HMAC-SHA-256, and sends `X-Dakflare-Timestamp` and `X-Dakflare-Signature: sha256=<hex>`; loopback, private, CGNAT and metadata hosts are refused.
 - **Five Installable Agent Skills (`skills/`):** `dakflare-provision`, `dakflare-messaging`, `dakflare-flows`, `dakflare-agents`, and `dakflare-multichannel` (`npx skills add`). `docs/CLI.md` has the 32-command inventory.
 
 ## Verified Benchmarks & Gates
 
 CI (`.github/workflows/pipeline.yml`) runs hermetically with **zero Cloudflare credentials**; deploys and D1 migrations run locally from the operator's terminal.
 
-| Gate | Measured Result (`ea34370`) |
+| Gate | Measured Result (`420fe48`) |
 | :--- | :--- |
-| **Worker Unit & Integration (Vitest)** | **150 passing** across 13 files (`typecheck` + `check:config` across 6 DO classes & 3 queue consumers) |
+| **Worker Unit & Integration (Vitest)** | **189 passing** across 16 files (`typecheck` + `check:config` across 6 DO classes & 3 queue consumers) |
 | **Conformance Harness** | **`SUITE PASSED` (513 assertions)** covering P-256 vectors, WebAuthn, replay, WS, rules, auth, and ack timeouts |
 | **Android Handset & Rust Cores** | **110** `simulator/core` + **58** `simulator/flow` Rust tests · Svelte `0/0` · Gradle Kotlin compiles |
 | **Dashboard Console** | `svelte-check` `0/0` · `check-system` `0` failing across 76 files |

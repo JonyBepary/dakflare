@@ -107,7 +107,10 @@
               "connector_secret_unavailable",
               "not_telegram",
               "telegram_bot_token_missing",
-              "telegram_rejected"
+              "telegram_rejected",
+              "bad_url",
+              "webhook_secret_unavailable",
+              "conflict"
             ]
           },
           "details": {
@@ -780,6 +783,204 @@
           },
           "updated_at": {
             "type": "integer"
+          }
+        }
+      },
+      "WebhookSummary": {
+        "type": "object",
+        "description": "An inbound or outbound webhook row. The signing secret and its hash are never returned; `secret_set` says only whether one is sealed.",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "target_url",
+          "enabled",
+          "events",
+          "custom_headers",
+          "timeout_ms",
+          "max_attempts",
+          "created_by",
+          "created_at",
+          "last_delivery_at",
+          "secret_set"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "target_url": {
+            "type": "string",
+            "description": "Empty for an inbound hook."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "custom_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 60000
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Epoch milliseconds."
+          },
+          "last_delivery_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch milliseconds, or null if never delivered."
+          },
+          "secret_set": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WebhookCreated": {
+        "type": "object",
+        "description": "A newly created webhook. `secret` is shown exactly once and sealed at rest.",
+        "required": [
+          "id",
+          "name",
+          "secret",
+          "enabled",
+          "created_at",
+          "created_by"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "target_url": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string",
+            "description": "The signing secret. Returned once in this response; never readable again."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "custom_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeout_ms": {
+            "type": "integer"
+          },
+          "max_attempts": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Epoch milliseconds."
+          },
+          "created_by": {
+            "type": "string"
+          }
+        }
+      },
+      "OutboundWebhookInput": {
+        "type": "object",
+        "description": "Create an outbound hook that a flow `webhook` action may call.",
+        "required": [
+          "kind",
+          "name",
+          "target_url"
+        ],
+        "properties": {
+          "kind": {
+            "const": "outbound"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "target_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Public http(s) URL. Private and loopback hosts are refused with `bad_url`."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "custom_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 60000,
+            "default": 10000
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 8
+          },
+          "device_id": {
+            "type": "string"
           }
         }
       }
@@ -3552,6 +3753,358 @@
                 },
                 "example": {
                   "error": "connector_secret_unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/webhooks": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List inbound or outbound webhooks",
+        "description": "Returns at most 200 hooks of one kind, newest first. Never includes the secret or its hash; `secret_set` only reports whether one is sealed.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "inbound",
+                "outbound"
+              ],
+              "default": "inbound"
+            },
+            "description": "Which direction to list. Defaults to inbound."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "webhooks"
+                  ],
+                  "properties": {
+                    "webhooks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`kind` is not inbound or outbound",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or missing session refused"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Create an inbound or outbound webhook",
+        "description": "Human only. The body is a union: `{name}` creates an inbound ingress hook; `{kind:'outbound', name, target_url, ...}` creates an endpoint that a flow `webhook` action may call. The response carries the signing `secret` once. An outbound hook's target is validated here and again at dispatch, so a private or loopback host is refused.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "name"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "inbound"
+                        ],
+                        "default": "inbound"
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120
+                      }
+                    }
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutboundWebhookInput"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook created; `secret` is shown once",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "`no-store`"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error, including `bad_url` for an outbound target that is not a public http(s) URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_url"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or missing session refused"
+          },
+          "503": {
+            "description": "`WEBHOOK_SECRET_KEY` is not configured, so the secret cannot be sealed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "webhook_secret_unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/webhooks/{id}": {
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Delete a webhook",
+        "description": "Deletes the hook and cascades its delivery rows.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "deleted",
+                    "id"
+                  ],
+                  "properties": {
+                    "deleted": {
+                      "const": true
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or missing session refused"
+          },
+          "404": {
+            "description": "No webhook with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/webhooks/{id}/test": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Send one signed test delivery",
+        "description": "Posts a synthetic `test` event to an outbound hook's target with its stored secret. `ok` tracks the receiver's status, so a 5xx is a failed test rather than a transport error; a transport failure returns `200` with `ok:false` and `status:0`. The secret and body are never returned.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test delivery attempted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "status",
+                    "latency_ms",
+                    "signed"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "Receiver HTTP status, or 0 when the request never completed."
+                    },
+                    "latency_ms": {
+                      "type": "integer"
+                    },
+                    "signed": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The stored target is not a public https URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_url"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or missing session refused"
+          },
+          "404": {
+            "description": "No webhook with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The hook is inbound; only an outbound hook can be tested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "conflict"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The signing secret could not be opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "webhook_secret_unavailable"
                 }
               }
             }
