@@ -19,6 +19,7 @@ import type { Env } from "../index";
 import { err } from "../lib/errors";
 import { MAX_STATUS_UPDATES } from "../lib/config";
 import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
+import { mirrorScheduledDelivery } from "../lib/scheduled";
 
 /**
  * §6.1 status targets the device may report.
@@ -166,8 +167,8 @@ export async function handleStatusBatch(
       EXPIRED: "failed",
     };
     try {
-      await env.DB.batch(
-        appliedUpdates.map((u) => {
+      await env.DB.batch([
+        ...appliedUpdates.map((u) => {
           const mappedState = mirrorReplyState[u.status] ?? u.status.toLowerCase();
           let replyError: string | null = null;
           if (u.status === "FAILED") {
@@ -184,8 +185,12 @@ export async function handleStatusBatch(
                 AND direction = 'out'
                 AND id = ?`
           ).bind(mappedState, u.status, replyError, deviceId, u.command_id);
-        })
-      );
+        }),
+        // The same receipt also advances the scheduled lifecycle. A scheduled
+        // row is not a `messages` row, so without this mirror it would stop at
+        // `sent` while the console already showed `delivered`.
+        ...mirrorScheduledDelivery(env.DB, deviceId, appliedUpdates),
+      ]);
     } catch {
       // Non-fatal mirror; the DO owns command state and trace joins both.
     }

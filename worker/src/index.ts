@@ -44,6 +44,7 @@ import {
   handleWebhookDeliveries,
   handleWebhookIngress,
   handleWebhookList,
+  handleWebhookTest,
 } from "./routes/webhooks";
 import {
   handleDeviceArchive,
@@ -107,6 +108,7 @@ import { FlowExecutionWorkflow, type FlowWorkflowParams } from "./workflows/flow
 import { getChannelPlugin } from "./channels";
 import { dispatchFlows } from "./flow/dispatch";
 import { isBlockedWebhookHost } from "./lib/flow-ir";
+import { signOutboundRequest } from "./lib/outbound-webhook";
 export { FlowExecutionWorkflow };
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
 import { scopeForAction } from "./lib/agent-scopes";
@@ -848,10 +850,21 @@ export default {
             msg.ack();
             continue;
           }
+          const bodyString =
+            typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {});
+          // Sign at consumption: a job may have waited, so a timestamp minted at
+          // enqueue would be stale. `signOutboundRequest` also drops any signature
+          // headers an older producer put on the payload, so one edge signs once.
+          const headers = await signOutboundRequest(
+            env,
+            payload.url,
+            { "Content-Type": "application/json", ...(payload.headers ?? {}) },
+            bodyString
+          );
           const res = await fetch(payload.url, {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...(payload.headers ?? {}) },
-            body: typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {}),
+            headers,
+            body: bodyString,
             redirect: "manual",
             signal: AbortSignal.timeout(10_000),
           });
@@ -1405,8 +1418,21 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
       );
     }
     if (method === "GET" && pathname === "/v1/admin/webhooks") {
+      const requestedKind = url.searchParams.get("kind") ?? "inbound";
+      if (requestedKind !== "inbound" && requestedKind !== "outbound") {
+        return Response.json(
+          { error: "bad_request", message: "kind must be 'inbound' or 'outbound'" },
+          { status: 400 }
+        );
+      }
       return withAdminAccess(req, env, "read", "list webhooks", (actor) =>
-        handleWebhookList(env, actor)
+        handleWebhookList(env, actor, requestedKind)
+      );
+    }
+    const webhookTestMatch = pathname.match(/^\/v1\/admin\/webhooks\/([^/]+)\/test$/);
+    if (method === "POST" && webhookTestMatch) {
+      return withAdminAccess(req, env, "write", "test webhooks", (actor) =>
+        handleWebhookTest(env, decodeURIComponent(webhookTestMatch[1]), actor)
       );
     }
     const webhookDeliveriesMatch = pathname.match(

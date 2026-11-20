@@ -75,11 +75,17 @@ is `sched:<id>`; a replay returns the existing command instead of a second SMS.
 ## Status and delivery
 
 `scheduled → dispatching → sent` is the transport path. `sent` means the handset was queued
-or the platform accepted the message; it is **not** delivery. `delivered` is reserved for a
-platform receipt and is not written by the Scheduler today: the console's `messages` table
-still carries the per-message delivery state. A scheduled row therefore stops at `sent`
-unless a later mirror is added. `skipped_window`, `skipped_opt_out`, `failed` and `unknown`
-are terminal and explained in `last_error`.
+or the platform accepted the message; it is **not** delivery. Carrier receipts (the SMS
+status batch) and connector platform receipts (the ingest consumer) both advance the
+scheduled row in the same D1 batch as the console's per-message state: `DELIVERED`, and a
+platform `read`/`played`/`seen`, set `delivered` and `delivered_at` (filling `sent_at` if the
+intermediate receipt was lost), while `FAILED` or `EXPIRED` sets `failed` with the reason in
+`last_error`. A connector receipt resolves the row by `(channel, dispatch_ref)`, where
+`dispatch_ref` is the platform message id the Scheduler stored; an SMS receipt uses the
+command id. The mirror only moves a row out of `sent` or `dispatched`, so a late `sent`
+cannot walk `delivered` backwards and a cancelled or skipped row is never rewritten. The
+`/v1/messages` row remains the per-message record. `skipped_window`, `skipped_opt_out`,
+`failed`, `delivered` and `unknown` are terminal and explained in `last_error`.
 
 ## Pacing policy
 
@@ -105,12 +111,21 @@ RFC-4180 with quoted commas, escaped quotes, CRLF and a BOM; it upserts in 50-ro
 `env.DB.batch()` chunks. An opted-out row is skipped at dispatch, not dropped at create, so
 the preview can count it.
 
+An inbound SMS whose entire trimmed body is `STOP`, `UNSUBSCRIBE`, `CANCEL`, `END` or `QUIT`
+sets `opt_out = 1` for that peer; `START` or `UNSTOP` clears it. The upsert is written in the
+same D1 batch as the message insert and is applied even when the message itself is a deduped
+replay, so a lost flag is repaired on the next upload. The keyword is case-insensitive and
+must be the whole body: a sentence containing "stop" does not unsubscribe anyone. A newly
+opted-out peer gets a `contacts` row, because they are now a recipient the operator must not
+message. The Scheduler re-reads the flag immediately before the claim and marks a due row
+`skipped_opt_out` without sending.
+
 ## Failure modes accepted
 
 - A cancel that arrives in the milliseconds between the claim and the platform call returns
   `409` and the message goes out. The two stores cannot share a transaction.
 - A STOP that arrives at the same instant as a send may lose; the check is immediately before
-  the call, not atomic with it.
+  the claim, not atomic with it. The flag itself is durable from the next upload onwards.
 - A lost Scheduler wake delays messages up to five minutes, until the reconciler cron. A
   growing `scheduled` backlog is the signal to alert on.
 - The token bucket resets if the object's storage is lost. It is a safety limit, not a billing

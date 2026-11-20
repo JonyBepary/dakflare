@@ -274,9 +274,9 @@ kind is neutral rather than being announced as silence.
 | | |
 |---|---|
 | Machine | One row in D1 `scheduled_messages`, dispatched by the `Scheduler` object |
-| States | `scheduled → dispatching → sent`; terminal `cancelled`, `skipped_opt_out`, `skipped_window`, `failed`, `unknown`; `delivered` is reserved for a platform receipt and is not written by the Scheduler yet |
-| Enforced in | `0019_templates_and_scheduling.sql`, `worker/src/lib/scheduled.ts` (`claimScheduled`, `cancelScheduled`, `finalizeScheduled`), `worker/src/scheduler.ts` |
-| Kind | **Guarded** by the conditional claim `WHERE status = 'scheduled'`. Cancel wins until the claim, then answers `409 not_cancellable`. `dispatching` is written before the side effect, so a crash cannot double-send: a connector becomes `unknown`, while SMS is requeued because `sched:<id>` makes the enqueue idempotent |
+| States | `scheduled → dispatching → dispatched → sent → delivered`; terminal `cancelled`, `skipped_opt_out`, `skipped_window`, `failed`, `unknown`. The carrier and platform receipt mirror advances `sent`/`dispatched` to `delivered` or `failed`; `START`/`STOP` move `contacts.opt_out`, which the Scheduler reads before the claim |
+| Enforced in | `0019_templates_and_scheduling.sql`, `worker/src/lib/scheduled.ts` (`claimScheduled`, `cancelScheduled`, `finalizeScheduled`, `mirrorScheduledDelivery`, `mirrorScheduledStatus`, `isPeerOptedOut`), `worker/src/routes/status.ts`, `worker/src/channels/ingest.ts`, `worker/src/routes/incoming.ts`, `worker/src/scheduler.ts` |
+| Kind | **Guarded** by the conditional claim `WHERE status = 'scheduled'` and the mirror's `status IN ('sent','dispatched')`. Cancel wins until the claim, then answers `409 not_cancellable`. `dispatching` is written before the side effect, so a crash cannot double-send: a connector becomes `unknown`, while SMS is requeued because `sched:<id>` makes the enqueue idempotent |
 
 ## Auth
 

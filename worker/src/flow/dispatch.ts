@@ -15,6 +15,7 @@ import type { Env } from "../index";
 import { runFlow } from "./engine";
 import { enqueueOutboundCommand, isOtpOrPinMessage, persistOutboundMessage } from "../lib/commands";
 import { isBlockedWebhookHost } from "../lib/flow-ir";
+import { signOutboundRequest } from "../lib/outbound-webhook";
 import { getChannelPlugin } from "../channels";
 
 export interface AcceptedMessage {
@@ -466,15 +467,24 @@ export async function dispatchFlows(
             executedWebhookOrDelay = true;
           } else {
             try {
-              await fetch(action.url, {
-                method: "POST",
-                headers: {
+              const bodyString = action.body || "{}";
+              // Sign here, not at enqueue: this branch has no queue wait, but the
+              // timestamp must still be minted immediately before the request.
+              const headers = await signOutboundRequest(
+                env,
+                action.url,
+                {
                   "Content-Type": "application/json",
                   "User-Agent": "DakFlare-Worker/7.0",
                   "X-Dakflare-Device": deviceId,
                   "X-Dakflare-Flow": workflow.id,
                 },
-                body: action.body || "{}",
+                bodyString
+              );
+              await fetch(action.url, {
+                method: "POST",
+                headers,
+                body: bodyString,
                 redirect: "manual",
                 signal: AbortSignal.timeout(10_000),
               });

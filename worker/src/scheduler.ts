@@ -37,6 +37,7 @@ import {
   deferScheduled,
   deterministicJitterMs,
   finalizeScheduled,
+  isPeerOptedOut,
   nextAllowedInstant,
   recoverStale,
   skipScheduled,
@@ -191,12 +192,7 @@ export class Scheduler extends DurableObject<Env> {
           continue;
         }
 
-        const contact = await this.env.DB.prepare(
-          `SELECT opt_out FROM contacts WHERE channel = ? AND peer = ?`
-        )
-          .bind(row.channel, row.to_peer)
-          .first<{ opt_out: number }>();
-        if (contact !== null && contact.opt_out === 1) {
+        if (await isPeerOptedOut(this.env.DB, row.channel, row.to_peer)) {
           await skipScheduled(this.env.DB, row.id, "skipped_opt_out", "recipient opted out", now);
           continue;
         }

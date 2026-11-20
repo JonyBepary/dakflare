@@ -58,6 +58,131 @@ export function statusAdvances(from: ScheduledStatus, to: ScheduledStatus): bool
 }
 
 /* ------------------------------------------------------------------------- *
+ * Carrier receipt mirror
+ * ------------------------------------------------------------------------- */
+
+/** One entry of the Durable Object's `applied_updates` list. */
+export interface AppliedUpdate {
+  command_id: string;
+  status: string;
+  error_code?: string;
+  error_message?: string;
+}
+
+/**
+ * The reason stored on a failed scheduled row.
+ *
+ * The handset reports `error_code` and `error_message` separately; the contract
+ * already caps the message at 280 characters, and this column is
+ * operator-facing prose, so the join is capped at 200. `EXPIRED` has no carrier
+ * reason of its own, so it gets a literal one.
+ */
+function deliveryError(update: AppliedUpdate): string {
+  if (update.status === "EXPIRED") return "expired";
+  const combined = [update.error_code, update.error_message].filter(Boolean).join(": ");
+  return combined === "" ? "failed" : combined.slice(0, 200);
+}
+
+/**
+ * One statement that applies a transport outcome to a scheduled row.
+ *
+ * A scheduled row is keyed by `(channel, dispatch_ref)`: for SMS the Scheduler
+ * stores the command id (the row's UUID); for a connector it stores the
+ * platform's message id (`result.channelMessageId`). The `status IN
+ * ('sent','dispatched')` guard is the whole decision: a cancellation, a skip, a
+ * failure or a delivery that is already recorded is never rewritten, so a late
+ * `sent` or a duplicate receipt cannot walk a row backwards.
+ *
+ * Exported so the SMS receipt route and the multi-channel ingest consumer apply
+ * the same rule rather than two copies that can drift.
+ */
+export function mirrorScheduledStatus(
+  db: D1Database,
+  channel: string,
+  dispatchRef: string,
+  outcome: "sent" | "delivered" | "failed",
+  now = Date.now(),
+  error?: string | null
+): D1PreparedStatement {
+  if (outcome === "delivered") {
+    return db
+      .prepare(
+        `UPDATE scheduled_messages
+            SET status = 'delivered',
+                delivered_at = ?,
+                sent_at = COALESCE(sent_at, ?),
+                updated_at = ?
+          WHERE channel = ?
+            AND dispatch_ref = ?
+            AND status IN ('sent', 'dispatched')`
+      )
+      .bind(now, now, now, channel, dispatchRef);
+  }
+
+  if (outcome === "sent") {
+    return db
+      .prepare(
+        `UPDATE scheduled_messages
+            SET status = 'sent',
+                sent_at = COALESCE(sent_at, ?),
+                updated_at = ?
+          WHERE channel = ?
+            AND dispatch_ref = ?
+            AND status IN ('sent', 'dispatched')`
+      )
+      .bind(now, now, channel, dispatchRef);
+  }
+
+  const reason = error === undefined || error === null || error.trim() === ""
+    ? "failed"
+    : error.slice(0, 200);
+  return db
+    .prepare(
+      `UPDATE scheduled_messages
+          SET status = 'failed',
+              last_error = ?,
+              updated_at = ?
+        WHERE channel = ?
+          AND dispatch_ref = ?
+          AND status IN ('sent', 'dispatched')`
+    )
+    .bind(reason, now, channel, dispatchRef);
+}
+
+/**
+ * Statements that copy SMS carrier receipts onto the scheduled row.
+ *
+ * The `messages` mirror records what the console shows per message; this is the
+ * scheduled lifecycle's own outcome. The row is found by `dispatch_ref`, which
+ * the Scheduler sets to the command id for an SMS send (the row's UUID), and
+ * the caller adds these to the same `env.DB.batch()` as the message mirror so
+ * one receipt updates both surfaces together.
+ */
+export function mirrorScheduledDelivery(
+  db: D1Database,
+  _deviceId: string,
+  updates: AppliedUpdate[],
+  now = Date.now()
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
+
+  for (const update of updates) {
+    if (update.status === "DELIVERED") {
+      statements.push(mirrorScheduledStatus(db, "sms", update.command_id, "delivered", now));
+      continue;
+    }
+
+    if (update.status === "FAILED" || update.status === "EXPIRED") {
+      statements.push(
+        mirrorScheduledStatus(db, "sms", update.command_id, "failed", now, deliveryError(update))
+      );
+    }
+  }
+
+  return statements;
+}
+
+/* ------------------------------------------------------------------------- *
  * Peers
  * ------------------------------------------------------------------------- */
 
@@ -85,6 +210,75 @@ export function normalisePeer(channel: string, peer: string): string | null {
   const trimmed = peer.trim();
   if (trimmed.length < 1 || trimmed.length > 256) return null;
   return trimmed;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Opt-out keywords
+ * ------------------------------------------------------------------------- */
+
+export type OptOutAction = "stop" | "start";
+
+/**
+ * The carrier keyword set, interpreted per the CTIA conventions.
+ *
+ * The match is the whole trimmed body, case-insensitive, and nothing else: a
+ * sentence that happens to contain "stop" is a message, not a subscription
+ * command. `UNSUBSCRIBE`, `CANCEL`, `END` and `QUIT` are the other standard
+ * opt-out words, and `UNSTOP` is the standard resubscribe companion to STOP.
+ */
+const STOP_KEYWORDS: ReadonlySet<string> = new Set([
+  "STOP",
+  "UNSUBSCRIBE",
+  "CANCEL",
+  "END",
+  "QUIT",
+]);
+const START_KEYWORDS: ReadonlySet<string> = new Set(["START", "UNSTOP"]);
+
+export function smsOptOutAction(body: string): OptOutAction | null {
+  const normalized = body.trim().toUpperCase();
+  if (STOP_KEYWORDS.has(normalized)) return "stop";
+  if (START_KEYWORDS.has(normalized)) return "start";
+  return null;
+}
+
+/** Whether the audience row for `(channel, peer)` is opted out. */
+export async function isPeerOptedOut(
+  db: D1Database,
+  channel: string,
+  peer: string
+): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT opt_out FROM contacts WHERE channel = ? AND peer = ?`)
+    .bind(channel, peer)
+    .first<{ opt_out: number }>();
+  return row !== null && row.opt_out === 1;
+}
+
+/**
+ * The contacts upsert a STOP/START keyword performs.
+ *
+ * An audience row may not exist yet: the recipient texted us, so they are a
+ * peer the operator can message. The insert creates that row, and the
+ * `ON CONFLICT` arm only touches the flag and its timestamp, preserving tags,
+ * attrs and the operator's chosen timezone. Exported so the incoming route and
+ * its tests share one statement.
+ */
+export function optOutContactStatement(
+  db: D1Database,
+  peer: string,
+  action: OptOutAction,
+  now: number
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO contacts
+         (id, channel, peer, name, attrs_json, tags_json, timezone, opt_out, created_at, updated_at)
+       VALUES (?, 'sms', ?, NULL, '{}', '[]', 'UTC', ?, ?, ?)
+       ON CONFLICT(channel, peer) DO UPDATE SET
+         opt_out = excluded.opt_out, updated_at = excluded.updated_at`
+    )
+    .bind(crypto.randomUUID(), peer, action === "stop" ? 1 : 0, now, now);
 }
 
 /* ------------------------------------------------------------------------- *

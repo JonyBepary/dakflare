@@ -31,6 +31,7 @@
 import type { Env } from "../index";
 import type { NormalizedChannelEvent } from "./connection-do";
 import { whatsappMessageIdFromEventId } from "./whatsapp-cloud";
+import { mirrorScheduledStatus } from "../lib/scheduled";
 
 /** D1's documented ceiling: 100 bound parameters in a single statement. */
 export const MAX_BOUND_PARAMS = 100;
@@ -206,6 +207,17 @@ export async function consumeIngestBatch(
           state
         )
       );
+
+      // The same receipt advances the scheduled row that produced this message.
+      // `localId` is the platform message id the Scheduler stored as
+      // `dispatch_ref`; `read`/`played`/`seen` already folded to `delivered`
+      // above. `queued` is not a scheduled outcome, so it only touches the
+      // per-message record.
+      if (state !== "queued") {
+        statements.push(
+          mirrorScheduledStatus(env.DB, event.channel, localId, state, now, event.errorCode)
+        );
+      }
     }
   }
 

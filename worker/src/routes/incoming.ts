@@ -38,6 +38,11 @@ import { RE_WORKFLOW_ID } from "../lib/workflow";
 import { parseAcks } from "../lib/acks";
 import { computeCommandLifecycle } from "../lib/canonical-lifecycle";
 import {
+  normalisePeer,
+  optOutContactStatement,
+  smsOptOutAction,
+} from "../lib/scheduled";
+import {
   MAX_BODY_CHARS,
   MAX_FCM_TOKEN_CHARS,
   MAX_ID_CHARS,
@@ -324,6 +329,20 @@ export async function handleIncomingBatch(
   let accepted = 0;
   let duplicates = 0;
   if (validated.length > 0) {
+    // A STOP/START body is a subscription command, not just a message. The
+    // contact upsert is appended for EVERY inbound keyword row, including one
+    // whose message insert is deduped, so replaying an upload repairs a flag
+    // that was lost rather than silently keeping the wrong state.
+    const optOutRows: Array<{ peer: string; action: "stop" | "start" }> = [];
+    for (const message of validated) {
+      if (message.direction !== "in") continue;
+      const action = smsOptOutAction(message.body);
+      if (action === null) continue;
+      const peer = normalisePeer("sms", message.peer);
+      if (peer === null) continue;
+      optOutRows.push({ peer, action });
+    }
+
     // Daily row budget, checked BEFORE the write. D1's write allowance is shared by
     // every device in the deployment, so a single looping device must not be able
     // to spend it all. A refusal is final for today: the rows are not written and
@@ -334,7 +353,7 @@ export async function handleIncomingBatch(
       reservation = await stub.fetch("https://do/__reserve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: validated.length }),
+        body: JSON.stringify({ rows: validated.length + optOutRows.length }),
       });
     } catch (error) {
       console.error(`[incoming] write-budget reservation failed: ${String(error)}`);
@@ -388,31 +407,33 @@ export async function handleIncomingBatch(
     );
     let results: D1Result[];
     try {
-      results = await env.DB.batch(
-        validated.map((m) =>
-          m.direction === "in"
-            ? inboundStmt.bind(
-                m.id,
-                deviceId,
-                m.localId,
-                m.direction,
-                m.peer,
-                m.body,
-                m.receivedAt,
-                m.autoReply
-              )
-            : outboundStmt.bind(
-                m.id,
-                deviceId,
-                m.localId,
-                m.peer,
-                m.body,
-                m.receivedAt,
-                m.replyState,
-                m.replyError
-              )
-        )
+      const statements: D1PreparedStatement[] = validated.map((m) =>
+        m.direction === "in"
+          ? inboundStmt.bind(
+              m.id,
+              deviceId,
+              m.localId,
+              m.direction,
+              m.peer,
+              m.body,
+              m.receivedAt,
+              m.autoReply
+            )
+          : outboundStmt.bind(
+              m.id,
+              deviceId,
+              m.localId,
+              m.peer,
+              m.body,
+              m.receivedAt,
+              m.replyState,
+              m.replyError
+            )
       );
+      for (const row of optOutRows) {
+        statements.push(optOutContactStatement(env.DB, row.peer, row.action, now));
+      }
+      results = await env.DB.batch(statements);
     } catch (error) {
       // A thrown batch is a storage fault, not a client error. 503 tells the device
       // to retry, and `(device_id, local_id)` makes that retry idempotent — unlike
@@ -422,7 +443,9 @@ export async function handleIncomingBatch(
     }
     const acceptedMessages: AcceptedMessage[] = [];
     const acceptedInbound: AcceptedInbound[] = [];
-    for (let i = 0; i < results.length; i++) {
+    // The batch also carries one contacts upsert per keyword row; those results
+    // follow the messages and must not be counted as messages.
+    for (let i = 0; i < validated.length; i++) {
       // `meta.changes` is 0 when an inbound `DO NOTHING` skipped the row, or
       // when an outbound upsert matched the same state it already held.
       if ((results[i].meta?.changes ?? 0) > 0) {

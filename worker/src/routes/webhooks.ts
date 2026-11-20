@@ -26,6 +26,12 @@ import { assertHuman } from "../lib/authority";
 import { err } from "../lib/errors";
 import { readBodyBounded } from "../lib/body";
 import { ASSISTANT_OBJECT_NAME } from "../lib/agent-runtime";
+import { isBlockedWebhookHost } from "../lib/flow-ir";
+import {
+  OUTBOUND_SIGNATURE_HEADER,
+  OUTBOUND_TIMESTAMP_HEADER,
+  signOutboundWebhook,
+} from "../lib/outbound-webhook";
 
 /** A webhook body is an event, not a batch upload. */
 export const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
@@ -257,6 +263,17 @@ export async function handleWebhookCreate(
     );
   }
 
+  const kind = body.kind === undefined ? "inbound" : body.kind;
+  if (kind !== "inbound" && kind !== "outbound") {
+    return Response.json(
+      { error: "bad_request", message: "kind must be 'inbound' or 'outbound'" },
+      { status: 400 }
+    );
+  }
+  if (kind === "outbound") {
+    return createOutboundWebhook(env, actor, name, body);
+  }
+
   const secret = randomHex(32);
   const secretHash = await sha256Hex(secret);
   const sealed = await sealSecret(env, secret);
@@ -296,17 +313,238 @@ export async function handleWebhookCreate(
   );
 }
 
-/** `GET /v1/admin/webhooks` — never the secret or its hash. */
-export async function handleWebhookList(env: Env, actor: AdminActor): Promise<Response> {
+/**
+ * Create an outbound endpoint.
+ *
+ * The URL is validated here as well as at dispatch: a row that can never be
+ * authorised should not exist, and a test ping must not be able to point the
+ * Worker at a private address. `secret_ring` stays empty because outbound
+ * signing uses the sealed single secret, not the legacy dual-ring.
+ */
+async function createOutboundWebhook(
+  env: Env,
+  actor: AdminActor,
+  name: string,
+  body: Record<string, unknown>
+): Promise<Response> {
+  const targetUrl = typeof body.target_url === "string" ? body.target_url.trim() : "";
+  if (targetUrl === "") {
+    return Response.json(
+      { error: "bad_url", message: "target_url is required for an outbound webhook" },
+      { status: 400 }
+    );
+  }
+  let protocol = "";
+  try {
+    protocol = new URL(targetUrl).protocol;
+  } catch {
+    return Response.json({ error: "bad_url", message: "target_url is not a valid URL" }, { status: 400 });
+  }
+  if (protocol !== "https:" || isBlockedWebhookHost(targetUrl)) {
+    return Response.json(
+      { error: "bad_url", message: "target_url must be a public https URL" },
+      { status: 400 }
+    );
+  }
+
+  const events =
+    body.events === undefined
+      ? []
+      : Array.isArray(body.events)
+        ? body.events.filter((event): event is string => typeof event === "string").slice(0, 50)
+        : null;
+  if (events === null) {
+    return Response.json(
+      { error: "bad_request", message: "events must be an array of strings" },
+      { status: 400 }
+    );
+  }
+
+  let customHeaders: Record<string, string> | null = null;
+  if (body.custom_headers !== undefined) {
+    if (
+      body.custom_headers === null ||
+      typeof body.custom_headers !== "object" ||
+      Array.isArray(body.custom_headers)
+    ) {
+      return Response.json(
+        { error: "bad_request", message: "custom_headers must be an object of strings" },
+        { status: 400 }
+      );
+    }
+    customHeaders = {};
+    for (const [header, value] of Object.entries(body.custom_headers as Record<string, unknown>)) {
+      if (typeof value === "string") customHeaders[header] = value;
+    }
+  }
+
+  const timeoutMs = readBoundedInt(body.timeout_ms, 10_000, 1_000, 60_000);
+  if (timeoutMs === null) {
+    return Response.json(
+      { error: "bad_request", message: "timeout_ms must be an integer between 1000 and 60000" },
+      { status: 400 }
+    );
+  }
+  const maxAttempts = readBoundedInt(body.max_attempts, 8, 1, 20);
+  if (maxAttempts === null) {
+    return Response.json(
+      { error: "bad_request", message: "max_attempts must be an integer between 1 and 20" },
+      { status: 400 }
+    );
+  }
+  const deviceId =
+    typeof body.device_id === "string" && body.device_id.trim() !== ""
+      ? body.device_id.trim()
+      : null;
+
+  const secret = randomHex(32);
+  const secretHash = await sha256Hex(secret);
+  const sealed = await sealSecret(env, secret);
+  if (sealed === null) {
+    return Response.json(
+      {
+        error: "webhook_secret_unavailable",
+        message:
+          "WEBHOOK_SECRET_KEY is required to seal a webhook secret; set it with `cf workers secrets update WEBHOOK_SECRET_KEY --type secret_text`",
+      },
+      { status: 503 }
+    );
+  }
+
+  const id = `wh_${randomHex(12)}`;
+  const createdAt = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO webhooks
+       (id, name, vertical, target_url, enabled, events_json, secret_ring,
+        custom_headers_json, timeout_ms, max_attempts, device_id,
+        created_at, updated_at, kind, secret_hash, secret_sealed, created_by,
+        last_delivery_at)
+     VALUES (?, ?, 'generic', ?, 1, ?, '', ?, ?, ?, ?, ?, ?, 'outbound', ?, ?, ?, NULL)`
+  )
+    .bind(
+      id,
+      name,
+      targetUrl,
+      JSON.stringify(events),
+      customHeaders === null ? null : JSON.stringify(customHeaders),
+      timeoutMs,
+      maxAttempts,
+      deviceId,
+      createdAt,
+      createdAt,
+      secretHash,
+      sealed,
+      actor.label
+    )
+    .run();
+
+  return Response.json(
+    {
+      id,
+      name,
+      kind: "outbound",
+      target_url: targetUrl,
+      secret,
+      enabled: true,
+      events,
+      custom_headers: customHeaders ?? {},
+      timeout_ms: timeoutMs,
+      max_attempts: maxAttempts,
+      created_at: createdAt,
+      created_by: actor.label,
+    },
+    { status: 201, headers: { "Cache-Control": "no-store" } }
+  );
+}
+
+function readBoundedInt(value: unknown, fallback: number, min: number, max: number): number | null {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    return null;
+  }
+  return value;
+}
+
+function parseStringArray(value: unknown): string[] {
+  try {
+    const parsed: unknown = JSON.parse(typeof value === "string" ? value : "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseHeaders(value: unknown): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(typeof value === "string" ? value : "{}");
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [header, headerValue] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof headerValue === "string") out[header] = headerValue;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+interface OutboundListRow {
+  id: string;
+  name: string;
+  kind: string;
+  target_url: string;
+  enabled: number;
+  events_json: string;
+  custom_headers_json: string | null;
+  timeout_ms: number;
+  max_attempts: number;
+  created_by: string | null;
+  created_at: number;
+  last_delivery_at: number | null;
+  secret_set: number;
+}
+
+/**
+ * `GET /v1/admin/webhooks?kind=outbound` (default inbound).
+ *
+ * Never the secret or its hash: `secret_set` says only whether one exists, so
+ * a console can show "signing configured" without carrying key material.
+ */
+export async function handleWebhookList(
+  env: Env,
+  actor: AdminActor,
+  kind: "inbound" | "outbound" = "inbound"
+): Promise<Response> {
   const refused = adminRefusal(actor);
   if (refused !== null) return refused;
 
   const rows = await env.DB.prepare(
-    `SELECT id, name, enabled, created_by, created_at, last_delivery_at
-       FROM webhooks WHERE kind = 'inbound'
+    `SELECT id, name, kind, target_url, enabled, events_json, custom_headers_json,
+            timeout_ms, max_attempts, created_by, created_at, last_delivery_at,
+            CASE WHEN secret_sealed IS NULL THEN 0 ELSE 1 END AS secret_set
+       FROM webhooks WHERE kind = ?
        ORDER BY created_at DESC LIMIT 200`
-  ).all<Omit<WebhookRow, "secret_hash" | "secret_sealed">>();
-  return json({ webhooks: rows.results ?? [] });
+  )
+    .bind(kind)
+    .all<OutboundListRow>();
+
+  const webhooks = (rows.results ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    target_url: row.target_url,
+    enabled: Number(row.enabled) === 1,
+    events: parseStringArray(row.events_json),
+    custom_headers: parseHeaders(row.custom_headers_json),
+    timeout_ms: row.timeout_ms,
+    max_attempts: row.max_attempts,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    last_delivery_at: row.last_delivery_at,
+    secret_set: Number(row.secret_set) === 1,
+  }));
+
+  return json({ webhooks });
 }
 
 /** `DELETE /v1/admin/webhooks/:id` — the delivery rows cascade. */
@@ -318,9 +556,104 @@ export async function handleWebhookDelete(
   const refused = adminRefusal(actor);
   if (refused !== null) return refused;
 
-  const result = await env.DB.prepare(`DELETE FROM webhooks WHERE id = ? AND kind = 'inbound'`).bind(id).run();
+  const result = await env.DB.prepare(`DELETE FROM webhooks WHERE id = ?`).bind(id).run();
   if (Number(result.meta?.changes ?? 0) === 0) return json({ error: "not_found" }, 404);
   return json({ deleted: true, id });
+}
+
+/**
+ * `POST /v1/admin/webhooks/:id/test`.
+ *
+ * One signed POST with the stored secret. The response reports the status and
+ * latency but never the secret or the body. `ok` tracks the receiver's status,
+ * so a 500 is a failed test rather than a transport error.
+ */
+export async function handleWebhookTest(
+  env: Env,
+  id: string,
+  actor: AdminActor
+): Promise<Response> {
+  const refused = adminRefusal(actor);
+  if (refused !== null) return refused;
+
+  const row = await env.DB.prepare(
+    `SELECT id, kind, target_url, secret_sealed, custom_headers_json, timeout_ms
+       FROM webhooks WHERE id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      kind: string;
+      target_url: string;
+      secret_sealed: string | null;
+      custom_headers_json: string | null;
+      timeout_ms: number;
+    }>();
+  if (row === null) return json({ error: "not_found" }, 404);
+  if (row.kind !== "outbound") {
+    return Response.json(
+      { error: "conflict", message: "only an outbound webhook can be tested" },
+      { status: 409 }
+    );
+  }
+  if (isBlockedWebhookHost(row.target_url)) {
+    return Response.json(
+      { error: "bad_url", message: "target_url is not a public https URL" },
+      { status: 400 }
+    );
+  }
+
+  const secret = await openSecret(env, row.secret_sealed);
+  if (secret === null) {
+    return Response.json(
+      {
+        error: "webhook_secret_unavailable",
+        message: "the signing secret could not be opened",
+      },
+      { status: 503 }
+    );
+  }
+
+  const now = Date.now();
+  const timestampSeconds = Math.floor(now / 1000);
+  const body = JSON.stringify({
+    event: "test",
+    webhook_id: row.id,
+    sent_at: new Date(now).toISOString(),
+  });
+  const signature = await signOutboundWebhook(secret, timestampSeconds, body);
+  const headers: Record<string, string> = {
+    ...parseHeaders(row.custom_headers_json),
+    "Content-Type": "application/json",
+    "User-Agent": "DakFlare-Worker/7.0",
+    [OUTBOUND_TIMESTAMP_HEADER]: String(timestampSeconds),
+    [OUTBOUND_SIGNATURE_HEADER]: signature,
+  };
+
+  const started = Date.now();
+  try {
+    const timeout = Math.min(Math.max(row.timeout_ms ?? 10_000, 1_000), 60_000);
+    const response = await fetch(row.target_url, {
+      method: "POST",
+      headers,
+      body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeout),
+    });
+    return json({
+      ok: response.ok,
+      status: response.status,
+      latency_ms: Date.now() - started,
+      signed: true,
+    });
+  } catch {
+    return json({
+      ok: false,
+      status: 0,
+      latency_ms: Date.now() - started,
+      signed: true,
+    });
+  }
 }
 
 /** `GET /v1/admin/webhooks/:id/deliveries` — the last 20, newest first. */
