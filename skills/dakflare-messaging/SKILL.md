@@ -60,6 +60,33 @@ dakflare status <command-id> --wait 60s --agent
 message, which is **not** a claim that it arrived — no carrier report is guaranteed. Do
 not tell a user "delivered" on the strength of `SENT`.
 
+## Scheduling and templates
+
+A send can be queued instead of handed to the radio now:
+
+```bash
+dakflare schedule create --target <device_id> --to +8801540196080 \
+  --body "reminder" --at 2026-11-20T18:30:00+06:00
+dakflare schedule list --status scheduled --agent
+dakflare schedule cancel <scheduled_id> --yes
+```
+
+`--channel` defaults to `sms` (a device target); any other channel is a connector id.
+The Scheduler applies the target's quiet hours and hourly cap, so the row may move later
+than `--at`; it is not lost. `cancel` succeeds only while the row is still `scheduled`.
+After the claim it answers `409 not_cancellable`, which means the message is already on
+its way.
+
+Templates render `{{name | fallback}}`; `contacts import` reads RFC-4180 CSV:
+
+```bash
+dakflare templates create --name order_ready --body "Hi {{1}}, order {{2}} is ready." --channel whatsapp
+dakflare contacts import audience.csv
+```
+
+In the queue, `sent` means the transport accepted the message, not that the handset
+delivered it. Delivery is reported on the message row, not the scheduled row.
+
 ## The one mistake to avoid
 
 Treating exit 75 as a failure and re-running `send`. It means the command is still

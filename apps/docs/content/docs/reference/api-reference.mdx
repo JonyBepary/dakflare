@@ -172,3 +172,12 @@ Content-Type: application/json
 - `POST /v1/channels/:channel/send` — Send outbound message via `telegram` or `whatsapp`
 - `POST /v1/admin/bootstrap`, `POST /v1/admin/invites`, `GET /v1/admin/invites`, `DELETE /v1/admin/invites/:id`, `POST /v1/admin/auth/reset-user`, `POST /v1/admin/auth/rotate-pepper`
 - `GET /source` — `302` redirect to AGPL-3.0 §13 source repository (`SOURCE_URL`)
+
+## 7. Templates, Audience & Scheduling
+
+- `GET` & `POST /v1/admin/templates`, `DELETE /v1/admin/templates/:id`, `POST /v1/admin/templates/:id/preview` — reusable `{{var | fallback}}` bodies, variable extraction, rendered preview with GSM-7/UCS-2 segments
+- `GET /v1/admin/contacts`, `POST /v1/admin/contacts/import` — the audience list; import accepts RFC-4180 `text/csv` or `{contacts: [...]}` and upserts in 50-row batches
+- `GET` & `POST /v1/scheduled`, `DELETE /v1/scheduled/:id` — the paced queue; a cancel returns `409 not_cancellable` once the Scheduler has claimed the row
+- `GET /v1/admin/pacing`, `PUT /v1/admin/pacing/:targetType/:targetId` — per-device or per-connector interval, jitter, hourly cap, quiet hours and timezone
+- `POST /v1/admin/connectors/:id/register-webhook` — Telegram one-click `setWebhook`; the bot token is opened server-side and never returned
+
