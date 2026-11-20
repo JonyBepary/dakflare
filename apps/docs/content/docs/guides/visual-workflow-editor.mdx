@@ -3,6 +3,19 @@ title: Visual Workflow Editor & WebMCP
 description: Design and simulate dakflare.flow/v2 pipelines in the SvelteKit console and expose live graph tools to browser agents via WebMCP.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The canvas"
+  title="Edit the graph, not the pixels"
+  lede="Shape the graph in Steps, inspect it on the Map, and let an agent propose the patch."
+  image="/screenshots/page-workflow-editor-1440.webp"
+  mobileImage="/screenshots/page-workflow-editor-390.webp"
+  alt="The workflow editor in Steps view: trigger, extract, condition, switch, webhook, send SMS and delay, with a saved v3 badge."
+  facts={[{ label: "Views", value: "Steps + Map" }, { label: "Patch", value: "staged ghost" }, { label: "Agents", value: "WebMCP" }, { label: "Storage", value: "graph-native" }]}
+  caption="The bKash confirmation flow in Steps view. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 The workflow editor at `/admin/workflows/edit` edits canonical `dakflare.flow/v2` documents without coupling storage to canvas pixels.
 
 ## Editor Surfaces

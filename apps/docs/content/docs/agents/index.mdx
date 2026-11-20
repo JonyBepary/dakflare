@@ -3,6 +3,16 @@ title: Docs for Agents
 description: Machine-readable endpoints, llms.txt indexes, per-page Markdown content negotiation, OpenAPI 3.1, SKILL.md, and the Docs MCP server for AI coding agents.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The interface"
+  title="The docs are a machine surface too"
+  lede="The index, the bundle, the schema, and the MCP endpoint, from one source."
+  steps={["GET /llms.txt", "GET /llms-full.txt", "GET /openapi.json", "POST /mcp"]}
+  facts={[{ label: "Index", value: "llms.txt" }, { label: "Bundle", value: "llms-full.txt" }, { label: "Schema", value: "openapi.json" }, { label: "Protocol", value: "MCP" }]}
+/>
+{/* llms-ignore:end */}
+
 DakFlare treats AI coding agents (Claude Code, Cursor, Windsurf, OpenCode, and autonomous workflows) as a first-class audience served from the same source of truth as the human documentation.
 
 ## Machine-Readable Endpoints

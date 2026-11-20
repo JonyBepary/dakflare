@@ -4,6 +4,7 @@ import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { OperationItem } from "fumadocs-openapi";
 import { source, openapi } from "@/lib/source";
 import { PageActions } from "@/components/PageActions";
+import { PageBanner } from "@/components/PageBanner";
 import { OpenAPIPage } from "@/components/OpenAPIPage";
 
 import { OPENAPI_SCHEMA_ID as DEFAULT_SCHEMA_ID } from "@/lib/source";
@@ -31,6 +32,7 @@ export default async function Page(props: { params: Promise<{ slug?: string[] }>
         <MDX
           components={{
             ...defaultMdxComponents,
+            PageBanner,
             APIPage: (apiProps: APIPageMdxProps) => (
               <OpenAPIPage
                 document={apiProps.document ?? DEFAULT_SCHEMA_ID}

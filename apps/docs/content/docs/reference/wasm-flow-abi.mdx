@@ -3,6 +3,16 @@ title: Wasm Flow ABI & IR v2
 description: Hand-rolled WebAssembly C ABI for simulator/flow-wasm and complete dakflare.flow/v2 intermediate representation specification.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The boundary"
+  title="A C ABI small enough to audit"
+  lede="The whole boundary is four functions and a versioned document."
+  code={{ label: "flow.wasm EXPORTS", lines: ["df_alloc(len) -> ptr", "df_eval(ptr, len) -> ptr", "df_free(ptr, len)", "// no wasm-bindgen, no imports"] }}
+  facts={[{ label: "Target", value: "wasm32" }, { label: "IR", value: "dakflare.flow/v2" }, { label: "Nodes", value: "9" }, { label: "Imports", value: "none" }]}
+/>
+{/* llms-ignore:end */}
+
 DakFlare compiles its pure-Rust flow engine (`simulator/flow`) to `wasm32-unknown-unknown` (`simulator/flow-wasm/build.sh` → `worker/src/wasm/flow.wasm` and `dashboard/static/flow.wasm`) without `wasm-bindgen`, so Cloudflare Workers can instantiate the module synchronously with zero loader glue.
 
 ## Binary Framing Contract

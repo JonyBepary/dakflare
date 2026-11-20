@@ -3,6 +3,16 @@ title: CLI, Bindings & Error Codes
 description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The machine surface"
+  title="One binary, one JSON contract"
+  lede="One binary, one JSON contract, and exit codes a script can branch on."
+  code={{ label: "dakflare capabilities --agent", lines: ["{ \"ok\": true, \"commands\": [", "  { \"name\": \"send\", \"effect\": \"sms.send\" },", "  { \"name\": \"status\", \"effect\": \"read\" }", "] }"] }}
+  facts={[{ label: "Commands", value: "32" }, { label: "Contract", value: "--agent" }, { label: "Exit codes", value: "8" }, { label: "Deps", value: "zero" }]}
+/>
+{/* llms-ignore:end */}
+
 ## `dakflare` CLI Machine Contract
 
 - Zero dependencies, Node 22+, config stored at `~/.config/dakflare/config.json` (mode `600`).

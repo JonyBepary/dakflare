@@ -3,6 +3,16 @@ title: P-256 Identity & Authentication
 description: Hardware-wrapped P-256 device signing, canonical string construction, replay protection, and Better Auth multi-factor operator security.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The proof"
+  title="A signature the Worker can verify, a nonce it cannot reuse"
+  lede="The key never leaves the Keystore; the Worker only sees a signature and a nonce."
+  steps={["Keystore P-256", "Canonical string", "Sign + nonce", "Verify + replay ledger"]}
+  facts={[{ label: "Curve", value: "ECDSA P-256" }, { label: "Key", value: "Android Keystore" }, { label: "Replay", value: "nonce window" }, { label: "Sessions", value: "Better Auth" }]}
+/>
+{/* llms-ignore:end */}
+
 ## Zero Shared Secrets Between Handset and Edge
 
 Every device request is authenticated with asymmetric **ECDSA P-256** (`worker/src/auth/canonical.ts`, `worker/src/auth/ecdsa.ts`):

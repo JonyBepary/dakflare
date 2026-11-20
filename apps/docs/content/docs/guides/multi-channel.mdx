@@ -3,6 +3,19 @@ title: Multi-Channel Connectors
 description: How DakFlare runs official APIs in the Worker and personal sessions on the handset, with per-account Durable Objects, Queue-to-D1 ingestion, sealed credentials, and the edge batch endpoint.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="Two tiers"
+  title="Official APIs in the Worker, personal apps on the phone"
+  lede="The Worker speaks the official APIs; the phone speaks the apps people already use."
+  image="/screenshots/console-channels-1440.webp"
+  mobileImage="/screenshots/console-channels-390.webp"
+  alt="The Channels screen: three connector cards with a Telegram webhook URL and a WhatsApp credential error."
+  facts={[{ label: "Channels", value: "5" }, { label: "Tiers", value: "2" }, { label: "Dedupe", value: "per account" }, { label: "Secrets", value: "sealed" }]}
+  caption="The Channels screen with live connector state. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 DakFlare treats WhatsApp Business Cloud, Telegram, Facebook Messenger, and Instagram as first-class
 mediums beside SMS. There is still no VPS: official APIs run in the Worker, and personal accounts run
 on the paired Android handset. The two paths meet at the same `channel_connectors` table, the same
@@ -86,14 +99,6 @@ only a watermark, not a message id — is never enqueued.
 
 ## Connectors and Credentials
 
-<a href="/screenshots/console-channels-1440.webp">
-  <picture>
-    <source media="(max-width: 700px)" srcSet="/screenshots/console-channels-390.webp" />
-    <img src="/screenshots/console-channels-1440.webp" alt="The Channels screen: three connector cards, a Telegram webhook URL with a copy button, and a WhatsApp credential error." width="1440" height="900" />
-  </picture>
-</a>
-
-*The console's `/admin/channels` screen: one card per platform account, a webhook URL you can copy in one click, and the last refused delivery in plain language.*
 
 
 A connector is one external account. Administration lives on four handlers:

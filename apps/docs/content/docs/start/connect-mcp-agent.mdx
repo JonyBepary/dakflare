@@ -3,6 +3,19 @@ title: Connect an MCP Agent
 description: Mint a scoped dkf_agt_ token, connect Claude Code, Cursor, or OpenCode to DakFlare's Streamable HTTP /mcp endpoint or stdio bridge, and approve a gated SMS send.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="Agent access"
+  title="An agent with a scoped key and a human gate"
+  lede="A scoped token gets an agent in; a time-boxed grant is what lets it send."
+  image="/screenshots/page-assistant-1440.webp"
+  mobileImage="/screenshots/page-assistant-390.webp"
+  alt="The console's Ask panel: a question about a missing receipt answered from this deployment, with the saved transcript and file limits."
+  facts={[{ label: "Token", value: "dkf_agt_" }, { label: "Transport", value: "/mcp or stdio" }, { label: "Gate", value: "TOTP + grant" }, { label: "Scope", value: "bounded" }]}
+  caption="The same assistant runtime an MCP client reaches. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 An AI agent never holds `ADMIN_TOKEN`. Instead, it authenticates with a scoped `dkf_agt_` bearer token whose **scopes** bound what it may attempt and whose **time-boxed authority grants** bound what it may actually execute.
 
 ## Step 1: Mint a Scoped Agent Token

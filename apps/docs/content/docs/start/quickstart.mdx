@@ -3,6 +3,19 @@ title: Quickstart
 description: Provision Cloudflare resources, deploy dakflare-worker, create the owner account, pair one Android handset, and send your first SMS via CLI.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The shortest path"
+  title="From a clean checkout to one delivered SMS"
+  lede="Provision, deploy, pair one handset, and prove the first send end to end."
+  image="/screenshots/page-overview-1440.webp"
+  mobileImage="/screenshots/page-overview-390.webp"
+  alt="The console's Gateway status after a healthy deploy: two phones answering, 284 messages and four rules."
+  facts={[{ label: "Path", value: "CLI-first" }, { label: "Needs", value: "Node 22 + cf" }, { label: "Handset", value: "1" }, { label: "Proof", value: "DELIVERED" }]}
+  caption="Gateway status with the fleet answering. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 This tutorial takes you from a clean checkout to a live DakFlare deployment on your Cloudflare account with one paired Android handset and one verified outbound SMS. Every step is executable from the terminal without dashboard screenshots.
 
 ## Prerequisites
@@ -57,12 +70,12 @@ Sign in to Cloudflare locally and run `dakflare up`:
 ```bash
 cf auth login
 dakflare up --email you@example.com --dry-run   # preview the plan without mutating Cloudflare
-dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 17 migrations, deploy, bootstrap owner
+dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 19 migrations, deploy, bootstrap owner
 ```
 
 What `dakflare up` executes in order:
 1. Finds or creates D1 database `sms_gateway` and KV namespace `KV`, writing their IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
-2. Applies D1 migrations `0001_baseline.sql` through `0017_alert_acknowledged_by.sql`.
+2. Applies D1 migrations `0001_baseline.sql` through `0019_templates_and_scheduling.sql`.
 3. Uploads secrets from `worker/.dev.vars` to `dakflare-worker`.
 4. Builds `dashboard/` into `worker/public/admin` and deploys `dakflare-worker` via `cf deploy`.
 5. Bootstraps the first `owner` account (`POST /v1/admin/bootstrap`) and prints a one-time invite URL.
@@ -121,7 +134,7 @@ Always pass `--idempotency-key` when a retry is possible so a network timeout ne
 ```bash
 dakflare send \
   --device dev63f3953f417d587f \
-  --to +8801540196080 \
+  --to +15550142299 \
   --body "DakFlare edge gateway online" \
   --idempotency-key "quickstart-001" \
   --agent

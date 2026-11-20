@@ -3,6 +3,16 @@ title: REST API Reference
 description: Complete HTTP endpoint reference for DakFlare's device protocol, authentication, admin fleet & messaging, automation, agent analysis, runtime, webhooks, and channels.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The contract"
+  title="Every route, its auth, and the shape it returns"
+  lede="The route, the signature, the body, and the error it can return."
+  code={{ label: "DEVICE → WORKER", lines: ["POST /v1/sms/incoming/batch", "X-Device-Id: dev_px6a_desk_01", "X-Signature: <P-256>", "→ 202 { accepted: 2 }"] }}
+  facts={[{ label: "Paths", value: "34" }, { label: "Operations", value: "41" }, { label: "Spec", value: "3.1" }, { label: "Auth", value: "per surface" }]}
+/>
+{/* llms-ignore:end */}
+
 Machine-readable OpenAPI 3.1.0 specification: [`/openapi.json`](/openapi.json).
 
 ## Authentication Schemes
@@ -85,7 +95,7 @@ Content-Type: application/json
 
 {
   "device_id": "dev63f3953f417d587f",
-  "to": "+8801540196080",
+  "to": "+15550142299",
   "body": "Order AB12CD confirmed.",
   "idempotency_key": "order-ab12cd-confirm"
 }
@@ -115,7 +125,7 @@ Content-Type: application/json
   "approval_request": {
     "id": "apr_01j9x7n0v1w2x3y4",
     "scope": "sms:send:production",
-    "target": { "recipients": ["+8801540196080"] },
+    "target": { "recipients": ["+15550142299"] },
     "requested_at": 1730000000000,
     "expires_at": 1730003600000,
     "ladder_s": [60, 300, 900, 1800, 3600, 86400, 604800, 2592000],

@@ -3,6 +3,16 @@ title: Canonical Glossary
 description: Locked canonical identifiers and nouns across DakFlare's codebase, API, CLI, and documentation to prevent terminology drift.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The nouns"
+  title="The words the code actually uses"
+  lede="The nouns are locked so the API, the CLI, and the console cannot drift apart."
+  code={{ label: "CANONICAL NOUNS", lines: ["handset    dev.dakflare.simulator", "gateway    dakflare-worker", "flow       dakflare.flow/v2", "command    /v1/sms/send → DeviceGateway"] }}
+  facts={[{ label: "Rule", value: "no synonyms" }, { label: "Surfaces", value: "5" }, { label: "Objects", value: "6" }, { label: "Migrations", value: "19" }]}
+/>
+{/* llms-ignore:end */}
+
 Use these exact identifiers across code, API payloads, CLI flags, prompts, and documentation. Never substitute synonyms.
 
 | Canonical Term | Exact Definition | Never Call This |

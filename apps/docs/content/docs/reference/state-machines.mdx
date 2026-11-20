@@ -3,6 +3,19 @@ title: State Machines
 description: Authoritative inventory of DakFlare's guarded, declared, and derived state machines across outbound commands, replies, approvals, grants, agent turns, and auth.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The transitions"
+  title="Every transition has one owner"
+  lede="Each status has one owner and one legal next move."
+  image="/screenshots/page-device-detail-1440.webp"
+  mobileImage="/screenshots/page-device-detail-390.webp"
+  alt="The device detail screen: live status, queue depth, paired date, SIM slot and wake capability."
+  facts={[{ label: "Classes", value: "3" }, { label: "Owner", value: "one predicate" }, { label: "Surfaces", value: "6" }, { label: "Ledger", value: "D1" }]}
+  caption="A device's live state, one of the machines on this page. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 Every state machine in DakFlare is classified by how its transitions are enforced:
 - **Guarded**: One atomic SQL predicate or function owns the transition; no route can bypass it.
 - **Declared**: Schema enumerates valid states, but enforcement lives in route predicates or lacks a writer.

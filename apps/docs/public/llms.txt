@@ -19,12 +19,18 @@
 ## How-To Guides
 
 - [Android Handset & Pairing](/docs/guides/android-node-pairing.md): Build, sign, install, pair, and verify dev.dakflare.simulator with Android Keystore P-256 identity.
-- [Durable Objects, Channels & Routing](/docs/guides/durable-objects-routing.md): Operate DeviceGateway/AuthGuard/AuthorityGuard/AssistantAgent, WS/poll fallback, Telegram/WhatsApp, and DakFlareApi.
+- [Durable Objects, Channels & Routing](/docs/guides/durable-objects-routing.md): Operate the six Durable Objects (DeviceGateway, ChannelConnection, Scheduler, AuthGuard, AuthorityGuard, AssistantAgent), WS/poll fallback, multi-channel routing, and DakFlareApi.
 - [Multi-Channel Connectors](/docs/guides/multi-channel.md): Official APIs in the Worker and personal sessions on the handset, per-account ChannelConnection DOs, Queue-to-D1 ingest, sealed credentials, and the edge batch endpoint.
-- [Service binding](/docs/service-binding.md): Call this deployment from another Worker or a Cloudflare Workflow — the entrypoint, the trust modes, and the retry rule.
 - [Visual Workflow Editor & WebMCP](/docs/guides/visual-workflow-editor.md): Use Steps/Map/Source, PatternSheet Clef auto-tagging, ghost patches, and the 4 browser WebMCP tools.
 - [Agent Authority, Grants & Webhooks](/docs/guides/agent-authority-and-webhooks.md): Configure scopes, 8-rung grant ladder, AssistantAgent autonomy windows, and HMAC-signed webhooks.
-- [Self-Hosting & Production Operations](/docs/guides/self-hosting-production.md): Sync cloudflare.config.ts/wrangler.toml, apply D1 migrations 0001-0017, avoid cf traps, verify and restore.
+- [Self-Hosting & Production Operations](/docs/guides/self-hosting-production.md): Sync cloudflare.config.ts/wrangler.toml, apply D1 migrations 0001-0019, avoid cf traps, verify and restore.
+
+## Service Binding
+
+- [Service binding](/docs/service-binding.md): Call this deployment from another Worker or a Cloudflare Workflow — the entrypoint, the trust modes, and the retry rule.
+- [From another Worker](/docs/service-binding/worker.md): The local consumer interface, typed calls, request() escape hatch, and refusals.
+- [From a Cloudflare Workflow](/docs/service-binding/workflow.md): Use the binding inside a retryable step, and the one rule that makes it safe.
+- [Method reference](/docs/service-binding/reference.md): Every DakFlareApi method, the route it reaches, and whether it needs a credential.
 
 ## Reference
 
@@ -32,7 +38,7 @@
 - [Interactive API Playground](/docs/reference/api-playground.md): Interactive fumadocs-openapi playground backed by /openapi.json.
 - [MCP & WebMCP Tools](/docs/reference/mcp-tools.md): Schemas, scopes, OAuth RFC 9728/8414/8707, elicitation, JSON-RPC errors for 9 MCP tools and 4 WebMCP tools.
 - [Wasm Flow ABI & IR v2](/docs/reference/wasm-flow-abi.md): Hand-rolled C ABI (alloc/dealloc/run_json/validate_json/synthesize_json/layout_json/trace_json) and dakflare.flow/v2 spec.
-- [CLI, Bindings & Error Codes](/docs/reference/cli-and-env.md): All 28 dakflare CLI commands, exit codes (0/1/2/3/4/5/6/75), Cloudflare bindings, env vars, secrets, and 17 §8 errors.
+- [CLI, Bindings & Error Codes](/docs/reference/cli-and-env.md): All 32 dakflare CLI commands, exit codes (0/1/2/3/4/5/6/75), Cloudflare bindings, env vars, secrets, and 17 §8 errors.
 - [State Machines](/docs/reference/state-machines.md): Guarded, declared, and derived state transitions for commands, replies, approvals, grants, turns, and lockouts.
 - [Canonical Glossary](/docs/reference/glossary.md): Locked identifiers (device_id, command_id, local_id, dkf_agt_, ag1_, etc.) with anti-drift rules.
 

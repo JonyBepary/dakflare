@@ -647,7 +647,8 @@ header[class*="grid-area:header"] button {
 }
 
 #nd-page .prose a code,
-#nd-page .prose li > code {
+#nd-page .prose li > code,
+#nd-page .prose :not(pre) > code {
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -1115,7 +1116,223 @@ header[class*="grid-area:header"] button {
 }
 
 /* --------------------------------------------------------------------------
-   12. Motion — one entrance, the console's settle; press and lift on controls
+   12. Page banner — one screen, one promise, three facts
+   --------------------------------------------------------------------------
+   The first visual on a docs page. A real capture on the left (or a flow/code
+   card where a screenshot would explain less), the page's promise and its
+   concrete facts on the right. The call site wraps it in `llms-ignore`, so the
+   machine markdown keeps the prose and drops the picture.
+   -------------------------------------------------------------------------- */
+
+#nd-page .prose .df-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(250px, 1fr);
+  margin: 1.75rem 0 2.75rem;
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-lg);
+  background: var(--df-surface-card);
+  box-shadow: var(--df-shadow-card);
+  overflow: hidden;
+}
+
+#nd-page .prose .df-banner-visual {
+  min-width: 0;
+  background: var(--df-surface-well);
+}
+
+#nd-page .prose .df-banner-shot {
+  display: block;
+  height: 100%;
+}
+
+#nd-page .prose .df-banner-shot img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  border-radius: 0;
+  object-fit: cover;
+  object-position: top left;
+}
+
+#nd-page .prose .df-banner-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 1.5rem 1.6rem;
+  border-left: 1px solid var(--df-border-hairline);
+}
+
+#nd-page .prose .df-banner-kicker {
+  font-family: var(--df-p-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--df-accent-text);
+}
+
+#nd-page .prose .df-banner-title {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: 1.25rem;
+  font-weight: 750;
+  line-height: 1.22;
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose .df-banner-lede {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--df-text-secondary);
+}
+
+#nd-page .prose .df-banner-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem 1rem;
+  margin: 0.35rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--df-border-hairline);
+}
+
+#nd-page .prose .df-banner-facts div {
+  min-width: 0;
+}
+
+#nd-page .prose .df-banner-facts dt {
+  font-family: var(--df-p-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+#nd-page .prose .df-banner-facts dd {
+  margin: 0.15rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose .df-banner-caption {
+  margin: auto 0 0;
+  padding-top: 0.65rem;
+  font-family: var(--df-p-font-mono);
+  font-size: 9px;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
+  color: var(--df-text-meta);
+}
+
+/* A page with no screen: the visual becomes a short numbered flow. */
+#nd-page .prose .df-banner-steps {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.45rem;
+  height: 100%;
+  margin: 0;
+  padding: 1.5rem;
+  list-style: none;
+}
+
+#nd-page .prose .df-banner-steps li {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--df-border-hairline);
+  border-radius: var(--df-p-radius-sm);
+  background: var(--df-surface-page);
+  font-family: var(--df-p-font-mono);
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: var(--df-text-primary);
+}
+
+#nd-page .prose .df-banner-steps li span {
+  flex: none;
+  font-size: 0.64rem;
+  color: var(--df-accent-text);
+}
+
+/* A page whose subject is a request: a quiet terminal card. */
+#nd-page .prose .df-banner-code {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.55rem;
+  height: 100%;
+  padding: 1.35rem 1.4rem;
+}
+
+#nd-page .prose .df-banner-code-label {
+  font-family: var(--df-p-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--df-text-meta);
+}
+
+#nd-page .prose .df-banner-code pre {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: auto;
+  font-family: var(--df-p-font-mono);
+  font-size: 0.74rem;
+  line-height: 1.65;
+  color: var(--df-text-primary);
+  white-space: pre-wrap;
+}
+
+#nd-page .prose .df-banner-code code {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+
+/* Facts-only banners (glossary, a page whose subject is a list). */
+#nd-page .prose .df-banner-text {
+  grid-template-columns: 1fr;
+}
+
+#nd-page .prose .df-banner-text .df-banner-copy {
+  border-left: 0;
+}
+
+@media (max-width: 900px) {
+  #nd-page .prose .df-banner {
+    grid-template-columns: 1fr;
+    margin: 1.25rem 0 2rem;
+  }
+
+  #nd-page .prose .df-banner-copy {
+    padding: 1.15rem 1.2rem 1.3rem;
+    border-left: 0;
+    border-top: 1px solid var(--df-border-hairline);
+  }
+
+  #nd-page .prose .df-banner-shot img {
+    height: auto;
+  }
+
+  #nd-page .prose .df-banner-steps {
+    padding: 1rem;
+  }
+
+  #nd-page .prose .df-banner-code {
+    padding: 1rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   13. Motion — one entrance, the console's settle; press and lift on controls
    -------------------------------------------------------------------------- */
 
 @keyframes df-settle {

@@ -1,15 +1,27 @@
 ---
 title: Durable Objects, Channels & Routing
-description: Operate DakFlare's four Durable Objects, WebSocket vs. polling delivery, idempotent sends, Telegram/WhatsApp Cloud channels, and DakFlareApi service bindings.
+description: Operate DakFlare's six Durable Objects, WebSocket vs. polling delivery, idempotent sends, multi-channel routing, and DakFlareApi service bindings.
 ---
 
-## The Four SQLite-Backed Durable Objects
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="Ownership"
+  title="Six objects, one owner per key"
+  lede="Which object owns a key, and what happens when the socket drops."
+  steps={["API route", "DeviceGateway lease", "Handset radio", "Status batch → D1"]}
+  facts={[{ label: "Objects", value: "6 SQLite" }, { label: "Primary", value: "WebSocket" }, { label: "Fallback", value: "poll + ack" }, { label: "Binding", value: "DakFlareApi" }]}
+/>
+{/* llms-ignore:end */}
 
-All four classes are exported in `worker/cloudflare.config.ts` and `worker/wrangler.toml` with `storage = "sqlite"`:
+## The Six SQLite-Backed Durable Objects
+
+All six classes are exported in `worker/cloudflare.config.ts` and `worker/wrangler.toml` with `storage = "sqlite"`:
 
 | Binding | Class | Instance Key | Responsibility |
 | --- | --- | --- | --- |
 | `DEVICE` | `DeviceGateway` | One per `device_id` | Command queue (`PENDING` → terminal), lease & ack alarms, P-256 nonce replay ledger, WebSocket hibernation, DLQ (`dead_letters` after 5 task attempts) |
+| `CHANNEL_CONN` | `ChannelConnection` | `channel:account_id` | Per-account channel dedupe, the 24-hour delivery window, and connector state; one object per account, never one hot object |
+| `SCHEDULER` | `Scheduler` | Pinned singleton (`scheduler`) | The paced scheduled queue: due rows, token buckets, quiet hours, and the wake that releases the next send |
 | `AUTH_GUARD` | `AuthGuard` | Global singleton | Dual-scope sign-in lockout counters: per-account (5 attempts) and per-IP (20 attempts) within `AUTH_LOCKOUT_WINDOW_SECONDS` (900s) |
 | `AUTHORITY_GUARD` | `AuthorityGuard` | Global singleton | Live time-boxed agent authority grant windows and atomic approval race arbitration |
 | `ASSISTANT` | `AssistantAgent` | Pinned singleton (`assistant`) | Stateful operator chat (`agents/sessions`), resumable SSE/WS turn streams (`agents/streams`), `tool_calls` fail-closed journal, autonomy enforcement |
@@ -33,13 +45,15 @@ dakflare trace <command_id> --device <device_id>
 
 ## Multi-Channel Routing (SMS, Telegram, WhatsApp Cloud)
 
-Inbound messages across all three channels normalize into one `conversations` row keyed by `(channel, account_id, peer_id)` and enter the same **Rules (`priority DESC`) → Flows** pipeline:
+Inbound messages across these three channels normalize into one `conversations` row keyed by `(channel, account_id, peer_id)` and enter the same **Rules (`priority DESC`) → Flows** pipeline:
 
 | Channel | Ingress Endpoint | Verification Header | Outbound Endpoint |
 | --- | --- | --- | --- |
 | **SMS** | `POST /v1/sms/incoming/batch` | P-256 `X-Signature` | `POST /v1/sms/send` |
 | **Telegram** | `POST /v1/channels/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` | `POST /v1/channels/telegram/send` |
 | **WhatsApp Cloud** | `POST /v1/channels/whatsapp/webhook` (`GET` verify + `POST` ingress) | `X-Hub-Signature-256` | `POST /v1/channels/whatsapp/send` |
+
+The Messenger and Instagram connectors share the same edge pipeline; see [Multi-Channel Connectors](/docs/guides/multi-channel/) for their auth modes and webhook ingress.
 
 > **Current state note**: Both Telegram and WhatsApp inserts currently write `session_state = 'WINDOW_OPEN'`. Automated transitions to `TEMPLATE_ONLY` and `OPTED_OUT` are declared in `0007_multi_platform_and_conversations.sql` but do not yet have background writers (see [State Machines](/docs/reference/state-machines/)).
 
@@ -68,7 +82,7 @@ interface DakFlareBinding {
 export default {
   async fetch(_req: Request, env: { DAKFLARE: Service<DakFlareBinding> }) {
     const sent = await env.DAKFLARE.sendSms({
-      to: "+8801711000111",
+      to: "+15550169912",
       body: "Payment settled.",
       idempotencyKey: "inv-9021",
     });
@@ -140,7 +154,7 @@ export default {
       // 2. Or send an outbound SMS directly from a Cloudflare Workflow / Worker
       const sent = await env.DAKFLARE.sendSms({
         deviceId: "dev63f3953f417d587f",
-        to: "+8801540196080",
+        to: "+15550142299",
         body: "Custom template deployed.",
         idempotencyKey: "deploy-wf-invoice-custom",
       });

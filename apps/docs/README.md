@@ -19,7 +19,7 @@ npm start        # serve the build
 
 | | |
 |---|---|
-| `/docs/...` | 20 pages in six sections — start, guides, reference, architecture, agents — with the sidebar and per-page actions from `content/docs/**/meta.json` |
+| `/docs/...` | 25 pages in seven sections — start, service binding, guides, reference, architecture, agents — with the sidebar and per-page actions from `content/docs/**/meta.json` |
 | `/docs/{slug}.md` | the same page as clean markdown, generated from the MDX at build, and `/docs/...` with `Accept: text/markdown` is rewritten to it by `middleware.ts` |
 | `/llms.txt`, `/llms-full.txt` | the index and the whole bundle, for an agent that wants one fetch |
 | `/openapi.json` | the edge API as OpenAPI 3.1, which also drives the playground |

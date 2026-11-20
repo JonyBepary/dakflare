@@ -3,6 +3,16 @@ title: Sovereign Edge Model
 description: Architectural rationale for pairing a dedicated Android handset radio with a single-tenant Cloudflare Worker instead of third-party telecom SaaS.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The model"
+  title="The handset is the radio; the Worker is the coordinator"
+  lede="One SIM, one tenant, and no third-party telecom in the path."
+  steps={["Android handset", "Signed HTTP / WS", "Cloudflare Worker", "D1 · KV · R2 · Queues"]}
+  facts={[{ label: "Radio", value: "1 SIM" }, { label: "Tenant", value: "1 account" }, { label: "Secrets", value: "0 shared" }, { label: "Channels", value: "5" }]}
+/>
+{/* llms-ignore:end */}
+
 DakFlare is built around one thesis: **the handset is the radio, the Worker is the coordinator, and the operator owns both.**
 
 ## Why Handset + Cloudflare Edge
@@ -13,7 +23,7 @@ DakFlare is built around one thesis: **the handset is the radio, the Worker is t
 
 ## Repository & Data Architecture
 
-- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 17 D1 migrations (`0001_baseline.sql`–`0017_alert_acknowledged_by.sql`), 4 SQLite Durable Objects, 3 channel adapters (SMS, Telegram, WhatsApp Cloud), `flow.wasm`, Clef System 1, and `/mcp`.
+- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 19 D1 migrations (`0001_baseline.sql`–`0019_templates_and_scheduling.sql`), 6 SQLite Durable Objects, 5 channel adapters (SMS, Telegram, WhatsApp Cloud, Messenger, Instagram), `flow.wasm`, Clef System 1, and `/mcp`.
 - **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
 - **`dashboard/`**: Svelte 5 with SvelteKit static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
 - **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (32 commands).

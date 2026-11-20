@@ -3,7 +3,17 @@ title: Self-Hosting & Production Operations
 description: Keep the three Cloudflare configs synchronized, apply D1 migrations safely, avoid cf CLI traps, verify deploys, and restore from D1 Time Travel.
 ---
 
-DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 7 hermetic verification jobs (`worker`, `skills`, `dashboard`, `docs`, `simulator`, `rust`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The release"
+  title="Deploy deliberately; verify with evidence"
+  lede="Three configs, one migration order, and a deploy gate that reads evidence."
+  steps={["cf auth login", "cf deploy", "npm run verify:deploy", "D1 Time Travel"]}
+  facts={[{ label: "Configs", value: "3 in sync" }, { label: "Gate", value: "verify:deploy" }, { label: "Migrations", value: "19" }, { label: "Backup", value: "Time Travel" }]}
+/>
+{/* llms-ignore:end */}
+
+DakFlare uses a sovereign local deploy model: GitHub Actions (`.github/workflows/pipeline.yml`) runs 8 hermetic verification jobs (`worker`, `skills`, `dashboard`, `docs`, `simulator`, `rust core`, `rust flow`, `suite`) with **zero Cloudflare credentials**, while production deploys and schema migrations are executed deliberately from the operator's authenticated terminal.
 
 ## Keep the Three Config Files in Sync
 
@@ -36,7 +46,7 @@ npx cf workers secrets update WEBHOOK_SECRET_KEY --worker dakflare-worker --type
 
 ## Schema Migration Order of Operations
 
-Migrations (`0001_baseline.sql` through `0017_alert_acknowledged_by.sql`) are **never** applied by CI:
+Migrations (`0001_baseline.sql` through `0019_templates_and_scheduling.sql`) are **never** applied by CI:
 
 1. **Snapshot first**: Record a D1 Time Travel bookmark or run `npx wrangler d1 export sms_gateway --remote --output backup.sql`.
 2. **Apply by database UUID** (`cf` rejects database names):

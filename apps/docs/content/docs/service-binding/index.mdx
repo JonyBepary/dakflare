@@ -3,13 +3,23 @@ title: Service binding
 description: Call this deployment from another Worker or a Cloudflare Workflow as a typed service, and what a binding is allowed to do.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The binding"
+  title="Call the gateway like a function"
+  lede="A typed call, not a second HTTP client, and the same scopes as the public API."
+  steps={["Caller Worker", "DakFlareApi binding", "handleFetch + scopes", "Typed response"]}
+  facts={[{ label: "Entrypoint", value: "DakFlareApi" }, { label: "Auth", value: "BINDING_AUTH" }, { label: "Audit", value: "same as HTTP" }, { label: "Transport", value: "typed RPC" }]}
+/>
+{/* llms-ignore:end */}
+
 DakFlare exports a **`WorkerEntrypoint`** called `DakFlareApi`. A second Worker in the same
 Cloudflare account — or a Cloudflare Workflow, which runs inside one — can bind this script as a
 service and call typed methods instead of building a `Request` and remembering which header carries
 the credential.
 
 ```ts
-const sent = await env.DAKFLARE.sendSms({ to: "+8801711000111", body: "Payment settled." });
+const sent = await env.DAKFLARE.sendSms({ to: "+15550169912", body: "Payment settled." });
 const fleet = await env.DAKFLARE.devices();
 const turn = await env.DAKFLARE.ask("How many rules are enabled?");
 ```

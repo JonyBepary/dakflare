@@ -3,6 +3,16 @@ title: From another Worker
 description: The typed calls, the local interface a consumer needs, the request() escape hatch, and how refusals arrive.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The caller"
+  title="No credential by hand, no raw DO stub"
+  lede="No handshake in trusted mode; a typed refusal when the call is out of scope."
+  steps={["Consumer Worker", "env.DAKFLARE", "DakFlareApi", "handleFetch"]}
+  facts={[{ label: "Mode", value: "trusted" }, { label: "Escape", value: "request()" }, { label: "Refusal", value: "typed" }, { label: "Client", value: "binding header" }]}
+/>
+{/* llms-ignore:end */}
+
 A Worker in the same account holds the binding in `env` and calls methods on it. There is nothing to
 authenticate by hand in `trusted` mode, and nothing to serialise: arguments and results are
 structured-clone values, not JSON strings.

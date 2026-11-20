@@ -4,6 +4,16 @@ description: Interactive OpenAPI 3.1.0 playground powered by fumadocs-openapi fo
 full: true
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="Try it"
+  title="Send a real request without leaving the page"
+  lede="A real request against your Worker, with the schema and auth already filled in."
+  code={{ label: "POST /v1/sms/send", lines: ["curl -X POST https://<worker>/v1/sms/send \\", "  -H \"Authorization: Bearer $ADMIN_TOKEN\" \\", "  -H \"Content-Type: application/json\" \\", "  -d '{\"to\":\"+15550142299\",\"body\":\"Hello\"}'"] }}
+  facts={[{ label: "Spec", value: "3.1" }, { label: "Auth", value: "Bearer" }, { label: "Paths", value: "34" }, { label: "Calls", value: "live" }]}
+/>
+{/* llms-ignore:end */}
+
 Try DakFlare's core REST endpoints directly against your deployment using the generated [`/openapi.json`](/openapi.json) specification.
 
 <APIPage

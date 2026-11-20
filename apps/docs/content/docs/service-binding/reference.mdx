@@ -3,6 +3,16 @@ title: Method reference
 description: Every DakFlareApi method, the route it reaches, its arguments and whether it needs a credential.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The shortcuts"
+  title="Every method, its route, its credential"
+  lede="Every shortcut, the route behind it, and whether it needs a credential."
+  code={{ label: "TYPED CALLS", lines: ["await env.DAKFLARE.health()", "await env.DAKFLARE.devices()", "await env.DAKFLARE.sendSms({ to, body })", "await env.DAKFLARE.ask(\"what failed?\")"] }}
+  facts={[{ label: "Methods", value: "7" }, { label: "Route", value: "handleFetch" }, { label: "Modes", value: "trusted · agent_token" }, { label: "Refusal", value: "typed" }]}
+/>
+{/* llms-ignore:end */}
+
 Every method delegates to `handleFetch`, the router the public API uses. The "route" column is what
 an HTTP caller would have hit; the "credential" column is whether `agent_token` mode requires a
 token for that call in `trusted` mode it never does.

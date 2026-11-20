@@ -3,6 +3,19 @@ title: Agent Authority, Grants & Webhooks
 description: Configure scoped agent tokens, time-boxed authority grants, AssistantAgent autonomy windows, and HMAC-signed inbound webhooks.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The gate"
+  title="Scopes say what; a grant says now"
+  lede="Tokens bound intent; grants bound the next hour; webhooks can answer but never act."
+  image="/screenshots/page-approvals-1440.webp"
+  mobileImage="/screenshots/page-approvals-390.webp"
+  alt="The Approvals screen: an agent request for sms.send with a 12-minute expiry and 1m, 5m, 15m and 1h approval buttons."
+  facts={[{ label: "Scopes", value: "attempt" }, { label: "Grants", value: "execute" }, { label: "Webhooks", value: "HMAC" }, { label: "Autonomy", value: "time-boxed" }]}
+  caption="A live approval request with a capped duration. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 DakFlare separates **what an agent may attempt** (token scopes) from **what an agent may execute right now** (time-boxed human grants) and **how much money it can spend** (hourly and daily caps).
 
 ## Scopes vs. Grants

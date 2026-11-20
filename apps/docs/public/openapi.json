@@ -150,7 +150,7 @@
             "maxLength": 32,
             "description": "E.164 recipient phone number.",
             "examples": [
-              "+8801540196080"
+              "+15550142299"
             ]
           },
           "body": {

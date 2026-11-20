@@ -3,6 +3,16 @@ title: Wasm & Agent Isolation
 description: How DakFlare guarantees deterministic flow evaluation across Rust/Wasm runtimes and enforces fail-closed authority isolation for AI agents.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The sandbox"
+  title="One pure engine; effects belong to the caller"
+  lede="One pure engine, no network, and effects that belong to the caller."
+  steps={["dakflare.flow/v2", "Rust core", "Wasm sandbox", "Caller-owned effects"]}
+  facts={[{ label: "Targets", value: "3" }, { label: "Network", value: "none" }, { label: "Effects", value: "caller-owned" }, { label: "Agents", value: "fail-closed" }]}
+/>
+{/* llms-ignore:end */}
+
 ## Deterministic Single-Engine Flow Execution
 
 Instead of maintaining separate JavaScript and Rust rule evaluators that inevitably drift, DakFlare compiles **one** pure-Rust crate (`simulator/flow`) to three targets:

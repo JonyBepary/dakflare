@@ -3,6 +3,19 @@ title: Android Handset & Pairing
 description: Build, sign, install, pair, and verify the Tauri v2 + Rust Android SMS radio app (dev.dakflare.simulator).
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The radio"
+  title="The phone is the radio; pairing is the handshake"
+  lede="From the debug build to a signed release, one handset and one verified key."
+  image="/screenshots/page-devices-1440.webp"
+  mobileImage="/screenshots/page-devices-390.webp"
+  alt="The console's Paired devices screen: two handsets answering, with rotate, archive and revoke actions."
+  facts={[{ label: "Package", value: "dev.dakflare.simulator" }, { label: "Identity", value: "P-256 Keystore" }, { label: "Role", value: "default SMS" }, { label: "Checks", value: "8 on-device" }]}
+  caption="The console side of pairing: two devices answering. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 The Android app (`simulator/`, package `dev.dakflare.simulator`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
 
 ## Toolchain & Debug Build

@@ -3,6 +3,19 @@ title: First Wasm Flow
 description: Author, validate, test locally against flow.wasm, deploy, and heal a dakflare.flow/v2 auto-reply graph.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="Graph first"
+  title="One graph, three runtimes, the same answer"
+  lede="Write one document, run it locally, then watch the same graph answer on the handset."
+  image="/screenshots/page-workflows-1440.webp"
+  mobileImage="/screenshots/page-workflows-390.webp"
+  alt="The console's Workflows list: four saved flows, two enabled, with Open and Delete actions."
+  facts={[{ label: "Graph", value: "dakflare.flow/v2" }, { label: "Engine", value: "Rust → Wasm" }, { label: "Runs", value: "phone first" }, { label: "Deploy", value: "drift-healed" }]}
+  caption="Saved flows in the console. The editor opens the same documents."
+/>
+{/* llms-ignore:end */}
+
 DakFlare evaluates inbound messages using a deterministic directed acyclic graph (`dakflare.flow/v2`). The exact same Rust crate (`simulator/flow`) runs natively on the Android handset and compiles to WebAssembly (`worker/src/wasm/flow.wasm` and `dashboard/static/flow.wasm`) for the Worker fallback and browser simulation panel.
 
 ## Step 1: Inspect the Canonical Flow Schema
@@ -96,8 +109,8 @@ Semantic exit codes:
 Create a JSONL corpus `corpus.jsonl`:
 
 ```json
-{"sender":"+8801711000111","body":"Please confirm order AB12CD","received_at":1763500000000}
-{"sender":"+8801711000111","body":"Hello there","received_at":1763500001000}
+{"sender":"+15550169912","body":"Please confirm order AB12CD","received_at":1763500000000}
+{"sender":"+15550169912","body":"Hello there","received_at":1763500001000}
 ```
 
 Execute the corpus locally against the compiled WebAssembly engine:

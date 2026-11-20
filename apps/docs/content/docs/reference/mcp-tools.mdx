@@ -3,6 +3,19 @@ title: MCP & WebMCP Tools
 description: Complete schema, scope, OAuth discovery, elicitation, and JSON-RPC error reference for DakFlare's 9 Streamable HTTP MCP tools and 4 browser WebMCP tools.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The toolbox"
+  title="The tools an MCP client can see"
+  lede="What an agent can list, what it can call, and where the human gate appears."
+  image="/screenshots/page-audit-1440.webp"
+  mobileImage="/screenshots/page-audit-390.webp"
+  alt="The Audit log: agent actions with actor, action and subject columns."
+  facts={[{ label: "Tools", value: "9 MCP" }, { label: "Browser", value: "4 WebMCP" }, { label: "Discovery", value: "OAuth" }, { label: "Gate", value: "elicitation" }]}
+  caption="Every tool call lands in the audit ledger. Captured from the current build."
+/>
+{/* llms-ignore:end */}
+
 ## Streamable HTTP MCP Server (`/mcp`)
 
 - **Endpoints**: `POST /mcp` (JSON-RPC requests & batches), `GET /mcp` (SSE stream for stateful sessions), `DELETE /mcp` (terminate session). Legacy `POST /v1/mcp` remains supported for stateless `_meta` clients.

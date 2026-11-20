@@ -3,6 +3,16 @@ title: From a Cloudflare Workflow
 description: Use the binding inside a Workflow step, and the one rule that makes a retrying step safe.
 ---
 
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The retry"
+  title="The one rule a retrying step needs"
+  lede="A retrying step is safe only when the call carries an idempotency key."
+  steps={["Workflow step.do", "DakFlareApi", "idempotency key", "safe retry"]}
+  facts={[{ label: "Rule", value: "idempotent" }, { label: "Delay", value: "step.sleep" }, { label: "Binding", value: "same env" }, { label: "Retries", value: "platform" }]}
+/>
+{/* llms-ignore:end */}
+
 A Workflow is a class in a Worker. It receives the same `env`, so the binding is used exactly as it
 is from a Worker — inside `step.do`, where the platform may run it more than once.
 
