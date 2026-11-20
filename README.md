@@ -54,7 +54,23 @@
 
 ## Architecture
 
-Official cloud APIs run directly on Cloudflare Workers with **one `ChannelConnection` SQLite Durable Object per `(channel, account_id)`**, avoiding hot-DO contention even across multiple accounts on the same platform. Personal sessions stay off Workers and run on the Android handset over DakFlare's P-256 signed transport.
+[![DakFlare system architecture: the Android handset signs requests to the Worker router; official cloud APIs arrive by HMAC; the router fans out to one ChannelConnection Durable Object per account, the DeviceGateway, the ingest queue into D1, and the flow workflow](docs/assets/dakflare-architecture.jpg)](docs/assets/dakflare-architecture.jpg)
+
+*Click the figure for its full 1600 px size; the labels are small at README width, so the same
+diagram is reproduced as text below.*
+
+Three tiers, one trust boundary. The **handset** owns the SIM and the personal-app bridge, and signs
+every request with a P-256 key held in `AndroidKeyStore`. The **Worker** verifies that signature — or
+Meta's `X-Hub-Signature-256`, or Telegram's secret token — and answers inside Meta's five-second
+window. Storage and coordination live in **five SQLite Durable Objects**, one per unit that needs
+serialisation: `DeviceGateway` per handset, `ChannelConnection` per `(channel, account_id)`,
+`AuthGuard` and `AuthorityGuard` as singletons, and `AssistantAgent` pinned to one name.
+
+Official cloud APIs run directly on Workers; personal sessions stay off them, on the phone. That is
+why five accounts on one platform are five isolated objects rather than one hot one.
+
+<details>
+<summary><strong>The same diagram as text</strong> (Mermaid source, for diffs)</summary>
 
 ```mermaid
 flowchart LR
@@ -95,8 +111,7 @@ flowchart LR
   META -- "X-Hub-Signature-256" --> ROUTER
 ```
 
-> [!NOTE]
-> **Five SQLite Durable Objects:** `DeviceGateway` (per-handset command queue, replay nonces, alarms), `ChannelConnection` (per-account dedupe, 24h window, rate buckets), `AuthGuard` (per-account and per-IP lockouts), `AuthorityGuard` (grant expiry windows), and `AssistantAgent` (pinned stateful operator runtime).
+</details>
 
 ## Quick Start
 
