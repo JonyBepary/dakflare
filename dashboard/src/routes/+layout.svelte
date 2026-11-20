@@ -49,6 +49,8 @@
 				{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone', count: 'devices', countWord: 'paired' },
 				{ href: ROUTES.messages, label: 'Messages', icon: 'message', count: 'messages', countWord: 'kept' },
 				{ href: ROUTES.channels, label: 'Channels', icon: 'send' },
+				{ href: ROUTES.templates, label: 'Templates', icon: 'braces' },
+				{ href: ROUTES.scheduled, label: 'Scheduled', icon: 'clock' },
 				{
 					href: ROUTES.rules,
 					label: 'Automation',
@@ -224,6 +226,8 @@
 				d: ROUTES.devices,
 				m: ROUTES.messages,
 				c: ROUTES.channels,
+				t: ROUTES.templates,
+				s: ROUTES.scheduled,
 				r: ROUTES.rules,
 				w: ROUTES.workflows,
 				a: session.canViewSecurity ? ROUTES.approvals : undefined
@@ -598,6 +602,8 @@
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>d</kbd></dt><dd>Devices</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>m</kbd></dt><dd>Messages</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>c</kbd></dt><dd>Channels</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>t</kbd></dt><dd>Templates</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>s</kbd></dt><dd>Scheduled</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>r</kbd></dt><dd>Rules</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>w</kbd></dt><dd>Workflows</dd></div>
 					{#if session.canViewSecurity}

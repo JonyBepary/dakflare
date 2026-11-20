@@ -1,6 +1,16 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { ApiError, describeError, getHealth, getInvites, revokeInvite } from '$lib/api';
+	import {
+		ApiError,
+		describeError,
+		getAgentTokens,
+		getDevices,
+		getHealth,
+		getInvites,
+		mintAgentToken,
+		revokeAgentToken,
+		revokeInvite
+	} from '$lib/api';
 	import { formatDate, formatRelative } from '$lib/format';
 	import { currentTime, subscribeClock } from '$lib/live-clock.svelte';
 	import { listPasskeys } from '$lib/passkey';
@@ -31,7 +41,8 @@
 		type TotpEnrolment,
 		type TotpProbe
 	} from '$lib/totp';
-	import type { Invite, PasskeySummary } from '$lib/types';
+	import type { AgentToken, Device, Invite, PasskeySummary } from '$lib/types';
+	import Badge from '$lib/components/Badge.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -40,6 +51,7 @@
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import QrCode from '$lib/components/QrCode.svelte';
 	import RecoveryCodes from '$lib/components/RecoveryCodes.svelte';
+	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 
@@ -148,6 +160,83 @@
 	let revoking = $state(false);
 	let revokeError = $state<string | null>(null);
 
+	/*
+	 * Factor 06: agent tokens and MCP.
+	 *
+	 * A token is a machine credential: a scope list decides what it may do, a
+	 * ceiling decides how often, and an expiry decides for how long. The value
+	 * exists once, in the mint response, and lives in this component until Done
+	 * is pressed. It is never written to storage, a URL or another component.
+	 *
+	 * The scope list is page-local on purpose: it is the console's copy of the
+	 * Worker's permission names, grouped by how much damage a mistake costs.
+	 */
+	const AGENT_SCOPES: Array<{ id: string; group: 'read' | 'write' | 'dangerous' }> = [
+		{ id: 'messages:read', group: 'read' },
+		{ id: 'devices:read', group: 'read' },
+		{ id: 'flows:read', group: 'read' },
+		{ id: 'audit:read', group: 'read' },
+		{ id: 'sms:send', group: 'write' },
+		{ id: 'messages:purge', group: 'write' },
+		{ id: 'alerts:write', group: 'write' },
+		{ id: 'flows:write', group: 'write' },
+		{ id: 'devices:write', group: 'write' },
+		{ id: 'rules:write', group: 'write' },
+		{ id: 'webhooks:write', group: 'write' },
+		{ id: 'sms:send:production', group: 'dangerous' },
+		{ id: 'enable_shortcode', group: 'dangerous' },
+		{ id: 'dlq_bulk_replay', group: 'dangerous' },
+		{ id: 'flow_deploy_prod', group: 'dangerous' }
+	];
+
+	const SCOPE_GROUPS: Array<{
+		id: 'read' | 'write' | 'dangerous';
+		label: string;
+		note: string;
+	}> = [
+		{ id: 'read', label: 'Read', note: 'Reads only. Nothing changes for a person who receives an SMS.' },
+		{ id: 'write', label: 'Write', note: 'Sends, changes rules and flows, and clears history.' },
+		{
+			id: 'dangerous',
+			label: 'Dangerous',
+			note: 'Reaches production traffic, real shortcodes, or a bulk replay of the dead-letter queue.'
+		}
+	];
+
+	const TTL_OPTIONS: Array<{ value: number; label: string }> = [
+		{ value: 3600, label: '1 hour' },
+		{ value: 86_400, label: '1 day' },
+		{ value: 604_800, label: '7 days' },
+		{ value: 2_592_000, label: '30 days' },
+		{ value: 31_536_000, label: '1 year' }
+	];
+
+	let agentTokens = $state<AgentToken[] | null>(null);
+	let tokensLoading = $state(true);
+	let tokensError = $state<string | null>(null);
+	let tokensNotice = $state<string | null>(null);
+	let tokensNoticeTone = $state<'ok' | 'info'>('ok');
+
+	let tokenMintOpen = $state(false);
+	let mintName = $state('');
+	let mintScopes = $state<string[]>([]);
+	let mintDevice = $state('');
+	let mintLimit = $state(60);
+	let mintTtl = $state(86_400);
+	let minting = $state(false);
+	let mintError = $state<string | null>(null);
+
+	/** The one-time value. `null` after Done, and nothing can bring it back. */
+	let freshToken = $state<{ id: string; name: string; token: string } | null>(null);
+
+	let devices = $state<Device[]>([]);
+	/** The public origin, read in the browser: the MCP URL is absolute. */
+	let origin = $state('');
+
+	let tokenRevokeTarget = $state<AgentToken | null>(null);
+	let revokingToken = $state(false);
+	let revokeTokenError = $state<string | null>(null);
+
 	const clock = $derived(currentTime());
 	const inviteNow = $derived(serverNow === 0 ? clock : clock + (serverNow - fetchedAt));
 	const openInvites = $derived(
@@ -156,6 +245,23 @@
 	const revokeExpired = $derived(
 		revokeTarget !== null && inviteState(revokeTarget, inviteNow) !== 'open'
 	);
+	const activeTokens = $derived(
+		agentTokens === null ? 0 : agentTokens.filter((token) => token.revoked_at === null).length
+	);
+	const mintProblem = $derived(
+		mintName.trim() === ''
+			? 'Give the token a name, so the audit log says who it is for.'
+			: mintScopes.length === 0
+				? 'Pick at least one scope. A token with none can reach nothing.'
+				: !Number.isFinite(mintLimit) || mintLimit < 1
+					? 'The ceiling is at least one request per hour.'
+					: null
+	);
+	const mintHasDangerous = $derived(
+		mintScopes.some((scope) => AGENT_SCOPES.find((entry) => entry.id === scope)?.group === 'dangerous')
+	);
+	const mcpSnippet = $derived(buildMcpSnippet(null));
+	const mcpLiveSnippet = $derived(freshToken === null ? null : buildMcpSnippet(freshToken.token));
 
 	const pwStrength = $derived(passwordStrength(pwValue));
 	const pwLengthError = $derived(pwValue === '' ? null : checkPasswordLength(pwValue));
@@ -208,6 +314,7 @@
 	const aiHref = `${BASE}/security/ai`;
 
 	onMount(() => {
+		origin = window.location.origin;
 		void load();
 		// One shared 30-second tick: an invite can expire while the page is open,
 		// and its row should say so without a reload.
@@ -219,6 +326,7 @@
 			checking = false;
 			passwordLoading = false;
 			invitesLoading = false;
+			tokensLoading = false;
 			return;
 		}
 		checking = true;
@@ -226,11 +334,14 @@
 		ended = null;
 		pwNotice = null;
 		invitesNotice = null;
+		tokensNotice = null;
 		resetPasswordForms();
 		probe = await probeTotp();
 		if (probe.kind === 'error') failure = probe.message;
 		await loadPassword();
 		await loadInvites();
+		await loadAgentTokens();
+		await loadDevices();
 		checking = false;
 		try {
 			passkeys = await listPasskeys();
@@ -362,6 +473,169 @@
 	function openMint(): void {
 		invitesNotice = null;
 		mintOpen = true;
+	}
+
+	/* -------------------------------------------------- agent tokens and MCP */
+
+	/**
+	 * The block people paste into Claude Desktop or Cursor. `token` is the real
+	 * credential only while the one-time reveal is on screen; the placeholder is
+	 * what the always-visible block carries.
+	 */
+	function buildMcpSnippet(token: string | null): string {
+		const credential = token ?? 'dkf_agt_…';
+		return JSON.stringify({
+			mcpServers: {
+				dakflare: {
+					url: `${origin}/mcp`,
+					headers: { Authorization: `Bearer ${credential}` }
+				}
+			}
+		});
+	}
+
+	/**
+	 * `GET /v1/admin/agent-tokens?revoked=1`: live and revoked rows in one list,
+	 * because "this token was revoked" is the answer to a request that stopped
+	 * working, and a hidden row would make that unanswerable.
+	 */
+	async function loadAgentTokens(): Promise<void> {
+		tokensLoading = true;
+		tokensError = null;
+		try {
+			agentTokens = await getAgentTokens(true);
+		} catch (error) {
+			tokensError =
+				error instanceof ApiError && error.status === 403
+					? 'Agent tokens are for owners and admins, and the gateway refused this account. Ask an owner if a program needs a credential.'
+					: describeError(error);
+			agentTokens = null;
+		} finally {
+			tokensLoading = false;
+		}
+	}
+
+	/** The optional device list. A failure leaves the select on "Any device". */
+	async function loadDevices(): Promise<void> {
+		try {
+			devices = await getDevices();
+		} catch {
+			devices = [];
+		}
+	}
+
+	/**
+	 * An expiry is a date first and a countdown second. `RelativeTime` clamps a
+	 * future stamp to "just now" (it is built for what already happened), so the
+	 * date is printed here and the countdown only appears within a week.
+	 */
+	function expiryLine(at: number | null, now: number): { date: string; note: string } {
+		if (at === null) return { date: 'never', note: '' };
+		const near = Math.abs(at - now) < 7 * 86_400_000;
+		if (!near) return { date: formatDate(at), note: '' };
+		return {
+			date: formatDate(at),
+			note: at < now ? `expired ${formatRelative(at, now)}` : formatRelative(at, now)
+		};
+	}
+
+	function openMintForm(): void {
+		tokensNotice = null;
+		mintError = null;
+		tokenMintOpen = true;
+	}
+
+	function closeMintForm(): void {
+		if (minting) return;
+		tokenMintOpen = false;
+		mintError = null;
+		mintName = '';
+		mintScopes = [];
+		mintDevice = '';
+		mintLimit = 60;
+		mintTtl = 86_400;
+	}
+
+	async function mintToken(event: SubmitEvent): Promise<void> {
+		event.preventDefault();
+		if (minting || mintProblem !== null) return;
+		minting = true;
+		mintError = null;
+		tokensNotice = null;
+		try {
+			const minted = await mintAgentToken({
+				name: mintName.trim(),
+				scopes: [...mintScopes],
+				...(mintDevice === '' ? {} : { device_id: mintDevice }),
+				max_per_hour: mintLimit,
+				expires_in_s: mintTtl
+			});
+			freshToken = { id: minted.id, name: minted.name, token: minted.token };
+			// The form is done; the value is the one thing worth looking at now.
+			tokenMintOpen = false;
+			mintName = '';
+			mintScopes = [];
+			mintDevice = '';
+			mintLimit = 60;
+			mintTtl = 86_400;
+			await loadAgentTokens();
+			await tick();
+			const reveal = document.getElementById('agent-token-reveal');
+			reveal?.setAttribute('tabindex', '-1');
+			reveal?.focus({ preventScroll: true });
+			reveal?.scrollIntoView({
+				block: 'center',
+				behavior: prefersReducedMotion() ? 'auto' : 'smooth'
+			});
+		} catch (error) {
+			mintError = describeError(error);
+		} finally {
+			minting = false;
+		}
+	}
+
+	/**
+	 * Done is the only control that drops the value from this component, and it
+	 * drops it for good: the gateway keeps a hash, never the token.
+	 */
+	function closeReveal(): void {
+		freshToken = null;
+	}
+
+	function askRevokeToken(token: AgentToken): void {
+		revokeTokenError = null;
+		tokenRevokeTarget = token;
+	}
+
+	async function confirmRevokeToken(): Promise<void> {
+		const target = tokenRevokeTarget;
+		if (target === null || revokingToken) return;
+		revokingToken = true;
+		revokeTokenError = null;
+		tokensNotice = null;
+		try {
+			await revokeAgentToken(target.id);
+			tokenRevokeTarget = null;
+			tokensNoticeTone = 'ok';
+			tokensNotice = `${target.name} was revoked. A request that presents it is refused from now on.`;
+			await loadAgentTokens();
+		} catch (error) {
+			// Revoking twice is not an error the operator can fix: the row is
+			// already dead, and the refreshed list is the answer.
+			if (
+				error instanceof ApiError &&
+				(error.status === 409 || error.code === 'already_revoked')
+			) {
+				tokenRevokeTarget = null;
+				tokensNoticeTone = 'info';
+				tokensNotice = `${target.name} was already revoked. The list has been refreshed.`;
+				await loadAgentTokens();
+			} else {
+				revokeTokenError = describeError(error);
+			}
+		} finally {
+			revokingToken = false;
+		}
 	}
 
 	async function openPasswordForm(): Promise<void> {
@@ -1575,6 +1849,346 @@
 				{/if}
 			</div>
 		</section>
+
+		<section class="card factor-card" id="agent-tokens-card" aria-labelledby="agent-tokens-title">
+			<header class="factor-head">
+				<div class="factor-title">
+					<span class="step-mark mono" aria-hidden="true">06</span>
+					<div>
+						<h2 id="agent-tokens-title">Agent tokens &amp; MCP</h2>
+						<p class="factor-lede">
+							A credential for a program rather than a person. Scopes decide what it may do, the
+							ceiling decides how often, and the value is shown once.
+						</p>
+					</div>
+				</div>
+				{#if tokensLoading && agentTokens === null}
+					<span class="chip" data-tone="muted"><Spinner /> reading</span>
+				{:else if agentTokens === null}
+					<span class="chip" data-tone="muted">unknown</span>
+				{:else if activeTokens === 0}
+					<span class="chip" data-tone="muted">none active</span>
+				{:else}
+					<span class="chip" data-tone="ok">{activeTokens} active</span>
+				{/if}
+			</header>
+
+			<div class="factor-body">
+				{#if freshToken !== null}
+					<div
+						class="token-reveal"
+						id="agent-token-reveal"
+						role="group"
+						aria-labelledby="agent-token-reveal-title"
+					>
+						<div class="reveal-head">
+							<span class="reveal-mark" aria-hidden="true"><Icon name="key" size={15} /></span>
+							<div>
+								<h3 id="agent-token-reveal-title">Copy the token for {freshToken.name}</h3>
+								<p>
+									This is the only time the gateway shows it. Press Done once it is in the
+									program, and this screen forgets it.
+								</p>
+							</div>
+						</div>
+						<div class="token-value">
+							<code class="mono">{freshToken.token}</code>
+							<CopyButton value={freshToken.token} label="Copy token" />
+						</div>
+						<div class="reveal-foot">
+							<p class="reveal-warning">
+								Only a hash is stored, so the value cannot be read again. Losing it means
+								minting another and revoking this one.
+							</p>
+							<button type="button" class="btn btn-primary btn-sm" onclick={closeReveal}>
+								<Icon name="check" size={13} /> Done
+							</button>
+						</div>
+					</div>
+				{/if}
+
+				<div class="token-bar">
+					{#if !tokenMintOpen}
+						<button
+							type="button"
+							class="btn btn-primary btn-sm"
+							onclick={openMintForm}
+							disabled={tokensLoading}
+						>
+							<Icon name="plus" size={13} /> Mint a token
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="btn btn-sm"
+						onclick={() => void loadAgentTokens()}
+						disabled={tokensLoading}
+						aria-busy={tokensLoading}
+					>
+						{#if tokensLoading}<Spinner />{:else}<Icon name="refresh" size={13} />{/if}
+						Refresh
+					</button>
+				</div>
+
+				{#if tokenMintOpen}
+					<form class="token-form" onsubmit={(event) => void mintToken(event)} novalidate>
+						<div class="token-form-grid">
+							<div class="field">
+								<label class="label" for="agent-token-name">Name</label>
+								<input
+									id="agent-token-name"
+									class="input"
+									bind:value={mintName}
+									maxlength="64"
+									placeholder="e.g. Nightly report"
+									autocomplete="off"
+									disabled={minting}
+								/>
+								<p class="hint">What this token is for. It is the name the audit log shows.</p>
+							</div>
+
+							<div class="field">
+								<label class="label" for="agent-token-device">
+									Device <span class="optional">optional</span>
+								</label>
+								<select
+									id="agent-token-device"
+									class="input"
+									bind:value={mintDevice}
+									disabled={minting}
+								>
+									<option value="">Any device</option>
+									{#each devices as device (device.device_id)}
+										<option value={device.device_id}>
+											{device.label ?? 'Unnamed device'} · {device.device_id}
+										</option>
+									{/each}
+								</select>
+								<p class="hint">
+									Bound to one phone, the token reaches only that device's messages and queue.
+								</p>
+							</div>
+						</div>
+
+						<fieldset class="scope-set">
+							<legend class="label">Scopes</legend>
+							{#each SCOPE_GROUPS as group (group.id)}
+								<div class="scope-group" data-group={group.id}>
+									<div class="scope-group-head">
+										<p class="scope-title mono">{group.label}</p>
+										<p class="scope-note">{group.note}</p>
+									</div>
+									<div class="scope-grid">
+										{#each AGENT_SCOPES.filter((entry) => entry.group === group.id) as scope (scope.id)}
+											<label class="scope-option">
+												<input
+													type="checkbox"
+													bind:group={mintScopes}
+													value={scope.id}
+													disabled={minting}
+												/>
+												<span class="mono">{scope.id}</span>
+											</label>
+										{/each}
+									</div>
+								</div>
+							{/each}
+						</fieldset>
+
+						{#if mintHasDangerous}
+							<p class="scope-warning">
+								<Icon name="alert" size={13} />
+								A dangerous scope reaches live traffic. Grant it only to a program you would trust
+								with this console.
+							</p>
+						{/if}
+
+						<div class="token-form-grid">
+							<div class="field">
+								<label class="label" for="agent-token-limit">Requests per hour</label>
+								<input
+									id="agent-token-limit"
+									class="input input-mono"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={mintLimit}
+									disabled={minting}
+								/>
+								<p class="hint">The ceiling the gateway holds the token to in any rolling hour.</p>
+							</div>
+
+							<div class="field">
+								<label class="label" for="agent-token-ttl">Expires in</label>
+								<select
+									id="agent-token-ttl"
+									class="input"
+									bind:value={mintTtl}
+									disabled={minting}
+								>
+									{#each TTL_OPTIONS as option (option.value)}
+										<option value={option.value}>{option.label}</option>
+									{/each}
+								</select>
+								<p class="hint">After that moment, every request with the token is refused.</p>
+							</div>
+						</div>
+
+						{#if mintError}
+							<div class="field-error-note">
+								<Notice tone="danger" title="The token was not minted">{mintError}</Notice>
+							</div>
+						{/if}
+
+						<div class="token-form-foot">
+							<button
+								type="submit"
+								class="btn btn-primary btn-sm"
+								disabled={minting || mintProblem !== null}
+								aria-busy={minting}
+							>
+								{#if minting}<Spinner />{:else}<Icon name="key" size={13} />{/if}
+								Mint the token
+							</button>
+							<button
+								type="button"
+								class="btn btn-ghost btn-sm"
+								onclick={closeMintForm}
+								disabled={minting}
+							>
+								Cancel
+							</button>
+							{#if !minting && mintProblem}
+								<p class="hint form-problem">{mintProblem}</p>
+							{/if}
+						</div>
+					</form>
+				{/if}
+
+				{#if tokensNotice}
+					<div class="token-note">
+						<Notice tone={tokensNoticeTone}>{tokensNotice}</Notice>
+					</div>
+				{/if}
+
+				{#if tokensLoading && agentTokens === null}
+					<div class="token-loading" aria-busy="true" aria-live="polite">
+						<span class="sr-only">Reading the agent tokens</span>
+						{#each ['a', 'b'] as key (key)}
+							<div class="skeleton" style="height: 38px"></div>
+						{/each}
+					</div>
+				{:else if tokensError}
+					<div class="token-message">
+						<Notice tone="danger" title="The token list did not load">{tokensError}</Notice>
+						<button
+							type="button"
+							class="btn btn-sm"
+							style="margin-top: 12px"
+							onclick={() => void loadAgentTokens()}
+						>
+							<Icon name="refresh" size={13} /> Try again
+						</button>
+					</div>
+				{:else if agentTokens !== null && agentTokens.length === 0}
+					<EmptyState
+						icon="key"
+						title="No agent tokens"
+						description="A token is how a program reads this gateway or sends through it, with a scope list and a ceiling instead of a person's session. Mint one above and paste it into the program once."
+					/>
+				{:else if agentTokens !== null}
+					<ul class="token-list">
+						{#each agentTokens as token (token.id)}
+							{@const expiry = expiryLine(token.expires_at, clock)}
+							<li class="token-row" class:is-revoked={token.revoked_at !== null}>
+								<div class="token-head">
+									<div class="token-id">
+										<p class="token-name">{token.name}</p>
+										<p class="token-meta mono">
+											created {formatDate(token.created_at)}
+											{#if token.device_id}
+												<span aria-hidden="true">{' · '}</span>device {token.device_id}
+											{/if}
+											{#if token.revoked_at !== null}
+												<span aria-hidden="true">{' · '}</span>revoked
+												<RelativeTime value={token.revoked_at} fallback="just now" />
+											{/if}
+										</p>
+									</div>
+									<div class="token-actions">
+										{#if token.revoked_at === null}
+											<Badge tone="ok" dot>Active</Badge>
+											<button
+												type="button"
+												class="btn btn-danger btn-sm"
+												onclick={() => askRevokeToken(token)}
+												aria-label={`Revoke the token ${token.name}`}
+											>
+												<Icon name="trash" size={13} /> Revoke
+											</button>
+										{:else}
+											<Badge tone="muted">Revoked</Badge>
+										{/if}
+									</div>
+								</div>
+
+								<ul class="scope-chips">
+									{#each token.scopes as scope (scope)}
+										<li class="scope-chip mono">{scope}</li>
+									{/each}
+								</ul>
+
+								<dl class="token-facts">
+									<div class="token-fact">
+										<dt>Max per hour</dt>
+										<dd class="mono">{token.max_per_hour}</dd>
+									</div>
+									<div class="token-fact">
+										<dt>Expires</dt>
+										<dd>
+											{expiry.date}
+											{#if expiry.note}
+												<span class="token-sub mono">{expiry.note}</span>
+											{/if}
+										</dd>
+									</div>
+									<div class="token-fact">
+										<dt>Last used</dt>
+										<dd><RelativeTime value={token.last_used_at} fallback="never" /></dd>
+									</div>
+								</dl>
+							</li>
+						{/each}
+					</ul>
+					<p class="hint token-foot">
+						Revoked rows stay in the list, because a request that stopped working is usually
+						answered here. The gateway writes <span class="mono">agent_token.minted</span> and
+						<span class="mono">agent_token.revoked</span> to the audit log, never the token.
+					</p>
+				{/if}
+
+				<div class="mcp-block">
+					<h3 class="mcp-title"><Icon name="braces" size={14} /> MCP server</h3>
+					<p class="hint mcp-note">
+						The assistant connects over streamable HTTP at <code>/mcp</code>, and the token is the
+						same agent credential it sends as a bearer header.
+					</p>
+					<div class="mcp-code">
+						<pre class="mono">{mcpSnippet}</pre>
+						<CopyButton value={mcpSnippet} label="Copy JSON" />
+					</div>
+					{#if mcpLiveSnippet !== null}
+						<div class="mcp-live">
+							<p class="mcp-live-label mono">With the token above</p>
+							<div class="mcp-code">
+								<pre class="mono">{mcpLiveSnippet}</pre>
+								<CopyButton value={mcpLiveSnippet} label="Copy JSON with token" />
+							</div>
+						</div>
+					{/if}
+				</div>
+			</div>
+		</section>
 	{/if}
 </div>
 
@@ -1659,6 +2273,30 @@
 				This cannot be undone. Mint a new invite if the address still needs one.
 			</p>
 		{/if}
+	{/if}
+</ConfirmDialog>
+
+<ConfirmDialog
+	open={tokenRevokeTarget !== null}
+	title={tokenRevokeTarget ? `Revoke ${tokenRevokeTarget.name}?` : 'Revoke agent token'}
+	confirmLabel="Revoke token"
+	tone="danger"
+	pending={revokingToken}
+	error={revokeTokenError}
+	onconfirm={() => void confirmRevokeToken()}
+	oncancel={() => {
+		tokenRevokeTarget = null;
+		revokeTokenError = null;
+	}}
+>
+	{#if tokenRevokeTarget !== null}
+		<p>
+			Requests that present <strong>{tokenRevokeTarget.name}</strong> are refused from the moment
+			it is revoked, and the program using it has to be given a new token.
+		</p>
+		<p class="hint" style="margin-top: 8px">
+			The row stays in the list, as revoked. This cannot be undone.
+		</p>
 	{/if}
 </ConfirmDialog>
 
@@ -2145,6 +2783,412 @@
 		margin-top: var(--s-3);
 	}
 
+	/* ------------------------------------------------ agent tokens and MCP */
+
+	/* The one-time value is the loudest thing in this card on purpose: it is
+	   unrecoverable, and every other control can wait until Done is pressed. */
+	.token-reveal {
+		margin-bottom: var(--df-p-space-4);
+		padding: var(--df-p-space-3);
+		border: 1px solid color-mix(in srgb, var(--df-state-ok-ink) 34%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-md);
+		background: var(--df-state-ok-bg);
+		color: var(--df-state-ok-ink);
+	}
+
+	.reveal-head {
+		display: flex;
+		gap: var(--df-p-space-2);
+		min-width: 0;
+	}
+
+	.reveal-mark {
+		flex: none;
+		display: inline-flex;
+		padding-top: 2px;
+	}
+
+	.reveal-head h3 {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-md);
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		overflow-wrap: anywhere;
+	}
+
+	.reveal-head p {
+		margin-top: var(--df-p-space-1);
+		max-width: 62ch;
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+	}
+
+	.token-value {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-3);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+	}
+
+	.token-value code {
+		flex: 1 1 24ch;
+		min-width: 0;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+		user-select: all;
+	}
+
+	.reveal-foot {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2) var(--df-p-space-3);
+		margin-top: var(--df-p-space-3);
+	}
+
+	.reveal-warning {
+		flex: 1 1 32ch;
+		min-width: 0;
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+	}
+
+	.token-bar {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2);
+	}
+
+	.token-note,
+	.token-message {
+		margin-top: var(--df-p-space-3);
+	}
+
+	.token-loading {
+		display: flex;
+		flex-direction: column;
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-3);
+	}
+
+	.token-form {
+		margin-top: var(--df-p-space-3);
+		padding: var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: color-mix(in srgb, var(--df-surface-well) 45%, var(--df-surface-card));
+	}
+
+	.token-form-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--df-p-space-3);
+	}
+
+	/* The second pair (ceiling and expiry) follows the scope set, and without
+	   this the warning's last line sits on the "Requests per hour" label. */
+	.token-form-grid:not(:first-child) {
+		margin-top: var(--df-p-space-4);
+	}
+
+	.token-form .hint {
+		max-width: 46ch;
+	}
+
+	/* The three groups are one decision with three costs, so they share a
+	   fieldset and a legend rather than three separate questions. */
+	.scope-set {
+		margin: var(--df-p-space-4) 0 0;
+		padding: 0;
+		border: 0;
+	}
+
+	.scope-group {
+		margin-top: var(--df-p-space-3);
+	}
+
+	.scope-group-head {
+		display: flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1) var(--df-p-space-2);
+	}
+
+	.scope-title {
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.scope-note {
+		flex: 1 1 24ch;
+		min-width: 0;
+		font-size: var(--df-p-text-xs);
+		line-height: 1.45;
+		color: var(--df-text-secondary);
+	}
+
+	.scope-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+		gap: var(--df-p-space-1);
+		margin-top: var(--df-p-space-1);
+	}
+
+	.scope-option {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		min-height: 36px;
+		padding: 0 var(--df-p-space-2);
+		border: 1px solid transparent;
+		border-radius: var(--df-p-radius-xs);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-xs);
+		cursor: pointer;
+	}
+
+	.scope-option input {
+		flex: none;
+		width: 16px;
+		height: 16px;
+		accent-color: var(--df-accent-fill);
+	}
+
+	.scope-option span {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.scope-option:has(input:checked) {
+		border-color: color-mix(in srgb, var(--df-accent-text) 26%, var(--df-border-hairline));
+		background: var(--df-surface-selected);
+		color: var(--df-text-primary);
+	}
+
+	.scope-option:has(input:focus-visible) {
+		outline: 2px solid var(--df-accent-text);
+		outline-offset: 2px;
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.scope-option:hover {
+			background: var(--df-surface-well);
+		}
+	}
+
+	.scope-warning {
+		display: flex;
+		align-items: baseline;
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-3);
+		color: var(--df-state-warn-ink);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+	}
+
+	.scope-warning :global(svg) {
+		flex: none;
+	}
+
+	.token-form-foot {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-4);
+	}
+
+	.form-problem {
+		margin: 0;
+	}
+
+	.token-list {
+		display: grid;
+		gap: var(--df-p-space-2);
+		margin: var(--df-p-space-3) 0 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.token-row {
+		display: grid;
+		gap: var(--df-p-space-2);
+		padding: var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-card);
+	}
+
+	.token-row.is-revoked {
+		background: color-mix(in srgb, var(--df-surface-well) 40%, var(--df-surface-card));
+	}
+
+	.token-row.is-revoked .token-name {
+		color: var(--df-text-secondary);
+	}
+
+	.token-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2) var(--df-p-space-3);
+		min-width: 0;
+	}
+
+	.token-id {
+		min-width: 0;
+	}
+
+	.token-name {
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-base);
+		font-weight: 700;
+		color: var(--df-text-primary);
+		overflow-wrap: anywhere;
+	}
+
+	.token-meta {
+		margin-top: 2px;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+		overflow-wrap: anywhere;
+	}
+
+	.token-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		margin-left: auto;
+	}
+
+	.scope-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1);
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.scope-chip {
+		padding: 2px var(--df-p-space-2);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-xs);
+		background: var(--df-surface-well);
+		color: var(--df-text-secondary);
+		font-size: var(--df-p-text-2xs);
+		line-height: 1.6;
+		overflow-wrap: anywhere;
+	}
+
+	.token-facts {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-2) var(--df-p-space-5);
+		margin: 0;
+	}
+
+	.token-fact {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.token-fact dt {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.token-fact dd {
+		margin: 0;
+		font-size: var(--df-p-text-sm);
+		color: var(--df-text-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	/* A countdown under the date, only while it is within a week. */
+	.token-sub {
+		display: block;
+		margin-top: 2px;
+		font-size: var(--df-p-text-2xs);
+		color: var(--df-text-meta);
+	}
+
+	.token-foot {
+		margin-top: var(--df-p-space-3);
+	}
+
+	/* The MCP block is the second half of a token's job: something has to be
+	   told where to send it. Two blocks, one placeholder and one live. */
+	.mcp-block {
+		margin-top: var(--df-p-space-4);
+		padding-top: var(--df-p-space-4);
+		border-top: 1px solid var(--df-border-hairline);
+	}
+
+	.mcp-title {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-2);
+		font-family: var(--df-font-display);
+		font-size: var(--df-p-text-base);
+		font-weight: 700;
+		color: var(--df-text-primary);
+	}
+
+	.mcp-note {
+		margin-top: var(--df-p-space-1);
+	}
+
+	.mcp-code {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--df-p-space-2);
+		margin-top: var(--df-p-space-2);
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid var(--df-border-hairline);
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-surface-well);
+	}
+
+	.mcp-code pre {
+		flex: 1;
+		min-width: 0;
+		margin: 0;
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		line-height: 1.6;
+		color: var(--df-text-primary);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	.mcp-live {
+		margin-top: var(--df-p-space-3);
+	}
+
+	.mcp-live-label {
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
 	@media (max-width: 720px) {
 		.factor-card {
 			padding: var(--s-4);
@@ -2217,6 +3261,72 @@
 		.invite-message .btn,
 		.enrol-cancel {
 			min-height: 48px;
+		}
+
+		/* Agent tokens: one column of fields, one column of scopes, and a 44px
+		   target on every control a thumb reaches, including the two copy
+		   buttons and the Done that drops the value. */
+		.token-form-grid,
+		.scope-grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.scope-option {
+			min-height: 44px;
+			font-size: var(--df-p-text-sm);
+		}
+
+		.token-bar .btn,
+		.token-form .btn,
+		.token-actions .btn,
+		.reveal-foot .btn,
+		.token-message .btn,
+		.token-value :global(.btn),
+		.mcp-code :global(.btn) {
+			min-height: 44px;
+		}
+
+		.token-form .input,
+		.token-value code {
+			min-height: 44px;
+		}
+
+		.token-value code {
+			display: flex;
+			align-items: center;
+		}
+
+		.token-head {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.token-actions {
+			margin-left: 0;
+		}
+
+		.reveal-foot {
+			align-items: stretch;
+			flex-direction: column;
+			justify-content: flex-start;
+			gap: var(--df-p-space-3);
+		}
+
+		/* In a column, `flex: 1 1 32ch` on the warning is a height basis: it was
+		   stretching the reveal card by a few hundred pixels. */
+		.reveal-warning {
+			flex: none;
+		}
+
+		/* The JSON is the point, so the copy button goes under it at this width
+		   instead of eating a third of the line. */
+		.mcp-code {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.mcp-code :global(.btn) {
+			align-self: flex-start;
 		}
 
 		/* The revoke dialog is shared, but its two buttons are tapped here. */

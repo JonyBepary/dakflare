@@ -8,6 +8,7 @@
  */
 
 import type {
+	AgentToken,
 	Alert,
 	ApprovalDecision,
 	ApprovalRequest,
@@ -25,20 +26,25 @@ import type {
 	HealthResult,
 	InviteList,
 	MeInfo,
+	MessageTemplate,
 	MessagesResult,
 	MintedInvite,
 	OfficialChannelId,
+	PacingPolicyRow,
 	PairingCode,
 	RedeemInfo,
 	Rule,
 	RuleInput,
 	RuleTestResult,
+	ScheduledMessage,
 	SessionInfo,
+	TemplatePreview,
 	TraceResult,
 	Workflow,
 	WorkflowIssue,
 	WorkflowSaveInput,
-	WorkflowSummary
+	WorkflowSummary,
+	ContactPage
 } from './types';
 
 const SESSION_PATH = '/admin/session';
@@ -841,5 +847,163 @@ export async function testRules(input: {
 	return get<RuleTestResult>('/v1/admin/rules/test', {
 		method: 'POST',
 		body: JSON.stringify(input)
+	});
+}
+
+/* ------------------------------------------------- templates and audience */
+
+/** Every template, newest first. The Worker parses `variables_json` for us. */
+export async function getTemplates(): Promise<MessageTemplate[]> {
+	const data = await get<{ templates: MessageTemplate[] }>('/v1/admin/templates');
+	return data.templates ?? [];
+}
+
+/**
+ * `POST /v1/admin/templates`: the body is stored verbatim. `variables` in the
+ * answer is the Worker's own extraction, so the console and the renderer agree
+ * on what a placeholder is.
+ */
+export function createTemplate(input: {
+	name: string;
+	channel: string;
+	body: string;
+	wa_template_name?: string;
+	wa_language?: string;
+}): Promise<{ template: MessageTemplate; variables: string[] }> {
+	return get('/v1/admin/templates', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function deleteTemplate(id: string): Promise<{ ok: boolean; id: string }> {
+	return get(`/v1/admin/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * `POST /v1/admin/templates/:id/preview`: renders against sample values and
+ * counts the SMS segments. It writes nothing and sends nothing.
+ */
+export function previewTemplate(id: string, vars: Record<string, string>): Promise<TemplatePreview> {
+	return get(`/v1/admin/templates/${encodeURIComponent(id)}/preview`, {
+		method: 'POST',
+		body: JSON.stringify({ vars })
+	});
+}
+
+/** The audience, filtered and paged. `opted_out` is a total for the same filter. */
+export async function getContacts(params: {
+	channel?: string;
+	opt_out?: boolean;
+	limit?: number;
+	offset?: number;
+} = {}): Promise<ContactPage> {
+	const query = new URLSearchParams();
+	if (params.channel) query.set('channel', params.channel);
+	if (params.opt_out !== undefined) query.set('opt_out', params.opt_out ? '1' : '0');
+	if (params.limit !== undefined) query.set('limit', String(params.limit));
+	if (params.offset !== undefined) query.set('offset', String(params.offset));
+	const suffix = query.toString();
+	const data = await get<ContactPage>(`/v1/admin/contacts${suffix ? `?${suffix}` : ''}`);
+	return { contacts: data.contacts ?? [], total: data.total ?? 0, opted_out: data.opted_out ?? 0 };
+}
+
+/**
+ * `POST /v1/admin/contacts/import`: raw CSV, not JSON, because the file is the
+ * operator's own export. The Worker accepts the same shape a spreadsheet saves.
+ */
+export function importContactsCsv(csv: string): Promise<{ ok: boolean; imported: number; skipped: number }> {
+	return get('/v1/admin/contacts/import', {
+		method: 'POST',
+		headers: { 'Content-Type': 'text/csv' },
+		body: csv
+	});
+}
+
+/* ------------------------------------------------------------- scheduling */
+
+export async function getScheduled(status?: string): Promise<ScheduledMessage[]> {
+	const suffix = status ? `?status=${encodeURIComponent(status)}` : '';
+	const data = await get<{ scheduled: ScheduledMessage[] }>(`/v1/scheduled${suffix}`);
+	return data.scheduled ?? [];
+}
+
+export function scheduleMessage(input: {
+	channel: string;
+	target_type?: 'device' | 'connector';
+	target_id: string;
+	to_peer: string;
+	body: string;
+	template_id?: string;
+	vars?: Record<string, string>;
+	send_at: number;
+	campaign_id?: string;
+}): Promise<{ scheduled: ScheduledMessage }> {
+	return get('/v1/scheduled', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function cancelScheduled(id: string): Promise<{ ok: boolean; cancelled: boolean }> {
+	return get(`/v1/scheduled/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function getPacingPolicies(): Promise<PacingPolicyRow[]> {
+	const data = await get<{ policies: PacingPolicyRow[] }>('/v1/admin/pacing');
+	return data.policies ?? [];
+}
+
+export function setPacingPolicy(
+	targetType: 'device' | 'connector',
+	targetId: string,
+	input: Omit<PacingPolicyRow, 'target_type' | 'target_id' | 'updated_at'>
+): Promise<{ policy: PacingPolicyRow }> {
+	return get(
+		`/v1/admin/pacing/${encodeURIComponent(targetType)}/${encodeURIComponent(targetId)}`,
+		{ method: 'PUT', body: JSON.stringify(input) }
+	);
+}
+
+/* ------------------------------------------------------------ agent tokens */
+
+export async function getAgentTokens(includeRevoked = false): Promise<AgentToken[]> {
+	const data = await get<{ agent_tokens: AgentToken[] }>(
+		`/v1/admin/agent-tokens${includeRevoked ? '?revoked=1' : ''}`
+	);
+	return data.agent_tokens ?? [];
+}
+
+/**
+ * Mint one token. The `token` field is the only time the value exists in a
+ * response; the caller must show it once and never write it to storage.
+ */
+export function mintAgentToken(input: {
+	name: string;
+	scopes: string[];
+	device_id?: string;
+	expires_in_s?: number;
+	max_per_hour?: number;
+}): Promise<{
+	id: string;
+	name: string;
+	token: string;
+	scopes: string[];
+	device_id: string | null;
+	max_per_hour: number;
+	expires_at: number;
+	created_at: number;
+}> {
+	return get('/v1/admin/agent-tokens', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function revokeAgentToken(id: string): Promise<{ ok: boolean; id: string; revoked_at: number }> {
+	return get(`/v1/admin/agent-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/* --------------------------------------------------------------- connectors */
+
+/** The one-click Telegram `setWebhook`; the bot token never leaves the Worker. */
+export function registerTelegramWebhook(id: string): Promise<{
+	ok: boolean;
+	webhook_url: string;
+	description?: string;
+}> {
+	return get(`/v1/admin/connectors/${encodeURIComponent(id)}/register-webhook`, {
+		method: 'POST'
 	});
 }

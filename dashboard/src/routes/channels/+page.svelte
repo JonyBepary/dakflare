@@ -5,6 +5,7 @@
 		deleteConnector,
 		describeError,
 		getConnectors,
+		registerTelegramWebhook,
 		updateConnector
 	} from '$lib/api';
 	import { announce } from '$lib/announce.svelte';
@@ -63,6 +64,10 @@
 	let secretToken = $state('');
 
 	let busyId = $state<string | null>(null);
+	/** The row whose `setWebhook` call is in flight; separate from pause/resume. */
+	let registeringId = $state<string | null>(null);
+	/** A refused register call, shown beside the flash a success would use. */
+	let actionError = $state<string | null>(null);
 	let pendingDelete = $state<ChannelConnector | null>(null);
 	let deleting = $state(false);
 	let deleteError = $state<string | null>(null);
@@ -194,6 +199,28 @@
 		}
 	}
 
+	/**
+	 * Telegram's one-click `setWebhook`, asked for from the row.
+	 *
+	 * The bot token never crosses this screen: the Worker unseals it and calls
+	 * Telegram itself, and answers with the public URL Telegram will post to.
+	 * That URL is the only thing the row says back.
+	 */
+	async function registerWebhook(item: ChannelConnector): Promise<void> {
+		if (registeringId !== null) return;
+		registeringId = item.id;
+		actionError = null;
+		flash = null;
+		try {
+			const result = await registerTelegramWebhook(item.id);
+			flash = `Telegram now posts to ${result.webhook_url}.`;
+		} catch (failure) {
+			actionError = describeError(failure);
+		} finally {
+			registeringId = null;
+		}
+	}
+
 	function askDelete(item: ChannelConnector): void {
 		deleteError = null;
 		pendingDelete = item;
@@ -280,6 +307,12 @@
 	{#if flash}
 		<div class="banner">
 			<Notice tone="ok">{flash}</Notice>
+		</div>
+	{/if}
+
+	{#if actionError}
+		<div class="banner">
+			<Notice tone="danger" title="The webhook was not registered">{actionError}</Notice>
 		</div>
 	{/if}
 
@@ -530,6 +563,22 @@
 									{/if}
 									{item.enabled ? 'Pause' : 'Resume'}
 								</button>
+								{#if item.channel === 'telegram'}
+									<button
+										type="button"
+										class="btn btn-sm register-action"
+										onclick={() => void registerWebhook(item)}
+										disabled={registeringId !== null || busyId !== null}
+										aria-busy={registeringId === item.id}
+									>
+										{#if registeringId === item.id}
+											<Spinner />
+										{:else}
+											<Icon name="send" size={12} />
+										{/if}
+										Register webhook
+									</button>
+								{/if}
 								<button
 									type="button"
 									class="btn btn-sm delete-action"
@@ -561,7 +610,18 @@
 							<dt>Last event</dt>
 							<dd><RelativeTime value={item.last_event_at} fallback="none yet" /></dd>
 						</div>
+						<div class="fact">
+							<dt>Webhook</dt>
+							<dd><RelativeTime value={item.last_webhook_at} fallback="none yet" /></dd>
+						</div>
 					</dl>
+
+					{#if item.last_error}
+						<p class="connector-error">
+							<Badge tone="warn">Last delivery failed</Badge>
+							<span>{item.last_error}</span>
+						</p>
+					{/if}
 
 					<div class="webhook">
 						<div class="webhook-copy">
@@ -844,6 +904,50 @@
 	.account-value {
 		font-size: var(--df-p-text-xs);
 		color: var(--df-text-primary);
+	}
+
+	/* The Worker's own sentence about the last refused delivery. It sits between
+	   the facts and the URL because it explains both: nothing arrived, and the
+	   address the platform posts to is the thing to check. */
+	.connector-error {
+		display: flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1) var(--df-p-space-2);
+		margin: 0;
+		padding: var(--df-p-space-2) var(--df-p-space-3);
+		border: 1px solid color-mix(in srgb, var(--df-state-warn-ink) 26%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-warn-bg);
+		color: var(--df-state-warn-ink);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+	}
+
+	.connector-error span {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	/* Registering is the row's one useful repair when a webhook was never set:
+	   at rest it reads as a plain control, not as the primary action, because
+	   most rows already answer. */
+	.register-action {
+		color: var(--df-text-secondary);
+		background: transparent;
+		border-color: var(--df-border-hairline);
+	}
+
+	.register-action:focus-visible {
+		color: var(--df-accent-text);
+		border-color: var(--df-border-focus);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.register-action:hover:not(:disabled) {
+			color: var(--df-accent-text);
+			border-color: color-mix(in srgb, var(--df-accent-text) 34%, var(--df-border-hairline));
+		}
 	}
 
 	.webhook {

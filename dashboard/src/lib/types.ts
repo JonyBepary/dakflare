@@ -720,6 +720,10 @@ export interface ChannelConnector {
 	/** When the sealed credential was last written; `null` when none exists. */
 	secret_updated_at: number | null;
 	last_event_at: number | null;
+	/** Last verified webhook POST, or `null` before the first one. */
+	last_webhook_at: number | null;
+	/** The last refused delivery, already reduced to a fixed sentence by the Worker. */
+	last_error: string | null;
 	created_by: string;
 	created_at: number;
 	updated_at: number;
@@ -769,4 +773,124 @@ export interface ChannelSendResult {
 	substate?: string;
 	retryAfterSeconds?: number;
 	errorCode?: string;
+}
+
+/* ------------------------------------------------- templates and audience */
+
+/** One reusable message body; `variables` is the parsed `variables_json`. */
+export interface MessageTemplate {
+	id: string;
+	name: string;
+	/** `any` or a channel word; `any` is offered on every platform. */
+	channel: string;
+	body: string;
+	variables: string[];
+	wa_template_name: string | null;
+	wa_language: string | null;
+	created_at: number;
+	updated_at: number;
+}
+
+/** One audience row. Distinct from a conversation identity. */
+export interface AudienceContact {
+	id: string;
+	channel: string;
+	peer: string;
+	name: string | null;
+	attrs: Record<string, unknown>;
+	tags: string[];
+	timezone: string;
+	opt_out: boolean;
+	created_at: number;
+	updated_at: number;
+}
+
+export interface ContactPage {
+	contacts: AudienceContact[];
+	total: number;
+	opted_out: number;
+}
+
+/** What one preview says before anything is queued. */
+export interface TemplatePreview {
+	rendered: string;
+	missing: string[];
+	used: string[];
+	segments: {
+		encoding: 'GSM-7' | 'UCS-2';
+		units: number;
+		segments: number;
+		remaining: number;
+	};
+}
+
+/* ------------------------------------------------------------- scheduling */
+
+export type ScheduledStatus =
+	| 'scheduled'
+	| 'dispatching'
+	| 'dispatched'
+	| 'sent'
+	| 'delivered'
+	| 'cancelled'
+	| 'skipped_opt_out'
+	| 'skipped_window'
+	| 'failed'
+	| 'unknown';
+
+export interface ScheduledMessage {
+	id: string;
+	campaign_id: string | null;
+	channel: string;
+	target_type: 'device' | 'connector';
+	target_id: string;
+	to_peer: string;
+	body: string;
+	template_id: string | null;
+	vars: Record<string, string>;
+	pacing_key: string;
+	send_at: number;
+	expires_at: number | null;
+	status: ScheduledStatus;
+	attempts: number;
+	shift_count: number;
+	last_shift_reason: string | null;
+	dispatch_ref: string | null;
+	last_error: string | null;
+	sent_at: number | null;
+	delivered_at: number | null;
+	created_at: number;
+	updated_at: number;
+	/** The recipient's zone snapshot, so the queue can show local time. */
+	timezone: string;
+}
+
+/** One row of `pacing_policies`, exactly as the Worker stores it. */
+export interface PacingPolicyRow {
+	target_type: 'device' | 'connector';
+	target_id: string;
+	min_interval_ms: number;
+	jitter_pct: number;
+	max_per_hour: number;
+	quiet_start_hour: number;
+	quiet_end_hour: number;
+	timezone: string;
+	updated_at: number;
+}
+
+/* ------------------------------------------------------------ agent tokens */
+
+export interface AgentToken {
+	id: string;
+	name: string;
+	scopes: string[];
+	device_id: string | null;
+	max_per_hour: number;
+	sent_current_hour: number;
+	hour_window_start: number;
+	created_at: number;
+	created_by: string;
+	last_used_at: number | null;
+	expires_at: number | null;
+	revoked_at: number | null;
 }

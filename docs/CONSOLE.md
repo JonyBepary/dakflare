@@ -16,6 +16,8 @@ the Worker serves at `/admin`. All asset URLs and routes carry the `/admin` base
 | `/devices` | fleet table and device detail |
 | `/messages` | message log with delivery state |
 | `/channels` | platform connectors: create, pause, rotate a credential, delete, copy the webhook URL |
+| `/templates` | message templates, live preview with SMS segment counts, CSV audience import |
+| `/scheduled` | the paced queue, cancel, and per-target quiet-hours and rate controls |
 | `/rules` | sentence-shaped rules |
 | `/workflows` | workflow list |
 | `/workflows/edit` | canvas editor; the workflow id is a query parameter |

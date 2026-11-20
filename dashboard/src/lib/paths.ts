@@ -16,6 +16,11 @@ export const ROUTES = {
 	// The accounts the gateway sends and receives for: one connector per
 	// external number, Page, Instagram account or bot.
 	channels: resolve('/channels'),
+	// Reusable message bodies and the audience they render against.
+	templates: resolve('/templates'),
+	// The paced queue: what is waiting, when it will leave, and the policy
+	// that decides the gap between two sends.
+	scheduled: resolve('/scheduled'),
 	rules: resolve('/rules'),
 	workflows: resolve('/workflows'),
 	// One static editor route for drafts and saved flows alike; the workflow key
