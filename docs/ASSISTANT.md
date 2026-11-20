@@ -187,7 +187,9 @@ missing key is shown as the command that installs one
 anywhere to type a key, because a key typed into a browser ends up in a history, a log
 or a screenshot.
 
-The floating button bottom-right opens the agent panel. It sends the current `route`
+The **Ask** action in the console header holds a row of chrome and opens the agent panel
+below it, so the control never covers a table action or the page's last row. The panel
+sends the current `route`
 and `flowId` as context, renders proposals as cards, and shows the operator's saved
 transcript above the turn in progress. On a deployment with the agent runtime, the
 transcript is durable: `GET /v1/admin/agent/conversation` is read on open, "Clear"
