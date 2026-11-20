@@ -184,6 +184,7 @@ const usage = (message) => new CliError(message, 2, { error: 'usage' });
 const ERROR_RULES = {
   usage: { exit: 2, category: 'usage' },
   no_config: { exit: 2, category: 'usage', remediation: 'dakflare init', fix: 'write the config' },
+  worker_not_found: { exit: 2, category: 'usage', remediation: 'dakflare up', fix: 'run from the repository root' },
   token_file: { exit: 2, category: 'usage' },
   confirmation_required: { exit: 2, category: 'usage', remediation: 'dakflare revoke <device-id> --yes', fix: 'confirm non-interactively' },
   keytool_missing: { exit: 2, category: 'tooling', remediation: 'install a JDK', fix: 'keytool is not on PATH' },
@@ -497,6 +498,69 @@ const COMMAND_SPECS = {
       'dakflare webhooks create --name "billing events"',
       'dakflare webhooks deliveries wh_abc --agent',
       'dakflare webhooks delete wh_abc --yes',
+    ],
+  },
+  templates: {
+    response: {
+      templates: '[{id,name,channel,body,variables,created_at,updated_at}]',
+      template: 'create: the stored template',
+      variables: 'create: the variable names found in the body',
+    },
+    summary: 'List, create or delete message templates (list|create|delete)',
+    effect: 'mutating',
+    usage: 'dakflare templates <list|create|delete> [options]',
+    flags: {
+      name: { type: 'string', note: 'create: template name' },
+      body: { type: 'string', note: 'create: body text, with {{variables}}' },
+      channel: {
+        type: 'string',
+        note: 'create: any|sms|whatsapp|telegram|messenger|instagram, default any',
+      },
+      'dry-run': { type: 'boolean', note: 'create: print the request; send nothing' },
+      yes: { type: 'boolean', note: 'delete: skip the confirmation prompt' },
+    },
+    examples: [
+      'dakflare templates list --agent',
+      'dakflare templates create --name order_update --channel whatsapp --body "Order {{id}} is ready"',
+      'dakflare templates delete tpl_abc --yes',
+    ],
+  },
+  contacts: {
+    response: {
+      imported: 'rows written',
+      skipped: 'rows skipped',
+    },
+    summary: 'Import contacts from a CSV file',
+    effect: 'mutating',
+    usage: 'dakflare contacts import <file.csv>',
+    flags: {},
+    examples: ['dakflare contacts import contacts.csv --agent'],
+  },
+  schedule: {
+    response: {
+      scheduled: '[{id,channel,target_type,target_id,to_peer,body,send_at,status}]',
+    },
+    summary: 'List, create or cancel scheduled sends (list|create|cancel)',
+    effect: 'mutating',
+    usage: 'dakflare schedule <list|create|cancel> [options]',
+    flags: {
+      status: { type: 'string', note: 'list: filter by status' },
+      target: { type: 'string', note: 'create: device id for sms, or connector id' },
+      to: { type: 'string', note: 'create: recipient' },
+      body: { type: 'string', note: 'create: message text' },
+      at: { type: 'string', note: 'create: ISO-8601 send time' },
+      channel: {
+        type: 'string',
+        note: 'create: sms|whatsapp|telegram|messenger|instagram, default sms',
+      },
+      'template-id': { type: 'string', note: 'create: template id for a connector send' },
+      'dry-run': { type: 'boolean', note: 'create: print the request; send nothing' },
+      yes: { type: 'boolean', note: 'cancel: skip the confirmation prompt' },
+    },
+    examples: [
+      'dakflare schedule list --agent',
+      'dakflare schedule create --target dev_pixel4a --to +8801540196080 --body "reminder" --at 2026-12-01T09:00:00Z',
+      'dakflare schedule cancel sch_abc --yes',
     ],
   },
   status: {
@@ -1070,6 +1134,9 @@ const VALUE_FLAGS = new Set([
   'template-id',
   'comment-id',
   'media-url',
+  'at',
+  'target',
+  'status',
 ]);
 
 const KNOWN_BOOLEAN_FLAGS = new Set([
@@ -1259,7 +1326,7 @@ async function api(
   method,
   pathname,
   body,
-  { timeout = DEFAULT_TIMEOUT_MS, headers = {} } = {}
+  { timeout = DEFAULT_TIMEOUT_MS, headers = {}, raw = false } = {}
 ) {
   const base = cfg.url.replace(/\/+$/, '');
   const target = `${base}${pathname}`;
@@ -1278,7 +1345,7 @@ async function api(
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...headers,
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
       signal: controller.signal,
     });
   } catch (error) {
@@ -1498,6 +1565,39 @@ function findWorkerDir() {
   return null;
 }
 
+/** Whether a directory carries the files a Worker project is built from. */
+function looksLikeWorkerDir(directory) {
+  if (fs.existsSync(path.join(directory, 'package.json'))) return true;
+  if (fs.existsSync(path.join(directory, 'cloudflare.config.ts'))) return true;
+  try {
+    return fs
+      .readdirSync(directory)
+      .some((name) => /^wrangler.*\.(toml|json|jsonc)$/.test(name));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where `init --local` may write, and nowhere else.
+ *
+ * An explicit directory from `up` bypasses discovery. Otherwise the only
+ * candidate is `worker/` under the current directory, and only when it looks
+ * like the Worker. There is deliberately no `__dirname` fallback here: that
+ * would let a run outside a checkout rotate another project's `.dev.vars`.
+ */
+function resolveLocalWorkerDir(explicit) {
+  if (explicit !== null && explicit !== undefined) return explicit;
+  const candidate = path.join(process.cwd(), 'worker');
+  if (fs.existsSync(candidate) && looksLikeWorkerDir(candidate)) return candidate;
+  throw new CliError(
+    'no worker/ directory here that looks like the Worker (package.json, wrangler.toml or cloudflare.config.ts). ' +
+      'Run this from the repository root, or use `dakflare up`.',
+    2,
+    { error: 'worker_not_found', cwd: process.cwd() }
+  );
+}
+
 function findingsFromHealth(health) {
   const bindings = health.bindings ?? {};
   const missingRequired = REQUIRED_BINDINGS.filter((name) => !bindings[name]);
@@ -1541,9 +1641,8 @@ function printFindings(findings) {
   }
 }
 
-async function initLocal(flags, json) {
-  const workerDir = findWorkerDir();
-  const directory = workerDir ?? process.cwd();
+async function initLocal(flags, json, workerDirectory = null, { quiet = false } = {}) {
+  const directory = resolveLocalWorkerDir(workerDirectory);
   const file = path.join(directory, '.dev.vars');
 
   if (fs.existsSync(file) && !flags.force) {
@@ -1558,6 +1657,7 @@ async function initLocal(flags, json) {
     ADMIN_TOKEN: `dk_adm_${crypto.randomBytes(32).toString('base64url')}`,
     AUTH_PEPPER: `v1:${crypto.randomBytes(32).toString('base64')}`,
     BETTER_AUTH_SECRET: crypto.randomBytes(32).toString('base64'),
+    WEBHOOK_SECRET_KEY: crypto.randomBytes(32).toString('base64'),
   };
 
   let existing = '';
@@ -1581,6 +1681,8 @@ async function initLocal(flags, json) {
   } catch {
     /* best effort */
   }
+
+  if (quiet) return 0;
 
   if (json) {
     emitJson({
@@ -3195,6 +3297,265 @@ async function commandSend(argv) {
   return outcomeExitCode(command, timedOut);
 }
 
+/* ─────────────────────── templates, contacts, schedule ─────────────────────── */
+
+const TEMPLATE_CHANNELS = ['any', ...CONNECTOR_CHANNELS];
+const SCHEDULE_CHANNELS = ['sms', ...CONNECTOR_CHANNELS];
+
+function isoOrRaw(value) {
+  if (value === null || value === undefined) return 'unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+}
+
+function dryRunRequest(method, pathname, body) {
+  if (MODE.json) {
+    emitJson({ ok: true, dry_run: true, request: { method, path: pathname, body } }, MODE);
+    return;
+  }
+  printDryRun(pathname, body, method);
+}
+
+async function commandTemplates(argv) {
+  let [sub = 'list', ...args] = argv;
+  if (sub === '--help' || sub === '-h') return printHelp('templates');
+  if (sub.startsWith('-')) {
+    args = [sub, ...args];
+    sub = 'list';
+  }
+  const { flags, rest } = parseArgv(args);
+  if (flags.help) return printHelp('templates');
+  assertCommandFlags(flags, 'templates');
+
+  if (sub === 'list') {
+    const cfg = requireConfig();
+    const result = await api(cfg, 'GET', '/v1/admin/templates');
+    if (result.status !== 200) throw requestFailure('listing templates', result);
+    const templates = Array.isArray(result.data?.templates) ? result.data.templates : [];
+    if (MODE.json) {
+      emitJson({ ok: true, templates }, MODE);
+      return 0;
+    }
+    if (templates.length === 0) {
+      out('No message templates configured.');
+      return 0;
+    }
+    out(`Templates (${templates.length})`);
+    for (const template of templates) {
+      const variables = Array.isArray(template.variables) ? template.variables : [];
+      out(
+        `  ${pad(template.id, 22)} ${pad(template.channel ?? 'any', 10)} ${template.name ?? ''}` +
+          (variables.length === 0 ? '' : muted(`  (${variables.join(', ')})`))
+      );
+    }
+    return 0;
+  }
+
+  if (sub === 'create') {
+    requireFlags(flags, ['name', 'body']);
+    const channel = (stringFlag(flags, 'channel') ?? 'any').toLowerCase();
+    if (!TEMPLATE_CHANNELS.includes(channel)) {
+      throw usage(`--channel must be one of ${TEMPLATE_CHANNELS.join(', ')}`);
+    }
+    const body = {
+      name: stringFlag(flags, 'name'),
+      channel,
+      body: stringFlag(flags, 'body'),
+    };
+    const pathname = '/v1/admin/templates';
+    if (flags['dry-run'] === true) {
+      dryRunRequest('POST', pathname, body);
+      return 0;
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'POST', pathname, body);
+    if (result.status !== 201 && result.status !== 200) {
+      throw requestFailure('creating the template', result);
+    }
+    const template = result.data?.template ?? result.data ?? {};
+    const variables = Array.isArray(result.data?.variables)
+      ? result.data.variables
+      : Array.isArray(template.variables)
+        ? template.variables
+        : [];
+    if (MODE.json) {
+      emitJson({ ok: true, template, variables }, MODE);
+      return 0;
+    }
+    out(`Created template ${template.id ?? ''} (${template.channel ?? channel})`);
+    if (variables.length > 0) out(`  variables     ${variables.join(', ')}`);
+    return 0;
+  }
+
+  if (sub === 'delete') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare templates delete <id> [--yes]');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    if (flags.yes !== true) {
+      const proceed = await confirm(`Delete template ${id}?`);
+      if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'DELETE', `/v1/admin/templates/${encodeURIComponent(id)}`);
+    if (result.status !== 200 && result.status !== 204) {
+      throw requestFailure(`deleting template ${id}`, result);
+    }
+    if (MODE.json) {
+      emitJson({ ok: true, id, deleted: true }, MODE);
+      return 0;
+    }
+    out(`Deleted template ${id}`);
+    return 0;
+  }
+
+  throw usage(`unknown templates subcommand "${sub}" (expected list|create|delete)`);
+}
+
+async function commandContacts(argv) {
+  let [sub = 'import', ...args] = argv;
+  if (sub === '--help' || sub === '-h') return printHelp('contacts');
+  if (sub.startsWith('-')) {
+    args = [sub, ...args];
+    sub = 'import';
+  }
+  const { flags, rest } = parseArgv(args);
+  if (flags.help) return printHelp('contacts');
+  assertCommandFlags(flags, 'contacts');
+  if (sub !== 'import') throw usage(`unknown contacts subcommand "${sub}" (expected import)`);
+
+  const file = rest[0];
+  if (!file) throw usage('dakflare contacts import <file.csv>');
+  if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+
+  let csv;
+  try {
+    csv = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new CliError(`cannot read ${file}: ${String(error?.message ?? error)}`, 2, {
+      error: 'input_missing',
+      file,
+    });
+  }
+
+  const cfg = requireConfig();
+  const result = await api(cfg, 'POST', '/v1/admin/contacts/import', csv, {
+    headers: { 'Content-Type': 'text/csv', Accept: 'application/json' },
+    raw: true,
+  });
+  if (result.status !== 200 && result.status !== 201) {
+    throw requestFailure('importing contacts', result);
+  }
+  const imported = Number(result.data?.imported ?? 0);
+  const skipped = Number(result.data?.skipped ?? 0);
+  if (MODE.json) {
+    emitJson({ ok: true, imported, skipped }, MODE);
+    return 0;
+  }
+  out(`Imported ${plural(imported, 'contact')}${skipped > 0 ? `; skipped ${skipped}` : ''}.`);
+  return 0;
+}
+
+async function commandSchedule(argv) {
+  let [sub = 'list', ...args] = argv;
+  if (sub === '--help' || sub === '-h') return printHelp('schedule');
+  if (sub.startsWith('-')) {
+    args = [sub, ...args];
+    sub = 'list';
+  }
+  const { flags, rest } = parseArgv(args);
+  if (flags.help) return printHelp('schedule');
+  assertCommandFlags(flags, 'schedule');
+
+  if (sub === 'list') {
+    const cfg = requireConfig();
+    const status = stringFlag(flags, 'status');
+    const pathname =
+      '/v1/scheduled' + (status === undefined ? '' : `?status=${encodeURIComponent(status)}`);
+    const result = await api(cfg, 'GET', pathname);
+    if (result.status !== 200) throw requestFailure('listing scheduled sends', result);
+    const scheduled = Array.isArray(result.data?.scheduled) ? result.data.scheduled : [];
+    if (MODE.json) {
+      emitJson({ ok: true, scheduled }, MODE);
+      return 0;
+    }
+    if (scheduled.length === 0) {
+      out('No scheduled sends.');
+      return 0;
+    }
+    out(`Scheduled sends (${scheduled.length})`);
+    for (const item of scheduled) {
+      out(
+        `  ${pad(item.id, 22)} ${pad(isoOrRaw(item.send_at), 24)} ${pad(item.channel ?? '', 10)} ` +
+          `${pad(item.status ?? '', 10)} ${item.to_peer ?? ''}`
+      );
+    }
+    return 0;
+  }
+
+  if (sub === 'create') {
+    requireFlags(flags, ['target', 'to', 'body', 'at']);
+    const channel = (stringFlag(flags, 'channel') ?? 'sms').toLowerCase();
+    if (!SCHEDULE_CHANNELS.includes(channel)) {
+      throw usage(`--channel must be one of ${SCHEDULE_CHANNELS.join(', ')}`);
+    }
+    const sendAt = Date.parse(stringFlag(flags, 'at'));
+    if (Number.isNaN(sendAt)) {
+      throw usage('--at must be an ISO-8601 timestamp, for example 2026-12-01T09:00:00Z');
+    }
+    const body = {
+      channel,
+      target_type: channel === 'sms' ? 'device' : 'connector',
+      target_id: stringFlag(flags, 'target'),
+      to_peer: stringFlag(flags, 'to'),
+      body: stringFlag(flags, 'body'),
+      send_at: sendAt,
+    };
+    const templateId = stringFlag(flags, 'template-id');
+    if (templateId !== undefined) body.template_id = templateId;
+
+    const pathname = '/v1/scheduled';
+    if (flags['dry-run'] === true) {
+      dryRunRequest('POST', pathname, body);
+      return 0;
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'POST', pathname, body);
+    if (result.status !== 201 && result.status !== 200) {
+      throw requestFailure('scheduling the send', result);
+    }
+    const scheduled = result.data?.scheduled ?? result.data ?? {};
+    if (MODE.json) {
+      emitJson({ ok: true, scheduled }, MODE);
+      return 0;
+    }
+    out(`Scheduled ${scheduled.id ?? ''} for ${isoOrRaw(scheduled.send_at ?? sendAt)}`);
+    return 0;
+  }
+
+  if (sub === 'cancel') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare schedule cancel <id> [--yes]');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    if (flags.yes !== true) {
+      const proceed = await confirm(`Cancel scheduled send ${id}?`);
+      if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'DELETE', `/v1/scheduled/${encodeURIComponent(id)}`);
+    if (result.status !== 200 && result.status !== 204) {
+      throw requestFailure(`cancelling ${id}`, result);
+    }
+    if (MODE.json) {
+      emitJson({ ok: true, id, cancelled: true }, MODE);
+      return 0;
+    }
+    out(`Cancelled ${id}`);
+    return 0;
+  }
+
+  throw usage(`unknown schedule subcommand "${sub}" (expected list|create|cancel)`);
+}
+
 /* ───────────────────────────── up ───────────────────────────── */
 
 /**
@@ -3214,6 +3575,15 @@ async function commandUp(argv) {
   if (flags.help) return printHelp('up');
   assertCommandFlags(flags, 'up');
 
+  const nodeMajor = Number(String(process.versions.node).split('.')[0]);
+  if (!Number.isFinite(nodeMajor) || nodeMajor < 22) {
+    throw new CliError(
+      `dakflare needs Node 22 or newer; this is Node ${process.versions.node}. Install Node 22+ and re-run.`,
+      6,
+      { error: 'node_too_old', node: process.versions.node, floor: '22' }
+    );
+  }
+
   const dryRun = flags['dry-run'] === true;
   const email = stringFlag(flags, 'email');
   if (email !== undefined && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -3221,9 +3591,14 @@ async function commandUp(argv) {
   }
 
   const workerDir = path.join(__dirname, '..', '..', 'worker');
+  const repoRoot = path.join(workerDir, '..');
   const plan = [];
 
-  // 1. cf, and a session it can use. Both failures name the fix rather than
+  // 1. Dependencies and local secrets: both are inputs to the deploy below.
+  ensureRepoDependencies(repoRoot, dryRun, plan);
+  await ensureWebhookSecretKey(workerDir, dryRun, plan);
+
+  // 2. cf, and a session it can use. Both failures name the fix rather than
   //    leaving the operator to guess why a deploy did not happen.
   const version = cf(['--version'], { allowFailure: true });
   if (version === null) {
@@ -3231,24 +3606,60 @@ async function commandUp(argv) {
       error: 'cf_missing',
     });
   }
-  const accounts = cf(['accounts', 'list'], { allowFailure: true });
-  if (accounts === null) {
-    throw new CliError('`cf` is installed but not authenticated.', 4, {
-      error: 'cf_not_authenticated',
-    });
+  let authenticated = cf(['accounts', 'list'], { allowFailure: true }) !== null;
+  if (!authenticated && dryRun) {
+    plan.push('cf auth login (not authenticated)');
+  }
+  if (!authenticated && !dryRun) {
+    if (MODE.agent || !process.stdin.isTTY) {
+      throw new CliError(
+        '`cf` is installed but not authenticated. Run `cf auth login`, then re-run `dakflare up`.',
+        4,
+        { error: 'cf_not_authenticated' }
+      );
+    }
+    out('Cloudflare CLI is not logged in. Launching `cf auth login` now...');
+    const login = spawnSync('cf', ['auth', 'login'], { stdio: 'inherit' });
+    if (login.error || login.status !== 0) {
+      throw new CliError(
+        '`cf auth login` did not complete. Run it, then re-run `dakflare up`.',
+        4,
+        { error: 'cf_not_authenticated' }
+      );
+    }
+    authenticated = cf(['accounts', 'list'], { allowFailure: true }) !== null;
+    if (!authenticated) {
+      throw new CliError(
+        '`cf` is still not authenticated. Run `cf auth login`, then re-run `dakflare up`.',
+        4,
+        { error: 'cf_not_authenticated' }
+      );
+    }
   }
 
-  // 2. Converge the two resources. `d1 list --name` is a search, so the match is
-  //    on the exact name; anything else would adopt the preview database.
-  const databaseId = ensureD1('sms_gateway', dryRun, plan);
-  const namespaceId = ensureKv('KV', dryRun, plan);
+  // 3. Converge the resources. `d1 list --name` is a search, so the match is on
+  //    the exact name; anything else would adopt the preview database. Queues
+  //    come before the deploy so the consumer configuration can bind them.
+  let databaseId;
+  let namespaceId;
+  if (authenticated) {
+    databaseId = ensureD1('sms_gateway', dryRun, plan);
+    namespaceId = ensureKv('KV', dryRun, plan);
+    ensureQueues(dryRun, plan);
+  } else {
+    databaseId = '<new-database-id>';
+    namespaceId = '<new-namespace-id>';
+    plan.push('d1 sms_gateway: create or reuse (cf not authenticated)');
+    plan.push('kv KV: create or reuse (cf not authenticated)');
+    for (const name of UP_QUEUES) plan.push(`queue ${name}: create if missing (cf not authenticated)`);
+  }
 
-  // 3. Write the ids into the config the deploy reads.
+  // 4. Write the ids into the config the deploy reads.
   const configPath = path.join(workerDir, 'cloudflare.config.ts');
   const configChange = writeConfigIds(configPath, databaseId, namespaceId, dryRun);
   plan.push(configChange);
 
-  // 4. Migrate, then deploy with the secrets `init --local` already wrote.
+  // 5. Migrate, then deploy with the secrets `init --local` already wrote.
   plan.push(`cf d1 migrations apply ${databaseId} --remote`);
   plan.push('cf deploy --secrets-file .dev.vars');
   plan.push(
@@ -3296,7 +3707,7 @@ async function commandUp(argv) {
 
   const deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
 
-  // 5. Verify against the deployment, not against the exit status of a deploy.
+  // 6. Verify against the deployment, not against the exit status of a deploy.
   const url = readDeployUrl(deploy.stdout) ?? readConfigUrl();
   if (url === null) {
     throw new CliError(
@@ -3308,10 +3719,22 @@ async function commandUp(argv) {
   const upToken = readUpAdminToken(workerDir);
   const health = await fetchHealthFor(url, upToken);
 
-  // 6. The owner account, then a pairing code. Both are what "installed" means:
+  // 7. Save the deployment so `doctor` and every other command work without a
+  //    second `init --url`.
+  let savedConfigPath = null;
+  if (upToken !== '') {
+    saveConfig({ url, token: upToken, installedAt: new Date().toISOString() });
+    savedConfigPath = CONFIG_FILE;
+  }
+
+  // 8. The owner account, then a pairing code. Both are what "installed" means:
   //    a deployment nobody can sign in to, or pair with, is not one.
   const owner = await bootstrapOwner(url, email, upToken);
   const pairing = await mintPairingCode(url, upToken);
+  const deepLink = pairing?.code
+    ? `dakflare://pair?u=${encodeURIComponent(url)}&c=${encodeURIComponent(pairing.code)}`
+    : null;
+  const qr = deepLink !== null && !MODE.json ? qrText(deepLink) : null;
 
   if (MODE.json) {
     emitJson(
@@ -3322,8 +3745,10 @@ async function commandUp(argv) {
         database_id: databaseId,
         kv_namespace_id: namespaceId,
         healthy: health,
+        config: { path: savedConfigPath, saved: savedConfigPath !== null },
         owner,
         pairing,
+        deep_link: deepLink,
       },
       MODE
     );
@@ -3332,6 +3757,7 @@ async function commandUp(argv) {
   out(`Deployed ${url}`);
   out(`  database      ${databaseId}`);
   out(`  kv namespace  ${namespaceId}`);
+  out(`  config        ${savedConfigPath ?? 'not saved (no admin token found)'}`);
   out(`  health        ${health ? 'ok' : 'not healthy: run `dakflare doctor`'}`);
   if (owner.state === 'created') {
     out('');
@@ -3345,6 +3771,11 @@ async function commandUp(argv) {
   if (pairing?.code) {
     out('');
     out(`Pairing code ${pairing.code} (expires in ${pairing.expires_in}s)`);
+    if (deepLink !== null) out(`  link          ${deepLink}`);
+    if (qr) {
+      out('');
+      out(qr);
+    }
   }
   return 0;
 }
@@ -3379,6 +3810,115 @@ function cfJson(args) {
     return JSON.parse(raw);
   } catch {
     return null;
+  }
+}
+
+/**
+ * `cf queues list` prints a `result_info:` line before its JSON array, so the
+ * document starts at the first `[` rather than at byte zero.
+ */
+function cfJsonArray(args) {
+  const raw = String(cf(args) ?? '');
+  const start = raw.indexOf('[');
+  if (start === -1) return null;
+  try {
+    const parsed = JSON.parse(raw.slice(start));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+const UP_QUEUES = ['dakflare-webhook-queue', 'dakflare-ingest-queue', 'dakflare-ingest-dlq'];
+
+/**
+ * Install what the build and deploy read. A missing `node_modules` is repaired
+ * rather than reported: the install is convergent and the failure names the
+ * exact directory that broke.
+ */
+function ensureRepoDependencies(repoRoot, dryRun, plan) {
+  for (const dir of ['worker', 'dashboard']) {
+    const full = path.join(repoRoot, dir);
+    if (!fs.existsSync(path.join(full, 'package.json'))) {
+      plan.push(`deps ${dir}: no package.json (skipped)`);
+      continue;
+    }
+    if (fs.existsSync(path.join(full, 'node_modules'))) {
+      plan.push(`deps ${dir}: node_modules present`);
+      continue;
+    }
+    if (dryRun) {
+      plan.push(`deps ${dir}: npm install (node_modules missing)`);
+      continue;
+    }
+    out(`Installing dependencies in ${dir}/...`);
+    const result = spawnSync('npm', ['install'], { cwd: full, encoding: 'utf8' });
+    if (result.error || result.status !== 0) {
+      const detail = (result.stderr || result.stdout || result.error?.message || '').trim();
+      throw new CliError(
+        `npm install failed in ${full} (exit ${result.status ?? 'n/a'}): ${detail}`,
+        1,
+        { error: 'dependency_install_failed', directory: full }
+      );
+    }
+    plan.push(`deps ${dir}: installed`);
+  }
+}
+
+/**
+ * `worker/.dev.vars` must exist and carry WEBHOOK_SECRET_KEY before the deploy,
+ * because a sealed webhook secret cannot be created without it. An existing file
+ * gains only the missing key; its other lines are never touched.
+ */
+async function ensureWebhookSecretKey(workerDir, dryRun, plan) {
+  const file = path.join(workerDir, '.dev.vars');
+  if (!fs.existsSync(file)) {
+    if (dryRun) {
+      plan.push(
+        'worker/.dev.vars: create (ADMIN_TOKEN, AUTH_PEPPER, BETTER_AUTH_SECRET, WEBHOOK_SECRET_KEY)'
+      );
+      return;
+    }
+    await initLocal({}, false, workerDir, { quiet: true });
+    plan.push('worker/.dev.vars: created with WEBHOOK_SECRET_KEY');
+    return;
+  }
+
+  const raw = fs.readFileSync(file, 'utf8');
+  if (/^WEBHOOK_SECRET_KEY=/m.test(raw)) {
+    plan.push('worker/.dev.vars: present (WEBHOOK_SECRET_KEY set)');
+    return;
+  }
+  if (dryRun) {
+    plan.push('worker/.dev.vars: append WEBHOOK_SECRET_KEY');
+    return;
+  }
+  const separator = raw === '' || raw.endsWith('\n') ? '' : '\n';
+  fs.appendFileSync(
+    file,
+    `${separator}WEBHOOK_SECRET_KEY=${crypto.randomBytes(32).toString('base64')}\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+  plan.push('worker/.dev.vars: appended WEBHOOK_SECRET_KEY');
+}
+
+/** Create the queues the Worker consumes, before the deploy binds them. */
+function ensureQueues(dryRun, plan) {
+  const rows = cfJsonArray(['queues', 'list']) ?? [];
+  const existing = new Set(
+    rows.map((row) => row.queue_name ?? row.name).filter((name) => typeof name === 'string')
+  );
+  for (const name of UP_QUEUES) {
+    if (existing.has(name)) {
+      plan.push(`queue ${name}: reuse`);
+      continue;
+    }
+    if (dryRun) {
+      plan.push(`queue ${name}: create`);
+      continue;
+    }
+    runCf(['queues', 'create', name], undefined, `creating queue ${name}`);
+    plan.push(`queue ${name}: created`);
   }
 }
 
@@ -7715,6 +8255,9 @@ Usage: dakflare <command> [options]
   status        read one command's state; --wait follows it to the end
   connectors    \`connectors list|create|update|delete\` channel credentials
   webhooks      \`webhooks list|create|delete|deliveries\` inbound agent hooks
+  templates     \`templates list|create|delete\` message templates
+  contacts      \`contacts import <file.csv>\` bulk contact import
+  schedule      \`schedule list|create|cancel\` scheduled sends
   up            provision the deployment: resources, deploy, owner, pairing
   auth          accounts, invites, agent tokens, approvals, and authority grants
   flows         \`flows apply\` and \`flows heal\` for v2 flow documents
@@ -7751,7 +8294,8 @@ ${CONFIG_FILE} (mode 600). The token is never printed.
   --token <token>      admin token (visible in shell history; prefer --token-file)
   --token-file <path>  read the admin token from a file
   --local              do not contact a Worker; write worker/.dev.vars with fresh
-                       ADMIN_TOKEN, AUTH_PEPPER and BETTER_AUTH_SECRET values
+                       ADMIN_TOKEN, AUTH_PEPPER, BETTER_AUTH_SECRET and
+                       WEBHOOK_SECRET_KEY values
   --force              with --local, replace an existing .dev.vars
   --json               machine-readable output`,
 
@@ -7872,6 +8416,41 @@ secret and runs one agent turn. The signing secret is returned only by create.
 
 Store the signing secret when create prints it. The deployment keeps a sealed
 copy for verification and will not return it again.`,
+
+  templates: `Usage: dakflare templates <list|create|delete> [options]
+
+  list                          id, channel, name and the variables found in each body
+  create --name <n> --body <text> [--channel <ch>] [--dry-run]
+                                store a template; the Worker extracts its {{variables}}
+  delete <id> [--yes]           remove a template
+
+  --channel <ch>                any|sms|whatsapp|telegram|messenger|instagram, default any
+  --dry-run                     create: print the request and send nothing
+  --yes                         delete: skip the confirmation prompt`,
+
+  contacts: `Usage: dakflare contacts import <file.csv> [--json]
+
+Reads the file and POSTs it verbatim to /v1/admin/contacts/import with
+Content-Type: text/csv. Nothing is buffered through JSON, so the header row and
+quoting reach the Worker exactly as written.
+
+Prints how many rows were imported and how many were skipped.`,
+
+  schedule: `Usage: dakflare schedule <list|create|cancel> [options]
+
+  list [--status <s>]           scheduled sends, optionally filtered by status
+  create --target <id> --to <peer> --body <text> --at <ISO8601>
+                                schedule one send; --at accepts any ISO-8601 timestamp
+  cancel <id> [--yes]           cancel a send that has not started
+
+  --channel <ch>                sms|whatsapp|telegram|messenger|instagram, default sms
+                                sms targets a device; every other channel a connector
+  --template-id <id>            create: template for a connector send
+  --dry-run                     create: print the request and send nothing
+  --yes                         cancel: skip the confirmation prompt
+
+Cancel exits 5 when the Worker answers 409 not_cancellable, and 3 when the id is
+unknown.`,
 
   status: `Usage: dakflare status <command-id> [--device <id>] [--wait [duration]] [--until <state>] [--json]
 
@@ -8092,11 +8671,13 @@ sender_mismatch, body_mismatch and cooldown are all reported, not just matches.`
 
   up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
 
-Provisions the deployment on the account \`cf\` is logged into: creates the D1
-database and the KV namespace if they are missing, writes both ids into
-worker/cloudflare.config.ts, applies migrations, deploys with the secrets
-\`dakflare init --local\` wrote, checks health, creates the owner, and mints one
-pairing code.
+Provisions the deployment on the account \`cf\` is logged into: installs missing
+dependencies, writes worker/.dev.vars (with WEBHOOK_SECRET_KEY) when it is
+missing, creates the D1 database, the KV namespace and the three queues if they
+are missing, writes both ids into worker/cloudflare.config.ts, applies
+migrations, deploys with the local secrets, checks health, saves the deployment
+to the CLI config, creates the owner, and mints one pairing code (with a
+scannable QR).
 
 Every step converges, so running it twice is safe and running it on a live
 deployment repairs it rather than replacing it.
@@ -8105,8 +8686,9 @@ deployment repairs it rather than replacing it.
   --yes              skip the confirmation before deploying
   --dry-run          resolve, check and print the plan; change nothing
 
-Requires \`cf\` on PATH and authenticated (\`cf auth login\`). There is no
-wrangler fallback on purpose: two deploy paths differ only on someone else's
+Requires \`cf\` on PATH. When it is not authenticated, an interactive run starts
+\`cf auth login\`; --agent and non-TTY runs refuse and name that command. There is
+no wrangler fallback on purpose: two deploy paths differ only on someone else's
 machine.
 `,
   capabilities: `Usage: dakflare capabilities [--agent]
@@ -8215,6 +8797,9 @@ const COMMANDS = {
   status: commandStatus,
   connectors: commandConnectors,
   webhooks: commandWebhooks,
+  templates: commandTemplates,
+  contacts: commandContacts,
+  schedule: commandSchedule,
   up: commandUp,
   capabilities: commandCapabilities,
   describe: commandDescribe,

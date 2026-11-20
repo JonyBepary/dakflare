@@ -25,7 +25,7 @@ owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questio
 | Command | Flags | What it does |
 |---|---|---|
 | `init` | `--url --token --token-file --local --force` | verify a Worker and save the URL and token |
-| `up` | `--email --yes --dry-run` | resources, deploy, owner, pairing |
+| `up` | `--email --yes --dry-run` | dependencies, local secrets, cf login, queues, deploy, owner, pairing QR, saved config |
 | `doctor` | `--max-age --serial` | config, health, schema, migrations, bindings, phone |
 | `pair` | `--label --qr --ttl` | mint a pairing code; `--qr` renders it in the terminal |
 | `devices` | none | list paired devices and their last contact |
@@ -64,6 +64,22 @@ one is set and when it last changed.
 | `webhooks create` | `--name --dry-run` | mint a hook and print its signing secret once |
 | `webhooks delete <id>` | `--yes` | remove a hook and its deliveries |
 | `webhooks deliveries <id>` | none | the last 20 deliveries, newest first |
+
+### Templates, contacts and scheduling
+
+| Command | Flags | What it does |
+|---|---|---|
+| `templates list` | none | id, channel and name, with variables |
+| `templates create` | `--name --body --channel --dry-run` | store a `{{var \| fallback}}` body |
+| `templates delete <id>` | `--yes` | remove a template |
+| `contacts import <file>` | none | read RFC-4180 CSV and upsert in 50-row D1 batches |
+| `schedule list` | `--status` | the paced queue, soonest first |
+| `schedule create` | `--target --to --body --at --channel --template-id --dry-run` | queue one send; `--at` is ISO-8601 |
+| `schedule cancel <id>` | `--yes` | cancel while it is still scheduled; a claimed row answers `not_cancellable` |
+
+`schedule create` infers `target_type` from `--channel`: `sms` is a paired device, every other
+channel is a connector id. Quiet hours and the hourly cap are applied by the Scheduler, not by the
+CLI, so a shifted message keeps its row and is not lost.
 
 `connectors create --dry-run` prints the request with every credential redacted and sends nothing.
 The webhook URL is built from the Worker URL and the connector id; the API never stores or returns
