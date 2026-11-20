@@ -167,8 +167,9 @@ A proposal from an agent is not applied and is not ignored: it is staged.
   spoofing signal, explicitly not an error in the operator's fields. Unavailable or refused
   leaves the manual path untouched with a note.
 
-- **The assistant is the same rule with prose allowed.** The floating button bottom-right opens
-  one question, sends `route` + `flowId` as context and nothing else, and renders each proposal
+- **The assistant is the same rule with prose allowed.** The header's **Ask** action holds a row
+  of chrome and opens a panel below it, so it never covers a table action or the page's last row.
+  It opens one question, sends `route` + `flowId` as context and nothing else, and renders each proposal
   as a card: Accept for a rule or a template, "Stage the patch" for a workflow. Staging is only
   offered while an editor is mounted, because the handover is a function the editor registers.
   The panel keeps nothing after it closes and has no history. Its settings live under Security

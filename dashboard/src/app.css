@@ -116,9 +116,17 @@
 
 	--rail: var(--df-p-layout-rail);
 	--df-c-shell-header: 64px;
+	/* The header's own inline padding, so the panel that hangs from it can line up
+	   with the button that opened it instead of guessing a gutter. */
+	--df-c-topbar-pad: var(--df-c-shell-gutter);
 	/* The section tabs only exist below 900px; above it they take no space and
 	   must not inflate scroll padding or the sticky table head. */
 	--df-c-shell-tabs: 0px;
+	/* The tab strip's overflow cue: how wide the fade at a hiding edge is, and how
+	   far inside that edge a tab must sit to be clear of it. `+layout.svelte` reads
+	   both, so the reveal and the gradient are the same two numbers. */
+	--df-c-tabs-fade: var(--df-p-space-5);
+	--df-c-tabs-inset: var(--df-p-space-6);
 	/* Outer margin is twice the smallest internal gap (04 §4.2). */
 	--df-c-shell-gutter: var(--df-p-space-6);
 
@@ -574,7 +582,7 @@ time {
 	align-items: center;
 	gap: var(--df-p-space-3);
 	height: var(--df-c-shell-header);
-	padding: 0 var(--df-c-shell-gutter);
+	padding: 0 var(--df-c-topbar-pad);
 	border-bottom: 1px solid var(--df-border-hairline);
 	background: color-mix(in srgb, var(--df-surface-card) 92%, transparent);
 	backdrop-filter: blur(8px);
@@ -601,7 +609,7 @@ time {
 }
 
 .topbar-brand-name,
-.shell-tabs {
+.shell-tabs-wrap {
 	display: none;
 }
 
@@ -1599,6 +1607,9 @@ select.input {
 		/* The tab strip appears with this breakpoint, so the scroll padding and
 		   the sticky table head grow by its height from here down. */
 		--df-c-shell-tabs: 48px;
+		/* The header's own inline padding is the phone's gutter, and the panel that
+		   hangs from the header lines up with it. */
+		--df-c-topbar-pad: var(--df-p-space-3);
 	}
 
 	.shell {
@@ -1616,7 +1627,7 @@ select.input {
 	}
 
 	.topbar {
-		padding: 0 var(--df-p-space-3);
+		padding: 0 var(--df-c-topbar-pad);
 		gap: var(--df-p-space-2);
 	}
 
@@ -1627,8 +1638,8 @@ select.input {
 	.topbar-brand {
 		display: grid;
 		place-items: center;
-		width: 40px;
-		height: 40px;
+		width: 44px;
+		height: 44px;
 		border-radius: 12px;
 		background: var(--df-accent-soft);
 		/* The mark's slab is currentColor, so this is the ink the icon is drawn
@@ -1647,19 +1658,32 @@ select.input {
 		white-space: nowrap;
 	}
 
-	.shell-tabs {
-		display: flex;
+	/* The wrapper is what sticks and owns the row's surface; the nav inside it is
+	   the scroller. Keeping the two apart is what makes the edge fade an overlay
+	   instead of a mask: a mask on the scroller fades its own background too, which
+	   reads as a glow on the row rather than as content continuing past it. */
+	.shell-tabs-wrap {
+		display: block;
 		position: sticky;
 		top: var(--df-c-shell-header);
 		z-index: 39;
-		gap: 2px;
 		height: var(--df-c-shell-tabs);
+		border-bottom: 1px solid var(--df-border-hairline);
+		background: var(--df-surface-card);
+	}
+
+	/* One line, never wrapped: a route that does not fit is reached by scrolling to
+	   it, never by hiding one or by adding a second row. */
+	.shell-tabs {
+		display: flex;
+		height: 100%;
+		gap: 2px;
 		padding: 0 var(--df-p-space-2);
 		overflow-x: auto;
 		overflow-y: hidden;
 		scrollbar-width: none;
-		border-bottom: 1px solid var(--df-border-hairline);
-		background: var(--df-surface-card);
+		scroll-padding-inline: var(--df-c-tabs-inset);
+		overscroll-behavior-inline: contain;
 	}
 
 	.shell-tabs::-webkit-scrollbar {
@@ -1674,6 +1698,61 @@ select.input {
 		font-size: var(--df-p-text-sm);
 		gap: 6px;
 		white-space: nowrap;
+		/* A tab reached by keyboard lands clear of the fade, not under it. */
+		scroll-margin-inline: var(--df-c-tabs-inset);
+	}
+
+	/* Empty scrollable room after the last tab, so the final route can rest clear of
+	   the fade instead of ending flush against the edge. */
+	.shell-tabs::after {
+		content: '';
+		flex: 0 0 var(--df-c-tabs-inset);
+	}
+
+	/* The overflow cue: a fade at each end that is hiding content. It is driven by
+	   the wrapper's `data-fade`, which the layout measures, so the fade is present
+	   only while there is something under it. */
+	.shell-tabs-wrap::before,
+	.shell-tabs-wrap::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: var(--df-c-tabs-fade);
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 120ms ease;
+	}
+
+	.shell-tabs-wrap::before {
+		left: 0;
+		background: linear-gradient(to right, var(--df-surface-card) 22%, transparent);
+	}
+
+	.shell-tabs-wrap::after {
+		right: 0;
+		background: linear-gradient(to left, var(--df-surface-card) 22%, transparent);
+	}
+
+	.shell-tabs-wrap[data-fade='start']::before,
+	.shell-tabs-wrap[data-fade='both']::before,
+	.shell-tabs-wrap[data-fade='end']::after,
+	.shell-tabs-wrap[data-fade='both']::after {
+		opacity: 1;
+	}
+
+	/* The chevron on the end that has more: a small mark in the quiet ink, sitting
+	   in the fade so it reads as the edge of the row rather than as a control. */
+	.tabs-more {
+		position: absolute;
+		top: 50%;
+		right: var(--df-p-space-1);
+		z-index: 1;
+		transform: translateY(-50%) rotate(-90deg);
+		display: grid;
+		place-items: center;
+		color: var(--df-text-secondary);
+		pointer-events: none;
 	}
 
 	.topbar-actions .btn-icon.btn-sm {

@@ -7,6 +7,7 @@
 	import { deleteSession, setUnauthorizedHandler, signOutAccount } from '$lib/api';
 	import { ALERTS_CHANGED_EVENT } from '$lib/alert-events';
 	import { announcer } from '$lib/announce.svelte';
+	import { assistantDock } from '$lib/assistant-dock.svelte';
 	import { formatAbsolute, formatCount } from '$lib/format';
 	import { BASE, ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
@@ -91,6 +92,13 @@
 	let boot = $state<'checking' | 'ready' | 'error'>('checking');
 	let loggingOut = $state(false);
 	let topbarNav = $state<HTMLElement | null>(null);
+	/**
+	 * Whether the phone's tab strip overflows, and which end has content past the
+	 * edge. Both are measured, never assumed: the fade exists only while there is
+	 * something under it, which is what makes it a cue rather than a decoration.
+	 */
+	let tabsScrollable = $state(false);
+	let tabsFade = $state<'none' | 'start' | 'end' | 'both'>('none');
 	let autonomy = $state<AgentAutonomy | null>(null);
 	let revokingAutonomy = $state(false);
 	let autonomyVersion = 0;
@@ -368,19 +376,118 @@
 		if (boot === 'ready' && !isPreauth) refreshCounts();
 	});
 
-	// Keep the current section in view inside the horizontally scrolling mobile
-	// nav. The rail shows everything; the phone shows the active item at the left
-	// edge with the next one fading in, instead of a row that starts at Overview.
+	/* ---- the phone's tab strip ---- */
+
+	/**
+	 * The two distances the strip is read with, taken from the stylesheet.
+	 *
+	 * `fade` is the width of the gradient at an overflowing edge and `inset` is how
+	 * far inside that edge a tab has to sit to be clear of it. They are read rather
+	 * than repeated here so the reveal and the gradient cannot drift apart: a tab
+	 * under the fade is exactly the thing the reveal is there to prevent.
+	 */
+	function tabMetrics(navEl: HTMLElement): { fade: number; inset: number } {
+		const style = getComputedStyle(navEl);
+		const read = (name: string, fallback: number): number => {
+			const value = Number.parseFloat(style.getPropertyValue(name));
+			return Number.isFinite(value) && value >= 0 ? value : fallback;
+		};
+		return { fade: read('--df-c-tabs-fade', 24), inset: read('--df-c-tabs-inset', 32) };
+	}
+
+	/**
+	 * Measure the strip: can it scroll at all, and which ends are hiding something.
+	 *
+	 * The left end is simply "content has moved past the start". The right end is
+	 * the last tab's own edge against the fade, not `scrollWidth`: the strip keeps a
+	 * tail of empty space (so the final tab can rest clear of the edge), and a
+	 * `scrollWidth` comparison would read at the end of the scroll as if there were
+	 * more to come. A tab whose right edge is under the fade is a tab that is
+	 * clipped, which is what the cue is for.
+	 */
+	function readTabs(): void {
+		const navEl = topbarNav;
+		if (navEl === null) return;
+
+		const scrollable = navEl.scrollWidth > navEl.clientWidth + 1;
+		tabsScrollable = scrollable;
+		if (!scrollable) {
+			tabsFade = 'none';
+			return;
+		}
+
+		const { fade } = tabMetrics(navEl);
+		const navBox = navEl.getBoundingClientRect();
+		const items = navEl.querySelectorAll<HTMLElement>('.nav-link');
+		const last = items[items.length - 1];
+		const start = navEl.scrollLeft > 1;
+		const end = last !== undefined && last.getBoundingClientRect().right > navBox.right - fade;
+		tabsFade = start && end ? 'both' : start ? 'start' : end ? 'end' : 'none';
+	}
+
+	/**
+	 * Bring the current page's tab fully into view, with room to see it.
+	 *
+	 * It scrolls only when the tab is not already clear of both fades, so opening a
+	 * page whose tab is visible leaves the strip where the operator left it. The
+	 * strip is one line and stays one line: the active tab is moved, the row never
+	 * wraps and no route is dropped to make room.
+	 */
+	function revealActive(): void {
+		const navEl = topbarNav;
+		if (navEl === null) return;
+
+		readTabs();
+		if (!tabsScrollable) return;
+
+		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
+		if (active === null) return;
+
+		const { inset } = tabMetrics(navEl);
+		const navBox = navEl.getBoundingClientRect();
+		const box = active.getBoundingClientRect();
+		const view = navEl.clientWidth;
+		const relLeft = box.left - navBox.left;
+		const relRight = box.right - navBox.left;
+
+		let target = navEl.scrollLeft;
+		if (relLeft < inset) target = navEl.scrollLeft + relLeft - inset;
+		else if (relRight > view - inset) target = navEl.scrollLeft + relRight - view + inset;
+		else return;
+
+		const max = navEl.scrollWidth - view;
+		navEl.scrollTo({ left: Math.max(0, Math.min(target, max)), behavior: 'auto' });
+		readTabs();
+	}
+
+	// The strip's own listeners, attached to whatever element is the strip: the
+	// console's until the shell goes away, and again if it comes back. A scroll
+	// only re-measures; a resize may have put the current tab out of view, so it
+	// asks for the reveal, which scrolls only when the tab is not already clear.
+	$effect(() => {
+		const navEl = topbarNav;
+		if (navEl === null) return;
+
+		const onScroll = (): void => readTabs();
+		navEl.addEventListener('scroll', onScroll, { passive: true });
+		const observer = new ResizeObserver(() => {
+			revealActive();
+		});
+		observer.observe(navEl);
+		// Labels are drawn in the body face; a font that loads late changes every
+		// width in the row, so the measurement runs once more when it is in.
+		void document.fonts?.ready.then(() => revealActive());
+
+		return () => {
+			navEl.removeEventListener('scroll', onScroll);
+			observer.disconnect();
+		};
+	});
+
+	// The current page changed: make sure its tab is the one you can read.
 	$effect(() => {
 		void page.url.pathname;
-		const navEl = topbarNav;
-		if (!navEl) return;
-		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
-		if (!active) return;
-		const navRect = navEl.getBoundingClientRect();
-		const activeRect = active.getBoundingClientRect();
-		const left = activeRect.left - navRect.left + navEl.scrollLeft - 4;
-		navEl.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
+		void tick().then(() => revealActive());
 	});
 </script>
 
@@ -513,21 +620,53 @@
 					>
 						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={16} />{/if}
 					</button>
+					<!-- The assistant's one launcher, in the header's own row rather than
+					     over the page. A fixed pill in the corner is a control that covers
+					     whatever the page puts there — a table's last action, a paginator,
+					     the right edge of a card — and no z-index or page padding changes
+					     that. Here it holds a row of chrome, so there is nothing under it,
+					     and the panel it opens hangs from the header below the button. -->
+					<button
+						type="button"
+						id={assistantDock.launcherId}
+						class="launcher"
+						data-away={assistantDock.expanded}
+						aria-expanded={assistantDock.open}
+						aria-controls={assistantDock.open && assistantDock.panelId !== ''
+							? assistantDock.panelId
+							: undefined}
+						aria-label={assistantDock.open ? 'Close the assistant' : 'Ask the assistant'}
+						title={assistantDock.open ? 'Close the assistant' : 'Ask the assistant'}
+						onclick={() => assistantDock.toggle()}
+					>
+						<span class="launcher-mark"><Icon name="sparkles" size={15} /></span>
+						<span class="launcher-label">{assistantDock.open ? 'Close' : 'Ask'}</span>
+					</button>
 				</div>
 			</header>
 
-			<nav class="shell-tabs" aria-label="Main" bind:this={topbarNav}>
-				{#each nav as item (item.href)}
-					<a
-						class="nav-link"
-						href={item.href}
-						aria-current={isActive(item) ? 'page' : undefined}
-					>
-						<Icon name={item.icon} size={16} />
-						{item.label}
-					</a>
-				{/each}
-			</nav>
+			<!-- One row, and it says when it is hiding something: the strip scrolls
+			     sideways on a phone, so each end that has content past it fades, and a
+			     small chevron marks the end with more to come. The fade is the child
+			     of a wrapper rather than the scroller itself: a mask on the scrolling
+			     element fades its own surface too, which reads as a glow on the row. -->
+			<div class="shell-tabs-wrap" data-fade={tabsFade}>
+				<nav class="shell-tabs" aria-label="Main" bind:this={topbarNav}>
+					{#each nav as item (item.href)}
+						<a
+							class="nav-link"
+							href={item.href}
+							aria-current={isActive(item) ? 'page' : undefined}
+						>
+							<Icon name={item.icon} size={16} />
+							{item.label}
+						</a>
+					{/each}
+				</nav>
+				{#if tabsFade === 'end' || tabsFade === 'both'}
+					<span class="tabs-more" aria-hidden="true"><Icon name="chevron-down" size={12} /></span>
+				{/if}
+			</div>
 
 			{#if autonomy?.enabled}
 				<div class="autonomy-banner" role="region" aria-label="Agent autonomy window">
@@ -616,26 +755,73 @@
 		</div>
 	{/if}
 
-	<!-- One floating control, outside the scroll: the panel is a sibling of the
-	     shell so its fixed position is measured against the window, not a card.
-	     `activeLabel` is the rail's own word for this page: the panel shows it in
-	     place of the bare `/` the console root strips to. -->
+	<!-- The panel, outside the shell so its own fixed box is measured against the
+	     window and never against a card. Its launcher is the header button above;
+	     `$lib/assistant-dock.svelte` is the link between them. `activeLabel` is the
+	     rail's own word for this page: the panel shows it in place of the bare `/`
+	     the console root strips to. -->
 	<Assistant pageLabel={activeLabel} />
 {/if}
 
 <style>
-	/* The tab strip scrolls sideways on a phone and hides its scrollbar; without
-	   a mask a partly cut-off tab looks like the end of the list. The fade says
-	   there is more in that direction. A mask reads alpha, so the stop is the
-	   absolute ink: opaque in both schemes, never a surface colour. */
-	:global(.shell-tabs) {
-		mask-image: linear-gradient(
-			to right,
-			transparent 0,
-			var(--df-p-absolute-ink) var(--df-p-dist-nudge),
-			var(--df-p-absolute-ink) calc(100% - var(--df-p-dist-nudge)),
-			transparent 100%
-		);
+	/* ---- the assistant's launcher ----
+	   A control in the header's own row: 36px like the icon buttons beside it, the
+	   44px floor on a phone, and the accent kept to the glyph so it does not
+	   compete with the page's primary action. Nothing here is positioned, which is
+	   the point: the row holds it, so it cannot sit over the page. */
+	.launcher {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		flex: none;
+		height: 36px;
+		min-width: 44px;
+		padding: 0 var(--df-p-space-3);
+		border: 1px solid var(--df-border-control);
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-card);
+		color: var(--df-text-primary);
+		font-family: var(--df-p-font-sans);
+		font-size: var(--df-p-text-sm);
+		font-weight: 600;
+		line-height: 1;
+		transition:
+			background-color 140ms ease,
+			border-color 140ms ease;
+	}
+
+	.launcher-mark {
+		display: grid;
+		place-items: center;
+		color: var(--df-accent-text);
+	}
+
+	.launcher[aria-expanded='true'] {
+		background: var(--df-surface-well);
+		border-color: var(--df-border-strong);
+	}
+
+	/* While the panel is expanded it covers the header, so the button under it is
+	   hidden rather than merely covered: a covered button must not be a keyboard
+	   stop. It comes back on the frame after collapsing, which is where focus goes. */
+	.launcher[data-away='true'] {
+		visibility: hidden;
+		pointer-events: none;
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.launcher:hover {
+			background: var(--df-surface-well);
+			border-color: var(--df-border-strong);
+		}
+	}
+
+	@media (max-width: 900px) {
+		.launcher {
+			height: 44px;
+			padding: 0 var(--df-p-space-2);
+		}
 	}
 
 	/* The console's first focusable control: hidden above the viewport until
@@ -676,15 +862,6 @@
 
 	#main:focus {
 		outline: none;
-	}
-
-	/* The assistant's button is fixed to the bottom-right corner, over the page.
-	   The content column keeps a floor taller than that button, so the last row
-	   of every page ends above it — at 390px as much as at 1280px. Without this
-	   the button covers the final row of a card, which is where a table's last
-	   action lives. */
-	.main {
-		padding-bottom: calc(var(--df-p-space-8) + 52px);
 	}
 
 	/* The role word reads as a value, not as a sentence: mono, lower case,

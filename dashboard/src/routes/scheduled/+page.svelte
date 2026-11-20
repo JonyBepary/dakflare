@@ -152,7 +152,7 @@
 		},
 		{
 			status: 'delivered',
-			meaning: 'A platform receipt confirmed delivery. Reserved: the Scheduler does not write this yet, so a scheduled row normally stops at Sent.'
+			meaning: 'The carrier or platform confirmed delivery. This is the strongest answer it gives.'
 		},
 		{
 			status: 'failed',

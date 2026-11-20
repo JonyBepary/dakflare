@@ -2,10 +2,10 @@
 	/**
 	 * The agent panel.
 	 *
-	 * One launcher, bottom-right, above every page of the console; one panel that
-	 * is not a modal and not a route. It reads the operator's saved conversation,
-	 * asks about the page they are standing on, and renders answers, the work that
-	 * produced them, proposals and the files a question carries.
+	 * One launcher in the console's header, one panel that is not a modal and not a
+	 * route. It reads the operator's saved conversation, asks about the page they
+	 * are standing on, and renders answers, the work that produced them, proposals
+	 * and the files a question carries.
 	 *
 	 * Two paths, and the deployment decides which one:
 	 *
@@ -61,8 +61,12 @@
 	 * gives back one step at a time — to floating first, closed only from floating —
 	 * and the choice lives in `sessionStorage`, so it follows the tab.
 	 *
-	 * The button is fixed, so `+layout.svelte` gives the main region a floor under
-	 * it: at 390px the page's last row must never end behind this control.
+	 * The button is a header action, so it holds a row of chrome and covers
+	 * nothing; the panel hangs from the header as a corner pane when it is open.
+	 * `+layout.svelte` renders that button, `$lib/assistant-dock.svelte` is the
+	 * state between the two, and this file keeps the panel, its transcript and its
+	 * keyboard behaviour. Opening, closing and putting focus back on the launcher
+	 * all go through the dock so the two halves cannot disagree.
 	 */
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
@@ -78,6 +82,7 @@
 		type Proposal,
 		type SayOutcome
 	} from '$lib/assistant';
+	import { assistantDock } from '$lib/assistant-dock.svelte';
 	import {
 		AgentLink,
 		ATTACHMENT_MAX_BYTES,
@@ -237,6 +242,19 @@
 	const expanded = $derived(presentation === 'fullscreen');
 	const modal = $derived(expanded && small);
 
+	/**
+	 * Tell the header's launcher what this panel is doing.
+	 *
+	 * `+layout.svelte` renders the button, so every state it has to describe —
+	 * open or closed, and whether the panel has taken the screen — is written here
+	 * the moment it changes, not derived in the header from something else. Three
+	 * writers only: `show`, `close` and `setPresentation`.
+	 */
+	function publishDock(): void {
+		assistantDock.open = open;
+		assistantDock.expanded = expanded;
+	}
+
 	/** `unknown` until the runtime read answers; `off` never opens a socket. */
 	let runtime = $state<'unknown' | 'on' | 'off'>('unknown');
 	/**
@@ -321,7 +339,6 @@
 	let politeText = $state('');
 	let alertText = $state('');
 
-	let launcher = $state<HTMLButtonElement | null>(null);
 	let field = $state<HTMLInputElement | null>(null);
 
 	/** Drops an answer that arrives after the panel was closed or re-asked. */
@@ -454,6 +471,25 @@
 		return () => query.removeEventListener('change', follow);
 	});
 
+	/**
+	 * Hand the header's launcher a way to open this panel.
+	 *
+	 * The button lives in another component, so it cannot call `show()` directly;
+	 * it calls the function registered here. Between unmount and mount the
+	 * registered function does nothing, which is the honest answer for a button
+	 * whose panel is not on the page.
+	 */
+	onMount(() => {
+		assistantDock.panelId = panelId;
+		assistantDock.toggle = () => void toggle();
+		return () => {
+			assistantDock.panelId = '';
+			assistantDock.toggle = () => {};
+			assistantDock.open = false;
+			assistantDock.expanded = false;
+		};
+	});
+
 	onDestroy(() => {
 		sequence += 1;
 		sessionId += 1;
@@ -492,6 +528,7 @@
 		// expanded comes back expanded, and a fresh tab comes back floating.
 		presentation = readPresentation();
 		open = true;
+		publishDock();
 		stageReady = workflowPatchSinkReady();
 		sessionId += 1;
 		await tick();
@@ -547,6 +584,7 @@
 		if (presentation === next) return;
 		presentation = next;
 		rememberPresentation(next);
+		publishDock();
 		await tick();
 		presentControl?.focus();
 	}
@@ -891,6 +929,7 @@
 		// reopens expanded. The transient state goes back to floating so the
 		// launcher — hidden while the panel owns the screen — is there to take focus.
 		presentation = 'floating';
+		publishDock();
 		question = '';
 		asked = '';
 		outcome = null;
@@ -926,7 +965,12 @@
 		alertText = '';
 		agent?.close();
 		agent = null;
-		launcher?.focus();
+		// The launcher is a header button this panel does not own. One frame passes
+		// first, because the button is hidden while the panel is expanded and a
+		// hidden button cannot take focus.
+		void tick().then(() => {
+			document.getElementById(assistantDock.launcherId)?.focus();
+		});
 	}
 
 	/**
@@ -1804,97 +1848,29 @@
 	</section>
 {/if}
 
-<button
-	bind:this={launcher}
-	type="button"
-	class="launcher"
-	data-away={expanded}
-	aria-expanded={open}
-	aria-controls={open ? panelId : undefined}
-	aria-label={open ? 'Close the assistant' : 'Ask the assistant'}
-	onclick={() => void toggle()}
->
-	<span class="launcher-mark"><Icon name="sparkles" size={15} /></span>
-	<span class="launcher-label">{open ? 'Close' : 'Ask'}</span>
-</button>
-
 <style>
-	/* The one floating control in the console. A 44px target, 4px corners, a
-	   hairline instead of a shadow, and the accent kept to the glyph: a coral
-	   button here would compete with whatever the page is asking for. */
-	.launcher {
-		position: fixed;
-		right: 16px;
-		bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-		z-index: 70;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 7px;
-		min-width: 44px;
-		height: 44px;
-		padding: 0 14px;
-		border: 1px solid var(--df-border-control);
-		border-radius: var(--df-p-radius-xs);
-		background: var(--df-surface-card);
-		color: var(--df-text-primary);
-		font-size: var(--df-p-text-sm);
-		font-weight: 600;
-		line-height: 1;
-		transition:
-			background-color 140ms ease,
-			border-color 140ms ease,
-			transform var(--df-p-dur-press) ease-out;
-	}
-
-	.launcher:active {
-		transform: scale(0.97);
-	}
-
-	/* The glyph carries the console's one accent; the plate stays quiet. */
-	.launcher-mark {
-		display: grid;
-		place-items: center;
-		color: var(--df-accent-text);
-	}
-
-	.launcher[aria-expanded='true'] {
-		background: var(--df-surface-well);
-		border-color: var(--df-border-strong);
-	}
-
-	/* While the panel holds the screen the launcher has nowhere to stand: at 390
-	   it would sit exactly on the composer, and at 1280 it would float over the
-	   page beside a sheet that already carries its own close. It is hidden rather
-	   than moved because there is no corner left that is not either the panel or
-	   the page's own controls, and a second exit beside the first is noise. It
-	   stays in the document, so `aria-expanded` still describes the panel, and it
-	   comes back the moment the panel floats again. */
-	.launcher[data-away='true'] {
-		visibility: hidden;
-		pointer-events: none;
-	}
-
-	@media (hover: hover) and (pointer: fine) {
-		.launcher:hover {
-			background: var(--df-surface-well);
-			border-color: var(--df-border-strong);
-		}
-	}
-
-	/* The panel sits directly above the launcher and never wider than the phone
-	   it is on. No scrim and no focus trap: the page behind stays usable, which is
-	   what "not a modal" means here. Taller than it was, because it now holds a
-	   transcript, but still a panel: one column, header to footer. */
+	/* ---- the panel ----
+	   The launcher is a header action (see `+layout.svelte`), so this surface hangs
+	   from the console's chrome instead of standing on the page: it opens below the
+	   header and the phone's tab strip, aligned to the same inline padding as the
+	   button that opened it, and it is not in the document at all while closed. No
+	   scrim and no focus trap in this presentation: the page behind stays usable,
+	   which is what "not a modal" means here. One column, header to footer, and
+	   never wider than the phone it is on. */
 	.panel {
 		position: fixed;
-		right: 16px;
-		bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+		top: calc(var(--df-c-shell-header) + var(--df-c-shell-tabs) + var(--df-p-space-2));
+		right: var(--df-c-topbar-pad);
 		z-index: 70;
 		display: flex;
 		flex-direction: column;
-		width: min(420px, calc(100vw - 32px));
-		max-height: min(82vh, 720px);
+		width: min(420px, calc(100vw - (2 * var(--df-c-topbar-pad))));
+		max-height: min(
+			82dvh,
+			calc(
+				100dvh - var(--df-c-shell-header) - var(--df-c-shell-tabs) - var(--df-p-space-5)
+			)
+		);
 		border: 1px solid var(--df-border-control);
 		border-radius: var(--df-p-radius-xs);
 		background: var(--df-surface-card);
@@ -2818,27 +2794,14 @@
 	}
 
 	@media (max-width: 420px) {
-		.launcher {
-			right: 12px;
-			bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-		}
-
 		.panel {
-			right: 12px;
-			left: 12px;
-			width: auto;
-			bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-			max-height: min(86vh, 760px);
+			/* The header's own 12px inset is already the phone's gutter, so the
+			   panel keeps the same edge as the button that opened it. */
+			max-height: min(86dvh, calc(100dvh - var(--df-c-shell-header) - var(--df-p-space-5)));
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.launcher {
-			transition: none;
-		}
-		.launcher:active {
-			transform: none;
-		}
 		.composer {
 			transition: none;
 		}
