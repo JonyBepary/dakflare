@@ -47,7 +47,7 @@ The object arms one alarm at the earliest due row. On each firing it:
 1. recovers claims older than the five-minute dispatch lease (SMS is requeued, because the
    command key makes the enqueue idempotent; a connector becomes `unknown`, because the
    platform may have accepted it);
-2. checks the campaign deadline (`skipped_window`), the audience `opt_out` flag
+2. checks the campaign deadline when one was supplied (`skipped_window`), the audience `opt_out` flag
    (`skipped_opt_out`), and quiet hours (update `send_at`, keep `scheduled`, consume no token
    and no attempt);
 3. takes a token from the bucket for `pacing_key`, and checks the minimum gap;

@@ -442,6 +442,22 @@ export async function handleScheduledCreate(
     quietEndHour: policy.quietEndHour,
   });
 
+  const expiresRaw = body.expires_at;
+  let expiresAt: number | null = null;
+  if (expiresRaw !== undefined && expiresRaw !== null) {
+    if (
+      typeof expiresRaw !== "number" ||
+      !Number.isFinite(expiresRaw) ||
+      expiresRaw <= scheduledAt
+    ) {
+      return json(
+        { error: "bad_expires_at", message: "expires_at must be after the effective send time" },
+        400
+      );
+    }
+    expiresAt = expiresRaw;
+  }
+
   const policySnapshot: PolicySnapshotJson = {
     max_per_hour: policy.maxPerHour,
     min_interval_ms: policy.minIntervalMs,
@@ -462,7 +478,7 @@ export async function handleScheduledCreate(
        (id, campaign_id, channel, target_type, target_id, pacing_key, to_peer, body,
         template_id, vars_json, policy_json, timezone, sim_slot, send_at, expires_at,
         status, idempotency_key, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'scheduled', ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)
      ON CONFLICT DO NOTHING`
   )
     .bind(
@@ -480,6 +496,7 @@ export async function handleScheduledCreate(
       timezone,
       simSlot,
       scheduledAt,
+      expiresAt,
       idempotencyKey,
       now,
       now
