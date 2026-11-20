@@ -324,7 +324,8 @@ test('capabilities reports the new command count', async () => {
 
   assert.equal(result.code, 0, result.stderr);
   const document = JSON.parse(result.stdout);
-  assert.equal(document.data.commands.length, 32);
+  assert.equal(document.data.commands.length, 33);
+  assert.ok(document.data.commands.some((command) => command.name === 'setup'));
   assert.ok(document.data.commands.some((command) => command.name === 'connectors'));
   assert.ok(document.data.commands.some((command) => command.name === 'webhooks'));
 });

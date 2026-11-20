@@ -1,6 +1,6 @@
 ---
 title: CLI, Bindings & Error Codes
-description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+description: Reference for all 33 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
 ---
 
 {/* llms-ignore:start */}
@@ -9,7 +9,7 @@ description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cl
   title="One binary, one JSON contract"
   lede="One binary, one JSON contract, and exit codes a script can branch on."
   code={{ label: "dakflare capabilities --agent", lines: ["{ \"ok\": true, \"commands\": [", "  { \"name\": \"send\", \"effect\": \"sms.send\" },", "  { \"name\": \"status\", \"effect\": \"read\" }", "] }"] }}
-  facts={[{ label: "Commands", value: "32" }, { label: "Contract", value: "--agent" }, { label: "Exit codes", value: "8" }, { label: "Deps", value: "zero" }]}
+  facts={[{ label: "Commands", value: "33" }, { label: "Contract", value: "--agent" }, { label: "Exit codes", value: "8" }, { label: "Deps", value: "zero" }]}
 />
 {/* llms-ignore:end */}
 
@@ -32,9 +32,9 @@ description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cl
 | `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
 | `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
 
-### Command Inventory (32 Commands)
+### Command Inventory (33 Commands)
 
-- **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
+- **Provision**: `setup`, `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
 - **Messaging**: `send` (SMS, or `--channel --connector` for a platform), `status`, `audit`
 - **Templates & audience**: `templates list`, `templates create`, `templates delete`, `contacts import`
 - **Scheduling**: `schedule list`, `schedule create`, `schedule cancel`
@@ -44,6 +44,10 @@ description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cl
 - **Agent Work**: `ai` (`ai providers`, `ai configure`, `ai models`, `ai test`), `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
 - **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`
 - **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
+
+`dakflare setup` is the interactive first-run path: it checks Node, npm, git, `cf` and `gh`,
+installs the Worker/console/docs dependencies, writes the local secrets, offers to star the
+repository, and can run `up`. `--yes` never stars or deploys without `--star`/`--deploy`.
 
 ## Cloudflare Bindings (`worker/cloudflare.config.ts` & `worker/wrangler.toml`)
 

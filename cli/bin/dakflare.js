@@ -354,6 +354,24 @@ function outputMode(flags) {
  * undone.
  */
 const COMMAND_SPECS = {
+  setup: {
+    summary: 'First-run wizard: dependencies, toolchain, secrets, star, and up',
+    effect: 'mutating',
+    usage:
+      'dakflare setup [--yes] [--star] [--deploy] [--email <address>] [--dry-run]',
+    flags: {
+      yes: { type: 'boolean', note: 'no prompts; install and check, but do not star or deploy without their flags' },
+      star: { type: 'boolean', note: 'star the repository with gh, or print/open its GitHub URL' },
+      deploy: { type: 'boolean', note: 'run `dakflare up` after setup' },
+      email: { type: 'string', note: 'owner address for the deploy step' },
+      'dry-run': { type: 'boolean', note: 'report the checks and the plan; change nothing' },
+    },
+    examples: [
+      'dakflare setup',
+      'dakflare setup --yes --star',
+      'dakflare setup --deploy --email you@example.com',
+    ],
+  },
   init: {
     summary: 'Verify a Worker and save its admin token',
     effect: 'mutating',
@@ -1509,11 +1527,15 @@ function plural(count, one, many = `${one}s`) {
 
 /* ───────────────────────────── prompts ───────────────────────────── */
 
+function readlineQuestion(rl, prompt) {
+  return new Promise((resolve) => rl.question(prompt, resolve));
+}
+
 async function ask(question) {
   if (!process.stdin.isTTY) throw usage(`${question.replace(/: $/, '')} needs a value (pass the flag)`);
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
   try {
-    return String(await rl.question(question)).trim();
+    return String((await readlineQuestion(rl, question)) ?? '').trim();
   } finally {
     rl.close();
   }
@@ -1569,7 +1591,7 @@ async function confirm(question) {
   }
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const answer = String(await rl.question(question)).trim().toLowerCase();
+    const answer = String(await readlineQuestion(rl, question)).trim().toLowerCase();
     return answer === 'y' || answer === 'yes';
   } finally {
     rl.close();
@@ -3688,6 +3710,437 @@ async function commandSchedule(argv) {
   throw usage(`unknown schedule subcommand "${sub}" (expected list|create|cancel)`);
 }
 
+/* ───────────────────────────── setup ───────────────────────────── */
+
+const SETUP_DEPENDENCY_DIRS = ['worker', 'dashboard', 'apps/docs'];
+const DEFAULT_GITHUB_REPO = 'JonyBepary/dakflare';
+const GH = process.env.DAKFLARE_GH || 'gh';
+const CF = process.env.DAKFLARE_CF || 'cf';
+
+/** First useful line of a command's output, or null when it did not run. */
+function toolVersion(command, args = ['--version'], timeout = 15_000) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout || result.stderr || '').trim().split(/\r?\n/)[0].trim() || 'present';
+}
+
+/** `owner/repo`, from DAKFLARE_REPO when it names a valid slug. */
+function githubSlug() {
+  const raw = String(process.env.DAKFLARE_REPO ?? DEFAULT_GITHUB_REPO).trim();
+  const slug = raw
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '');
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug) ? slug : DEFAULT_GITHUB_REPO;
+}
+
+function githubUrl() {
+  return `https://github.com/${githubSlug()}`;
+}
+
+function cfSetupState() {
+  const version = toolVersion(CF);
+  if (version === null) return { installed: false, authenticated: false, version: null };
+  const auth = spawnSync(CF, ['accounts', 'list'], { stdio: 'ignore', timeout: 20_000 });
+  return {
+    installed: true,
+    authenticated: !auth.error && auth.status === 0,
+    version,
+  };
+}
+
+function ghSetupState() {
+  const version = toolVersion(GH);
+  if (version === null) return { installed: false, authenticated: false, version: null };
+  const auth = spawnSync(GH, ['auth', 'status'], { stdio: 'ignore', timeout: 15_000 });
+  return {
+    installed: true,
+    authenticated: !auth.error && auth.status === 0,
+    version,
+  };
+}
+
+/** A checklist an operator can read and an agent can parse. */
+function setupChecks(repoRoot) {
+  const nodeMajor = Number(String(process.versions.node).split('.')[0]);
+  const checks = [
+    {
+      name: 'node',
+      status: Number.isFinite(nodeMajor) && nodeMajor >= 22 ? 'ok' : 'fail',
+      detail: process.version,
+    },
+  ];
+
+  const npm = toolVersion('npm');
+  checks.push({ name: 'npm', status: npm === null ? 'fail' : 'ok', detail: npm ?? 'not found' });
+
+  const git = toolVersion('git');
+  checks.push({
+    name: 'git',
+    status: git === null ? 'warn' : 'ok',
+    detail: git === null ? 'not found (optional)' : git,
+  });
+
+  const cf = cfSetupState();
+  checks.push({
+    name: 'cf',
+    status: cf.installed ? (cf.authenticated ? 'ok' : 'warn') : 'warn',
+    detail: cf.installed
+      ? `${cf.version}${cf.authenticated ? ' · signed in' : ' · not signed in'}`
+      : 'not installed',
+  });
+
+  const gh = ghSetupState();
+  checks.push({
+    name: 'gh',
+    status: gh.installed ? (gh.authenticated ? 'ok' : 'warn') : 'warn',
+    detail: gh.installed
+      ? `${gh.version}${gh.authenticated ? ' · signed in' : ' · not signed in'}`
+      : 'not installed (star opens the browser)',
+  });
+
+  for (const dir of SETUP_DEPENDENCY_DIRS) {
+    const full = path.join(repoRoot, dir);
+    if (!fs.existsSync(path.join(full, 'package.json'))) {
+      checks.push({ name: dir, status: 'warn', detail: 'no package.json in this checkout' });
+    } else if (fs.existsSync(path.join(full, 'node_modules'))) {
+      checks.push({ name: dir, status: 'ok', detail: 'dependencies present' });
+    } else {
+      checks.push({ name: dir, status: 'warn', detail: 'dependencies missing' });
+    }
+  }
+
+  const devVars = path.join(repoRoot, 'worker', '.dev.vars');
+  if (!fs.existsSync(devVars)) {
+    checks.push({ name: 'secrets', status: 'warn', detail: 'worker/.dev.vars missing' });
+  } else {
+    const raw = fs.readFileSync(devVars, 'utf8');
+    const hasHook = /^WEBHOOK_SECRET_KEY=/m.test(raw);
+    checks.push({
+      name: 'secrets',
+      status: hasHook ? 'ok' : 'warn',
+      detail: `worker/.dev.vars present${hasHook ? ' · WEBHOOK_SECRET_KEY set' : ' · WEBHOOK_SECRET_KEY missing'}`,
+    });
+  }
+
+  return checks;
+}
+
+function printSetupChecks(checks) {
+  const mark = { ok: ok('✓'), warn: warn('!'), fail: fail('×') };
+  for (const check of checks) {
+    out(`  ${mark[check.status]} ${pad(check.name, 12)} ${check.detail}`);
+  }
+}
+
+function openSetupBrowser(url) {
+  if (process.env.DAKFLARE_NO_BROWSER === '1' || process.env.NO_BROWSER === '1') return false;
+  if (process.env.DAKFLARE_OPENER) {
+    const result = spawnSync(process.env.DAKFLARE_OPENER, [url], { stdio: 'ignore', timeout: 15_000 });
+    return !result.error && result.status === 0;
+  }
+  let command;
+  let args;
+  if (process.platform === 'darwin') {
+    command = 'open';
+    args = [];
+  } else if (process.platform === 'win32') {
+    command = 'cmd';
+    args = ['/c', 'start', ''];
+  } else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+    command = 'xdg-open';
+    args = [];
+  } else {
+    return false;
+  }
+  const result = spawnSync(command, [...args, url], { stdio: 'ignore', timeout: 15_000 });
+  return !result.error && result.status === 0;
+}
+
+/**
+ * One star, never a side effect: gh when it is installed and signed in,
+ * otherwise the browser (interactive) or the URL (non-interactive).
+ */
+function starSetupRepo({ interactive }) {
+  const repo = githubSlug();
+  const url = githubUrl();
+  const gh = ghSetupState();
+
+  if (gh.authenticated) {
+    const result = spawnSync(GH, ['api', '--method', 'PUT', `/user/starred/${repo}`], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    if (!result.error && result.status === 0) {
+      return { requested: true, starred: true, via: 'gh', url, repo };
+    }
+    const detail = String(result.stderr || result.stdout || result.error?.message || '')
+      .trim()
+      .split(/\r?\n/)[0];
+    const opened = interactive ? openSetupBrowser(url) : false;
+    return {
+      requested: true,
+      starred: false,
+      via: opened ? 'browser' : 'url',
+      url,
+      repo,
+      detail: detail || null,
+    };
+  }
+
+  const opened = interactive ? openSetupBrowser(url) : false;
+  return {
+    requested: true,
+    starred: false,
+    via: opened ? 'browser' : 'url',
+    url,
+    repo,
+    gh: gh.installed ? 'not_authenticated' : 'missing',
+  };
+}
+
+/** Like `confirm`, but Enter means yes and a non-TTY means no. */
+async function confirmDefaultYes(question, defaultValue = true) {
+  if (AGENT || MODE.json || !process.stdin.isTTY) return false;
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const raw = await readlineQuestion(rl, question);
+    // Ctrl+D is not a yes; an empty Enter is the default.
+    if (raw === undefined) return false;
+    const answer = String(raw).trim().toLowerCase();
+    if (answer === '') return defaultValue;
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * `dakflare setup` — the first-run wizard.
+ *
+ * It installs the Node projects the Worker and console build from, creates the
+ * local secrets, checks cf and gh, asks for a star (gh when signed in, otherwise
+ * the browser), and optionally hands the terminal to `up`. Nothing about the
+ * star is silent: --yes never stars without --star, and a non-interactive run
+ * only prints the URL.
+ */
+async function commandSetup(argv) {
+  const { flags } = parseArgv(argv);
+  if (flags.help) return printHelp('setup');
+  assertCommandFlags(flags, 'setup');
+
+  const dryRun = flags['dry-run'] === true;
+  const yes = flags.yes === true;
+  const starRequested = flags.star === true;
+  const deployRequested = flags.deploy === true;
+  let email = stringFlag(flags, 'email');
+  if (email !== undefined && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw usage('--email must be an address, for example you@example.com');
+  }
+
+  const repoRoot = process.env.DAKFLARE_REPO_DIR
+    ? path.resolve(process.env.DAKFLARE_REPO_DIR)
+    : path.join(__dirname, '..', '..');
+  const workerDir = path.join(repoRoot, 'worker');
+  if (!fs.existsSync(path.join(workerDir, 'package.json'))) {
+    throw new CliError(
+      '`dakflare setup` needs the full repository checkout, not a --cli-only install. ' +
+        'Re-run the installer without --cli-only, or clone the repository.',
+      2,
+      { error: 'worker_not_found', checkout: repoRoot }
+    );
+  }
+
+  const nodeMajor = Number(String(process.versions.node).split('.')[0]);
+  if (!Number.isFinite(nodeMajor) || nodeMajor < 22) {
+    throw new CliError(
+      `dakflare needs Node 22 or newer; this is Node ${process.versions.node}. Install Node 22+ and re-run.`,
+      6,
+      { error: 'node_too_old', node: process.versions.node, floor: '22' }
+    );
+  }
+  if (toolVersion('npm') === null) {
+    throw new CliError('npm is not on PATH; install Node 22+ with npm, then re-run.', 6, {
+      error: 'npm_missing',
+    });
+  }
+
+  const interactive = !MODE.json && !AGENT && !yes && process.stdin.isTTY;
+  const plan = [];
+  let checks = setupChecks(repoRoot);
+
+  if (!MODE.json) {
+    out('DakFlare setup');
+    out(muted(`  ${repoRoot}`));
+    out('');
+    out('Checks');
+    printSetupChecks(checks);
+    out('');
+  }
+
+  // 1. The three Node projects. `up` only needs two, but a full checkout is a
+  // complete install, and the docs build is part of the repository.
+  ensureRepoDependencies(repoRoot, dryRun, plan, SETUP_DEPENDENCY_DIRS);
+
+  // 2. Local secrets. Never overwrite an existing file; append only the one key
+  // the deploy requires.
+  const devVars = path.join(workerDir, '.dev.vars');
+  if (!fs.existsSync(devVars)) {
+    if (dryRun) {
+      plan.push('worker/.dev.vars: create with fresh local secrets');
+    } else {
+      await initLocal({}, false, workerDir, { quiet: true });
+      plan.push('worker/.dev.vars: created with fresh local secrets');
+      if (!MODE.json) out(`${ok('✓')} ${pad('secrets', 12)} worker/.dev.vars created (mode 600)`);
+    }
+  } else {
+    await ensureWebhookSecretKey(workerDir, dryRun, plan);
+  }
+
+  // 3. cf is the one Cloudflare dependency. Offer the npm install, but never
+  // turn a missing optional tool into a failed install when no deploy is asked.
+  let cf = cfSetupState();
+  if (!cf.installed) {
+    let install = false;
+    if (!dryRun) {
+      install = interactive
+        ? await confirmDefaultYes(
+            'Cloudflare CLI (cf) is not installed. Install it with `npm install -g cf`? [Y/n] ',
+            true
+          )
+        : yes;
+    }
+    if (dryRun) {
+      plan.push('cf: npm install -g cf (missing)');
+    } else if (install) {
+      if (!MODE.json) out('Installing the Cloudflare CLI...');
+      const result = spawnSync('npm', ['install', '-g', 'cf'], { encoding: 'utf8', timeout: 300_000 });
+      if (!result.error && result.status === 0) {
+        cf = cfSetupState();
+        if (!MODE.json) {
+          out(`${ok('✓')} ${pad('cf', 12)} installed${cf.version ? ` · ${cf.version}` : ''}`);
+        }
+      } else {
+        const detail = String(result.stderr || result.stdout || result.error?.message || '')
+          .trim()
+          .split(/\r?\n/)[0];
+        if (!MODE.json) {
+          out(`${warn('!')} ${pad('cf', 12)} could not install it: ${detail || 'npm install -g cf failed'}`);
+        }
+      }
+    } else {
+      plan.push('cf: not installed (run `npm install -g cf`)');
+    }
+  }
+
+  // 4. The star. Explicit --star or an interactive yes; --yes alone is not
+  // consent to touch the account's GitHub stars.
+  let star = { requested: false, starred: false, via: null, url: githubUrl(), repo: githubSlug() };
+  if (dryRun) {
+    if (starRequested) plan.push(`star ${githubSlug()} (gh when signed in, otherwise the browser)`);
+  } else {
+    let wantStar = starRequested;
+    if (!wantStar && interactive) {
+      wantStar = await confirmDefaultYes(
+        `Star ${githubSlug()} on GitHub? It helps others find the project. [Y/n] `,
+        true
+      );
+    }
+    if (wantStar) {
+      star = starSetupRepo({ interactive });
+      if (!MODE.json) {
+        if (star.starred) out(`${ok('✓')} ${pad('GitHub', 12)} starred ${star.url} via gh`);
+        else if (star.via === 'browser') out(`${ok('✓')} ${pad('GitHub', 12)} opened ${star.url} in the browser`);
+        else out(`${warn('!')} ${pad('GitHub', 12)} star it here: ${star.url}`);
+      }
+    } else if (!MODE.json) {
+      out(`${muted('·')} ${pad('GitHub', 12)} skipped; ${githubUrl()}`);
+    }
+  }
+
+  // 5. The deployment. Default no: `up` creates real Cloudflare resources, so
+  // it needs a deliberate yes or --deploy.
+  let deploy = { requested: deployRequested, started: false };
+  let next = `dakflare up${email ? ` --email ${email}` : ''}`;
+
+  if (dryRun) {
+    plan.push(deployRequested ? 'deploy: dakflare up' : `next: ${next}`);
+  } else {
+    let wantDeploy = deployRequested;
+    if (!wantDeploy && interactive) {
+      wantDeploy = await confirmDefaultYes('Deploy now with `dakflare up`? [Y/n] ', false);
+    }
+    if (wantDeploy) {
+      if (email === undefined && interactive) {
+        const answer = await ask('Owner email for the first sign-in (blank skips): ');
+        email = answer === '' ? undefined : answer;
+        if (email !== undefined && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          throw usage('the owner email must be an address, for example you@example.com');
+        }
+        next = `dakflare up${email ? ` --email ${email}` : ''}`;
+      }
+      deploy.started = true;
+      if (!MODE.json) {
+        out('');
+        out(`Deploying with \`dakflare up\`${email ? ` as ${email}` : ''}...`);
+        out('');
+      }
+      const childArgs = [fileURLToPath(import.meta.url), 'up', '--yes'];
+      if (email) childArgs.push('--email', email);
+      // Both machine modes run the child without prompts; one document on stdout.
+      if (MODE.json || MODE.agent) childArgs.push('--agent');
+      const child = spawnSync(process.execPath, childArgs, { stdio: 'inherit', cwd: repoRoot });
+      if (child.error) {
+        throw new CliError(`could not start \`dakflare up\`: ${child.error.message}`, 1, {
+          error: 'provision_failed',
+          step: 'up',
+        });
+      }
+      // The child already printed its report (JSON included); returning its
+      // status keeps one document on stdout, not two.
+      return child.status ?? 1;
+    }
+  }
+
+  checks = setupChecks(repoRoot);
+
+  if (MODE.json) {
+    emitJson(
+      {
+        ok: true,
+        summary: dryRun ? 'setup plan' : 'setup complete',
+        dry_run: dryRun,
+        checkout: repoRoot,
+        checks,
+        plan,
+        star,
+        deploy,
+        next,
+      },
+      MODE
+    );
+    return 0;
+  }
+
+  out('');
+  if (dryRun) {
+    out('Plan (nothing was changed)');
+    for (const step of plan) out(`  ${step}`);
+    out('');
+    out(`Next: ${next}`);
+    return 0;
+  }
+
+  out(`${ok('Setup complete')}`);
+  out(`  ${pad('checkout', 12)} ${repoRoot}`);
+  out(`  ${pad('star', 12)} ${star.starred ? 'starred' : star.requested ? 'not completed' : 'skipped'}`);
+  out(`  ${pad('deploy', 12)} ${deploy.started ? 'started' : 'not started'}`);
+  out(`  ${pad('next', 12)} ${next}`);
+  if (!cf.installed) out(`  ${pad('cf', 12)} install it with \`npm install -g cf\`, then \`cf auth login\``);
+  else if (!cf.authenticated) out(`  ${pad('cf', 12)} not signed in; run \`cf auth login\` before \`dakflare up\``);
+  return 0;
+}
+
 /* ───────────────────────────── up ───────────────────────────── */
 
 /**
@@ -3722,8 +4175,10 @@ async function commandUp(argv) {
     throw usage('--email must be an address, for example you@example.com');
   }
 
-  const workerDir = path.join(__dirname, '..', '..', 'worker');
-  const repoRoot = path.join(workerDir, '..');
+  const repoRoot = process.env.DAKFLARE_REPO_DIR
+    ? path.resolve(process.env.DAKFLARE_REPO_DIR)
+    : path.join(__dirname, '..', '..');
+  const workerDir = path.join(repoRoot, 'worker');
   const plan = [];
 
   // 1. Dependencies and local secrets: both are inputs to the deploy below.
@@ -3916,7 +4371,7 @@ async function commandUp(argv) {
 
 /** Run `cf`, returning stdout, or null when the command failed. */
 function cf(args, { allowFailure = false, cwd } = {}) {
-  const result = spawnSync('cf', args, { cwd, encoding: 'utf8' });
+  const result = spawnSync(CF, args, { cwd, encoding: 'utf8' });
   if (result.error || result.status !== 0) {
     if (allowFailure) return null;
     throw new CliError(
@@ -3930,7 +4385,7 @@ function cf(args, { allowFailure = false, cwd } = {}) {
 
 /** Run `cf` and turn a failure into a named step, so the operator knows where it stopped. */
 function runCf(args, cwd, step) {
-  const result = spawnSync('cf', args, { cwd, encoding: 'utf8' });
+  const result = spawnSync(CF, args, { cwd, encoding: 'utf8' });
   if (result.error || result.status !== 0) {
     const detail = (result.stderr || result.stdout || result.error?.message || '').trim();
     throw new CliError(`cf ${step} failed: ${detail}`, 1, { error: 'cf_failed', step });
@@ -3970,8 +4425,8 @@ const UP_QUEUES = ['dakflare-webhook-queue', 'dakflare-ingest-queue', 'dakflare-
  * rather than reported: the install is convergent and the failure names the
  * exact directory that broke.
  */
-function ensureRepoDependencies(repoRoot, dryRun, plan) {
-  for (const dir of ['worker', 'dashboard']) {
+function ensureRepoDependencies(repoRoot, dryRun, plan, dirs = ['worker', 'dashboard']) {
+  for (const dir of dirs) {
     const full = path.join(repoRoot, dir);
     if (!fs.existsSync(path.join(full, 'package.json'))) {
       plan.push(`deps ${dir}: no package.json (skipped)`);
@@ -8380,6 +8835,7 @@ const HELP = {
 
 Usage: dakflare <command> [options]
 
+  setup         first-run wizard: dependencies, toolchain, secrets, star, deploy
   init          verify a Worker and save its admin token; --local writes .dev.vars
   doctor        checklist: config, health, schema, migrations, bindings, phone
   pair          mint a pairing code; --qr renders a terminal QR
@@ -8817,6 +9273,28 @@ apply --dry-run reports create/update/unchanged per rule and writes nothing.
 test is the honest answer to "why did this message get no reply": disabled,
 sender_mismatch, body_mismatch and cooldown are all reported, not just matches.`,
 
+  setup: `Usage: dakflare setup [--yes] [--star] [--deploy] [--email <address>] [--dry-run]
+
+First-run wizard for a fresh checkout. It checks Node, npm, git, cf and gh;
+installs the worker, dashboard and docs Node dependencies; creates
+worker/.dev.vars when it is missing (and appends WEBHOOK_SECRET_KEY when it is
+not); offers to install cf with npm; asks for a GitHub star; and optionally runs
+dakflare up.
+
+  --yes              no prompts: install and check, but do not star or deploy
+                     unless --star or --deploy says so
+  --star             star JonyBepary/dakflare. Uses gh when it is installed and
+                     signed in; otherwise opens the repository in the browser
+                     (or prints the URL when there is no browser)
+  --deploy           run dakflare up --yes after setup
+  --email <address>  owner address for the deploy step
+  --dry-run          print the checks and the plan; change nothing
+
+The star is optional and is never silent: --yes alone does not star. Set
+DAKFLARE_REPO=owner/repo to star a fork, and DAKFLARE_NO_BROWSER=1 to always
+print the URL instead of opening one.
+`,
+
   up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
 
 Provisions the deployment on the account \`cf\` is logged into: installs missing
@@ -8936,6 +9414,7 @@ function printHelp(topic = 'root') {
 /* ───────────────────────────── main ───────────────────────────── */
 
 const COMMANDS = {
+  setup: commandSetup,
   init: commandInit,
   doctor: commandDoctor,
   pair: commandPair,

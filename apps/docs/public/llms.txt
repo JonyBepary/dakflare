@@ -38,7 +38,7 @@
 - [Interactive API Playground](/docs/reference/api-playground.md): Interactive fumadocs-openapi playground backed by /openapi.json.
 - [MCP & WebMCP Tools](/docs/reference/mcp-tools.md): Schemas, scopes, OAuth RFC 9728/8414/8707, elicitation, JSON-RPC errors for 9 MCP tools and 4 WebMCP tools.
 - [Wasm Flow ABI & IR v2](/docs/reference/wasm-flow-abi.md): Hand-rolled C ABI (alloc/dealloc/run_json/validate_json/synthesize_json/layout_json/trace_json) and dakflare.flow/v2 spec.
-- [CLI, Bindings & Error Codes](/docs/reference/cli-and-env.md): All 32 dakflare CLI commands, exit codes (0/1/2/3/4/5/6/75), Cloudflare bindings, env vars, secrets, and 17 §8 errors.
+- [CLI, Bindings & Error Codes](/docs/reference/cli-and-env.md): All 33 dakflare CLI commands, exit codes (0/1/2/3/4/5/6/75), Cloudflare bindings, env vars, secrets, and 17 §8 errors.
 - [State Machines](/docs/reference/state-machines.md): Guarded, declared, and derived state transitions for commands, replies, approvals, grants, turns, and lockouts.
 - [Canonical Glossary](/docs/reference/glossary.md): Locked identifiers (device_id, command_id, local_id, dkf_agt_, ag1_, etc.) with anti-drift rules.
 

@@ -4,14 +4,17 @@
 #   curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 #
 # Fetches the repository at a ref, keeps the checkout (the Worker and console
-# live in it), and links the zero-dependency CLI into a bin directory. It does
-# not provision anything and never touches Cloudflare; that is `dakflare up`.
+# live in it), and links the zero-dependency CLI into a bin directory. It then
+# starts `dakflare setup` on an interactive terminal: dependency installs,
+# toolchain checks, local secrets, an optional GitHub star, and an optional
+# hand-off to `dakflare up`. It never touches Cloudflare by itself.
 #
 # Options:
 #   --ref REF        branch, tag or commit to install (default: main)
 #   --dir DIR        where the checkout goes (default: ./dakflare)
 #   --bin-dir DIR    where the `dakflare` command is linked (default: ~/.local/bin)
 #   --cli-only       install only the CLI, not the Worker and console tree
+#   --no-setup       install the files, but do not start the setup wizard
 #   --force          replace an existing --dir
 #   -h, --help       this text
 #
@@ -21,6 +24,7 @@
 #   DAKFLARE_DIR       same as --dir
 #   DAKFLARE_BIN_DIR   same as --bin-dir
 #   DAKFLARE_TARBALL   a local .tar.gz or URL to install from, instead of GitHub
+#   DAKFLARE_NO_SETUP  same as --no-setup
 
 set -eu
 umask 022
@@ -31,15 +35,17 @@ DIR="${DAKFLARE_DIR:-dakflare}"
 BIN_DIR="${DAKFLARE_BIN_DIR:-$HOME/.local/bin}"
 CLI_ONLY=0
 FORCE=0
+NO_SETUP="${DAKFLARE_NO_SETUP:-0}"
 
 usage() {
 	cat <<'EOF'
-usage: install.sh [--ref REF] [--dir DIR] [--bin-dir DIR] [--cli-only] [--force]
+usage: install.sh [--ref REF] [--dir DIR] [--bin-dir DIR] [--cli-only] [--no-setup] [--force]
 
   --ref REF        branch, tag or commit to install (default: main)
   --dir DIR        where the checkout goes (default: ./dakflare)
   --bin-dir DIR    where the `dakflare` command is linked (default: ~/.local/bin)
   --cli-only       install only the CLI, not the Worker and console tree
+  --no-setup       install the files, but do not start the setup wizard
   --force          replace an existing --dir
   -h, --help       this text
 EOF
@@ -69,6 +75,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--cli-only)
 		CLI_ONLY=1
+		shift
+		;;
+	--no-setup)
+		NO_SETUP=1
 		shift
 		;;
 	--force)
@@ -159,6 +169,18 @@ if [ "$CLI_ONLY" -eq 1 ]; then
 	printf '  note     CLI only: the Worker and console tree is not installed\n'
 fi
 
+# A piped installer has no usable stdin for prompts; /dev/tty is the terminal
+# the operator is looking at. Only start the wizard when there is one, and never
+# fail an install that already succeeded because the wizard was declined.
+if [ "$CLI_ONLY" -eq 0 ] && [ "$NO_SETUP" -eq 0 ] && [ -t 1 ] && [ -r /dev/tty ]; then
+	printf '\nStarting the setup wizard...\n\n'
+	if ! "$BIN_DIR/dakflare" setup < /dev/tty; then
+		printf '\nSetup stopped. Run %s setup when you are ready.\n' "$BIN_DIR/dakflare"
+	fi
+elif [ "$CLI_ONLY" -eq 0 ]; then
+	printf '\nNext: %s setup\n' "$BIN_DIR/dakflare"
+fi
+
 case ":${PATH:-}:" in
 *":$BIN_DIR:"*) ;;
 *)
@@ -167,12 +189,7 @@ case ":${PATH:-}:" in
 	;;
 esac
 
-cat <<EOF
-
-Next:
-  cd $DIR
-  cd worker && npm install && cd ..
-  dakflare init --local
-  cf auth login
-  dakflare up --email you@example.com
-EOF
+if [ "$CLI_ONLY" -eq 1 ]; then
+	printf '\nCLI only: point it at an existing Worker with:\n'
+	printf '  %s init --url <url> --token-file <file>\n' "$BIN_DIR/dakflare"
+fi

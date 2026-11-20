@@ -136,11 +136,18 @@ that directory is not on your `PATH`), and runs it once to prove the binary:
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 ```
 
-Then provision. `up` installs any missing dependency, writes `worker/.dev.vars` with a
-`WEBHOOK_SECRET_KEY`, launches `cf auth login` when needed, creates the three queues, applies
+On an interactive terminal the installer starts `dakflare setup`. The wizard installs the Worker,
+console and docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, asks whether to
+star the repository, and can hand off to `up`. It never stars without an explicit yes or `--star`.
+Skip it with `install.sh --no-setup`; run it later with `dakflare setup`.
+
+Then provision. `up` converges the deployment: it installs any missing dependency, writes
+`worker/.dev.vars` when missing, launches `cf auth login` when needed, creates the queues, applies
 migrations `0001` to `0019`, deploys, saves the CLI config, and prints the pairing QR:
 
 ```bash
+dakflare setup --deploy --email you@example.com
+# or, after a setup-only run:
 dakflare up --email you@example.com
 dakflare doctor
 ```
@@ -265,7 +272,7 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 | `worker/` | Cloudflare Worker, 6 SQLite Durable Objects, 19 D1 migrations, channels, `flow.wasm`, MCP server |
 | `dashboard/` | Svelte 5 on SvelteKit 3 operator console, built into `worker/public/admin` and served at `/admin` |
 | `simulator/` | Tauri v2 Android handset app (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
-| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (32 commands) + `cli/schema/flow-v2.json` |
+| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (33 commands) + `cli/schema/flow-v2.json` |
 | `apps/docs/` | Dual-audience Fumadocs site (`/llms.txt`, `.md`, `/openapi.json`, `/SKILL.md`, `/mcp`) |
 | `skills/` | Five `SKILL.md` packages for coding agents |
 | `contracts/` | `mcp-tools.json`, generated from `tools/list` by `worker/scripts/mcp-contract.mjs` |

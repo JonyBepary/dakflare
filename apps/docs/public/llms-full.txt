@@ -22,7 +22,7 @@ DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare W
 | **Durable Objects** | `DeviceGateway` (`DEVICE`), `ChannelConnection` (`CHANNEL_CONN`), `Scheduler` (`SCHEDULER`), `AuthGuard` (`AUTH_GUARD`), `AuthorityGuard` (`AUTHORITY_GUARD`), `AssistantAgent` (`ASSISTANT`) | Per-device command queue/replay/alarms, per-account channel dedupe/windows, the scheduled-send clock and pacing, account & IP lockout, live grant windows, and stateful streaming agent runtime |
 | **Durable Storage & Async** | D1 (`DB` / `sms_gateway`), KV (`KV`), R2 (`MEDIA_BUCKET`), Queues (`WEBHOOK_QUEUE`, `INGEST_QUEUE`, `INGEST_DLQ`), Workflow (`FLOW_WORKFLOW`) | 19-migration SQLite ledger, FCM token cache, 24h agent attachments, SSRF-guarded webhook retries, >5s flow delays |
 | **Operator Console** | `dashboard/` (Svelte 5 with SvelteKit `adapter-static` → `worker/public/admin`) | Served at `/admin`; fleet presence, messages, Svelte Flow editor with WebMCP, approvals/grants, a header **Ask** assistant, audit log, security |
-| **Operator CLI** | `cli/` (`dakflare`, zero-dependency Node 22+) | 32 commands, `--agent` single-JSON contract, semantic exit codes (`0, 1, 2, 3, 4, 5, 6, 75`), `dakflare mcp serve` stdio bridge |
+| **Operator CLI** | `cli/` (`dakflare`, zero-dependency Node 22+) | 33 commands, `--agent` single-JSON contract, semantic exit codes (`0, 1, 2, 3, 4, 5, 6, 75`), `dakflare mcp serve` stdio bridge |
 
 ---
 
@@ -51,6 +51,9 @@ directory is not on your `PATH`, it prints the `export PATH` line to add:
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 ```
 
+On an interactive terminal the installer starts `dakflare setup`, which installs the Worker,
+console and docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, and offers to star
+the repository. `install.sh --no-setup` installs the files only; `dakflare setup` reruns the wizard.
 `node cli/bin/dakflare.js` still works from the checkout, and `install.sh --cli-only` installs the
 CLI without the Worker tree.
 
@@ -60,11 +63,13 @@ Verify the CLI is available and speaks its machine contract:
 dakflare capabilities --agent
 ```
 
-Expected output: a single compact JSON document with `"status": "ok"` listing all 32 commands, their effects, and flags.
+Expected output: a single compact JSON document with `"status": "ok"` listing all 33 commands, their effects, and flags.
 
 ## Step 2: Generate Local Secrets
 
-From the checkout, generate fresh cryptographic secrets into `worker/.dev.vars` (git-ignored):
+`dakflare setup` performs this step and the next one for you, and asks before it touches GitHub or
+Cloudflare. The manual equivalent, from the checkout, generates fresh cryptographic secrets into
+`worker/.dev.vars` (git-ignored):
 
 ```bash
 cd dakflare
@@ -1411,7 +1416,7 @@ Derived from `cli/schema/flow-v2.json` and `worker/src/lib/flow-ir.ts`:
 
 # CLI, Bindings & Error Codes
 
-> Reference for all 32 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+> Reference for all 33 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
 
 ## `dakflare` CLI Machine Contract
 
@@ -1432,9 +1437,9 @@ Derived from `cli/schema/flow-v2.json` and `worker/src/lib/flow-ir.ts`:
 | `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
 | `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
 
-### Command Inventory (32 Commands)
+### Command Inventory (33 Commands)
 
-- **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
+- **Provision**: `setup`, `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
 - **Messaging**: `send` (SMS, or `--channel --connector` for a platform), `status`, `audit`
 - **Templates & audience**: `templates list`, `templates create`, `templates delete`, `contacts import`
 - **Scheduling**: `schedule list`, `schedule create`, `schedule cancel`
@@ -1444,6 +1449,10 @@ Derived from `cli/schema/flow-v2.json` and `worker/src/lib/flow-ir.ts`:
 - **Agent Work**: `ai` (`ai providers`, `ai configure`, `ai models`, `ai test`), `ask`, `fix`, `flow test`, `flow apply`, `schema --flow-v2`
 - **Provenance**: `trace`, `alerts`, `dlq`, `ws inspect`
 - **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
+
+`dakflare setup` is the interactive first-run path: it checks Node, npm, git, `cf` and `gh`,
+installs the Worker/console/docs dependencies, writes the local secrets, offers to star the
+repository, and can run `up`. `--yes` never stars or deploys without `--star`/`--deploy`.
 
 ## Cloudflare Bindings (`worker/cloudflare.config.ts` & `worker/wrangler.toml`)
 
@@ -1620,7 +1629,7 @@ DakFlare is built around one thesis: **the handset is the radio, the Worker is t
 - **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 19 D1 migrations (`0001_baseline.sql`–`0019_templates_and_scheduling.sql`), 6 SQLite Durable Objects, 5 channel adapters (SMS, Telegram, WhatsApp Cloud, Messenger, Instagram), `flow.wasm`, Clef System 1, and `/mcp`.
 - **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
 - **`dashboard/`**: Svelte 5 with SvelteKit static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
-- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (32 commands).
+- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (33 commands).
 
 ## Honest Architectural Boundaries (Known Gaps)
 

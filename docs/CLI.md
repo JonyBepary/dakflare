@@ -5,9 +5,13 @@ its config in `~/.config/dakflare/config.json` (mode 600), and never needs a bui
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
-dakflare init --url https://example.workers.dev --token <ADMIN_TOKEN>
+dakflare setup
 dakflare doctor
 ```
+
+On an interactive terminal the installer starts `dakflare setup`: it installs the Worker, console and
+docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, offers to star the repository,
+and can hand off to `up`. `--no-setup` skips it; `--dry-run` previews the changes.
 
 In an existing checkout, `npm install -g .` installs the same binary, and
 `node cli/bin/dakflare.js` runs it without installing.
@@ -24,6 +28,7 @@ owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questio
 
 | Command | Flags | What it does |
 |---|---|---|
+| `setup` | `--yes --star --deploy --email --dry-run` | first-run wizard: dependencies, toolchain, secrets, star, optional `up` |
 | `init` | `--url --token --token-file --local --force` | verify a Worker and save the URL and token |
 | `up` | `--email --yes --dry-run` | dependencies, local secrets, cf login, queues, deploy, owner, pairing QR, saved config |
 | `doctor` | `--max-age --serial` | config, health, schema, migrations, bindings, phone |

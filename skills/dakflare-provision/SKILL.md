@@ -23,7 +23,15 @@ phone, and each failing check names the command that fixes it in the envelope's
 
 ## The sequence
 
+`dakflare setup` is the first-run wizard: it checks Node, npm, git, `cf` and `gh`, installs the
+Worker, console and docs dependencies, creates `worker/.dev.vars`, and offers to star the
+repository and run `up`. It never stars without an interactive yes or `--star`. `--dry-run`
+previews it; `--yes` skips prompts but still needs `--star`/`--deploy` for those effects.
+
 ```bash
+# 0. one-time wizard (the installer starts it on a terminal)
+dakflare setup
+
 # 1. sign in to Cloudflare locally
 cf auth login
 
