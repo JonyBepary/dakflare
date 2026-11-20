@@ -252,29 +252,21 @@
 				{#if loading}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
 				Refresh
 			</button>
-			<button
-				type="button"
-				class="btn header-action {formOpen || connectors.length === 0 ? '' : 'btn-primary'}"
-				bind:this={addButton}
-				onclick={() => (formOpen ? closeForm() : openForm())}
-				aria-expanded={formOpen}
-				aria-controls={formOpen ? 'connector-form' : undefined}
-			>
-				<Icon name={formOpen ? 'x' : 'plus'} size={14} />
-				{formOpen ? 'Close form' : 'Add connector'}
-			</button>
+			{#if connectors.length > 0 || formOpen}
+				<button
+					type="button"
+					class="btn header-action {formOpen ? '' : 'btn-primary'}"
+					bind:this={addButton}
+					onclick={() => (formOpen ? closeForm() : openForm())}
+					aria-expanded={formOpen}
+					aria-controls={formOpen ? 'connector-form' : undefined}
+				>
+					<Icon name={formOpen ? 'x' : 'plus'} size={14} />
+					{formOpen ? 'Close form' : 'Add connector'}
+				</button>
+			{/if}
 		{/if}
 	</PageHeader>
-
-	{#if !canManage}
-		<p class="read-only" id="channels-read-only">
-			<Icon name="shield" size={14} />
-			<span>
-				<strong>Read-only.</strong> A connector holds an account's credential, so only an owner
-				or admin can list or change one. Ask an owner if this account needs a platform connected.
-			</span>
-		</p>
-	{/if}
 
 	{#if loadError}
 		<div class="banner">
@@ -352,7 +344,10 @@
 									<option value={option.value}>{option.label}</option>
 								{/each}
 							</select>
-							<p class="hint">Which login issued this account's access token.</p>
+							<p class="hint">
+								One of three logins: Unified Login (the usual choice), Instagram Login, or
+								Facebook Login. Pick the one that issued this account's token.
+							</p>
 						</div>
 					{/if}
 
@@ -465,7 +460,15 @@
 			<div class="skeleton"></div>
 			<div class="skeleton"></div>
 		</div>
-	{:else if !loadError && connectors.length === 0 && canManage}
+	{:else if !canManage}
+		<section class="card">
+			<EmptyState
+				icon="shield"
+				title="Connectors are hidden for a member account"
+				description="Connector credentials are managed by owners and admins, so a member account does not see them. The connectors this gateway has are hidden from you, not absent. Ask an owner if one needs to be added, paused or retired."
+			/>
+		</section>
+	{:else if !loadError && connectors.length === 0}
 		<section class="card">
 			<EmptyState
 				icon="send"
@@ -473,7 +476,12 @@
 				description="Add WhatsApp, Telegram, Messenger or Instagram to receive that account's events and answer from Messages. Each connector gets its own webhook URL."
 			>
 				{#if !formOpen}
-					<button type="button" class="btn btn-primary" onclick={openForm}>
+					<button
+						type="button"
+						class="btn btn-primary"
+						bind:this={addButton}
+						onclick={openForm}
+					>
 						<Icon name="plus" size={14} /> Add the first connector
 					</button>
 				{/if}
@@ -524,7 +532,7 @@
 								</button>
 								<button
 									type="button"
-									class="btn btn-sm btn-danger-ghost"
+									class="btn btn-sm delete-action"
 									onclick={() => askDelete(item)}
 									disabled={busyId !== null || deleting}
 								>
@@ -585,32 +593,6 @@
 </ConfirmDialog>
 
 <style>
-	.read-only {
-		display: flex;
-		align-items: flex-start;
-		gap: var(--df-p-space-2);
-		margin: 0 0 var(--df-p-space-4);
-		padding: var(--df-p-space-2) var(--df-p-space-3);
-		border: 1px solid var(--df-border-hairline);
-		border-left: var(--df-p-focus-width) solid var(--df-text-meta);
-		border-radius: 0 var(--df-p-radius-sm) var(--df-p-radius-sm) 0;
-		background: var(--df-surface-well);
-		font-size: var(--df-p-text-sm);
-		line-height: 1.5;
-		color: var(--df-text-secondary);
-	}
-
-	.read-only :global(svg) {
-		flex: none;
-		margin-top: var(--df-p-space-1);
-		color: var(--df-text-meta);
-	}
-
-	.read-only strong {
-		font-weight: 600;
-		color: var(--df-text-primary);
-	}
-
 	.banner {
 		display: flex;
 		align-items: center;
@@ -788,6 +770,45 @@
 		gap: var(--df-p-space-2);
 		flex-wrap: wrap;
 		margin-left: auto;
+	}
+
+	/* Delete is the quietest control in the row: at rest it is neutral meta
+	   ink, so the name and the state lead, and it only turns danger while the
+	   pointer or the keyboard is on it. The 44px target is the row's shared
+	   mobile rule below. */
+	.delete-action {
+		color: var(--df-text-secondary);
+		background: transparent;
+		border-color: transparent;
+		font-weight: 500;
+	}
+
+	.delete-action :global(svg) {
+		opacity: 0.7;
+	}
+
+	.delete-action:disabled {
+		color: var(--df-text-meta);
+		background: transparent;
+		border-color: transparent;
+	}
+
+	.delete-action:focus-visible {
+		color: var(--df-state-danger-ink);
+		background: var(--df-state-danger-bg);
+		border-color: var(--df-state-danger-ink);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.delete-action:hover:not(:disabled) {
+			color: var(--df-state-danger-ink);
+			background: var(--df-state-danger-bg);
+			border-color: color-mix(
+				in srgb,
+				var(--df-state-danger-ink) 34%,
+				var(--df-border-hairline)
+			);
+		}
 	}
 
 	.facts {

@@ -37,9 +37,12 @@
 	let comment = $state('');
 	let sending = $state(false);
 	let failure = $state<string | null>(null);
-	let sent = $state<{ label: string; word: string; state: string; messageId?: string } | null>(
-		null
-	);
+	let sent = $state<{
+		label: string;
+		word: string;
+		state: ChannelSendResult['state'];
+		messageId?: string;
+	} | null>(null);
 
 	const enabled = $derived(connectors.filter((item) => item.enabled));
 	const active = $derived(enabled.find((item) => item.id === selectedId) ?? null);
@@ -76,16 +79,13 @@
 		}
 	});
 
-	const STATE_WORDS: Record<string, string> = {
-		ACCEPTED_BY_CHANNEL: 'accepted by the platform',
-		DELIVERED: 'delivered',
-		RETRY_BACKOFF: 'queued for a retry',
-		FAILED_PERMANENT: 'refused'
-	};
-
-	const canSend = $derived(
-		active !== null && to.trim() !== '' && body.trim() !== '' && !sending
-	);
+	/**
+	 * The primary action is always live: an empty field is a validation problem,
+	 * not a reason to grey the button out and make the panel's one action look
+	 * unavailable. `required` on the two fields lets the browser stop the submit
+	 * and focus what is missing.
+	 */
+	const canSubmit = $derived(active !== null && !sending);
 
 	/** The delivery result's own code, which arrives in the body of an HTTP error. */
 	function payloadCode(error: unknown): string | null {
@@ -122,7 +122,7 @@
 
 	async function submit(event: SubmitEvent): Promise<void> {
 		event.preventDefault();
-		if (!active || !canSend) return;
+		if (!active || !canSubmit) return;
 		const target = active;
 		const activeMeta = meta;
 		sending = true;
@@ -155,7 +155,7 @@
 			sent = {
 				label: target.label,
 				word: channelWord(target.channel) ?? 'the platform',
-				state: STATE_WORDS[result.state] ?? result.state.toLowerCase().replaceAll('_', ' '),
+				state: result.state,
 				...(result.channelMessageId ? { messageId: result.channelMessageId } : {})
 			};
 			body = '';
@@ -220,6 +220,7 @@
 						placeholder={recipient.placeholder}
 						autocomplete="off"
 						spellcheck="false"
+						required
 						disabled={sending}
 					/>
 					<p class="hint">{recipient.hint}</p>
@@ -233,6 +234,7 @@
 						bind:value={body}
 						rows="3"
 						placeholder={`Type the reply ${word} should send…`}
+						required
 						disabled={sending}
 					></textarea>
 				</div>
@@ -293,7 +295,7 @@
 				{/if}
 
 				<div class="send-foot span-2">
-					<button type="submit" class="btn btn-primary" disabled={!canSend} aria-busy={sending}>
+					<button type="submit" class="btn btn-primary" disabled={!canSubmit} aria-busy={sending}>
 						{#if sending}<Spinner />{:else}<Icon name="send" size={14} />{/if}
 						Send via connector
 					</button>
@@ -311,8 +313,16 @@
 	{/if}
 
 	{#if sent}
-		<Notice tone="ok" title="Sent">
-			{sent.label}: {sent.state}.
+		<Notice
+			tone="info"
+			title={sent.state === 'DELIVERED' ? `Delivered by ${sent.word}` : `Accepted by ${sent.word}`}
+		>
+			{#if sent.state === 'DELIVERED'}
+				{sent.label}: the platform reported this message as delivered.
+			{:else}
+				{sent.label} handed the message to {sent.word}. That is an acceptance, not a delivery:
+				the platform confirms delivery later through its own event, not through this response.
+			{/if}
 			{#if sent.messageId}
 				<span class="mono sent-id">{sent.messageId}</span>
 			{/if}
