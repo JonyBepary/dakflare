@@ -35,6 +35,18 @@
                     "null"
                   ]
                 },
+                "sim_slot": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "last_seen": {
                   "type": [
                     "number",
@@ -308,6 +320,233 @@
         },
         "required": [
           "workflow"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "triage",
+      "title": "Triage a message",
+      "description": "Classify one inbound message: intent, prompt-injection probability, template specificity, the role of each supplied span, and the deterministic balance-vs-principal invariant. Reads only; the message body is not stored or echoed.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "The inbound message text."
+          },
+          "sender": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "The sender, as the phone reported it."
+          },
+          "spans": {
+            "description": "Candidate spans to classify individually.",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "index",
+                "text"
+              ]
+            }
+          }
+        },
+        "required": [
+          "message",
+          "sender"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "intent": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "choice": {
+                    "type": "string"
+                  },
+                  "probability": {
+                    "type": "number"
+                  },
+                  "confidence": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "choice",
+                  "probability",
+                  "confidence"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "injection": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "probability": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "probability"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "specificity": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "score": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "score"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "number"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "probability": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "index",
+                "role",
+                "probability"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "invariant": {
+            "type": "object",
+            "properties": {
+              "balanceAtLeastPrincipal": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "balanceAtLeastPrincipal"
+            ],
+            "additionalProperties": false
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "intent",
+          "injection",
+          "specificity",
+          "roles",
+          "invariant",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "telemetry",
+      "title": "Fleet telemetry",
+      "description": "Map one operator question to a single bounded telemetry plan (fleet health, stuck outbox, SIM ranking, workflow failures, authority audit or extraction drift) and return its rows. No raw SQL and no fan-out over devices.",
+      "inputSchema": {
+        "type": "object",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "The question to answer."
+          }
+        },
+        "required": [
+          "question"
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "plan": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "took_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "plan",
+          "rows",
+          "truncated",
+          "took_ms"
         ],
         "additionalProperties": false
       }
