@@ -3660,7 +3660,9 @@ async function commandUp(argv) {
   plan.push(configChange);
 
   // 5. Migrate, then deploy with the secrets `init --local` already wrote.
-  plan.push(`cf d1 migrations apply ${databaseId} --remote`);
+  // `cf` applies to the remote database unless `--local` is passed; `--remote`
+  // is a wrangler flag and this CLI version rejects it.
+  plan.push(`cf d1 migrations apply ${databaseId}`);
   plan.push('cf deploy --secrets-file .dev.vars');
   plan.push(
     email === undefined
@@ -3688,7 +3690,7 @@ async function commandUp(argv) {
     }
   }
 
-  runCf(['d1', 'migrations', 'apply', databaseId, '--remote'], workerDir, 'applying migrations');
+  runCf(['d1', 'migrations', 'apply', databaseId], workerDir, 'applying migrations');
 
   const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
   if (!fs.existsSync(dashboardEntry)) {
