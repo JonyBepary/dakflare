@@ -62,7 +62,7 @@ diagram is reproduced as text below.*
 Three tiers, one trust boundary. The **handset** owns the SIM and the personal-app bridge, and signs
 every request with a P-256 key held in `AndroidKeyStore`. The **Worker** verifies that signature — or
 Meta's `X-Hub-Signature-256`, or Telegram's secret token — and answers inside Meta's five-second
-window. Storage and coordination live in **five SQLite Durable Objects**, one per unit that needs
+window. Storage and coordination live in **six SQLite Durable Objects**, one per unit that needs
 serialisation: `DeviceGateway` per handset, `ChannelConnection` per `(channel, account_id)`,
 `AuthGuard` and `AuthorityGuard` as singletons, and `AssistantAgent` pinned to one name.
 
@@ -134,7 +134,7 @@ cd worker && npm install && cd ..
 # 1. Generate local secrets into worker/.dev.vars (never committed)
 dakflare init --local
 
-# 2. Provision D1/KV, apply migrations 0001 to 0018, deploy Worker + console, bootstrap owner & pairing code
+# 2. Provision D1/KV, apply migrations 0001 to 0019, deploy Worker + console, bootstrap owner & pairing code
 cf auth login
 dakflare up --email you@example.com
 
@@ -190,6 +190,12 @@ npm run verify:deploy                           # verify live routes, version, w
 > [!TIP]
 > Connector secrets are sealed at rest with AES-256-GCM (`WEBHOOK_SECRET_KEY`), cached in KV for 60s on the hot webhook path, and never returned after creation. Admin CRUD routes enforce `assertHuman` and refuse member or agent sessions.
 
+**Templates and paced scheduling.** A body renders `{{name | fallback}}` and reports its GSM-7
+or UCS-2 segment count before it leaves; a CSV audience import fills the variables. A send can be
+queued for a time: the `Scheduler` paces it per SIM or per account (8-15 s of jitter for the radio,
+a token bucket for cloud APIs), moves it past quiet hours instead of dropping it, and refuses a
+cancel after the claim instead of pretending. `docs/SCHEDULING.md` has the claim rules.
+
 ## Wasm Flows
 
 A flow is a canonical, acyclic **`dakflare.flow/v2`** document with 9 node kinds (`trigger`, `extract`, `set_var`, `condition`, `switch`, `delay`, `webhook`, `send_sms`, `stop`). No pixel coordinates are needed: the Worker computes deterministic `rank-v1` layouts on save and refuses cycles or variables unbound on any branch.
@@ -207,20 +213,20 @@ dakflare flows heal wf_orders --samples samples.json             # zero-regressi
 - **Streamable HTTP MCP (`/mcp`) & Stdio Bridge (`dakflare mcp serve`):** Serves **9 scope-filtered tools** (`list_devices`, `read_messages`, `command_status`, `list_flows`, `get_flow`, `triage`, `telemetry`, `trace`, `send_sms`) with RFC 9728/8414/8707 OAuth discovery and TOTP elicitation for mutating calls.
 - **Browser WebMCP (`/admin/workflows/edit`):** Registers 4 live editor tools (`dakflare_get_flow_ast`, `dakflare_stage_flow_patch`, `dakflare_synthesize_pattern`, `dakflare_diagnose_message`) with dashed ghost-patch staging.
 - **Worker-to-Worker RPC (`DakFlareApi`):** Bind `entrypoint = "DakFlareApi"` from any Worker or Cloudflare Workflow in your account without bypassing scopes, limiters, or audit logs.
-- **Five Installable Agent Skills (`skills/`):** `dakflare-provision`, `dakflare-messaging`, `dakflare-flows`, `dakflare-agents`, and `dakflare-multichannel` (`npx skills add`). `docs/CLI.md` has the 29-command inventory.
+- **Five Installable Agent Skills (`skills/`):** `dakflare-provision`, `dakflare-messaging`, `dakflare-flows`, `dakflare-agents`, and `dakflare-multichannel` (`npx skills add`). `docs/CLI.md` has the 32-command inventory.
 
 ## Verified Benchmarks & Gates
 
 CI (`.github/workflows/pipeline.yml`) runs hermetically with **zero Cloudflare credentials**; deploys and D1 migrations run locally from the operator's terminal.
 
-| Gate | Measured Result (`27fb51c`) |
+| Gate | Measured Result (`ea34370`) |
 | :--- | :--- |
-| **Worker Unit & Integration (Vitest)** | **54 passing** across 7 files (`typecheck` + `check:config` across 5 DO classes & 3 queue consumers) |
+| **Worker Unit & Integration (Vitest)** | **150 passing** across 13 files (`typecheck` + `check:config` across 6 DO classes & 3 queue consumers) |
 | **Conformance Harness** | **`SUITE PASSED` (513 assertions)** covering P-256 vectors, WebAuthn, replay, WS, rules, auth, and ack timeouts |
 | **Android Handset & Rust Cores** | **110** `simulator/core` + **58** `simulator/flow` Rust tests · Svelte `0/0` · Gradle Kotlin compiles |
-| **Dashboard Console** | `svelte-check` `0/0` · `check-system` `0` failing |
-| **Multi-Account Burst Benchmark (WhatsApp)** | **780/780** acked · **600** D1 rows · **0** duplicates · **p95 305 ms** (SLA `< 5,000 ms`) |
-| **Multi-Account Burst Benchmark (Messenger)** | **780/780** acked · **600** D1 rows · **0** duplicates · **p95 338 ms** (SLA `< 5,000 ms`) |
+| **Dashboard Console** | `svelte-check` `0/0` · `check-system` `0` failing across 76 files |
+| **Multi-Account Burst Benchmark (WhatsApp)** | **780/780** acked · **600** D1 rows · **0** duplicates · **p95 307 ms** (SLA `< 5,000 ms`) |
+| **Multi-Account Burst Benchmark (Messenger)** | **780/780** acked · **600** D1 rows · **0** duplicates · **p95 283 ms** (SLA `< 5,000 ms`) |
 
 <details>
 <summary><strong>Run the verification &amp; benchmark suite locally</strong></summary>
@@ -251,10 +257,10 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 
 | Path | Contents |
 | :--- | :--- |
-| `worker/` | Cloudflare Worker, 5 SQLite Durable Objects, 18 D1 migrations, channels, `flow.wasm`, MCP server |
+| `worker/` | Cloudflare Worker, 6 SQLite Durable Objects, 19 D1 migrations, channels, `flow.wasm`, MCP server |
 | `dashboard/` | Svelte 5 on SvelteKit 3 operator console, built into `worker/public/admin` and served at `/admin` |
 | `simulator/` | Tauri v2 Android handset app (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
-| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (29 commands) + `cli/schema/flow-v2.json` |
+| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (32 commands) + `cli/schema/flow-v2.json` |
 | `apps/docs/` | Dual-audience Fumadocs site (`/llms.txt`, `.md`, `/openapi.json`, `/SKILL.md`, `/mcp`) |
 | `skills/` | Five `SKILL.md` packages for coding agents |
 | `contracts/` | `mcp-tools.json`, generated from `tools/list` by `worker/scripts/mcp-contract.mjs` |

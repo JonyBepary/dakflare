@@ -20,6 +20,7 @@ truth; the site is a presentation of it, and should be corrected here first.
 | `DAKFLARE_MASTER_SPECIFICATION.md` | the system reference: surfaces, storage, protocols, invariants |
 | `MULTI_PLATFORM_AI_HUB_SPEC.md` | the multi-channel hub: WhatsApp, Telegram, session windows, templates |
 | `MULTICHANNEL.md` | what shipped for the connector tiers, the invariants, and the two known gaps |
+| `SCHEDULING.md` | scheduled sends, the Scheduler object, claims, pacing and quiet hours |
 
 ## Agents
 

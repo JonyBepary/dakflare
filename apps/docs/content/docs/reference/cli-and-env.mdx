@@ -1,6 +1,6 @@
 ---
 title: CLI, Bindings & Error Codes
-description: Reference for all 29 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
+description: Reference for all 32 dakflare CLI commands, semantic exit codes, Cloudflare bindings, environment variables, secrets, and the 17-code §8 error catalog.
 ---
 
 ## `dakflare` CLI Machine Contract
@@ -22,10 +22,12 @@ description: Reference for all 29 dakflare CLI commands, semantic exit codes, Cl
 | `6` | Precondition failed (`approval_required`, `agent_quota_exceeded`, `heal_refused`) | Obtain approval or fix corpus regression |
 | `75` | Temporary / still in flight (`send` poll timeout, network) | **Never re-run `send`**; poll `dakflare status <command_id>` |
 
-### Command Inventory (29 Commands)
+### Command Inventory (32 Commands)
 
 - **Provision**: `init`, `up`, `doctor`, `pair`, `devices`, `revoke`
 - **Messaging**: `send` (SMS, or `--channel --connector` for a platform), `status`, `audit`
+- **Templates & audience**: `templates list`, `templates create`, `templates delete`, `contacts import`
+- **Scheduling**: `schedule list`, `schedule create`, `schedule cancel`
 - **Channels**: `connectors list`, `connectors create`, `connectors update`, `connectors delete`, `webhooks list`, `webhooks create`, `webhooks delete`, `webhooks deliveries`
 - **Auth & Control Plane**: `auth bootstrap`, `auth invite`, `auth invites`, `auth reset`, `auth mint-agent-token`, `auth agent-tokens`, `auth revoke-agent-token`, `auth approvals`, `auth approve`, `auth reject`, `auth grants`, `auth grants revoke`
 - **Automation**: `flows apply`, `flows heal`, `rules list`, `rules apply`, `rules update`, `rules delete`, `rules test`, `extract synthesize`
@@ -37,7 +39,7 @@ description: Reference for all 29 dakflare CLI commands, semantic exit codes, Cl
 
 | Binding | Type | Resource / Class |
 | --- | --- | --- |
-| `DB` | D1 Database | `sms_gateway` (18 migrations: `0001`–`0018`) |
+| `DB` | D1 Database | `sms_gateway` (19 migrations: `0001`–`0019`) |
 | `KV` | KV Namespace | FCM HTTP v1 bearer-token cache |
 | `MEDIA_BUCKET` | R2 Bucket | `dakflare-media` (24h `agent_attachments` storage) |
 | `DEVICE` | Durable Object (SQLite) | `DeviceGateway` |
@@ -45,6 +47,7 @@ description: Reference for all 29 dakflare CLI commands, semantic exit codes, Cl
 | `AUTHORITY_GUARD` | Durable Object (SQLite) | `AuthorityGuard` |
 | `ASSISTANT` | Durable Object (SQLite) | `AssistantAgent` |
 | `CHANNEL_CONN` | Durable Object (SQLite) | `ChannelConnection` (one object per `channel:account_id`) |
+| `SCHEDULER` | Durable Object (SQLite) | `Scheduler` (single `scheduler` instance: due rows, token buckets, quiet hours) |
 | `WEBHOOK_QUEUE` | Queue (producer & consumer) | `dakflare-webhook-queue` (`max_batch_size=10`, `max_retries=3`) |
 | `INGEST_QUEUE` | Queue (producer & consumer) | `dakflare-ingest-queue` (`max_batch_size=50`, `max_batch_timeout=2`, DLQ `dakflare-ingest-dlq`) |
 | `FLOW_WORKFLOW` | Workflow | `FlowExecutionWorkflow` (`flow-execution-workflow`) |
