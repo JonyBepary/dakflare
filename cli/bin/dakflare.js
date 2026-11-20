@@ -481,21 +481,31 @@ const COMMAND_SPECS = {
   },
   webhooks: {
     response: {
-      webhooks: '[{id, name, enabled, created_by, created_at, last_delivery_at}]',
+      webhooks:
+        '[{id, name, kind, target_url, enabled, events, custom_headers, timeout_ms, max_attempts, created_by, created_at, last_delivery_at, secret_set}]',
       secret: 'the signing secret, returned only by create and shown once',
+      test: '{ok, status, latency_ms, signed} for an outbound delivery attempt',
       deliveries: '[{id, webhook_id, received_at, body_json, status, answer_text, error}]',
     },
-    summary: 'List, create, delete inbound agent webhooks or read deliveries (list|create|delete|deliveries)',
+    summary:
+      'List, create, delete, test or inspect inbound and outbound webhooks (list|create|delete|test|deliveries)',
     effect: 'mutating',
-    usage: 'dakflare webhooks <list|create|delete|deliveries> [options]',
+    usage: 'dakflare webhooks <list|create|delete|test|deliveries> [options]',
     flags: {
-      name: { type: 'string', note: 'create: a display name, default "webhook"' },
+      kind: { type: 'string', note: 'list: filter by inbound|outbound; create: inbound (default) or outbound' },
+      name: { type: 'string', note: 'create: a display name, default "webhook" (required for outbound)' },
+      url: { type: 'string', note: 'create outbound: the https:// endpoint that receives deliveries' },
+      event: { type: 'string', note: 'create outbound: an event name to deliver, repeatable' },
+      'timeout-ms': { type: 'string', note: 'create outbound: delivery timeout in milliseconds' },
       'dry-run': { type: 'boolean', note: 'create: print the request; send nothing' },
       yes: { type: 'boolean', note: 'delete: skip the confirmation prompt' },
     },
     examples: [
       'dakflare webhooks list --agent',
+      'dakflare webhooks list --kind outbound --agent',
       'dakflare webhooks create --name "billing events"',
+      'dakflare webhooks create --kind outbound --name "delivery feed" --url https://example.com/hooks/sms --event delivered --event failed',
+      'dakflare webhooks test wh_abc --agent',
       'dakflare webhooks deliveries wh_abc --agent',
       'dakflare webhooks delete wh_abc --yes',
     ],
@@ -1137,7 +1147,13 @@ const VALUE_FLAGS = new Set([
   'at',
   'target',
   'status',
+  'kind',
+  'event',
+  'timeout-ms',
 ]);
+
+/** Flags that may be given more than once and collect into an array. */
+const REPEATABLE_FLAGS = new Set(['event']);
 
 const KNOWN_BOOLEAN_FLAGS = new Set([
   'json',
@@ -1169,6 +1185,15 @@ function looksLikeCliFlag(arg) {
   return VALUE_FLAGS.has(name) || KNOWN_BOOLEAN_FLAGS.has(name);
 }
 
+function setFlagValue(flags, key, value) {
+  if (!REPEATABLE_FLAGS.has(key)) {
+    flags[key] = value;
+    return;
+  }
+  if (!Array.isArray(flags[key])) flags[key] = [];
+  flags[key].push(value);
+}
+
 function parseArgv(argv) {
   const flags = Object.create(null);
   const rest = [];
@@ -1186,16 +1211,16 @@ function parseArgv(argv) {
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       if (eq !== -1) {
-        flags[arg.slice(2, eq)] = arg.slice(eq + 1);
+        setFlagValue(flags, arg.slice(2, eq), arg.slice(eq + 1));
         continue;
       }
       const key = arg.slice(2);
       const next = argv[i + 1];
       if (VALUE_FLAGS.has(key) && next !== undefined && !looksLikeCliFlag(next)) {
-        flags[key] = next;
+        setFlagValue(flags, key, next);
         i += 1;
       } else {
-        flags[key] = true;
+        setFlagValue(flags, key, true);
       }
       continue;
     }
@@ -2947,6 +2972,42 @@ async function commandConnectors(argv) {
   throw usage(`unknown connectors subcommand "${sub}" (expected list|create|update|delete)`);
 }
 
+const WEBHOOK_KINDS = ['inbound', 'outbound'];
+
+function webhookKind(flags) {
+  const value = stringFlag(flags, 'kind');
+  if (value === undefined) return undefined;
+  const kind = value.toLowerCase();
+  if (!WEBHOOK_KINDS.includes(kind)) throw usage('--kind must be inbound or outbound');
+  return kind;
+}
+
+/** `--event` may be repeated and each value may hold a comma-separated list. */
+function webhookEvents(flags) {
+  const raw = flags.event;
+  if (raw === undefined) return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const events = [];
+  for (const value of values) {
+    if (value === true || value === '') throw usage('--event needs a value');
+    for (const entry of String(value).split(',')) {
+      const event = entry.trim();
+      if (event !== '') events.push(event);
+    }
+  }
+  return events;
+}
+
+function webhookTimeout(flags) {
+  const raw = stringFlag(flags, 'timeout-ms');
+  if (raw === undefined) return undefined;
+  const timeout = Number(raw);
+  if (!Number.isInteger(timeout) || timeout <= 0) {
+    throw usage('--timeout-ms must be a positive integer');
+  }
+  return timeout;
+}
+
 async function commandWebhooks(argv) {
   const [sub = 'list', ...args] = argv;
   if (sub === '--help' || sub === '-h') return printHelp('webhooks');
@@ -2955,8 +3016,11 @@ async function commandWebhooks(argv) {
   assertCommandFlags(flags, 'webhooks');
 
   if (sub === 'list') {
+    const kind = webhookKind(flags);
+    const pathname =
+      kind === undefined ? '/v1/admin/webhooks' : `/v1/admin/webhooks?kind=${kind}`;
     const cfg = requireConfig();
-    const result = await api(cfg, 'GET', '/v1/admin/webhooks');
+    const result = await api(cfg, 'GET', pathname);
     if (result.status !== 200) throw requestFailure('listing webhooks', result);
     const webhooks = Array.isArray(result.data?.webhooks) ? result.data.webhooks : [];
     if (MODE.json) {
@@ -2964,21 +3028,45 @@ async function commandWebhooks(argv) {
       return 0;
     }
     if (webhooks.length === 0) {
-      out('No inbound webhooks configured.');
+      out(kind === undefined ? 'No webhooks configured.' : `No ${kind} webhooks configured.`);
       return 0;
     }
     out(`Webhooks (${webhooks.length})`);
     for (const webhook of webhooks) {
       const state = webhook.enabled ? ok('active') : muted('paused');
-      out(`  ${String(webhook.id).padEnd(22)} ${state.padEnd(8)} ${webhook.name ?? ''}`);
+      const hookKind = webhook.kind ?? kind ?? 'inbound';
+      out(
+        `  ${String(webhook.id).padEnd(22)} ${String(hookKind).padEnd(9)} ${state.padEnd(8)} ${webhook.name ?? ''}`
+      );
+      if (hookKind === 'outbound' && webhook.target_url) {
+        out(muted(`    ${webhook.target_url}`));
+      }
     }
     return 0;
   }
 
   if (sub === 'create') {
-    const name = stringFlag(flags, 'name') ?? 'webhook';
-    const body = { name };
+    const kind = webhookKind(flags) ?? 'inbound';
     const pathname = '/v1/admin/webhooks';
+    let body;
+
+    if (kind === 'outbound') {
+      requireFlags(flags, ['name', 'url']);
+      const url = stringFlag(flags, 'url', { required: true });
+      body = { kind: 'outbound', name: stringFlag(flags, 'name'), target_url: url };
+      const events = webhookEvents(flags);
+      if (events.length > 0) body.events = events;
+      const timeout = webhookTimeout(flags);
+      if (timeout !== undefined) body.timeout_ms = timeout;
+    } else {
+      if (flags.url !== undefined) throw usage('--url is only for outbound webhooks');
+      if (flags.event !== undefined) throw usage('--event is only for outbound webhooks');
+      if (flags['timeout-ms'] !== undefined) {
+        throw usage('--timeout-ms is only for outbound webhooks');
+      }
+      body = { name: stringFlag(flags, 'name') ?? 'webhook' };
+    }
+
     if (flags['dry-run'] === true) {
       if (MODE.json) {
         emitJson(
@@ -2990,6 +3078,7 @@ async function commandWebhooks(argv) {
       printDryRun(pathname, body);
       return 0;
     }
+
     const cfg = requireConfig();
     const result = await api(cfg, 'POST', pathname, body);
     if (result.status !== 201 && result.status !== 200) {
@@ -3000,12 +3089,53 @@ async function commandWebhooks(argv) {
       emitJson({ ok: true, ...webhook }, MODE);
       return 0;
     }
-    out(`Created webhook ${webhook.id ?? ''}`);
-    out(`  name          ${webhook.name ?? name}`);
+    out(`Created ${kind} webhook ${webhook.id ?? ''}`);
+    out(`  name          ${webhook.name ?? body.name}`);
+    if (kind === 'outbound' && body.target_url !== undefined) {
+      out(`  target        ${webhook.target_url ?? body.target_url}`);
+      if (body.events !== undefined) out(`  events        ${body.events.join(', ')}`);
+    }
     if (typeof webhook.secret === 'string' && webhook.secret !== '') {
       out(`  signing secret (shown once): ${webhook.secret}`);
-      out(muted('  store it now; the deployment will not return it again'));
+      out(muted('  store it now; it will not be shown again'));
     }
+    return 0;
+  }
+
+  if (sub === 'test') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare webhooks test <id>');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    const cfg = requireConfig();
+    const result = await api(cfg, 'POST', `/v1/admin/webhooks/${encodeURIComponent(id)}/test`);
+    if (result.status !== 200) throw requestFailure(`testing webhook ${id}`, result);
+    const outcome = result.data ?? {};
+    // `outcome.ok` is the target's answer, not the command's. Spreading it into
+    // `{ ok: true, ...outcome }` would set `ok:false` on the envelope and turn a
+    // completed test into an `internal` error. Rename it before emitting.
+    const accepted = outcome.ok !== false;
+    if (MODE.json) {
+      emitJson(
+        {
+          ok: true,
+          accepted,
+          status: outcome.status ?? null,
+          latency_ms: outcome.latency_ms ?? null,
+          signed: outcome.signed === true,
+        },
+        MODE
+      );
+      return accepted ? 0 : 1;
+    }
+    if (outcome.ok === false) {
+      const sentence =
+        outcome.error ?? outcome.message ?? outcome.detail ?? 'the target did not accept the delivery';
+      out(String(sentence));
+      return 1;
+    }
+    const latency = outcome.latency_ms === undefined ? '?' : outcome.latency_ms;
+    const signed = outcome.signed ? ', signed' : '';
+    out(`ok ${outcome.status ?? '?'} (${latency} ms${signed})`);
     return 0;
   }
 
@@ -3050,7 +3180,9 @@ async function commandWebhooks(argv) {
     return 0;
   }
 
-  throw usage(`unknown webhooks subcommand "${sub}" (expected list|create|delete|deliveries)`);
+  throw usage(
+    `unknown webhooks subcommand "${sub}" (expected list|create|delete|test|deliveries)`
+  );
 }
 
 async function commandSendConnector(flags) {
@@ -8256,7 +8388,7 @@ Usage: dakflare <command> [options]
   send          queue an SMS, or send through a channel connector
   status        read one command's state; --wait follows it to the end
   connectors    \`connectors list|create|update|delete\` channel credentials
-  webhooks      \`webhooks list|create|delete|deliveries\` inbound agent hooks
+  webhooks      \`webhooks list|create|delete|test|deliveries\` inbound and outbound hooks
   templates     \`templates list|create|delete\` message templates
   contacts      \`contacts import <file.csv>\` bulk contact import
   schedule      \`schedule list|create|cancel\` scheduled sends
@@ -8402,22 +8534,36 @@ Credential flags, all sealed at rest and never printed:
 The webhook URL is built from the Worker URL and the connector id. It is not
 stored in D1; the API never returns it.`,
 
-  webhooks: `Usage: dakflare webhooks <list|create|delete|deliveries> [options]
+  webhooks: `Usage: dakflare webhooks <list|create|delete|test|deliveries> [options]
 
-Inbound agent webhooks. A POST to /v1/webhooks/:id is signed with the hook's
-secret and runs one agent turn. The signing secret is returned only by create.
+Two kinds of webhook share this group:
 
-  list                          id, enabled state and name
-  create [--name <name>]        mint a hook; prints the signing secret once
+  inbound    a POST to /v1/webhooks/:id is signed with the hook's secret and
+             runs one agent turn. The secret is returned only by create.
+  outbound   the deployment delivers events to your https:// endpoint, signed
+             with the hook's secret. The secret is returned only by create.
+
+  list [--kind inbound|outbound]
+                                id, kind, enabled state and name, plus the
+                                target URL for outbound hooks
+  create [--name <name>]        mint an inbound hook; prints the signing secret once
+  create --kind outbound --name <name> --url <https://...> [options]
+                                register an outbound endpoint
   delete <id> [--yes]           remove the hook and its deliveries
-  deliveries <id>               the last 20 deliveries, newest first
+  test <id>                     send a signed test delivery and print the result
+  deliveries <id>               inbound only: the last 20 deliveries, newest first
 
-  --name <name>                 create: display name, default "webhook"
+  --kind <kind>                 inbound|outbound, default inbound
+  --name <name>                 create: display name, default "webhook" (outbound requires it)
+  --url <https://...>           create outbound: the endpoint that receives deliveries
+  --event <name>                create outbound: an event to deliver; repeat the flag,
+                                or pass a comma-separated list
+  --timeout-ms <n>              create outbound: delivery timeout in milliseconds
   --dry-run                     create: print the request and send nothing
   --yes                         delete: skip the confirmation prompt
 
 Store the signing secret when create prints it. The deployment keeps a sealed
-copy for verification and will not return it again.`,
+copy for signing and will not return it again.`,
 
   templates: `Usage: dakflare templates <list|create|delete> [options]
 

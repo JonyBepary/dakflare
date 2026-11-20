@@ -60,10 +60,11 @@ one is set and when it last changed.
 | `connectors create` | `--channel --account-id --label --auth-mode --access-token --bot-token --app-secret --verify-token --secret-token --enabled --dry-run` | create `whatsapp`, `telegram`, `messenger` or `instagram` |
 | `connectors update <id>` | `--label --enabled --auth-mode` and the credential flags | change metadata or rotate a credential; channel and account id are immutable |
 | `connectors delete <id>` | `--yes` | remove the connector and its Durable Object |
-| `webhooks list` | none | inbound agent hooks |
-| `webhooks create` | `--name --dry-run` | mint a hook and print its signing secret once |
-| `webhooks delete <id>` | `--yes` | remove a hook and its deliveries |
-| `webhooks deliveries <id>` | none | the last 20 deliveries, newest first |
+| `webhooks list` | `--kind inbound\|outbound` | inbound triggers or outbound flow endpoints |
+| `webhooks create` | `--name --dry-run` (inbound) or `--kind outbound --name --url --event --timeout-ms --dry-run` | mint a hook and print its signing secret once |
+| `webhooks test <id>` | none | signed test ping to an outbound endpoint, with status and latency |
+| `webhooks delete <id>` | `--yes` | remove a hook and its deliveries, either kind |
+| `webhooks deliveries <id>` | none | the last 20 inbound deliveries, newest first |
 
 ### Templates, contacts and scheduling
 
@@ -85,6 +86,12 @@ CLI, so a shifted message keeps its row and is not lost.
 The webhook URL is built from the Worker URL and the connector id; the API never stores or returns
 it. Unlike a connector secret, a webhook signing secret is printed by `create` and must be stored
 then, because the deployment keeps only a sealed copy for verification.
+
+An **outbound** webhook is a URL a flow's `webhook` action may call. Its secret is sealed with
+AES-256-GCM and printed once by `create`. The Worker signs `` `<unix-seconds>.<raw-body>` `` with
+HMAC-SHA-256 and sends `X-Dakflare-Timestamp` and `X-Dakflare-Signature: sha256=<hex>`; verify
+within 300 seconds so a replay cannot be re-used. Loopback, private, CGNAT, metadata and
+non-http(s) targets are refused when the hook is created and again when it is called.
 
 ### Accounts and the agent control plane
 
