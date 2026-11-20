@@ -184,14 +184,14 @@
   <path class="object" d="M 1420 214 H 1452"/>
   <path class="object" d="M 1422 434 H 1450"/>
   <g>
-  <path d="M 1409 312 H 1465 A 15 15 0 0 1 1480 327 V 361 A 15 15 0 0 1 1465 376 H 1409 A 15 15 0 0 1 1394 361 V 360 L 1385 350 L 1394 336 V 327 A 15 15 0 0 1 1409 312 Z" fill="var(--df-surface-well)" stroke="var(--df-p-umber-900)" stroke-width="3" stroke-linejoin="round"/>
-  <path d="M 1411 331 H 1463 M 1411 347 H 1436" fill="none" stroke="var(--df-p-umber-500)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M 1415.5 312 H 1465.5 A 15 15 0 0 1 1480.5 327 V 361 A 15 15 0 0 1 1465.5 376 H 1415.5 A 15 15 0 0 1 1400.5 361 V 360 L 1391.5 350 L 1400.5 336 V 327 A 15 15 0 0 1 1415.5 312 Z" fill="var(--df-surface-well)" stroke="var(--df-p-umber-900)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M 1417.5 331 H 1463.5 M 1417.5 347 H 1436.5" fill="none" stroke="var(--df-p-umber-500)" stroke-width="7" stroke-linecap="round"/>
 </g>
 
   <!-- the message rides on the lane, not under it -->
   <g>
-  <rect x="1306" y="282" width="44" height="32" rx="5" fill="var(--df-accent-soft)" stroke="var(--df-p-umber-900)" stroke-width="3"/>
-  <path d="M 1310 286 L 1328 303 L 1346 286" fill="none" stroke="var(--df-p-umber-900)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="1313" y="282" width="44" height="32" rx="5" fill="var(--df-accent-soft)" stroke="var(--df-p-umber-900)" stroke-width="3"/>
+  <path d="M 1317 286 L 1335 303 L 1353 286" fill="none" stroke="var(--df-p-umber-900)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 </g>
 </g>
 
