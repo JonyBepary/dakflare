@@ -706,7 +706,7 @@
 				description="It holds the words and the placeholders, and every contact gets their own values filled in. Nothing is sent from this page; a flow or an operator uses the template later."
 			>
 				{#if canWrite}
-					<button type="button" class="btn btn-primary" onclick={openComposer}>
+					<button type="button" class="btn" onclick={openComposer}>
 						<Icon name="plus" size={14} /> Write the first template
 					</button>
 				{/if}
@@ -818,13 +818,13 @@
 
 				<button
 					type="button"
-					class="btn btn-primary import-run"
+					class="btn import-run"
 					onclick={() => void runImport()}
 					disabled={importing || csvText.trim() === ''}
 					aria-busy={importing}
 				>
 					{#if importing}<Spinner />{:else}<Icon name="plus" size={14} />{/if}
-					Import contacts
+					Import CSV
 				</button>
 
 				{#if importResult}
@@ -1423,8 +1423,9 @@
 			max-width: none;
 		}
 
-		/* The table becomes a stack of labelled rows. Each cell keeps its own
-		   label, so nothing has to be inferred from position. */
+		/* The table becomes a stack of labelled facts. Each cell puts its label
+		   above its value in one column, so a value can never slide under another
+		   fact's label or restart at the label's edge. */
 		.template-table thead {
 			display: none;
 		}
@@ -1449,13 +1450,22 @@
 
 		.template-table td {
 			display: grid;
-			grid-template-columns: 6.5rem minmax(0, 1fr);
+			grid-template-columns: minmax(0, 1fr);
 			grid-column: 1 / -1;
-			align-items: baseline;
-			gap: var(--df-p-space-2);
-			padding: var(--df-p-space-1) 0;
+			align-items: start;
+			gap: var(--df-p-space-1);
+			padding: var(--df-p-space-2) 0;
 			border-bottom: 0;
-			justify-items: start;
+			justify-items: stretch;
+			min-width: 0;
+		}
+
+		.template-table .channel-tag {
+			justify-self: start;
+		}
+
+		.template-table td:first-child .cell-main {
+			overflow-wrap: anywhere;
 		}
 
 		.template-table td:first-child {
@@ -1488,6 +1498,7 @@
 		/* The two row actions ride at the top right of the card, so the name and
 		   the body keep the full width they need. */
 		.template-table .row-actions {
+			display: flex;
 			grid-column: 2;
 			grid-row: 1;
 			justify-self: end;

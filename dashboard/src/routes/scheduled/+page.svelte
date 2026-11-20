@@ -3,10 +3,11 @@
 	 * The paced queue.
 	 *
 	 * A row here is a promise to send later, not a delivery: `scheduled` waits for
-	 * its alarm, `dispatched` means the target took the row and the outcome is not
-	 * known yet, and only the target's answer moves it on. The queue and its
-	 * target labels are the primary read; the pacing policy is a second read that
-	 * the screen can live without.
+	 * its alarm, `dispatching` means the Scheduler claimed the row, `dispatched`
+	 * means it was handed to the transport and the outcome is not confirmed yet,
+	 * and only the transport's answer moves it on. The queue and its target labels
+	 * are the primary read; the pacing policy is a second read that the screen can
+	 * live without.
 	 */
 	import { onMount } from 'svelte';
 	import {
@@ -110,39 +111,48 @@
 		'Australia/Sydney'
 	];
 
+	/**
+	 * `sent` and `delivered` are different claims, so they never share a colour.
+	 * `delivered` is the mint `ok` pair; `sent` is the neutral wire pair, which
+	 * says "the transport took it" without implying delivery. `scheduled` keeps
+	 * the accent chip because Badge has no `info` tone and a neutral one would
+	 * read as `sent`. The rest follow the same rule: uncertainty is warn, a stop
+	 * is muted, a closed window is warn because it needs a reschedule, and a
+	 * refusal is danger.
+	 */
 	const STATUS: Record<ScheduledStatus, StatusMeta> = {
 		scheduled: { label: 'Scheduled', tone: 'accent' },
 		dispatching: { label: 'Dispatching', tone: 'warn' },
 		dispatched: { label: 'Dispatched', tone: 'warn' },
-		sent: { label: 'Sent', tone: 'ok' },
+		sent: { label: 'Sent', tone: 'neutral' },
 		delivered: { label: 'Delivered', tone: 'ok' },
 		cancelled: { label: 'Cancelled', tone: 'muted' },
 		skipped_opt_out: { label: 'Skipped, opted out', tone: 'muted' },
-		skipped_window: { label: 'Skipped, quiet hours', tone: 'muted' },
+		skipped_window: { label: 'Window closed', tone: 'warn' },
 		failed: { label: 'Failed', tone: 'danger' },
-		unknown: { label: 'Unknown', tone: 'muted' }
+		unknown: { label: 'Unknown', tone: 'warn' }
 	};
 
 	const LEGEND: Array<{ status: ScheduledStatus; meaning: string }> = [
 		{
 			status: 'scheduled',
-			meaning: 'Waiting for its alarm. Cancel works until the target claims it.'
+			meaning: 'Waiting for its alarm. Cancel works until the Scheduler claims it.'
 		},
 		{
 			status: 'dispatching',
-			meaning: 'The target took the row and is sending it now.'
+			meaning: 'The Scheduler claimed the row and is handing it to the transport.'
 		},
 		{
 			status: 'dispatched',
-			meaning: 'Claimed by the target, outcome unknown. The row moves on when the target answers.'
+			meaning: 'Handed off; the outcome is not confirmed yet.'
 		},
 		{
 			status: 'sent',
-			meaning: 'Handed to the carrier or the platform. That is not proof of delivery.'
+			meaning: 'Handed to the transport, the handset queue or the platform. That is not proof of delivery.'
 		},
 		{
 			status: 'delivered',
-			meaning: 'The target confirmed delivery. This is the strongest answer it gives.'
+			meaning: 'A platform receipt confirmed delivery. Reserved: the Scheduler does not write this yet, so a scheduled row normally stops at Sent.'
 		},
 		{
 			status: 'failed',
@@ -158,7 +168,8 @@
 		},
 		{
 			status: 'skipped_window',
-			meaning: 'Held past its window and then left out of the queue for good.'
+			meaning:
+				'The 24-hour customer-service window or the campaign deadline passed. The row is terminal; reschedule inside the window.'
 		},
 		{
 			status: 'unknown',
@@ -622,12 +633,12 @@
 		<div class="ledger-cell">
 			<dt>Sent</dt>
 			<dd>{formatCount(counts.sent)}</dd>
-			<span class="ledger-note">handed to the target</span>
+			<span class="ledger-note">handed to the transport</span>
 		</div>
 		<div class="ledger-cell">
 			<dt>Delivered</dt>
 			<dd>{formatCount(counts.delivered)}</dd>
-			<span class="ledger-note">confirmed by the target</span>
+			<span class="ledger-note">confirmed delivery</span>
 		</div>
 		<div class="ledger-cell" data-tone={counts.failed > 0 ? 'danger' : undefined}>
 			<dt>Failed</dt>
@@ -643,7 +654,8 @@
 			</h2>
 			<p class="panel-meta">
 				{#if nextRow}
-					Next {whenFor(nextRow.send_at, nextRow.timezone).clock}
+					{nextRow.send_at < now ? 'Overdue' : 'Next'}
+					{whenFor(nextRow.send_at, nextRow.timezone).clock}
 					<span aria-hidden="true">·</span>
 					{sendIn(nextRow.send_at)}
 				{:else}
@@ -739,6 +751,11 @@
 						</div>
 					{/each}
 				</dl>
+				<p class="legend-quiet">
+					<Icon name="clock" size={13} />
+					Quiet hours are not a status: the row stays Scheduled, the send time moves to the end of
+					the window plus up to five minutes of jitter, and it is never dropped.
+				</p>
 				{#if supportWarning}
 					<p class="hint legend-note">{supportWarning}</p>
 				{/if}
@@ -945,7 +962,7 @@
 		{#if pendingCancel}
 			The message to <span class="mono">{pendingCancel.to_peer}</span> on
 			{channelWord(pendingCancel.channel) ?? pendingCancel.channel} will not leave. The row stays in
-			the queue marked cancelled. A send the target already claimed cannot be recalled here.
+			the queue marked cancelled. A send the Scheduler has already claimed cannot be recalled here.
 		{/if}
 	</p>
 </ConfirmDialog>
@@ -1159,6 +1176,24 @@
 		margin-top: var(--df-p-space-3);
 	}
 
+	.legend-quiet {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		max-width: 84ch;
+		margin-top: var(--df-p-space-3);
+		padding-top: var(--df-p-space-3);
+		border-top: 1px dashed var(--df-border-hairline);
+		font-size: var(--df-p-text-sm);
+		line-height: 1.5;
+		color: var(--df-text-secondary);
+	}
+
+	.legend-quiet :global(svg) {
+		margin-top: 2px;
+		color: var(--df-text-meta);
+	}
+
 	.quiet-link {
 		display: inline-flex;
 		align-items: center;
@@ -1300,8 +1335,9 @@
 			grid-column: auto;
 		}
 
-		/* The queue becomes a stack of labelled rows. The label column is fixed
-		   so every row's facts line up; the value column takes the rest. */
+		/* The queue becomes a stack of labelled facts. The label sits above its
+		   own value, so a multi-line target or a message error stays inside this
+		   fact instead of starting at another label's edge. */
 		.queue-table thead {
 			display: none;
 		}
@@ -1326,13 +1362,22 @@
 
 		.queue-table td {
 			display: grid;
-			grid-template-columns: 6.5rem minmax(0, 1fr);
+			grid-template-columns: minmax(0, 1fr);
 			grid-column: 1 / -1;
-			align-items: baseline;
-			gap: var(--df-p-space-2);
-			padding: var(--df-p-space-1) 0;
+			align-items: start;
+			gap: var(--df-p-space-1);
+			padding: var(--df-p-space-2) 0;
 			border-bottom: 0;
-			justify-items: start;
+			justify-items: stretch;
+			min-width: 0;
+		}
+
+		.queue-table .channel-tag {
+			justify-self: start;
+		}
+
+		.queue-table .cell-main {
+			overflow-wrap: anywhere;
 		}
 
 		.queue-table td:first-child {
