@@ -2,7 +2,7 @@
 
 # DakFlare — Sovereign Multi-Platform Messaging Hub & SMS Gateway
 
-DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates four SQLite-backed Durable Objects (`DeviceGateway`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 17 migrations `0001`–`0017`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
+DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates six SQLite-backed Durable Objects (`DeviceGateway`, `ChannelConnection`, `Scheduler`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 19 migrations `0001`–`0019`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
 
 ## Navigation Index (Ordered by Onboarding Priority)
 
@@ -17,11 +17,11 @@ DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare W
 | Layer | Implementation | Responsibility |
 | --- | --- | --- |
 | **Handset Radio** | `simulator/` (Tauri v2 + Rust `core/` + Kotlin `bridge/` + Svelte 5) | Owns the SIM, holds `android.app.role.SMS`, wraps P-256 identity in Android Keystore, runs `simulator/flow` offline, syncs via WebSocket or polling |
-| **Edge Coordinator** | `worker/` (`dakflare-worker`, TypeScript on Cloudflare Workers) | Verifies P-256 signatures & nonces, hosts REST API, Better Auth, channels (SMS, Telegram, WhatsApp Cloud), `flow.wasm` fallback, Clef System 1, and `/mcp` |
-| **Durable Objects** | `DeviceGateway` (`DEVICE`), `AuthGuard` (`AUTH_GUARD`), `AuthorityGuard` (`AUTHORITY_GUARD`), `AssistantAgent` (`ASSISTANT`) | Per-device command queue/replay/alarms, account & IP lockout, live grant windows, and stateful streaming agent runtime |
-| **Durable Storage & Async** | D1 (`DB` / `sms_gateway`), KV (`KV`), R2 (`MEDIA_BUCKET`), Queue (`WEBHOOK_QUEUE`), Workflow (`FLOW_WORKFLOW`) | 17-migration SQLite ledger, FCM token cache, 24h agent attachments, SSRF-guarded webhook retries, >5s flow delays |
-| **Operator Console** | `dashboard/` (SvelteKit 5 `adapter-static` → `worker/public/admin`) | Served at `/admin`; fleet presence, messages, Svelte Flow editor with WebMCP, approvals/grants, floating Assistant, audit log, security |
-| **Operator CLI** | `cli/` (`dakflare`, zero-dependency Node 22+) | 28 commands, `--agent` single-JSON contract, semantic exit codes (`0, 1, 2, 3, 4, 5, 6, 75`), `dakflare mcp serve` stdio bridge |
+| **Edge Coordinator** | `worker/` (`dakflare-worker`, TypeScript on Cloudflare Workers) | Verifies P-256 signatures & nonces, hosts REST API, Better Auth, channels (SMS, Telegram, WhatsApp Cloud, Messenger and Instagram), templates and paced scheduling, `flow.wasm` fallback, Clef System 1, and `/mcp` |
+| **Durable Objects** | `DeviceGateway` (`DEVICE`), `ChannelConnection` (`CHANNEL_CONN`), `Scheduler` (`SCHEDULER`), `AuthGuard` (`AUTH_GUARD`), `AuthorityGuard` (`AUTHORITY_GUARD`), `AssistantAgent` (`ASSISTANT`) | Per-device command queue/replay/alarms, per-account channel dedupe/windows, the scheduled-send clock and pacing, account & IP lockout, live grant windows, and stateful streaming agent runtime |
+| **Durable Storage & Async** | D1 (`DB` / `sms_gateway`), KV (`KV`), R2 (`MEDIA_BUCKET`), Queues (`WEBHOOK_QUEUE`, `INGEST_QUEUE`, `INGEST_DLQ`), Workflow (`FLOW_WORKFLOW`) | 19-migration SQLite ledger, FCM token cache, 24h agent attachments, SSRF-guarded webhook retries, >5s flow delays |
+| **Operator Console** | `dashboard/` (Svelte 5 with SvelteKit `adapter-static` → `worker/public/admin`) | Served at `/admin`; fleet presence, messages, Svelte Flow editor with WebMCP, approvals/grants, a header **Ask** assistant, audit log, security |
+| **Operator CLI** | `cli/` (`dakflare`, zero-dependency Node 22+) | 32 commands, `--agent` single-JSON contract, semantic exit codes (`0, 1, 2, 3, 4, 5, 6, 75`), `dakflare mcp serve` stdio bridge |
 
 ---
 
@@ -55,7 +55,7 @@ Verify the CLI is available and speaks its machine contract:
 dakflare capabilities --agent
 ```
 
-Expected output: a single compact JSON document with `"ok": true` listing all 28 commands, their effects, and flags.
+Expected output: a single compact JSON document with `"ok": true` listing all 32 commands, their effects, and flags.
 
 ## Step 2: Generate Local Secrets
 
@@ -79,7 +79,7 @@ Sign in to Cloudflare locally and run `dakflare up`:
 ```bash
 cf auth login
 dakflare up --email you@example.com --dry-run   # preview the plan without mutating Cloudflare
-dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 17 migrations, deploy, bootstrap owner
+dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 19 migrations, deploy, bootstrap owner
 ```
 
 What `dakflare up` executes in order:
@@ -1155,7 +1155,7 @@ Derived from `cli/schema/flow-v2.json` and `worker/src/lib/flow-ir.ts`:
 
 | Binding | Type | Resource / Class |
 | --- | --- | --- |
-| `DB` | D1 Database | `sms_gateway` (17 migrations: `0001`–`0017`) |
+| `DB` | D1 Database | `sms_gateway` (19 migrations: `0001`–`0019`) |
 | `KV` | KV Namespace | FCM HTTP v1 bearer-token cache |
 | `MEDIA_BUCKET` | R2 Bucket | `dakflare-media` (24h `agent_attachments` storage) |
 | `DEVICE` | Durable Object (SQLite) | `DeviceGateway` |
@@ -1323,7 +1323,7 @@ DakFlare is built around one thesis: **the handset is the radio, the Worker is t
 - **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 17 D1 migrations (`0001_baseline.sql`–`0017_alert_acknowledged_by.sql`), 4 SQLite Durable Objects, 3 channel adapters (SMS, Telegram, WhatsApp Cloud), `flow.wasm`, Clef System 1, and `/mcp`.
 - **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
 - **`dashboard/`**: SvelteKit 5 static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
-- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (28 commands).
+- **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (32 commands).
 
 ## Honest Architectural Boundaries (Known Gaps)
 
