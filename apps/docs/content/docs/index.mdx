@@ -4,16 +4,19 @@ description: Sovereign multi-platform messaging hub and SMS gateway on Cloudflar
 template: splash
 ---
 
-{/* llms-ignore:start */}
 import { Cards, Card } from "fumadocs-ui/components/card";
-
-# DakFlare
 
 **The handset is the radio. The Worker is the coordinator. The console is where an operator watches both.**
 
 DakFlare pairs a dedicated Android handset (`dev.dakflare.simulator`, Tauri v2 + Rust core + Kotlin telephony) with your own Cloudflare account (Workers, 6 Durable Objects, D1, KV, R2, Queues, Workflows, Workers AI) to deliver a sovereign SMS gateway, a unified conversation hub for Telegram, WhatsApp Cloud, Messenger and Instagram, a deterministic Rust/Wasm flow engine, and an agent-operable MCP control plane—with zero third-party telecom SaaS and zero shared secrets between the phone and the edge.
 
-[![The DakFlare operator console at /admin beside the Android handset settings screen. The console shows the paced scheduled-message queue, channel connectors and templates; the handset shows the six-row settings hub.](/screenshots/dakflare-console.webp)](/screenshots/dakflare-console.webp)
+{/* llms-ignore:start */}
+<a href="/screenshots/dakflare-console.webp">
+  <picture>
+    <source media="(max-width: 700px)" srcSet="/screenshots/phone-settings.webp" />
+    <img src="/screenshots/dakflare-console.webp" alt="The DakFlare operator console at /admin beside the Android handset settings screen. The console shows the paced scheduled-message queue, channel connectors and templates; the handset shows the six-row settings hub." width="1600" height="800" />
+  </picture>
+</a>
 
 *Left: the operator console at `/admin`, with the paced queue and connector cards. Right: the handset app, which holds the SIM. Both captured from the current build.*
 
@@ -40,24 +43,6 @@ DakFlare pairs a dedicated Android handset (`dev.dakflare.simulator`, Tauri v2 +
   />
 </Cards>
 {/* llms-ignore:end */}
-
-{/* llms-only:start */}
-<div className="hidden">
-
-# DakFlare — Sovereign Multi-Platform Messaging Hub & SMS Gateway
-
-DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates six SQLite-backed Durable Objects (`DeviceGateway`, `ChannelConnection`, `Scheduler`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 19 migrations `0001`–`0019`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
-
-## Navigation Index (Ordered by Onboarding Priority)
-
-- **Start Here (Tutorials)**: `/start/quickstart.md`, `/start/first-wasm-flow.md`, `/start/connect-mcp-agent.md`
-- **How-To Guides**: `/guides/android-node-pairing.md`, `/guides/durable-objects-routing.md`, `/guides/visual-workflow-editor.md`, `/guides/agent-authority-and-webhooks.md`, `/guides/self-hosting-production.md`
-- **Reference**: `/reference/api-reference.md`, `/reference/mcp-tools.md`, `/reference/wasm-flow-abi.md`, `/reference/cli-and-env.md`, `/reference/state-machines.md`, `/reference/glossary.md`
-- **Architecture**: `/architecture/sovereign-edge-model.md`, `/architecture/security-p256-identity.md`, `/architecture/wasm-and-agent-isolation.md`
-- **Machine Endpoints**: `/llms.txt`, `/llms-full.txt`, `/openapi.json`, `/SKILL.md`, `/AGENTS.md`, `POST /mcp`
-
-</div>
-{/* llms-only:end */}
 
 ## System Topology at a Glance
 
