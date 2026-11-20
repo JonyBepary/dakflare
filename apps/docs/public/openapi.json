@@ -75,7 +75,39 @@
               "device_exists",
               "daily_quota_exceeded",
               "storage_unavailable",
-              "idempotency_key_not_supported_in_batch"
+              "idempotency_key_not_supported_in_batch",
+              "template_name_taken",
+              "not_found",
+              "bad_status",
+              "bad_channel",
+              "bad_target",
+              "bad_target_type",
+              "bad_peer",
+              "bad_body",
+              "bad_send_at",
+              "bad_template",
+              "bad_campaign",
+              "bad_vars",
+              "bad_sim_slot",
+              "bad_idempotency_key",
+              "template_channel",
+              "template_not_found",
+              "unknown_device",
+              "connector_not_found",
+              "connector_disabled",
+              "connector_edge_device",
+              "scheduled_exists",
+              "scheduler_unavailable",
+              "not_cancellable",
+              "bad_min_interval_ms",
+              "bad_jitter_pct",
+              "bad_max_per_hour",
+              "bad_quiet_hours",
+              "bad_timezone",
+              "connector_secret_unavailable",
+              "not_telegram",
+              "telegram_bot_token_missing",
+              "telegram_rejected"
             ]
           },
           "details": {
@@ -372,6 +404,382 @@
               }
             ],
             "description": "Epoch milliseconds or an ISO timestamp. Must be within 180 days in the past and 24 hours in the future."
+          }
+        }
+      },
+      "Template": {
+        "type": "object",
+        "description": "An operator-authored message template. `variables` is derived from the body's `{{name}}` tokens at write time.",
+        "required": [
+          "id",
+          "name",
+          "channel",
+          "body",
+          "variables",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "tpl_5f1c2b3a4d5e6f708192a3b4c5d6e7f8"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "any",
+              "sms",
+              "whatsapp",
+              "telegram",
+              "messenger",
+              "instagram"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "wa_template_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wa_language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        }
+      },
+      "Contact": {
+        "type": "object",
+        "description": "An audience row: a recipient the operator chose to message, with the variables it carries.",
+        "required": [
+          "id",
+          "channel",
+          "peer",
+          "attrs",
+          "tags",
+          "timezone",
+          "opt_out",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "ct_0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "sms",
+              "whatsapp",
+              "telegram",
+              "messenger",
+              "instagram"
+            ]
+          },
+          "peer": {
+            "type": "string",
+            "description": "Normalised channel address."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attrs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Columns from the import that are not reserved."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA zone; UTC when the import value is unknown."
+          },
+          "opt_out": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        }
+      },
+      "ScheduledMessage": {
+        "type": "object",
+        "description": "A row in the D1 schedule. `id` is also the SMS command id for a device target. Timestamps are epoch milliseconds.",
+        "required": [
+          "id",
+          "channel",
+          "target_type",
+          "target_id",
+          "pacing_key",
+          "to_peer",
+          "body",
+          "vars",
+          "policy",
+          "timezone",
+          "send_at",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "examples": [
+              "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
+            ]
+          },
+          "campaign_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "sms",
+              "whatsapp",
+              "telegram",
+              "messenger",
+              "instagram"
+            ]
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "device",
+              "connector"
+            ]
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "pacing_key": {
+            "type": "string",
+            "examples": [
+              "sms:dev63f3953f417d587f"
+            ]
+          },
+          "to_peer": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vars": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "sim_slot": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "send_at": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "scheduled",
+              "dispatching",
+              "dispatched",
+              "sent",
+              "delivered",
+              "cancelled",
+              "skipped_opt_out",
+              "skipped_window",
+              "failed",
+              "unknown"
+            ]
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "shift_count": {
+            "type": "integer"
+          },
+          "last_shift_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claim_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "dispatched_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sent_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "delivered_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "dispatch_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        }
+      },
+      "PacingPolicy": {
+        "type": "object",
+        "description": "A per-target token bucket and quiet window. Stored in `pacing_policies` and snapshotted onto each scheduled row.",
+        "required": [
+          "id",
+          "target_type",
+          "target_id",
+          "min_interval_ms",
+          "jitter_pct",
+          "max_per_hour",
+          "quiet_start_hour",
+          "quiet_end_hour",
+          "timezone",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "device",
+              "connector"
+            ]
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "min_interval_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 3600000
+          },
+          "jitter_pct": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 50
+          },
+          "max_per_hour": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "quiet_start_hour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "quiet_end_hour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "integer"
           }
         }
       }
@@ -1883,6 +2291,1270 @@
           },
           "503": {
             "description": "Durable Object ingest failed: storage_unavailable"
+          }
+        }
+      }
+    },
+    "/v1/admin/templates": {
+      "get": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "List message templates",
+        "description": "Returns at most 200 templates, newest first. A member session and the machine actor may read; an agent token may not.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "templates"
+                  ],
+                  "properties": {
+                    "templates": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Template"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or missing session refused"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "Create a message template",
+        "description": "Requires an owner or admin. `variables` is derived from `{{name}}` tokens in the body. `channel` defaults to `any`; `wa_language` defaults to `en_US`.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "body"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "any",
+                      "sms",
+                      "whatsapp",
+                      "telegram",
+                      "messenger",
+                      "instagram"
+                    ],
+                    "default": "any"
+                  },
+                  "wa_template_name": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "wa_language": {
+                    "type": "string",
+                    "default": "en_US"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Template created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "template",
+                    "variables"
+                  ],
+                  "properties": {
+                    "template": {
+                      "$ref": "#/components/schemas/Template"
+                    },
+                    "variables": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (name/body length, unsupported channel)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A template with that name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "template_name_taken"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/templates/{id}": {
+      "delete": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "Delete a message template",
+        "description": "Requires an owner or admin. Deleting a template does not rewrite scheduled rows that already reference it.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "id"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or member session refused"
+          },
+          "404": {
+            "description": "Template not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/templates/{id}/preview": {
+      "post": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "Render a template and count SMS segments",
+        "description": "Pure rendering and segment accounting. `vars` values must be strings or finite numbers; other types are ignored. `used` lists the variables consumed, `missing` the tokens with no value.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vars": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": [
+                        "string",
+                        "number"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rendered body and segment accounting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "rendered",
+                    "missing",
+                    "used",
+                    "segments"
+                  ],
+                  "properties": {
+                    "rendered": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "used": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "segments": {
+                      "type": "object",
+                      "required": [
+                        "encoding",
+                        "units",
+                        "segments",
+                        "remaining"
+                      ],
+                      "properties": {
+                        "encoding": {
+                          "type": "string",
+                          "enum": [
+                            "GSM-7",
+                            "UCS-2"
+                          ]
+                        },
+                        "units": {
+                          "type": "integer",
+                          "description": "Septets for GSM-7, UTF-16 code units for UCS-2."
+                        },
+                        "segments": {
+                          "type": "integer"
+                        },
+                        "remaining": {
+                          "type": "integer",
+                          "description": "Units free in the last segment."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON or `vars` is not an object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Template not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/contacts": {
+      "get": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "List the audience list",
+        "description": "Returns at most 200 contacts, newest first. `total` and `opted_out` describe the channel filter only, ignoring `opt_out`, so a console can show both sides of the split.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sms",
+                "whatsapp",
+                "telegram",
+                "messenger",
+                "instagram"
+              ]
+            }
+          },
+          {
+            "name": "opt_out",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contacts and the channel-wide summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contacts",
+                    "total",
+                    "opted_out"
+                  ],
+                  "properties": {
+                    "contacts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Contact"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "opted_out": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token or webhook turn refused"
+          }
+        }
+      }
+    },
+    "/v1/admin/contacts/import": {
+      "post": {
+        "tags": [
+          "Templates"
+        ],
+        "summary": "Import contacts from CSV or JSON",
+        "description": "Requires an owner or admin. Accepts a raw `text/csv` body with a header row, or `application/json` with a `contacts` array. Each row needs a `peer` (or `phone`); rows without a usable peer are counted in `skipped`. Imported rows upsert on `(channel, peer)`.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "contacts"
+                ],
+                "properties": {
+                  "contacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "channel": {
+                          "type": "string",
+                          "enum": [
+                            "sms",
+                            "whatsapp",
+                            "telegram",
+                            "messenger",
+                            "instagram"
+                          ],
+                          "default": "sms"
+                        },
+                        "peer": {
+                          "type": "string"
+                        },
+                        "phone": {
+                          "type": "string",
+                          "description": "Alias for `peer`."
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "timezone": {
+                          "type": "string"
+                        },
+                        "opt_out": {
+                          "type": [
+                            "boolean",
+                            "string",
+                            "integer"
+                          ]
+                        },
+                        "tags": {
+                          "oneOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "imported",
+                    "skipped"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "imported": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No contacts, `contacts` is not an array, or malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Agent token, webhook turn, or member session refused"
+          },
+          "413": {
+            "description": "Body exceeds the import size cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "payload_too_large"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scheduled": {
+      "get": {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "List scheduled messages",
+        "description": "Returns at most 200 rows ordered by `send_at` ascending. A member session and the machine actor may read; an agent token may not.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "scheduled",
+                "dispatching",
+                "dispatched",
+                "sent",
+                "delivered",
+                "cancelled",
+                "skipped_opt_out",
+                "skipped_window",
+                "failed",
+                "unknown"
+              ]
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sms",
+                "whatsapp",
+                "telegram",
+                "messenger",
+                "instagram"
+              ]
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scheduled messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "scheduled"
+                  ],
+                  "properties": {
+                    "scheduled": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ScheduledMessage"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`status` is not a known state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_status"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Schedule an outbound message",
+        "description": "Requires an owner or admin. Validates the target (a registered device for `sms`, an enabled `worker_do` connector otherwise), resolves the timezone, snapshots the pacing policy and stores the row before waking the Scheduler Durable Object. A template is a WhatsApp-only platform object.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "channel",
+                  "target_id",
+                  "to_peer",
+                  "body",
+                  "send_at"
+                ],
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "enum": [
+                      "sms",
+                      "whatsapp",
+                      "telegram",
+                      "messenger",
+                      "instagram"
+                    ]
+                  },
+                  "target_id": {
+                    "type": "string",
+                    "description": "A device_id for `sms`, otherwise a connector id on that channel."
+                  },
+                  "to_peer": {
+                    "type": "string",
+                    "description": "Recipient address, normalised for the channel."
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "send_at": {
+                    "type": "integer",
+                    "description": "Epoch milliseconds, now or later."
+                  },
+                  "template_id": {
+                    "type": "string",
+                    "description": "Local template id; WhatsApp only."
+                  },
+                  "vars": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "description": "IANA zone. Defaults to the contact's zone, then UTC."
+                  },
+                  "sim_slot": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
+                  "campaign_id": {
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "description": "At most one row per key; a repeat returns the original row."
+                  },
+                  "policy": {
+                    "type": "object",
+                    "description": "Per-message overrides layered over the target's stored pacing policy.",
+                    "properties": {
+                      "min_interval_ms": {
+                        "type": "integer"
+                      },
+                      "jitter_pct": {
+                        "type": "integer"
+                      },
+                      "max_per_hour": {
+                        "type": "integer"
+                      },
+                      "quiet_start_hour": {
+                        "type": "integer"
+                      },
+                      "quiet_end_hour": {
+                        "type": "integer"
+                      },
+                      "use_human_agent_tag": {
+                        "type": "boolean"
+                      },
+                      "comment_id": {
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The same idempotency key already created this row; it is returned unchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "scheduled"
+                  ],
+                  "properties": {
+                    "scheduled": {
+                      "$ref": "#/components/schemas/ScheduledMessage"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Scheduled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "scheduled"
+                  ],
+                  "properties": {
+                    "scheduled": {
+                      "$ref": "#/components/schemas/ScheduledMessage"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (bad_channel, bad_target, bad_peer, bad_body, bad_send_at, bad_template, bad_campaign, bad_vars, bad_sim_slot, bad_idempotency_key, template_channel, template_not_found, unknown_device, connector_not_found, or bad_timezone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_request"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key already used by an unreadable row; also connector_disabled or connector_edge_device",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "scheduled_exists"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The row is stored but the Scheduler could not be woken; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "scheduler_unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scheduled/{id}": {
+      "delete": {
+        "tags": [
+          "Scheduled"
+        ],
+        "summary": "Cancel a scheduled message",
+        "description": "Requires an owner or admin. Only a row still in `scheduled` can be cancelled; the D1 update is the cancellation authority.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "cancelled"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "cancelled": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The row is no longer cancellable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "status"
+                  ],
+                  "properties": {
+                    "error": {
+                      "const": "not_cancellable"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "scheduled",
+                        "dispatching",
+                        "dispatched",
+                        "sent",
+                        "delivered",
+                        "cancelled",
+                        "skipped_opt_out",
+                        "skipped_window",
+                        "failed",
+                        "unknown"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/pacing": {
+      "get": {
+        "tags": [
+          "Pacing"
+        ],
+        "summary": "List pacing policies",
+        "description": "Returns at most 200 policies, most recently updated first.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pacing policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "policies"
+                  ],
+                  "properties": {
+                    "policies": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PacingPolicy"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/pacing/{targetType}/{targetId}": {
+      "put": {
+        "tags": [
+          "Pacing"
+        ],
+        "summary": "Upsert a pace and quiet window for a target",
+        "description": "Requires an owner or admin. All six fields are required and bounded: min_interval_ms 1000..3600000, jitter_pct 0..50, max_per_hour 1..3600, quiet hours 0..23, and a known IANA timezone. A later edit does not rewrite rows already queued.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "targetType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "device",
+                "connector"
+              ]
+            }
+          },
+          {
+            "name": "targetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "min_interval_ms",
+                  "jitter_pct",
+                  "max_per_hour",
+                  "quiet_start_hour",
+                  "quiet_end_hour",
+                  "timezone"
+                ],
+                "properties": {
+                  "min_interval_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 3600000
+                  },
+                  "jitter_pct": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50
+                  },
+                  "max_per_hour": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3600
+                  },
+                  "quiet_start_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  },
+                  "quiet_end_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  },
+                  "timezone": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "policy"
+                  ],
+                  "properties": {
+                    "policy": {
+                      "$ref": "#/components/schemas/PacingPolicy"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown IANA zone; also bad_target_type, bad_target, bad_min_interval_ms, bad_jitter_pct, bad_max_per_hour, or bad_quiet_hours",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "bad_timezone"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/connectors/{id}/register-webhook": {
+      "post": {
+        "tags": [
+          "Channel Connectors"
+        ],
+        "summary": "Register a Telegram bot's webhook",
+        "description": "Human-only, like connector creation. Opens the sealed credential and calls Telegram's `setWebhook` with the connector's secret token. The bot token is never returned or written to the audit detail. A failure records `last_error` on the connector.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Telegram accepted the webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "webhook_url"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "webhook_url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connector not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The connector is not a Telegram connector; also telegram_bot_token_missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "not_telegram"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Telegram refused the webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "webhook_url"
+                  ],
+                  "properties": {
+                    "error": {
+                      "const": "telegram_rejected"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "webhook_url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The sealed credential could not be opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                },
+                "example": {
+                  "error": "connector_secret_unavailable"
+                }
+              }
+            }
           }
         }
       }
