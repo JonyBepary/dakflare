@@ -13,7 +13,11 @@ import type {
 	ApprovalRequest,
 	AuditResult,
 	AuthorityGrant,
+	ChannelConnector,
+	ChannelSendResult,
 	CommandInfo,
+	ConnectorInput,
+	ConnectorUpdateInput,
 	Device,
 	DeviceCommand,
 	DeviceStatus,
@@ -23,6 +27,7 @@ import type {
 	MeInfo,
 	MessagesResult,
 	MintedInvite,
+	OfficialChannelId,
 	PairingCode,
 	RedeemInfo,
 	Rule,
@@ -626,6 +631,81 @@ export async function sendSms(input: {
 		method: 'POST',
 		body: JSON.stringify(input)
 	});
+}
+
+/* -------------------------------------------------------- channel connectors */
+
+/**
+ * `GET /v1/admin/connectors`: every account this gateway can send and receive
+ * for. The rows never carry a credential, only `secret_set` and its timestamp.
+ *
+ * The endpoint refuses a member session, so callers ask `session.canWrite`
+ * first rather than showing a page that cannot be filled.
+ */
+export async function getConnectors(): Promise<ChannelConnector[]> {
+	const data = await get<{ connectors: ChannelConnector[] }>('/v1/admin/connectors');
+	return data.connectors ?? [];
+}
+
+/**
+ * `POST /v1/admin/connectors`: one external account, with its credential
+ * nested under `secret`.
+ *
+ * The response is the created row (201), not a wrapper: the credential is
+ * sealed inside the Worker and is never part of any answer.
+ */
+export function createConnector(input: ConnectorInput): Promise<ChannelConnector> {
+	return get<ChannelConnector>('/v1/admin/connectors', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+/**
+ * `PATCH /v1/admin/connectors/:id`: label, enabled, auth mode, or a fresh
+ * `secret` object. `channel` and `account_id` are immutable: the row's
+ * Durable Object is named from them.
+ */
+export function updateConnector(
+	id: string,
+	input: ConnectorUpdateInput
+): Promise<ChannelConnector> {
+	return get<ChannelConnector>(`/v1/admin/connectors/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: JSON.stringify(input)
+	});
+}
+
+/** `DELETE /v1/admin/connectors/:id`: the route stops answering before the row is gone. */
+export function deleteConnector(id: string): Promise<{ deleted: boolean; id: string }> {
+	return get<{ deleted: boolean; id: string }>(
+		`/v1/admin/connectors/${encodeURIComponent(id)}`,
+		{ method: 'DELETE' }
+	);
+}
+
+/**
+ * `POST /v1/channels/:channel/:connectorId/send`: send with the connector's
+ * own sealed credential, not the deployment's.
+ *
+ * A refusal arrives as an HTTP error with the delivery result in the body, so
+ * `channelSendFailure` is what turns it into a sentence.
+ */
+export function sendChannelMessage(input: {
+	channel: OfficialChannelId;
+	connectorId: string;
+	to: string;
+	body: string;
+	media_url?: string;
+	template_id?: string;
+	use_human_agent_tag?: boolean;
+	comment_id?: string;
+}): Promise<ChannelSendResult> {
+	const { channel, connectorId, ...payload } = input;
+	return get<ChannelSendResult>(
+		`/v1/channels/${encodeURIComponent(channel)}/${encodeURIComponent(connectorId)}/send`,
+		{ method: 'POST', body: JSON.stringify(payload) }
+	);
 }
 
 /**

@@ -48,6 +48,7 @@
 				{ href: ROUTES.overview, label: 'Overview', icon: 'activity' },
 				{ href: ROUTES.devices, label: 'Devices', icon: 'smartphone', count: 'devices', countWord: 'paired' },
 				{ href: ROUTES.messages, label: 'Messages', icon: 'message', count: 'messages', countWord: 'kept' },
+				{ href: ROUTES.channels, label: 'Channels', icon: 'send' },
 				{
 					href: ROUTES.rules,
 					label: 'Automation',
@@ -222,6 +223,7 @@
 				o: ROUTES.overview,
 				d: ROUTES.devices,
 				m: ROUTES.messages,
+				c: ROUTES.channels,
 				r: ROUTES.rules,
 				w: ROUTES.workflows,
 				a: session.canViewSecurity ? ROUTES.approvals : undefined
@@ -595,6 +597,7 @@
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>o</kbd></dt><dd>Overview</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>d</kbd></dt><dd>Devices</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>m</kbd></dt><dd>Messages</dd></div>
+					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>c</kbd></dt><dd>Channels</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>r</kbd></dt><dd>Rules</dd></div>
 					<div class="shortcut-row"><dt><kbd>g</kbd> <kbd>w</kbd></dt><dd>Workflows</dd></div>
 					{#if session.canViewSecurity}

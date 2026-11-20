@@ -95,6 +95,13 @@ A connector is one external account. Administration lives on four handlers:
 | `PATCH` | `/v1/admin/connectors/{id}` | Update label, tier, auth mode, `enabled`, or rotate the secret. |
 | `DELETE` | `/v1/admin/connectors/{id}` | Delete the row, invalidate its cache, and destroy its Durable Object. |
 
+Both operator surfaces wrap those four handlers. The CLI is
+`dakflare connectors create|list|update|delete`, with `--app-secret`, `--verify-token`,
+`--access-token`, `--bot-token` and `--secret-token` for the credential, and `--dry-run` to print the
+request with every value redacted. The admin console at `/admin/channels` does the same from an owner
+or admin session, and copies the webhook URL in one click. Neither surface can show a credential after
+it is written.
+
 `channel` and `account_id` are immutable after creation, because either one selects the Durable
 Object; changing one would leave the old object holding a live window.
 

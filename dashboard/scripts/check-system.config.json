@@ -45,6 +45,7 @@
 		"src/lib/components/RelativeTime.svelte",
 		"src/lib/components/ReplyFate.svelte",
 		"src/lib/components/RuleTestPanel.svelte",
+		"src/lib/components/SendChannelForm.svelte",
 		"src/lib/components/SendSmsForm.svelte",
 		"src/lib/components/Spinner.svelte",
 		"src/lib/components/ThemeToggle.svelte",

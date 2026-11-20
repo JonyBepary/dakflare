@@ -13,6 +13,9 @@ export const ROUTES = {
 	login: resolve('/login'),
 	devices: resolve('/devices'),
 	messages: resolve('/messages'),
+	// The accounts the gateway sends and receives for: one connector per
+	// external number, Page, Instagram account or bot.
+	channels: resolve('/channels'),
 	rules: resolve('/rules'),
 	workflows: resolve('/workflows'),
 	// One static editor route for drafts and saved flows alike; the workflow key

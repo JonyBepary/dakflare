@@ -35,6 +35,7 @@
 	import RelativeTime from '$lib/components/RelativeTime.svelte';
 	import ReplyFate from '$lib/components/ReplyFate.svelte';
 	import SendSmsForm from '$lib/components/SendSmsForm.svelte';
+	import SendChannelForm from '$lib/components/SendChannelForm.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 
 	/* One request is one page. The Worker clamps at 500 and has no total, so the
@@ -82,6 +83,12 @@
 	let composeOpen = $state(false);
 	let composeDevice = $state('');
 	let composeButton = $state<HTMLButtonElement | null>(null);
+	/**
+	 * Which pipe Compose writes to. SMS is the default and the panel resets to it
+	 * when it closes, so the phone path is exactly what it was before connectors
+	 * existed; the other mode sends through a connector's own credential.
+	 */
+	let composeMode = $state<'sms' | 'channel'>('sms');
 
 	/**
 	 * Sending is a `write` on the Worker; reading the ledger is not. A member can
@@ -462,6 +469,7 @@
 
 	function closeCompose(): void {
 		composeOpen = false;
+		composeMode = 'sms';
 		void tick().then(() => composeButton?.focus());
 	}
 
@@ -611,7 +619,9 @@
 						<Icon name="send" size={14} /> Compose message
 					</h2>
 					<span class="spacer"></span>
-					<span class="compose-meta">outbound · queued for the device</span>
+					<span class="compose-meta">
+						{composeMode === 'sms' ? 'outbound · queued for the device' : 'outbound · sent by the platform'}
+					</span>
 					<button
 						type="button"
 						class="btn btn-ghost btn-icon btn-sm"
@@ -621,12 +631,29 @@
 						<Icon name="x" size={14} />
 					</button>
 				</div>
-				<SendSmsForm
-					devices={devices}
-					bind:deviceId={composeDevice}
-					onqueued={(result) => void handleQueued(result)}
-					autofocus
-				/>
+				<div class="compose-modes">
+					<span class="compose-modes-label" id="compose-mode-label">Send through</span>
+					<div class="seg compose-mode" role="group" aria-labelledby="compose-mode-label">
+						<label class="seg-item">
+							<input type="radio" name="compose-mode" value="sms" bind:group={composeMode} />
+							<span>SMS device</span>
+						</label>
+						<label class="seg-item">
+							<input type="radio" name="compose-mode" value="channel" bind:group={composeMode} />
+							<span>Channel connector</span>
+						</label>
+					</div>
+				</div>
+				{#if composeMode === 'sms'}
+					<SendSmsForm
+						devices={devices}
+						bind:deviceId={composeDevice}
+						onqueued={(result) => void handleQueued(result)}
+						autofocus
+					/>
+				{:else}
+					<SendChannelForm />
+				{/if}
 			</section>
 		{/if}
 
@@ -1086,6 +1113,28 @@
 		white-space: nowrap;
 	}
 
+	/* The pipe is a choice between two forms, not a filter: it sits above the
+	   form it switches, so switching never rearranges the header. */
+	.compose-modes {
+		display: flex;
+		align-items: center;
+		gap: var(--df-p-space-3);
+		flex-wrap: wrap;
+		margin-bottom: var(--df-p-space-4);
+	}
+
+	.compose-modes-label {
+		font-family: var(--df-p-font-mono);
+		font-size: var(--df-p-text-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--df-text-meta);
+	}
+
+	.compose-mode {
+		flex: none;
+	}
+
 	.log-card {
 		padding: 0;
 	}
@@ -1508,6 +1557,21 @@
 			min-height: 44px;
 			height: auto;
 			padding-inline: var(--df-p-space-3);
+		}
+
+		.compose-mode .seg-item span {
+			min-height: 44px;
+			height: auto;
+			padding-inline: var(--df-p-space-3);
+		}
+
+		:global(.page-actions) .btn {
+			min-height: 44px;
+		}
+
+		.compose-panel .card-head .btn-icon {
+			width: 44px;
+			height: 44px;
 		}
 
 		.track-btn {

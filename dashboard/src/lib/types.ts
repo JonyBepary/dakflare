@@ -684,3 +684,89 @@ export interface AuditResult {
 	events: AuditEvent[];
 	limit: number;
 }
+
+/* -------------------------------------------------------- channel connectors */
+
+/** The platforms this console can configure. SMS leaves through a phone, not a connector. */
+export type OfficialChannelId = 'whatsapp' | 'telegram' | 'messenger' | 'instagram';
+
+/**
+ * Which Meta login produced an Instagram connector's token.
+ *
+ * The Worker only accepts these three for Instagram; the other auth modes it
+ * stores belong to platforms this console does not create.
+ */
+export type InstagramAuthMode = 'unified_login' | 'instagram_login' | 'facebook_login';
+
+/**
+ * One connector, exactly as `/v1/admin/connectors` returns it.
+ *
+ * There is no credential field and there never will be: the gateway reports
+ * `secret_set` and `secret_updated_at`, which is all a screen may know after a
+ * save. The webhook URL is not in the row either; it is built from the route,
+ * the channel and the id.
+ */
+export interface ChannelConnector {
+	id: string;
+	channel: OfficialChannelId;
+	account_id: string;
+	/** `worker_do` unless the row was created for an edge device. */
+	execution_tier: string;
+	/** `cloud_api`, `bot_api`, one of the Instagram logins, or `null`. */
+	auth_mode: string | null;
+	label: string;
+	enabled: boolean;
+	secret_set: boolean;
+	/** When the sealed credential was last written; `null` when none exists. */
+	secret_updated_at: number | null;
+	last_event_at: number | null;
+	created_by: string;
+	created_at: number;
+	updated_at: number;
+}
+
+/**
+ * The credential bag, nested under `secret` on the wire.
+ *
+ * Which fields a platform needs is the Worker's rule, not the console's:
+ * WhatsApp and Instagram need `appSecret` + `verifyToken` + `accessToken`,
+ * Messenger the same or a `pageAccessToken` instead of `accessToken`, and
+ * Telegram a `botToken` plus an optional `secretToken`.
+ */
+export interface ConnectorSecret {
+	appSecret?: string;
+	verifyToken?: string;
+	accessToken?: string;
+	pageAccessToken?: string;
+	botToken?: string;
+	secretToken?: string;
+}
+
+export interface ConnectorInput {
+	channel: OfficialChannelId;
+	account_id: string;
+	label: string;
+	auth_mode?: string;
+	execution_tier?: string;
+	enabled?: boolean;
+	secret: ConnectorSecret;
+}
+
+/** `channel` and `account_id` are immutable, so they are not part of an update. */
+export interface ConnectorUpdateInput {
+	label?: string;
+	enabled?: boolean;
+	auth_mode?: string;
+	secret?: ConnectorSecret;
+}
+
+/** `POST /v1/channels/:channel/:connectorId/send`: the delivery result. */
+export interface ChannelSendResult {
+	success: boolean;
+	/** The platform's own message id, when it answered with one. */
+	channelMessageId?: string;
+	state: 'ACCEPTED_BY_CHANNEL' | 'DELIVERED' | 'RETRY_BACKOFF' | 'FAILED_PERMANENT';
+	substate?: string;
+	retryAfterSeconds?: number;
+	errorCode?: string;
+}
