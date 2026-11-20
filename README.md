@@ -117,12 +117,18 @@ flowchart LR
 
 Requires **Node.js 22+** and an authenticated Cloudflare [`cf`](https://developers.cloudflare.com/) CLI (`cf auth login`).
 
-```bash
-# One line: fetch the repository and link the zero-dependency `dakflare` CLI
-curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
-cd dakflare
+Install the repository and the `dakflare` command in one line. It checks Node, fetches the
+checkout to `./dakflare`, links `dakflare` into `~/.local/bin` (printing the `export PATH` line if
+that directory is not on your `PATH`), and runs it once to prove the binary:
 
-# The Worker's local dependencies
+```bash
+curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
+```
+
+Then provision from the checkout:
+
+```bash
+cd dakflare
 cd worker && npm install && cd ..
 
 # 1. Generate local secrets into worker/.dev.vars (never committed)

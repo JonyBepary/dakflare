@@ -14,16 +14,16 @@ This tutorial takes you from a clean checkout to a live DakFlare deployment on y
 
 ## Step 1: Install the Repository and CLI
 
+One command installs both. It checks Node 22, fetches the checkout to `./dakflare`, links
+`dakflare` into `~/.local/bin`, and runs `dakflare --version` to prove the command works. If that
+directory is not on your `PATH`, it prints the `export PATH` line to add:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
-cd dakflare
-cd worker && npm install && cd ..
 ```
 
-The installer fetches the repository, links `dakflare` into `~/.local/bin`, and runs
-`dakflare --version` to prove the command works. If that directory is not on your `PATH`, it prints
-the `export PATH` line to add. `node cli/bin/dakflare.js` still works from the checkout, and
-`install.sh --cli-only` installs the CLI without the Worker tree.
+`node cli/bin/dakflare.js` still works from the checkout, and `install.sh --cli-only` installs the
+CLI without the Worker tree.
 
 Verify the CLI is available and speaks its machine contract:
 
@@ -35,9 +35,11 @@ Expected output: a single compact JSON document with `"status": "ok"` listing al
 
 ## Step 2: Generate Local Secrets
 
-Generate fresh cryptographic secrets into `worker/.dev.vars` (git-ignored):
+From the checkout, generate fresh cryptographic secrets into `worker/.dev.vars` (git-ignored):
 
 ```bash
+cd dakflare
+cd worker && npm install && cd ..
 dakflare init --local
 ```
 
