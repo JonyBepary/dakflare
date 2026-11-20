@@ -118,11 +118,11 @@ The operator surface and the handset app, captured from the current build:
 <a href="docs/assets/dakflare-console.webp">
   <picture>
     <source media="(max-width: 700px)" srcset="docs/assets/phone-settings.webp" />
-    <img src="docs/assets/dakflare-console.webp" alt="The DakFlare console at /admin beside the Android handset settings screen: the paced queue and connector cards on the left, the six-row settings hub on the right." />
+    <img src="docs/assets/dakflare-console.webp" alt="The DakFlare console at /admin beside the Android handset settings screen: the Scheduled status ledger and paced queue on the left, the six-row settings hub on the right." />
   </picture>
 </a>
 
-*The console's paced queue and connector cards; the handset's settings hub. The phone holds the SIM and signs every request; the console watches both.*
+*The console's Scheduled ledger and paced queue; the handset's settings hub. The phone holds the SIM and signs every request; the console watches both.*
 
 ## Quick Start
 
