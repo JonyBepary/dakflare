@@ -25,6 +25,16 @@ function readPackageVersion() {
   return typeof pkg.version === "string" ? pkg.version : null;
 }
 
+/**
+ * The root manifest is what `npm install -g .` publishes, so it is a third statement of the
+ * version — and the one a user actually installs. It sat at 6.1.0 while the CLI printed
+ * 6.3.0-alpha.1 until a README draft's install instructions exposed it.
+ */
+function readRootVersion() {
+  const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+  return typeof pkg.version === "string" ? pkg.version : null;
+}
+
 function readCliVersion() {
   const source = readFileSync(resolve(root, "cli", "bin", "dakflare.js"), "utf8");
   const match = source.match(/const CLI_VERSION = '([^']+)'/);
@@ -33,10 +43,12 @@ function readCliVersion() {
 
 const packageVersion = readPackageVersion();
 const cliVersion = readCliVersion();
+const rootVersion = readRootVersion();
 
 if (packageVersion === null || cliVersion === null) {
   console.error(
     `could not read a version: worker/package.json=${packageVersion ?? "missing"}, ` +
+      `package.json=${rootVersion ?? "missing"}, ` +
       `cli/bin/dakflare.js CLI_VERSION=${cliVersion ?? "missing"}`,
   );
   process.exit(6);
@@ -45,6 +57,12 @@ if (packageVersion === null || cliVersion === null) {
 const problems = [];
 if (cliVersion !== packageVersion) {
   problems.push(`the CLI says ${cliVersion}, the Worker package says ${packageVersion}`);
+}
+if (rootVersion !== packageVersion) {
+  problems.push(
+    `the root package.json says ${rootVersion} (that is what \`npm install -g .\` publishes), ` +
+      `the Worker package says ${packageVersion}`
+  );
 }
 
 const tag = process.argv[2];
