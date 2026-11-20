@@ -213,7 +213,7 @@
 		flash = null;
 		try {
 			const result = await registerTelegramWebhook(item.id);
-			flash = `Telegram now posts to ${result.webhook_url}.`;
+			flash = "Telegram now posts to this connector's webhook.";
 		} catch (failure) {
 			actionError = describeError(failure);
 		} finally {
@@ -576,7 +576,7 @@
 										{:else}
 											<Icon name="send" size={12} />
 										{/if}
-										Register webhook
+										{item.last_webhook_at === null ? 'Register webhook' : 'Re-register webhook'}
 									</button>
 								{/if}
 								<button
@@ -664,6 +664,12 @@
 	.banner :global(.notice) {
 		flex: 1;
 		min-width: 0;
+	}
+
+	/* A platform sentence or a URL can arrive without a break opportunity. */
+	.banner :global(.callout > div) {
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	/* ---------- the create panel ---------- */
@@ -992,6 +998,14 @@
 		.platform-seg .seg-item span {
 			min-height: 44px;
 			padding-inline: var(--df-p-space-2);
+		}
+
+		/* Four facts in two pairs, on every card: a flex row put three across and
+		   orphaned Webhook under Account at this width. */
+		.facts {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: var(--df-p-space-3) var(--df-p-space-4);
 		}
 
 		.editor .input {

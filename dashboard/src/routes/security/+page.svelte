@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import {
 		ApiError,
 		describeError,
@@ -221,13 +221,16 @@
 	let mintName = $state('');
 	let mintScopes = $state<string[]>([]);
 	let mintDevice = $state('');
-	let mintLimit = $state(60);
+	let mintLimit = $state(20);
 	let mintTtl = $state(86_400);
 	let minting = $state(false);
 	let mintError = $state<string | null>(null);
 
 	/** The one-time value. `null` after Done, and nothing can bring it back. */
 	let freshToken = $state<{ id: string; name: string; token: string } | null>(null);
+	/** "Copied" feedback on the reveal's primary action, cleared after a moment. */
+	let tokenCopied = $state(false);
+	let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let devices = $state<Device[]>([]);
 	/** The public origin, read in the browser: the MCP URL is absolute. */
@@ -319,6 +322,10 @@
 		// One shared 30-second tick: an invite can expire while the page is open,
 		// and its row should say so without a reload.
 		return subscribeClock();
+	});
+
+	onDestroy(() => {
+		if (copyTimer) clearTimeout(copyTimer);
 	});
 
 	async function load(): Promise<void> {
@@ -552,7 +559,7 @@
 		mintName = '';
 		mintScopes = [];
 		mintDevice = '';
-		mintLimit = 60;
+		mintLimit = 20;
 		mintTtl = 86_400;
 	}
 
@@ -576,14 +583,14 @@
 			mintName = '';
 			mintScopes = [];
 			mintDevice = '';
-			mintLimit = 60;
+			mintLimit = 20;
 			mintTtl = 86_400;
 			await loadAgentTokens();
 			await tick();
-			const reveal = document.getElementById('agent-token-reveal');
-			reveal?.setAttribute('tabindex', '-1');
-			reveal?.focus({ preventScroll: true });
-			reveal?.scrollIntoView({
+			// The next thing to do is copy it, so focus lands on that button.
+			const copyButton = document.getElementById('agent-token-copy');
+			copyButton?.focus({ preventScroll: true });
+			copyButton?.scrollIntoView({
 				block: 'center',
 				behavior: prefersReducedMotion() ? 'auto' : 'smooth'
 			});
@@ -595,11 +602,52 @@
 	}
 
 	/**
+	 * Copy is the reveal's primary action, so it is a real button rather than
+	 * the small CopyButton. The fallback is the same shim that component uses:
+	 * a secure context has the async clipboard, and nothing else may throw.
+	 */
+	async function copyTokenValue(): Promise<void> {
+		const value = freshToken?.token;
+		if (!value) return;
+		let ok = false;
+		try {
+			await navigator.clipboard.writeText(value);
+			ok = true;
+		} catch {
+			ok = legacySnippetCopy(value);
+		}
+		if (!ok) return;
+		tokenCopied = true;
+		if (copyTimer) clearTimeout(copyTimer);
+		copyTimer = setTimeout(() => (tokenCopied = false), 1800);
+	}
+
+	function legacySnippetCopy(text: string): boolean {
+		try {
+			const area = document.createElement('textarea');
+			area.value = text;
+			area.setAttribute('readonly', '');
+			area.style.position = 'fixed';
+			area.style.top = '-1000px';
+			area.style.opacity = '0';
+			document.body.appendChild(area);
+			area.select();
+			const ok = document.execCommand('copy');
+			document.body.removeChild(area);
+			return ok;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * Done is the only control that drops the value from this component, and it
 	 * drops it for good: the gateway keeps a hash, never the token.
 	 */
 	function closeReveal(): void {
 		freshToken = null;
+		tokenCopied = false;
+		if (copyTimer) clearTimeout(copyTimer);
 	}
 
 	function askRevokeToken(token: AgentToken): void {
@@ -1893,15 +1941,26 @@
 						</div>
 						<div class="token-value">
 							<code class="mono">{freshToken.token}</code>
-							<CopyButton value={freshToken.token} label="Copy token" />
+							<button
+								type="button"
+								id="agent-token-copy"
+								class="btn btn-primary btn-sm copy-token"
+								onclick={() => void copyTokenValue()}
+							>
+								<Icon name={tokenCopied ? 'check' : 'copy'} size={13} />
+								{tokenCopied ? 'Copied' : 'Copy token'}
+							</button>
 						</div>
+						<span class="sr-only" aria-live="polite">
+							{tokenCopied ? 'Token copied to clipboard' : ''}
+						</span>
 						<div class="reveal-foot">
 							<p class="reveal-warning">
 								Only a hash is stored, so the value cannot be read again. Losing it means
 								minting another and revoking this one.
 							</p>
-							<button type="button" class="btn btn-primary btn-sm" onclick={closeReveal}>
-								<Icon name="check" size={13} /> Done
+							<button type="button" class="btn btn-sm" onclick={closeReveal}>
+								Done
 							</button>
 						</div>
 					</div>
@@ -1911,7 +1970,7 @@
 					{#if !tokenMintOpen}
 						<button
 							type="button"
-							class="btn btn-primary btn-sm"
+							class="btn {freshToken === null ? 'btn-primary' : ''} btn-sm"
 							onclick={openMintForm}
 							disabled={tokensLoading}
 						>
@@ -2178,9 +2237,14 @@
 						<CopyButton value={mcpSnippet} label="Copy JSON" />
 					</div>
 					{#if mcpLiveSnippet !== null}
-						<div class="mcp-live">
-							<p class="mcp-live-label mono">With the token above</p>
-							<div class="mcp-code">
+						<div class="mcp-live" data-tone="ok">
+							<div class="mcp-live-head">
+								<Badge tone="ok" dot>One-time block</Badge>
+								<p class="mcp-live-note">
+									It carries the token above and leaves this screen when you press Done.
+								</p>
+							</div>
+							<div class="mcp-code mcp-code-live">
 								<pre class="mono">{mcpLiveSnippet}</pre>
 								<CopyButton value={mcpLiveSnippet} label="Copy JSON with token" />
 							</div>
@@ -2845,6 +2909,12 @@
 		user-select: all;
 	}
 
+	/* Copy is the one action that matters while the value is on screen, so it is
+	   the reveal's only coral primary and it sits on the value it copies. */
+	.copy-token {
+		flex: none;
+	}
+
 	.reveal-foot {
 		display: flex;
 		align-items: center;
@@ -3180,13 +3250,31 @@
 
 	.mcp-live {
 		margin-top: var(--df-p-space-3);
+		padding: var(--df-p-space-3);
+		border: 1px solid color-mix(in srgb, var(--df-state-ok-ink) 34%, var(--df-border-hairline));
+		border-radius: var(--df-p-radius-sm);
+		background: var(--df-state-ok-bg);
 	}
 
-	.mcp-live-label {
-		font-size: var(--df-p-text-2xs);
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--df-text-meta);
+	.mcp-live-head {
+		display: flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: var(--df-p-space-1) var(--df-p-space-2);
+	}
+
+	.mcp-live-note {
+		flex: 1 1 28ch;
+		min-width: 0;
+		color: var(--df-state-ok-ink);
+		font-size: var(--df-p-text-xs);
+		line-height: 1.5;
+	}
+
+	/* The JSON keeps a card surface so the mono stays at body ink, but the
+	   green panel around it is what says "this one expires with Done". */
+	.mcp-code-live {
+		background: var(--df-surface-card);
 	}
 
 	@media (max-width: 720px) {
@@ -3289,6 +3377,10 @@
 		.token-form .input,
 		.token-value code {
 			min-height: 44px;
+		}
+
+		.copy-token {
+			width: 100%;
 		}
 
 		.token-value code {
