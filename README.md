@@ -118,9 +118,11 @@ flowchart LR
 Requires **Node.js 22+** and an authenticated Cloudflare [`cf`](https://developers.cloudflare.com/) CLI (`cf auth login`).
 
 ```bash
-git clone https://github.com/JonyBepary/dakflare
+# One line: fetch the repository and link the zero-dependency `dakflare` CLI
+curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 cd dakflare
-npm install -g .                      # installs the zero-dependency `dakflare` CLI
+
+# The Worker's local dependencies
 cd worker && npm install && cd ..
 
 # 1. Generate local secrets into worker/.dev.vars (never committed)

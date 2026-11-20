@@ -4,10 +4,13 @@ Zero-dependency Node 22+ CLI for one DakFlare deployment. It talks to the Worker
 its config in `~/.config/dakflare/config.json` (mode 600), and never needs a build step.
 
 ```bash
-npm install -g .                       # from the repo root, or: node cli/bin/dakflare.js ...
+curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 dakflare init --url https://example.workers.dev --token <ADMIN_TOKEN>
 dakflare doctor
 ```
+
+In an existing checkout, `npm install -g .` installs the same binary, and
+`node cli/bin/dakflare.js` runs it without installing.
 
 `init --local` writes `worker/.dev.vars` with a fresh `ADMIN_TOKEN`, `AUTH_PEPPER` and
 `BETTER_AUTH_SECRET` for `wrangler dev`; it does not contact a Worker.

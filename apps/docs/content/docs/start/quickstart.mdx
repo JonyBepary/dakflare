@@ -12,14 +12,18 @@ This tutorial takes you from a clean checkout to a live DakFlare deployment on y
 - **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
 - **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/docs/guides/android-node-pairing/))
 
-## Step 1: Clone and Install Dependencies
+## Step 1: Install the Repository and CLI
 
 ```bash
-git clone https://github.com/JonyBepary/dakflare
+curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 cd dakflare
-npm install -g .          # installs the `dakflare` binary globally (or run `node cli/bin/dakflare.js`)
 cd worker && npm install && cd ..
 ```
+
+The installer fetches the repository, links `dakflare` into `~/.local/bin`, and runs
+`dakflare --version` to prove the command works. If that directory is not on your `PATH`, it prints
+the `export PATH` line to add. `node cli/bin/dakflare.js` still works from the checkout, and
+`install.sh --cli-only` installs the CLI without the Worker tree.
 
 Verify the CLI is available and speaks its machine contract:
 
@@ -27,7 +31,7 @@ Verify the CLI is available and speaks its machine contract:
 dakflare capabilities --agent
 ```
 
-Expected output: a single compact JSON document with `"ok": true` listing all 29 commands, their effects, and flags.
+Expected output: a single compact JSON document with `"status": "ok"` listing all 29 commands, their effects, and flags.
 
 ## Step 2: Generate Local Secrets
 
