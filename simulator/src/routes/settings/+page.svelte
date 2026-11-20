@@ -27,7 +27,7 @@
 
 	const SECTION_TITLES: Record<SectionId, string> = {
 		connection: 'Connection & pairing',
-		channels: 'Personal channels & permissions',
+		channels: 'Personal channels',
 		sms: 'Default SMS app',
 		log: 'Local message log',
 		devices: 'Devices & identity',
@@ -36,7 +36,8 @@
 
 	const SECTION_SUBS: Record<SectionId, string> = {
 		connection: 'Where this phone sends, and the code that pairs it.',
-		channels: 'The Android grant that lets this phone read personal chats, and which apps it watches.',
+		channels:
+			"Android's grant to read personal chats, the permissions behind it, and the apps it watches.",
 		sms: 'Android delivers a text only to the app that holds this role.',
 		log: 'How long messages stay on this phone, and how to clear them now.',
 		devices: 'The key this phone pairs with, and every identity stored here.',
@@ -112,6 +113,31 @@
 	const activeSub = $derived(activeSection === 'root' ? '' : SECTION_SUBS[activeSection]);
 
 	let popToHub = $state(false);
+
+	/** The channels section shows one panel at a time, not three stacked cards. */
+	let channelTab = $state<'access' | 'apps'>('access');
+
+	function selectChannelTab(next: 'access' | 'apps') {
+		channelTab = next;
+	}
+
+	/** Arrow keys move between the two tabs, the way a tablist is expected to. */
+	function onTabKey(event: KeyboardEvent) {
+		const target =
+			event.key === 'Home'
+				? 'access'
+				: event.key === 'End'
+					? 'apps'
+					: event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+						? channelTab === 'access'
+							? 'apps'
+							: 'access'
+						: null;
+		if (!target) return;
+		event.preventDefault();
+		channelTab = target;
+		document.getElementById(target === 'access' ? 'tab-access' : 'tab-apps')?.focus();
+	}
 
 	function scrollToTop() {
 		document.querySelector('.app-main')?.scrollTo({ top: 0 });
@@ -212,6 +238,16 @@
 			await refreshPerms();
 		} catch (error) {
 			permError = sentence(error);
+		} finally {
+			permBusy = null;
+		}
+	}
+
+	/** The manual re-read, with its own busy word so the button answers the tap. */
+	async function recheckPerms() {
+		permBusy = 'refresh';
+		try {
+			await refreshPerms();
 		} finally {
 			permBusy = null;
 		}
@@ -590,6 +626,7 @@
 					class="hub-row"
 					data-tone={row.tone}
 					style={`--i: ${index}`}
+					title={`${row.title}: ${row.summary}`}
 					onclick={() => openSection(row.id)}
 				>
 					<span class="hub-dot" aria-hidden="true"></span>
@@ -602,11 +639,11 @@
 						<svg
 							class="chev"
 							viewBox="0 0 16 16"
-							width="14"
-							height="14"
+							width="12"
+							height="12"
 							fill="none"
 							stroke="currentColor"
-							stroke-width="1.6"
+							stroke-width="1.7"
 							stroke-linecap="round"
 							stroke-linejoin="round"
 							aria-hidden="true"
@@ -751,141 +788,176 @@
 						{/if}
 					</section>
 				{:else if activeSection === 'channels'}
-					<section class="sheet" aria-labelledby="na-title">
-						<div class="sheet-head">
-							<h2 class="sheet-title" id="na-title">Notification Access</h2>
-							<span class="pill" data-state={pillState(listenerTone)}>
-								{listenerWord}
-							</span>
-						</div>
-						<p class="note">
-							Android grants this to one app at a time. It is what lets the bridge read
-							personal chats on this phone, and the state here re-reads when you come back
-							from Android's own screen.
-						</p>
+					<div class="seg" role="tablist" aria-label="Personal channels view">
+						<button
+							id="tab-access"
+							type="button"
+							role="tab"
+							class="seg-btn"
+							aria-selected={channelTab === 'access'}
+							aria-controls="panel-access"
+							tabindex={channelTab === 'access' ? 0 : -1}
+							onclick={() => selectChannelTab('access')}
+							onkeydown={onTabKey}
+						>
+							Access &amp; permissions
+						</button>
+						<button
+							id="tab-apps"
+							type="button"
+							role="tab"
+							class="seg-btn"
+							aria-selected={channelTab === 'apps'}
+							aria-controls="panel-apps"
+							tabindex={channelTab === 'apps' ? 0 : -1}
+							onclick={() => selectChannelTab('apps')}
+							onkeydown={onTabKey}
+						>
+							Watched apps
+						</button>
+					</div>
 
-						{#if !hasBridge()}
-							<p class="state-line">
-								This window has no Android permission interface, so the grant can only be read
-								and requested on the phone.
-							</p>
-						{:else if !permKnown}
-							<p class="state-line">Reading Android's permission state…</p>
-						{:else if listenerOn}
-							<p class="state-line">
-								Granted in Android. Turn it off in the same screen if capture should stop.
-							</p>
-						{:else}
-							<div class="form-actions">
-								<button
-									class="btn primary wide"
-									type="button"
-									disabled={permBusy !== null}
-									onclick={openNotificationAccess}
-								>
-									{permBusy === 'listener' ? 'Opening…' : 'Open Notification Access'}
-								</button>
+					<div
+						class="tab-body"
+						id="panel-access"
+						role="tabpanel"
+						aria-labelledby="tab-access"
+						hidden={channelTab !== 'access'}
+					>
+						<section class="sheet" aria-label="Access and permissions">
+							<div class="sheet-head">
+								<h2 class="sheet-title">Notification Access</h2>
+								<span class="pill" data-state={pillState(listenerTone)}>{listenerWord}</span>
 							</div>
-						{/if}
-
-						{#if hasBridge()}
-							<div class="sheet-actions">
-								<button
-									class="btn quiet small"
-									type="button"
-									disabled={permBusy !== null}
-									onclick={() => refreshPerms()}
-								>
-									Check again
-								</button>
-							</div>
-						{/if}
-						{#if permError}
-							<p class="row-error" role="alert">{permError}</p>
-						{/if}
-					</section>
-
-					<section class="sheet" aria-labelledby="perm-title">
-						<h2 class="sheet-title" id="perm-title">System permissions</h2>
-
-						<div class="perm-row">
-							<span class="perm-label">Notifications</span>
-							<span class="perm-word" data-tone={perms.notifications ? 'ok' : 'warn'}>
-								{perms.notifications ? 'Allowed' : permKnown ? 'Off' : 'Unknown'}
-							</span>
-							{#if permKnown && !perms.notifications && hasBridge()}
-								<button
-									class="btn small"
-									type="button"
-									disabled={!hasBridge() || permBusy !== null}
-									onclick={() => askSystem('request_notifications', 'notifications')}
-								>
-									{permBusy === 'notifications' ? 'Opening…' : 'Allow'}
-								</button>
-							{/if}
-						</div>
-
-						<div class="perm-row">
-							<span class="perm-label">Battery exemption</span>
-							<span class="perm-word" data-tone={perms.battery_exempt ? 'ok' : 'warn'}>
-								{perms.battery_exempt ? 'Exempt' : permKnown ? 'Restricted' : 'Unknown'}
-							</span>
-							{#if permKnown && !perms.battery_exempt && hasBridge()}
-								<button
-									class="btn small"
-									type="button"
-									disabled={!hasBridge() || permBusy !== null}
-									onclick={() => askSystem('request_battery_exemption', 'battery')}
-								>
-									{permBusy === 'battery' ? 'Opening…' : 'Allow'}
-								</button>
-							{/if}
-						</div>
-
-						<p class="note">
-							Without the exemption Android pauses the app between messages. Notifications are
-							how the phone says the connection is up.
-						</p>
-						{#if !hasBridge()}
-							<p class="note">This window has no Android permission interface.</p>
-						{/if}
-					</section>
-					<section class="sheet" aria-labelledby="watch-title">
-						<div class="sheet-head">
-							<h2 class="sheet-title" id="watch-title">Watched apps</h2>
-							<span class="pill" data-state={watchedOn === 5 ? 'live' : 'unknown'}>
-								{watchedOn} of 5
-							</span>
-						</div>
-						<p class="note">
-							Only these five are read. A chat from one of them can be answered from its
-							thread, so the reply lands in the same app.
-						</p>
-
-						<div class="watch-list">
-							{#each WATCHED as entry (entry.key)}
-								<div class="watch-item">
-									<Toggle
-										label={entry.name}
-										checked={watched[entry.key]}
-										busy={watchedBusy === entry.key}
-										disabled={watchedBusy !== null}
-										onchange={(next) => toggleWatched(entry.key, next)}
-									/>
-								</div>
-							{/each}
-						</div>
-
-						{#if !listenerOn}
 							<p class="note">
-								These switches are stored now and take effect the moment Notification Access
-								is granted above.
+								Android grants this to one app at a time. It is what lets the bridge read personal
+								chats here, and the state re-reads when you come back from its screen.
 							</p>
-						{/if}
-						{#if watchedError}
-							<p class="row-error" role="alert">{watchedError}</p>
-						{/if}
-					</section>
+
+							{#if !hasBridge()}
+								<p class="state-line">
+									This window has no Android permission interface, so the grant can only be read on
+									the phone.
+								</p>
+							{:else if !permKnown}
+								<p class="state-line">Reading Android's permission state…</p>
+							{:else if listenerOn}
+								<p class="state-line">
+									Granted in Android. Turn it off there if capture should stop.
+								</p>
+							{:else}
+								<div class="form-actions">
+									<button
+										class="btn primary wide"
+										type="button"
+										disabled={permBusy !== null}
+										onclick={openNotificationAccess}
+									>
+										{permBusy === 'listener' ? 'Opening…' : 'Open Notification Access'}
+									</button>
+								</div>
+							{/if}
+
+							{#if hasBridge()}
+								<div class="sheet-actions">
+									<button
+										class="btn small"
+										type="button"
+										disabled={permBusy !== null}
+										onclick={recheckPerms}
+									>
+										{permBusy === 'refresh' ? 'Checking…' : 'Check again'}
+									</button>
+								</div>
+							{/if}
+							{#if permError}
+								<p class="row-error" role="alert">{permError}</p>
+							{/if}
+
+							<div class="hairline" aria-hidden="true"></div>
+							<h3 class="sheet-title">System permissions</h3>
+
+							<div class="perm-row">
+								<span class="perm-label">Notifications</span>
+								<span class="perm-word" data-tone={perms.notifications ? 'ok' : 'warn'}>
+									{perms.notifications ? 'Allowed' : permKnown ? 'Off' : 'Unknown'}
+								</span>
+								{#if permKnown && !perms.notifications && hasBridge()}
+									<button
+										class="btn small"
+										type="button"
+										disabled={permBusy !== null}
+										onclick={() => askSystem('request_notifications', 'notifications')}
+									>
+										{permBusy === 'notifications' ? 'Opening…' : 'Allow'}
+									</button>
+								{/if}
+							</div>
+
+							<div class="perm-row">
+								<span class="perm-label">Battery exemption</span>
+								<span class="perm-word" data-tone={perms.battery_exempt ? 'ok' : 'warn'}>
+									{perms.battery_exempt ? 'Exempt' : permKnown ? 'Restricted' : 'Unknown'}
+								</span>
+								{#if permKnown && !perms.battery_exempt && hasBridge()}
+									<button
+										class="btn small"
+										type="button"
+										disabled={permBusy !== null}
+										onclick={() => askSystem('request_battery_exemption', 'battery')}
+									>
+										{permBusy === 'battery' ? 'Opening…' : 'Allow'}
+									</button>
+								{/if}
+							</div>
+
+							<p class="note">The exemption keeps Android from pausing the app between messages.</p>
+							{#if !hasBridge()}
+								<p class="note">This window has no Android permission interface.</p>
+							{/if}
+						</section>
+					</div>
+
+					<div
+						class="tab-body"
+						id="panel-apps"
+						role="tabpanel"
+						aria-labelledby="tab-apps"
+						hidden={channelTab !== 'apps'}
+					>
+						<section class="sheet" aria-label="Watched apps">
+							<div class="sheet-head">
+								<h2 class="sheet-title">Watched apps</h2>
+								<span class="pill" data-state={watchedOn === 5 ? 'live' : 'unknown'}>
+									{watchedOn} of 5
+								</span>
+							</div>
+							<p class="note">
+								Only these five are read. A reply from a thread lands in the app it came from.
+							</p>
+
+							<div class="watch-list">
+								{#each WATCHED as entry (entry.key)}
+									<div class="watch-item">
+										<Toggle
+											label={entry.name}
+											checked={watched[entry.key]}
+											busy={watchedBusy === entry.key}
+											disabled={watchedBusy !== null}
+											onchange={(next) => toggleWatched(entry.key, next)}
+										/>
+									</div>
+								{/each}
+							</div>
+
+							{#if !listenerOn}
+								<p class="note">Stored now; capture starts once Notification Access is granted.</p>
+							{/if}
+							{#if watchedError}
+								<p class="row-error" role="alert">{watchedError}</p>
+							{/if}
+						</section>
+					</div>
 
 				{:else if activeSection === 'sms'}
 					<section class="sheet" aria-labelledby="sms-role-title">
@@ -1264,7 +1336,7 @@
 
 	/* The hub is one screen, not a scroll: it takes the height it is given and
 	   puts its meta line at the bottom, so a six-row list reads as a complete
-	   screen on a 390 x 844 phone instead of stopping two thirds down. */
+	   screen on a 360 x 800 phone instead of stopping two thirds down. */
 	.screen[data-view='root'] {
 		display: flex;
 		flex-direction: column;
@@ -1274,14 +1346,14 @@
 	/* ------------------------------------------------------------- hub head */
 
 	.hub-head {
-		padding: 6px 0 18px;
+		padding: 0 0 12px;
 	}
 
 	.hub-rule {
 		display: block;
 		width: 32px;
 		height: 3px;
-		margin-bottom: 12px;
+		margin-bottom: 9px;
 		border-radius: var(--df-p-radius-pill);
 		background: var(--df-accent-decor);
 	}
@@ -1289,19 +1361,19 @@
 	.hub-head h1 {
 		font-family: var(--display);
 		font-size: var(--df-p-text-2xl);
-		line-height: 1.15;
+		line-height: 1.1;
 		font-weight: 800;
 		letter-spacing: -0.02em;
 		color: var(--ink);
 	}
 
 	.hub-ident {
-		margin-top: 4px;
+		margin-top: 2px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-family: var(--mono);
-		font-size: 11px;
+		font-size: 10.5px;
 		color: var(--ink-3);
 	}
 
@@ -1317,14 +1389,16 @@
 		box-shadow: var(--df-shadow-card);
 	}
 
+	/* One line of title, one of summary, one state word: 56px on a 360 wide
+	   phone, which is what keeps all six rows above the dock at 800 tall. */
 	.hub-row {
 		display: grid;
-		grid-template-columns: 10px minmax(0, 1fr) auto;
+		grid-template-columns: 7px minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 12px;
+		gap: 10px;
 		width: 100%;
-		min-height: 68px;
-		padding: 12px 14px;
+		min-height: 56px;
+		padding: 9px 14px;
 		border: 0;
 		border-top: 1px solid var(--line);
 		background: transparent;
@@ -1353,8 +1427,8 @@
 	}
 
 	.hub-dot {
-		width: 8px;
-		height: 8px;
+		width: 7px;
+		height: 7px;
 		border-radius: 50%;
 		background: currentColor;
 		box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
@@ -1368,21 +1442,23 @@
 	}
 
 	.hub-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		font-family: var(--display);
 		font-size: var(--df-p-text-md);
-		line-height: 1.28;
+		line-height: 1.25;
 		font-weight: 700;
 		letter-spacing: -0.01em;
 		color: var(--ink);
-		text-wrap: balance;
 	}
 
 	.hub-summary {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11.5px;
-		line-height: 1.4;
+		font-size: 11px;
+		line-height: 1.35;
 		color: var(--ink-3);
 	}
 
@@ -1390,11 +1466,11 @@
 		display: flex;
 		flex: none;
 		align-items: center;
-		gap: 5px;
+		gap: 4px;
 	}
 
 	.hub-word {
-		font-size: 11.5px;
+		font-size: 11px;
 		font-weight: 700;
 		letter-spacing: 0.01em;
 		white-space: nowrap;
@@ -1429,7 +1505,7 @@
 
 	.hub-foot {
 		margin-top: auto;
-		padding: 18px 2px 2px;
+		padding: 14px 2px 2px;
 		font-family: var(--mono);
 		font-size: 10.5px;
 		letter-spacing: 0.01em;
@@ -1446,7 +1522,7 @@
 	/* --------------------------------------------------------- section head */
 
 	.section-head {
-		padding: 2px 0 4px;
+		padding: 0;
 	}
 
 	/* 44px is the floor even though this is a quiet control: it is the way back
@@ -1475,10 +1551,10 @@
 	}
 
 	.section-head h1 {
-		margin-top: 4px;
+		margin-top: 2px;
 		font-family: var(--display);
 		font-size: 22px;
-		line-height: 1.2;
+		line-height: 1.15;
 		font-weight: 800;
 		letter-spacing: -0.02em;
 		color: var(--ink);
@@ -1486,10 +1562,10 @@
 	}
 
 	.section-sub {
-		max-width: 42ch;
-		margin-top: 4px;
-		font-size: 12px;
-		line-height: 1.5;
+		max-width: 48ch;
+		margin-top: 2px;
+		font-size: 11.5px;
+		line-height: 1.45;
 		color: var(--ink-3);
 		text-wrap: pretty;
 	}
@@ -1507,16 +1583,98 @@
 
 	/* -------------------------------------------------------- section bodies */
 
+	/* A drill-down is read top to bottom on a 360 wide phone, so every card
+	   loses a little padding and gap against the shared sheet. */
+	.view .sheet {
+		margin-top: 10px;
+		padding: 14px;
+	}
+
+	.view .sheet-head {
+		margin-bottom: 4px;
+	}
+
+	.view .sheet .note {
+		margin-top: 6px;
+	}
+
+	.view .sheet .field {
+		margin-top: 10px;
+	}
+
+	.view .form-actions {
+		margin-top: 10px;
+	}
+
+	.view .rows {
+		margin-top: 4px;
+	}
+
+	/* Two panels instead of three stacked cards. The control is 50px tall, so
+	   each half keeps a 44px target inside its 3px gutter. */
+	.seg {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 3px;
+		margin-top: 10px;
+		padding: 3px;
+		border: 1px solid var(--line);
+		border-radius: var(--df-p-radius-pill);
+		background: var(--df-surface-well);
+	}
+
+	.seg-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 44px;
+		padding: 0 10px;
+		border: 1px solid transparent;
+		border-radius: var(--df-p-radius-pill);
+		background: transparent;
+		color: var(--ink-2);
+		font-size: 12px;
+		font-weight: 600;
+		line-height: 1.2;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition:
+			background-color var(--df-p-dur-lift) var(--df-p-ease-standard),
+			color var(--df-p-dur-lift) var(--df-p-ease-standard);
+	}
+
+	/* Selected is a lifted fill, a border and a heavier weight: three signals,
+	   so the panel in view is never carried by colour alone. */
+	.seg-btn[aria-selected='true'] {
+		border-color: var(--line);
+		/* `selected` is lighter than the well in both themes, so the thumb reads
+		   raised in light and in dark, where `card` would read as a hole. */
+		background: var(--df-surface-selected);
+		color: var(--ink);
+		font-weight: 700;
+		box-shadow: var(--df-shadow-card);
+	}
+
+	.seg-btn:focus-visible {
+		outline-offset: -2px;
+	}
+
+	.tab-body {
+		animation: view-in var(--df-p-dur-lift) var(--df-p-ease-standard) both;
+	}
+
+	/* The one divider inside a card that holds two topics. */
+	.hairline {
+		height: 1px;
+		margin: 12px 0 10px;
+		background: var(--line);
+	}
+
 	.sheet-actions {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
-		margin-top: 2px;
-	}
-
-	/* The label lines up with the card's own text, not its padding box. */
-	.sheet-actions .btn.quiet {
-		margin-left: -10px;
+		margin-top: 8px;
 	}
 
 	.state-line {
@@ -1562,8 +1720,8 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		min-height: 48px;
-		padding: 6px 0;
+		min-height: 44px;
+		padding: 2px 0;
 		border-top: 1px solid var(--line);
 	}
 
@@ -1596,7 +1754,7 @@
 	}
 
 	.watch-list {
-		margin-top: 8px;
+		margin-top: 4px;
 		border-top: 1px solid var(--line);
 	}
 
@@ -1613,7 +1771,7 @@
 	/* A disclosure row, not a filled block: the marker has to stay visible, so
 	   this stays a list item rather than a flex row. */
 	.advanced summary {
-		padding: 13px 0;
+		padding: 10px 0;
 		min-height: 44px;
 		font-size: 11.5px;
 		font-weight: 700;
@@ -1639,7 +1797,7 @@
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: 8px;
-		margin: 14px 0 0;
+		margin: 12px 0 0;
 		padding: 0;
 		border: 0;
 	}

@@ -105,7 +105,9 @@
 		width: 20px;
 		height: 20px;
 		border-radius: 50%;
-		background: var(--surface);
+		/* `selected` is a step lighter than the well in dark and identical to the
+		   card in light, so the thumb reads off in both themes. */
+		background: var(--df-surface-selected);
 		box-shadow: var(--df-p-shadow-1);
 		transition: transform var(--df-p-dur-lift) var(--df-p-ease-standard);
 	}
