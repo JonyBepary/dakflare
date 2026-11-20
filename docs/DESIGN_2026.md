@@ -25,7 +25,7 @@ text: it is a container, a chip or a fill behind dark ink.
 | `--ink-3` | `#6B6053` | metadata, timestamps |
 | `--line` | `#E7DCCB` | hairlines |
 | `--line-strong` | `#D3C4AC` | input borders, focus ring base |
-| `--accent` | `#B93F22` | accent **text**, 5.14:1 on `--bg` |
+| `--accent` | `#B23B20` | accent **text**, 5.51:1 on `--bg` (`--df-p-coral-700`, the token value) |
 | `--accent-fill` | `#C9482A` | primary button fill, white text, 4.73:1 |
 | `--accent-soft` | `#FBE3DA` | selected nav, tinted cards |
 
