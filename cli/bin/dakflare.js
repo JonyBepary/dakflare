@@ -292,6 +292,16 @@ const ERROR_RULES = {
   },
   bad_request: { exit: 2, category: 'usage' },
 
+  // Channel connectors. A missing or disabled connector is not a malformed
+  // request; it is a target the caller has to fix, and a closed messaging
+  // window is a conflict rather than a failure of the send itself.
+  connector_not_found: { exit: 3, category: 'not_found', remediation: 'dakflare connectors list' },
+  connector_exists: { exit: 5, category: 'conflict', remediation: 'dakflare connectors list' },
+  connector_disabled: { exit: 6, category: 'precondition', remediation: 'dakflare connectors update <id> --enabled true' },
+  connector_secret_unavailable: { exit: 6, category: 'precondition' },
+  window_expired: { exit: 5, category: 'conflict', fix: 'the 24h service window is closed; use a template or an allowed tag' },
+  unsupported_channel: { exit: 2, category: 'usage' },
+
   // `fix` names the two ways a target can be absent or ambiguous. A malformed
   // run key and two targets at once are the caller's document (usage); a key or
   // a flow that does not exist is a not-found, like every other unknown id.
@@ -406,24 +416,87 @@ const COMMAND_SPECS = {
       replayed: 'true when an idempotency key matched an existing command',
       state: 'PENDING|LEASED|DISPATCHED|SENT|DELIVERED|FAILED|EXPIRED',
       verification: '{passed, state, terminal, reason, next_command}',
+      channel_message_id: 'connector send: the platform message id',
+      delivery: 'connector send: the channel delivery result',
     },
-    summary: 'Queue one outbound SMS and follow it to the radio',
+    summary: 'Queue one outbound SMS, or send through a channel connector',
     effect: 'mutating',
     usage:
-      'dakflare send --to <e164> --body <text> [--device <id>] [--no-wait] [--wait [duration]] [--until <state>] [--idempotency-key <k>]',
+      'dakflare send --to <e164> --body <text> [--device <id>] [--no-wait] [--wait [duration]] [--until <state>] [--idempotency-key <k>] | send --channel <whatsapp|telegram|messenger|instagram> --connector <id> --to <destination> --body <text> [--template-id <id>] [--media-url <url>] [--human-agent-tag] [--comment-id <id>]',
     flags: {
-      to: { type: 'string', required: true, note: 'E.164 recipient' },
+      to: { type: 'string', required: true, note: 'E.164 recipient, or the platform destination for a connector' },
       body: { type: 'string', required: true, note: 'message text, max 4096 characters' },
       device: { type: 'string', note: 'send through this device; default is the freshest' },
       'no-wait': { type: 'boolean', note: 'queue and return immediately' },
       wait: { type: 'duration', note: 'how long to follow it, default 10s, max 5m' },
       until: { type: 'state', note: 'pending|dispatched|sent|delivered, default sent' },
       'idempotency-key': { type: 'string', note: 'a retry with the same key returns the same command' },
+      channel: { type: 'string', note: 'connector send: whatsapp|telegram|messenger|instagram' },
+      connector: { type: 'string', note: 'connector send: the connector id from `connectors list`' },
+      'template-id': { type: 'string', note: 'connector send: WhatsApp template id' },
+      'media-url': { type: 'string', note: 'connector send: media URL' },
+      'human-agent-tag': { type: 'boolean', note: 'connector send: Messenger HUMAN_AGENT outside the 24h window' },
+      'comment-id': { type: 'string', note: 'connector send: Instagram private reply to a comment' },
     },
     examples: [
       'dakflare send --to +8801540196080 --body "deploy ack"',
       'dakflare send --to +8801540196080 --body "ack" --idempotency-key ci-1234 --agent',
       'dakflare send --to +8801540196080 --body "ack" --no-wait',
+      'dakflare send --channel whatsapp --connector conn_abc --to +8801540196080 --body "ack"',
+      'dakflare send --channel telegram --connector conn_bot --to 123456789 --body "ack" --agent',
+    ],
+  },
+  connectors: {
+    response: {
+      connectors: '[{id, channel, account_id, execution_tier, auth_mode, label, enabled, secret_set, secret_updated_at, last_event_at, created_at, updated_at}]',
+      connector: 'the created or updated connector, with secret_set and never the secret',
+      webhook_url: 'the ingress URL built from the Worker URL and the connector id',
+    },
+    summary: 'List, create, update or delete channel connectors (list|create|update|delete)',
+    effect: 'mutating',
+    usage:
+      'dakflare connectors <list|create|update|delete> [options]',
+    flags: {
+      channel: { type: 'string', note: 'create: whatsapp|telegram|messenger|instagram' },
+      'account-id': { type: 'string', note: 'create: the platform account, Page, number or chat id' },
+      label: { type: 'string', note: 'create|update: a display name, max 64 characters' },
+      'auth-mode': { type: 'string', note: 'create|update: the platform auth mode' },
+      'access-token': { type: 'string', note: 'create|update: access token; sealed at rest, never printed' },
+      'bot-token': { type: 'string', note: 'create|update: Telegram bot token; sealed at rest, never printed' },
+      'app-secret': { type: 'string', note: 'create|update: Meta app secret; sealed at rest, never printed' },
+      'verify-token': { type: 'string', note: 'create|update: Meta verify token; sealed at rest, never printed' },
+      'secret-token': { type: 'string', note: 'create|update: Telegram secret token; sealed at rest, never printed' },
+      enabled: { type: 'string', note: 'create|update: true or false' },
+      'dry-run': { type: 'boolean', note: 'create: print the request with credentials redacted; send nothing' },
+      yes: { type: 'boolean', note: 'delete: skip the confirmation prompt' },
+    },
+    examples: [
+      'dakflare connectors list --agent',
+      'dakflare connectors create --channel whatsapp --account-id 1234567890 --label "Sales line" --access-token "$WA_TOKEN" --dry-run',
+      'dakflare connectors create --channel telegram --account-id 123456789 --label "Support bot" --bot-token "$BOT_TOKEN" --secret-token "$TG_SECRET"',
+      'dakflare connectors update conn_abc --label "Sales" --enabled false',
+      'dakflare connectors delete conn_abc --yes',
+    ],
+  },
+  webhooks: {
+    response: {
+      webhooks: '[{id, name, enabled, created_by, created_at, last_delivery_at}]',
+      secret: 'the signing secret, returned only by create and shown once',
+      deliveries: '[{id, webhook_id, received_at, body_json, status, answer_text, error}]',
+    },
+    summary: 'List, create, delete inbound agent webhooks or read deliveries (list|create|delete|deliveries)',
+    effect: 'mutating',
+    usage: 'dakflare webhooks <list|create|delete|deliveries> [options]',
+    flags: {
+      name: { type: 'string', note: 'create: a display name, default "webhook"' },
+      'dry-run': { type: 'boolean', note: 'create: print the request; send nothing' },
+      yes: { type: 'boolean', note: 'delete: skip the confirmation prompt' },
+    },
+    examples: [
+      'dakflare webhooks list --agent',
+      'dakflare webhooks create --name "billing events"',
+      'dakflare webhooks deliveries wh_abc --agent',
+      'dakflare webhooks delete wh_abc --yes',
     ],
   },
   status: {
@@ -985,6 +1058,18 @@ const VALUE_FLAGS = new Set([
   'reply',
   'cooldown',
   'sim-slot',
+  'channel',
+  'connector',
+  'account-id',
+  'auth-mode',
+  'access-token',
+  'bot-token',
+  'app-secret',
+  'verify-token',
+  'secret-token',
+  'template-id',
+  'comment-id',
+  'media-url',
 ]);
 
 const KNOWN_BOOLEAN_FLAGS = new Set([
@@ -1006,6 +1091,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   'allow-shortcode',
   'no-shortcode',
   'flow-v2',
+  'human-agent-tag',
 ]);
 
 function looksLikeCliFlag(arg) {
@@ -1225,7 +1311,12 @@ async function api(
 }
 
 function apiErrorBody(data, status) {
-  if (data && typeof data === 'object' && typeof data.error === 'string') return data.error;
+  if (data && typeof data === 'object') {
+    if (typeof data.error === 'string') return data.error;
+    // The channel send routes report a delivery failure as `errorCode` rather
+    // than `error`, because the 200-shaped result and the failure share a type.
+    if (typeof data.errorCode === 'string') return data.errorCode;
+  }
   return `HTTP ${status}`;
 }
 
@@ -2529,16 +2620,426 @@ function renderCommand(command, { deviceId, note }) {
   if (next) out(`  next          ${next}`);
 }
 
+/* ────────────────────── connectors and webhooks ────────────────────── */
+
+const CONNECTOR_CREDENTIAL_FLAGS = [
+  ['access-token', 'accessToken'],
+  ['bot-token', 'botToken'],
+  ['app-secret', 'appSecret'],
+  ['verify-token', 'verifyToken'],
+  ['secret-token', 'secretToken'],
+];
+
+function connectorWebhookUrl(cfg, channel, id) {
+  return `${cfg.url}/v1/channels/${encodeURIComponent(channel)}/${encodeURIComponent(id)}/webhook`;
+}
+
+function connectorSecret(flags) {
+  const secret = {};
+  for (const [flag, key] of CONNECTOR_CREDENTIAL_FLAGS) {
+    if (flags[flag] === undefined) continue;
+    const value = stringFlag(flags, flag);
+    if (value === '') throw usage(`--${flag} needs a value`);
+    secret[key] = value;
+  }
+  return Object.keys(secret).length === 0 ? null : secret;
+}
+
+function redactConnectorSecret(body) {
+  if (body.secret === undefined) return body;
+  const secret = {};
+  for (const key of Object.keys(body.secret)) secret[key] = '<redacted>';
+  return { ...body, secret };
+}
+
+function booleanFlagValue(flags, name) {
+  const value = flags[name];
+  if (value === undefined) return undefined;
+  if (value === true || value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw usage(`--${name} must be true or false`);
+}
+
+/**
+ * `connectors` accepts `--enabled true|false`, but `enabled` is a bare boolean
+ * for `rules update`. Normalize the two-word form before the shared parser so
+ * neither command needs a private argument grammar.
+ */
+function connectorArgv(argv) {
+  const normalized = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    const next = argv[index + 1];
+    if (arg === '--enabled' && (next === 'true' || next === 'false' || next === '0' || next === '1')) {
+      normalized.push(`--enabled=${next}`);
+      index += 1;
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return normalized;
+}
+
+function printConnectorRows(cfg, rows) {
+  if (rows.length === 0) {
+    out('No channel connectors configured.');
+    return;
+  }
+  out(`Connectors (${rows.length})`);
+  for (const connector of rows) {
+    const state = connector.enabled ? ok('active') : muted('paused');
+    const secret = connector.secret_set
+      ? `secret set${connector.secret_updated_at ? ` ${iso(connector.secret_updated_at)}` : ''}`
+      : 'no secret';
+    out(
+      `  ${String(connector.id).padEnd(22)} ${String(connector.channel).padEnd(10)} ${state.padEnd(8)} ${connector.account_id}  ${connector.label ?? ''}`
+    );
+    out(muted(`    ${secret}`));
+    out(muted(`    ${connectorWebhookUrl(cfg, connector.channel, connector.id)}`));
+  }
+}
+
+async function commandConnectors(argv) {
+  const [sub = 'list', ...args] = argv;
+  if (sub === '--help' || sub === '-h') return printHelp('connectors');
+  const { flags, rest } = parseArgv(connectorArgv(args));
+  if (flags.help) return printHelp('connectors');
+  assertCommandFlags(flags, 'connectors');
+
+  if (sub === 'list') {
+    const cfg = requireConfig();
+    const result = await api(cfg, 'GET', '/v1/admin/connectors');
+    if (result.status !== 200) throw requestFailure('listing connectors', result);
+    const raw = Array.isArray(result.data?.connectors) ? result.data.connectors : [];
+    const connectors = raw.map((connector) => ({
+      ...connector,
+      webhook_url: connectorWebhookUrl(cfg, connector.channel, connector.id),
+    }));
+    if (MODE.json) {
+      emitJson({ ok: true, connectors }, MODE);
+      return 0;
+    }
+    printConnectorRows(cfg, connectors);
+    return 0;
+  }
+
+  if (sub === 'create') {
+    requireFlags(flags, ['channel', 'account-id', 'label']);
+    const channel = stringFlag(flags, 'channel').toLowerCase();
+    if (!CONNECTOR_CHANNELS.includes(channel)) {
+      throw usage(`--channel must be one of ${CONNECTOR_CHANNELS.join(', ')}`);
+    }
+    const accountId = stringFlag(flags, 'account-id');
+    const label = stringFlag(flags, 'label');
+    const secret = connectorSecret(flags);
+    if (secret === null) {
+      throw usage(
+        'a credential is required: pass --access-token, --bot-token, --app-secret, --verify-token or --secret-token'
+      );
+    }
+    const body = {
+      channel,
+      account_id: accountId,
+      label,
+      secret,
+    };
+    const authMode = stringFlag(flags, 'auth-mode');
+    if (authMode !== undefined) body.auth_mode = authMode;
+    const enabled = booleanFlagValue(flags, 'enabled');
+    if (enabled !== undefined) body.enabled = enabled;
+
+    if (flags['dry-run'] === true) {
+      const redacted = redactConnectorSecret(body);
+      const pathname = '/v1/admin/connectors';
+      if (MODE.json) {
+        emitJson(
+          { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body: redacted } },
+          MODE
+        );
+        return 0;
+      }
+      printDryRun(pathname, redacted);
+      return 0;
+    }
+
+    const cfg = requireConfig();
+    const result = await api(cfg, 'POST', '/v1/admin/connectors', body);
+    if (result.status !== 201 && result.status !== 200) {
+      throw requestFailure('creating the connector', result);
+    }
+    const connector = result.data ?? {};
+    const webhookUrl = connectorWebhookUrl(cfg, connector.channel ?? channel, connector.id ?? '');
+    if (MODE.json) {
+      emitJson({ ok: true, connector, webhook_url: webhookUrl }, MODE);
+      return 0;
+    }
+    out(`Created connector ${connector.id ?? ''} (${connector.channel ?? channel})`);
+    out(`  account       ${connector.account_id ?? accountId}`);
+    out(`  secret        stored sealed; it is never returned by the API`);
+    out(`  webhook       ${webhookUrl}`);
+    return 0;
+  }
+
+  if (sub === 'update') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare connectors update <id> [--label <name>] [--enabled true|false]');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    const body = {};
+    const label = stringFlag(flags, 'label');
+    if (label !== undefined) body.label = label;
+    const authMode = stringFlag(flags, 'auth-mode');
+    if (authMode !== undefined) body.auth_mode = authMode;
+    const enabled = booleanFlagValue(flags, 'enabled');
+    if (enabled !== undefined) body.enabled = enabled;
+    const secret = connectorSecret(flags);
+    if (secret !== null) body.secret = secret;
+    if (Object.keys(body).length === 0) {
+      throw usage('nothing to update: pass --label, --enabled, --auth-mode or a credential flag');
+    }
+
+    const cfg = requireConfig();
+    const result = await api(cfg, 'PATCH', `/v1/admin/connectors/${encodeURIComponent(id)}`, body);
+    if (result.status !== 200) throw requestFailure(`updating connector ${id}`, result);
+    const connector = result.data ?? {};
+    const webhookUrl =
+      connector.channel === undefined
+        ? null
+        : connectorWebhookUrl(cfg, connector.channel, connector.id ?? id);
+    if (MODE.json) {
+      emitJson(
+        {
+          ok: true,
+          connector,
+          ...(webhookUrl === null ? {} : { webhook_url: webhookUrl }),
+        },
+        MODE
+      );
+      return 0;
+    }
+    out(`Updated connector ${id}`);
+    out(`  secret        ${connector.secret_set ? 'stored sealed' : 'not set'}; it is never returned by the API`);
+    return 0;
+  }
+
+  if (sub === 'delete') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare connectors delete <id> [--yes]');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    if (flags.yes !== true) {
+      const proceed = await confirm(`Delete connector ${id}?`);
+      if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'DELETE', `/v1/admin/connectors/${encodeURIComponent(id)}`);
+    if (result.status !== 200 && result.status !== 204) {
+      throw requestFailure(`deleting connector ${id}`, result);
+    }
+    if (MODE.json) {
+      emitJson({ ok: true, id, deleted: true }, MODE);
+      return 0;
+    }
+    out(`Deleted connector ${id}`);
+    return 0;
+  }
+
+  throw usage(`unknown connectors subcommand "${sub}" (expected list|create|update|delete)`);
+}
+
+async function commandWebhooks(argv) {
+  const [sub = 'list', ...args] = argv;
+  if (sub === '--help' || sub === '-h') return printHelp('webhooks');
+  const { flags, rest } = parseArgv(args);
+  if (flags.help) return printHelp('webhooks');
+  assertCommandFlags(flags, 'webhooks');
+
+  if (sub === 'list') {
+    const cfg = requireConfig();
+    const result = await api(cfg, 'GET', '/v1/admin/webhooks');
+    if (result.status !== 200) throw requestFailure('listing webhooks', result);
+    const webhooks = Array.isArray(result.data?.webhooks) ? result.data.webhooks : [];
+    if (MODE.json) {
+      emitJson({ ok: true, webhooks }, MODE);
+      return 0;
+    }
+    if (webhooks.length === 0) {
+      out('No inbound webhooks configured.');
+      return 0;
+    }
+    out(`Webhooks (${webhooks.length})`);
+    for (const webhook of webhooks) {
+      const state = webhook.enabled ? ok('active') : muted('paused');
+      out(`  ${String(webhook.id).padEnd(22)} ${state.padEnd(8)} ${webhook.name ?? ''}`);
+    }
+    return 0;
+  }
+
+  if (sub === 'create') {
+    const name = stringFlag(flags, 'name') ?? 'webhook';
+    const body = { name };
+    const pathname = '/v1/admin/webhooks';
+    if (flags['dry-run'] === true) {
+      if (MODE.json) {
+        emitJson(
+          { ok: true, dry_run: true, request: { method: 'POST', path: pathname, body } },
+          MODE
+        );
+        return 0;
+      }
+      printDryRun(pathname, body);
+      return 0;
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'POST', pathname, body);
+    if (result.status !== 201 && result.status !== 200) {
+      throw requestFailure('creating the webhook', result);
+    }
+    const webhook = result.data ?? {};
+    if (MODE.json) {
+      emitJson({ ok: true, ...webhook }, MODE);
+      return 0;
+    }
+    out(`Created webhook ${webhook.id ?? ''}`);
+    out(`  name          ${webhook.name ?? name}`);
+    if (typeof webhook.secret === 'string' && webhook.secret !== '') {
+      out(`  signing secret (shown once): ${webhook.secret}`);
+      out(muted('  store it now; the deployment will not return it again'));
+    }
+    return 0;
+  }
+
+  if (sub === 'deliveries') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare webhooks deliveries <id>');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    const cfg = requireConfig();
+    const result = await api(cfg, 'GET', `/v1/admin/webhooks/${encodeURIComponent(id)}/deliveries`);
+    if (result.status !== 200) throw requestFailure(`reading deliveries for ${id}`, result);
+    const deliveries = Array.isArray(result.data?.deliveries) ? result.data.deliveries : [];
+    if (MODE.json) {
+      emitJson({ ok: true, deliveries }, MODE);
+      return 0;
+    }
+    if (deliveries.length === 0) {
+      out('No deliveries recorded.');
+      return 0;
+    }
+    out(JSON.stringify(deliveries, null, 2));
+    return 0;
+  }
+
+  if (sub === 'delete') {
+    const id = rest[0];
+    if (!id) throw usage('dakflare webhooks delete <id> [--yes]');
+    if (rest.length > 1) throw usage(`unexpected argument "${rest[1]}"`);
+    if (flags.yes !== true) {
+      const proceed = await confirm(`Delete webhook ${id}?`);
+      if (!proceed) throw new CliError('cancelled', 2, { error: 'cancelled' });
+    }
+    const cfg = requireConfig();
+    const result = await api(cfg, 'DELETE', `/v1/admin/webhooks/${encodeURIComponent(id)}`);
+    if (result.status !== 200 && result.status !== 204) {
+      throw requestFailure(`deleting webhook ${id}`, result);
+    }
+    if (MODE.json) {
+      emitJson({ ok: true, id, deleted: true }, MODE);
+      return 0;
+    }
+    out(`Deleted webhook ${id}`);
+    return 0;
+  }
+
+  throw usage(`unknown webhooks subcommand "${sub}" (expected list|create|delete|deliveries)`);
+}
+
+async function commandSendConnector(flags) {
+  const channel = stringFlag(flags, 'channel').toLowerCase();
+  if (!CONNECTOR_CHANNELS.includes(channel)) {
+    throw usage(`--channel must be one of ${CONNECTOR_CHANNELS.join(', ')}`);
+  }
+  const connectorId = stringFlag(flags, 'connector', { required: true });
+  requireFlags(flags, ['to', 'body']);
+  const to = stringFlag(flags, 'to', { required: true });
+  const body = stringFlag(flags, 'body', { required: true });
+  if (to === '') throw usage('--to must not be empty');
+  if (body.length === 0) throw usage('--body must not be empty');
+  if (body.length > MAX_BODY_CHARS) throw usage(`--body is limited to ${MAX_BODY_CHARS} characters`);
+
+  for (const smsOnly of ['device', 'idempotency-key', 'wait', 'until', 'no-wait']) {
+    if (flags[smsOnly] !== undefined) {
+      throw usage(`--${smsOnly} is only used by the SMS send path`);
+    }
+  }
+
+  const requestBody = { to, body };
+  const templateId = stringFlag(flags, 'template-id');
+  if (templateId !== undefined) requestBody.template_id = templateId;
+  const mediaUrl = stringFlag(flags, 'media-url');
+  if (mediaUrl !== undefined) requestBody.media_url = mediaUrl;
+  const commentId = stringFlag(flags, 'comment-id');
+  if (commentId !== undefined) requestBody.comment_id = commentId;
+  if (flags['human-agent-tag'] === true) requestBody.use_human_agent_tag = true;
+
+  const cfg = requireConfig();
+  const pathname = `/v1/channels/${encodeURIComponent(channel)}/${encodeURIComponent(connectorId)}/send`;
+  const result = await api(cfg, 'POST', pathname, requestBody);
+  if (result.status !== 200) throw requestFailure('sending the channel message', result);
+  const delivery = result.data ?? {};
+  const state = typeof delivery.state === 'string' ? delivery.state : 'UNKNOWN';
+  const passed = state === 'DELIVERED';
+  const verification = {
+    passed,
+    state,
+    terminal: state === 'DELIVERED' || state === 'FAILED_PERMANENT',
+    reason: delivery.errorCode ?? null,
+    next_command: null,
+  };
+
+  if (MODE.json) {
+    emitJson(
+      {
+        ok: true,
+        channel,
+        connector_id: connectorId,
+        to,
+        channel_message_id: delivery.channelMessageId ?? null,
+        state,
+        delivery,
+        verification,
+      },
+      MODE
+    );
+    return 0;
+  }
+
+  out('Sent through channel connector');
+  out(`  connector     ${connectorId} (${channel})`);
+  out(`  to            ${to}`);
+  out(`  state         ${state}`);
+  out(`  message       ${delivery.channelMessageId ?? 'not assigned'}`);
+  if (delivery.errorCode) out(`  reason        ${delivery.errorCode}`);
+  return 0;
+}
+
 /* ───────────────────────────── send ───────────────────────────── */
 
 function looksLikeE164(value) {
   return /^\+[1-9]\d{6,14}$/.test(value);
 }
 
+const CONNECTOR_CHANNELS = ['whatsapp', 'telegram', 'messenger', 'instagram'];
+
 async function commandSend(argv) {
   const { flags } = parseArgv(argv);
   if (flags.help) return printHelp('send');
   assertCommandFlags(flags, 'send');
+
+  const hasChannel = flags.channel !== undefined;
+  const hasConnector = flags.connector !== undefined;
+  if (hasChannel !== hasConnector) {
+    throw usage('--channel and --connector must be used together');
+  }
+  if (hasChannel) return commandSendConnector(flags);
+
   const json = MODE.json;
   const cfg = requireConfig();
 
@@ -3248,8 +3749,37 @@ const SUMMARY_BUILDERS = {
   pair: () => 'pairing code minted',
   devices: (data) => `${(data.devices ?? []).length} devices paired`,
   revoke: (data) => `revoked ${data.device_id ?? 'the device'}`,
-  send: (data) => (data.replayed ? 'already queued for that key' : 'queued for the radio'),
+  send: (data) =>
+    data.delivery
+      ? data.delivery.success === true
+        ? 'sent through the channel connector'
+        : 'the channel refused the message'
+      : data.replayed
+        ? 'already queued for that key'
+        : 'queued for the radio',
   status: (data) => `command is ${data.state ?? 'unknown'}`,
+  connectors: (data) =>
+    data.dry_run === true
+      ? 'dry run, nothing sent'
+      : data.connectors
+        ? `${(data.connectors ?? []).length} connectors`
+        : data.connector
+          ? `connector ${data.connector.id ?? ''} written`.trim()
+          : data.deleted === true
+            ? `connector ${data.id ?? ''} deleted`.trim()
+            : 'connectors',
+  webhooks: (data) =>
+    data.dry_run === true
+      ? 'dry run, nothing sent'
+      : data.webhooks
+        ? `${(data.webhooks ?? []).length} webhooks`
+        : data.deliveries
+          ? `${(data.deliveries ?? []).length} deliveries`
+          : data.secret
+            ? 'webhook created; secret shown once'
+            : data.deleted === true
+              ? `webhook ${data.id ?? ''} deleted`.trim()
+              : 'webhooks',
   audit: (data) => `${(data.entries ?? data.events ?? []).length} audit rows`,
   auth: (data) =>
     data.token
@@ -7181,8 +7711,10 @@ Usage: dakflare <command> [options]
   pair          mint a pairing code; --qr renders a terminal QR
   devices       list paired devices
   revoke        revoke one device (asks first; --yes to skip)
-  send          queue an SMS and follow it to the radio
+  send          queue an SMS, or send through a channel connector
   status        read one command's state; --wait follows it to the end
+  connectors    \`connectors list|create|update|delete\` channel credentials
+  webhooks      \`webhooks list|create|delete|deliveries\` inbound agent hooks
   up            provision the deployment: resources, deploy, owner, pairing
   auth          accounts, invites, agent tokens, approvals, and authority grants
   flows         \`flows apply\` and \`flows heal\` for v2 flow documents
@@ -7263,9 +7795,12 @@ Revokes a device in D1 and in its Durable Object. Asks for confirmation;
 --yes skips it for automation. This is irreversible: the phone must pair again.`,
 
   send: `Usage: dakflare send --to <e164> --body <text> [--device <id>] [--wait [duration]] [--until <state>] [--no-wait] [--idempotency-key <k>] [--json]
+       dakflare send --channel <whatsapp|telegram|messenger|instagram> --connector <id> --to <destination> --body <text> [options]
 
-Queues one outbound SMS and prints the command id and its state.
+Queues one outbound SMS and prints the command id and its state, or sends one
+message through a channel connector and prints the platform result.
 
+SMS options:
   --to <e164>     recipient, for example +8801540196080
   --body <text>   message text (max ${MAX_BODY_CHARS} characters)
   --device <id>   send through this device; omitted when exactly one is paired
@@ -7278,13 +7813,65 @@ Queues one outbound SMS and prints the command id and its state.
                   instead of sending a second SMS. The reply carries replayed:true
                   when that happened, and the exit code is still success.
 
-By default the command is followed for up to 10 s, so exit 0 means the radio
+Connector options (require both --channel and --connector):
+  --to <dest>     phone number, Page-scoped id or Telegram chat id
+  --template-id   WhatsApp template id
+  --media-url     media URL to attach
+  --human-agent-tag
+                  Messenger HUMAN_AGENT message outside the 24h window
+  --comment-id    Instagram private reply to a comment
+
+By default the SMS command is followed for up to 10 s, so exit 0 means the radio
 accepted it, 1 means FAILED or EXPIRED, and 75 means it was still in flight. With
 --no-wait, exit 0 means only that the deployment queued it. The envelope's
 verification.passed is true only on DELIVERED: SENT means the radio accepted it,
 not that it arrived.
 
   For a body that begins with "-", use --body="…".`,
+
+  connectors: `Usage: dakflare connectors <list|create|update|delete> [options]
+
+A connector is one external platform account with its credential sealed at rest.
+The credential is never returned after it is written.
+
+  list                          id, channel, enabled state, account, label, secret
+                                presence and the webhook URL
+  create --channel <ch> --account-id <id> --label <name> [options]
+                                whatsapp|telegram|messenger|instagram
+  update <id> [options]         change the label, enabled state, auth mode or credential
+  delete <id> [--yes]           remove the connector and its Durable Object
+
+Credential flags, all sealed at rest and never printed:
+  --access-token <tok>          Meta access token, or WhatsApp Cloud token
+  --bot-token <tok>             Telegram bot token
+  --app-secret <sec>            Meta app secret
+  --verify-token <tok>          Meta webhook verify token
+  --secret-token <tok>          Telegram webhook secret token
+
+  --auth-mode <mode>            platform auth mode
+  --enabled true|false          create and update
+  --dry-run                     create only: print the request with credentials
+                                redacted, and send nothing
+
+The webhook URL is built from the Worker URL and the connector id. It is not
+stored in D1; the API never returns it.`,
+
+  webhooks: `Usage: dakflare webhooks <list|create|delete|deliveries> [options]
+
+Inbound agent webhooks. A POST to /v1/webhooks/:id is signed with the hook's
+secret and runs one agent turn. The signing secret is returned only by create.
+
+  list                          id, enabled state and name
+  create [--name <name>]        mint a hook; prints the signing secret once
+  delete <id> [--yes]           remove the hook and its deliveries
+  deliveries <id>               the last 20 deliveries, newest first
+
+  --name <name>                 create: display name, default "webhook"
+  --dry-run                     create: print the request and send nothing
+  --yes                         delete: skip the confirmation prompt
+
+Store the signing secret when create prints it. The deployment keeps a sealed
+copy for verification and will not return it again.`,
 
   status: `Usage: dakflare status <command-id> [--device <id>] [--wait [duration]] [--until <state>] [--json]
 
@@ -7626,6 +8213,8 @@ const COMMANDS = {
   revoke: commandRevoke,
   send: commandSend,
   status: commandStatus,
+  connectors: commandConnectors,
+  webhooks: commandWebhooks,
   up: commandUp,
   capabilities: commandCapabilities,
   describe: commandDescribe,

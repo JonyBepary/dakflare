@@ -33,12 +33,39 @@ owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questio
 | Command | Flags | What it does |
 |---|---|---|
 | `send` | `--to --body --device --no-wait --wait --until --idempotency-key` | queue an SMS and follow it to the radio |
+| `send --channel --connector` | `--template-id --human-agent-tag --comment-id --media-url` | send one message through an enabled connector instead of the radio |
 | `status <id>` | `--device --wait --until` | read one command's state, or follow it |
 | `audit` | `--tail --actor --limit` | read the audit log |
 
 A send is asynchronous. `send` waits 10 s by default and exits from the outcome; `--no-wait` returns
 as soon as the deployment queues it. Exit `75` means still in flight: check `status`, never send
 again. `SENT` is not delivery; `DELIVERED` is. Pass `--idempotency-key` whenever a retry is possible.
+
+`--channel` plus `--connector` posts to `/v1/channels/<channel>/<id>/send` and never touches the
+radio. `--template-id` applies to WhatsApp, `--human-agent-tag` to Messenger, and `--comment-id` to
+an Instagram comment reply. Without `--channel`, `send` behaves exactly as before.
+
+### Channels
+
+A connector is one external platform account with its credential sealed at rest
+(AES-256-GCM). The credential is never returned after it is written, so `list` reports only whether
+one is set and when it last changed.
+
+| Command | Flags | What it does |
+|---|---|---|
+| `connectors list` | none | id, channel, account, label, secret presence, enabled state and the webhook URL |
+| `connectors create` | `--channel --account-id --label --auth-mode --access-token --bot-token --app-secret --verify-token --secret-token --enabled --dry-run` | create `whatsapp`, `telegram`, `messenger` or `instagram` |
+| `connectors update <id>` | `--label --enabled --auth-mode` and the credential flags | change metadata or rotate a credential; channel and account id are immutable |
+| `connectors delete <id>` | `--yes` | remove the connector and its Durable Object |
+| `webhooks list` | none | inbound agent hooks |
+| `webhooks create` | `--name --dry-run` | mint a hook and print its signing secret once |
+| `webhooks delete <id>` | `--yes` | remove a hook and its deliveries |
+| `webhooks deliveries <id>` | none | the last 20 deliveries, newest first |
+
+`connectors create --dry-run` prints the request with every credential redacted and sends nothing.
+The webhook URL is built from the Worker URL and the connector id; the API never stores or returns
+it. Unlike a connector secret, a webhook signing secret is printed by `create` and must be stored
+then, because the deployment keeps only a sealed copy for verification.
 
 ### Accounts and the agent control plane
 
