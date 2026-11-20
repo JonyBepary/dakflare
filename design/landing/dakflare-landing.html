@@ -2752,7 +2752,7 @@ border:1px solid var(--line);border-radius:999px;padding:7px 12px;box-shadow:var
       <div class="run-grid">
         <div class="run-copy">
           <h2>Self-host on Cloudflare for $0/month.</h2>
-          <p class="body">You don’t need a VPS, a telecom account, or a custom domain. One command builds the console and ships the Worker, the D1 database and the Durable Object queue to Cloudflare’s free tier.</p>
+          <p class="body">You don’t need a VPS, a telecom account, or a custom domain. One installer and one wizard build the console and ship the Worker, the D1 database and the Durable Object queue to Cloudflare’s free tier.</p>
 
           <ul class="reqs">
             <li><strong>A Cloudflare account.</strong> The free tier is the target, and the whole design fits inside its 10 ms CPU budget.</li>
@@ -2762,25 +2762,16 @@ border:1px solid var(--line);border-radius:999px;padding:7px 12px;box-shadow:var
 
           <details class="all">
             <summary>The whole sequence, in one block</summary>
-            <pre class="mono"><span class="cm"># 1 · the edge</span>
-git clone https://github.com/JonyBepary/dakflare
-cd dakflare/worker && npm install
-cp wrangler.template.toml wrangler.toml
-cp cloudflare.config.template.ts cloudflare.config.ts
-npx wrangler d1 create sms_gateway
-npx wrangler kv namespace create KV
-npx wrangler d1 migrations apply sms_gateway --remote
+            <pre class="mono"><span class="cm"># 1 · install the checkout, CLI and dependencies</span>
+curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
+cd dakflare
 
-<span class="cm"># 2 · the three secrets</span>
-npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
-npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
-npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text
+<span class="cm"># 2 · one wizard: toolchain, secrets, optional star, deploy</span>
+dakflare setup --deploy --email you@example.com
 
-<span class="cm"># 3 · deploy and point the CLI at it</span>
-npm run deploy
-npm install -g .
-dakflare init
-dakflare doctor</pre>
+<span class="cm"># 3 · verify, then pair the phone</span>
+dakflare doctor
+dakflare pair --qr</pre>
           </details>
         </div>
 
@@ -2791,36 +2782,29 @@ dakflare doctor</pre>
           </div>
 
           <div class="term-group">
-            <p class="term-k"><span class="c">#</span> 1 · create the edge</p>
-            <pre class="mono" tabindex="0" aria-label="Commands to create the edge">cd worker &amp;&amp; npm install
-cp wrangler.template.toml wrangler.toml
-cp cloudflare.config.template.ts cloudflare.config.ts
-npx wrangler d1 create sms_gateway
-npx wrangler kv namespace create KV
-npx wrangler d1 migrations apply sms_gateway --remote</pre>
-            <p class="term-checkpoint mono"><span>↳ checkpoint</span> paste the <code>database_id</code> and the KV <code>id</code> into <code>wrangler.toml</code> before step 02.</p>
+            <p class="term-k"><span class="c">#</span> 01 · install</p>
+            <pre class="mono" tabindex="0" aria-label="Install the checkout, CLI and dependencies">curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
+cd dakflare</pre>
+            <p class="term-checkpoint mono"><span>↳ note</span> on a terminal the installer starts <code>dakflare setup</code>; <code>--no-setup</code> skips it.</p>
           </div>
 
           <div class="term-group">
-            <p class="term-k"><span class="c">#</span> 2 · the three secrets</p>
-            <pre class="mono" tabindex="0" aria-label="Commands to set the three secrets">npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text
-npx cf workers secrets update BETTER_AUTH_SECRET --worker dakflare-worker --type secret_text
-npx cf workers secrets update AUTH_PEPPER --worker dakflare-worker --type secret_text</pre>
+            <p class="term-k"><span class="c">#</span> 02 · setup</p>
+            <pre class="mono" tabindex="0" aria-label="Run the first-run setup wizard">dakflare setup --deploy --email you@example.com</pre>
+            <p class="term-checkpoint mono"><span>↳ does</span> dependencies, <code>.dev.vars</code>, cf/gh checks, an optional GitHub star, then <code>up</code>.</p>
           </div>
 
           <div class="term-group">
-            <p class="term-k"><span class="c">#</span> 3 · deploy, then pair the CLI</p>
-            <pre class="mono" tabindex="0" aria-label="Commands to deploy and pair the CLI">npm run deploy
-npm install -g .
-dakflare init
-dakflare doctor</pre>
+            <p class="term-k"><span class="c">#</span> 03 · verify and pair</p>
+            <pre class="mono" tabindex="0" aria-label="Verify the deployment and pair the phone">dakflare doctor
+dakflare pair --qr</pre>
           </div>
 
-          <p class="term-foot"><b>then</b> · dakflare auth bootstrap --email you@example.com</p>
+          <p class="term-foot"><b>then</b> · redeem the owner invite in a browser and create a passkey</p>
         </div>
       </div>
 
-      <p class="run-after">Run <code>dakflare auth bootstrap --email you@example.com</code> to print a one-time owner invite. Redeem it in a browser, create a passkey, then scan the QR code with the Android app to pair the phone. <code>dakflare doctor</code> checks the config, the edge, the schema, migrations, bindings and the handset.</p>
+      <p class="run-after"><code>dakflare setup</code> prints the one-time owner invite after it deploys. Redeem it in a browser, create a passkey, then scan the QR code from <code>dakflare pair --qr</code> with the Android app. <code>dakflare doctor</code> checks the config, the edge, the schema, migrations, bindings and the handset.</p>
     </div>
   </section>
 
