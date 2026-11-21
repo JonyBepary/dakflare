@@ -35,12 +35,18 @@ ADMIN_TOKEN="dev-admin-token"
 # Absent => /api/auth and /v1/auth/* answer 503; admin routes are unaffected.
 # BETTER_AUTH_SECRET=""
 #
-# The Worker's own origin. Used for trustedOrigins, the WebAuthn rpId (its
-# hostname) and the Secure-cookie decision (https => secure). Local dev MUST be
-# http here or the browser refuses the __Secure- session cookie.
+# The Worker's own origin. Local dev MUST be http here or the browser refuses
+# the __Secure- session cookie. Production does not need it: Better Auth derives
+# the origin from each request, and `dakflare up` deliberately drops a localhost
+# value instead of shipping it. Set it in production only to force a canonical
+# public origin.
 AUTH_BASE_URL="http://127.0.0.1:8787"
 # Comma-separated extra origins allowed to call /api/auth (the console's origin).
 AUTH_TRUSTED_ORIGINS="http://127.0.0.1:8787"
-# Pin the WebAuthn rpId. Defaults to AUTH_BASE_URL's hostname; production pins
-# sohelahmedjony.workers.dev (AUTH_PLAN §3). Changing it invalidates passkeys.
+# Optional WebAuthn rpId override. Unset, it is derived from AUTH_BASE_URL's
+# host, then from the host of the request: `<account>.workers.dev` for a
+# workers.dev deployment (the worker label is not a registrable domain, so a
+# browser rejects it) and the full host for a custom domain. Passkeys are bound
+# to the rpId they were created under, so changing either the override or the
+# hostname invalidates them.
 # AUTH_RP_ID="sohelahmedjony.workers.dev"

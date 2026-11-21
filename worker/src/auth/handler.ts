@@ -235,7 +235,7 @@ async function clearFromVerifyResponse(res: Response, env: Env): Promise<void> {
 }
 
 export async function handleAuthRequest(req: Request, env: Env): Promise<Response> {
-  const auth = getAuth(env);
+  const auth = getAuth(env, req);
   if (auth === null) {
     return Response.json({ error: "auth_unavailable" }, { status: 503 });
   }

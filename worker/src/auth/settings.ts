@@ -46,9 +46,6 @@ export const TOTP_PERIOD = 30;
 /** Seven days. Sensitive actions use `requireRole({ fresh: true })` and hit D1. */
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
 
-/** The rpId AUTH_PLAN §3 pins. Moving to a custom domain invalidates passkeys. */
-const DEFAULT_RP_ID = "sohelahmedjony.workers.dev";
-
 type Auth = ReturnType<typeof buildAuth>;
 
 function trustedOrigins(env: Env): string[] {
@@ -62,25 +59,68 @@ function trustedOrigins(env: Env): string[] {
   return origins;
 }
 
-function rpId(env: Env): string {
+/**
+ * The WebAuthn rpId for a host.
+ *
+ * `workers.dev` is on the Public Suffix List, so `<account>.workers.dev` is the
+ * registrable domain and `<worker>.<account>.workers.dev` is not. A browser
+ * refuses a ceremony whose rpId is the full worker host, so a fresh install
+ * must use the account subdomain. A custom domain keeps its full host
+ * (`sms.example.com`), which is itself a registrable domain.
+ */
+export function hostRpId(hostname: string): string {
+  let host = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    if (end !== -1) host = host.slice(1, end);
+  } else {
+    const colon = host.indexOf(":");
+    if (colon !== -1) host = host.slice(0, colon);
+  }
+  const labels = host.split(".");
+  if (labels.length >= 3 && labels.slice(-2).join(".") === "workers.dev") {
+    return labels.slice(-3).join(".");
+  }
+  return host;
+}
+
+/**
+ * The rpId this deployment signs passkeys under.
+ *
+ * Precedence: the operator's pin, then AUTH_BASE_URL's host, then the host of
+ * the request being served. The last step is what makes a fresh install work:
+ * `dakflare up` deliberately does not ship a local AUTH_BASE_URL, and there is
+ * no deployment URL to bake in at build time (one pack serves every account).
+ * Without it the Worker would fall back to whichever domain happened to be
+ * pinned when the project was written, and passkeys would fail everywhere else.
+ */
+export function resolveRpId(env: Env, requestUrl?: string): string | undefined {
   if (env.AUTH_RP_ID !== undefined && env.AUTH_RP_ID !== "") return env.AUTH_RP_ID;
   const base = env.AUTH_BASE_URL?.trim();
   if (base !== undefined && base !== "") {
     try {
-      return new URL(base).hostname;
+      return hostRpId(new URL(base).hostname);
     } catch {
-      // fall through to the pinned default
+      // fall through to the request
     }
   }
-  return DEFAULT_RP_ID;
+  if (requestUrl !== undefined) {
+    try {
+      return hostRpId(new URL(requestUrl).hostname);
+    } catch {
+      // fall through to the plugin's own default
+    }
+  }
+  return undefined;
 }
 
-function buildAuth(env: Env) {
+function buildAuth(env: Env, request?: Request) {
   const baseURL = env.AUTH_BASE_URL?.trim() || undefined;
   // Secure cookies unless we are explicitly on plain http (local `wrangler dev`).
   // The prefix is load-bearing: Better Auth adds `__Secure-` when this is true,
   // and a browser will not store that over http.
   const useSecureCookies = baseURL === undefined ? true : baseURL.startsWith("https://");
+  const rpID = resolveRpId(env, request?.url);
 
   return betterAuth({
     appName: "DakFlare",
@@ -185,7 +225,7 @@ function buildAuth(env: Env) {
 
     plugins: [
       passkey({
-        rpID: rpId(env),
+        ...(rpID === undefined ? {} : { rpID }),
         rpName: "DakFlare",
       }),
       twoFactor({
@@ -228,19 +268,31 @@ function buildAuth(env: Env) {
  */
 let cached: { key: string; auth: Auth } | null = null;
 
-export function getAuth(env: Env): Auth | null {
+export function getAuth(env: Env, request?: Request): Auth | null {
   if (env.BETTER_AUTH_SECRET === undefined || env.BETTER_AUTH_SECRET === "") return null;
+  // A deployment can answer on more than one host (its workers.dev name and a
+  // custom domain). Passkeys are bound to the rpId they were created under, so
+  // the instance is cached per origin rather than per Worker.
+  let origin = "";
+  if (request !== undefined) {
+    try {
+      origin = new URL(request.url).origin;
+    } catch {
+      origin = "";
+    }
+  }
   const key = [
     env.BETTER_AUTH_SECRET,
     env.AUTH_BASE_URL ?? "",
     env.AUTH_TRUSTED_ORIGINS ?? "",
     env.AUTH_RP_ID ?? "",
+    origin,
     // The hasher pair closes over `env`; a pepper rotation must not leave a
     // cached instance holding the old ring.
     env.AUTH_PEPPER ?? "",
   ].join("\u0000");
   if (cached !== null && cached.key === key) return cached.auth;
-  const auth = buildAuth(env);
+  const auth = buildAuth(env, request);
   cached = { key, auth };
   return auth;
 }

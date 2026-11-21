@@ -39,7 +39,7 @@ Every device request is authenticated with asymmetric **ECDSA P-256** (`worker/s
 ## Operator Authentication & Sessions
 
 Registration is strictly **invite-only** (no public sign-up). Four sign-in factors are supported:
-1. **Passkey (WebAuthn)** — primary, phishing-resistant; `AUTH_RP_ID` pinned to the deployment hostname.
+1. **Passkey (WebAuthn)** — primary, phishing-resistant; the rpId is derived from the deployment hostname (`<account>.workers.dev` for a workers.dev deployment, the full host for a custom domain) unless `AUTH_RP_ID` overrides it.
 2. **TOTP** — optional second factor (requires a passkey to enroll); disabling deletes the secret and clears all pending challenges.
 3. **Password** — optional; defaults to `AUTH_PASSWORD_MODE=client-derived` (210,000-round PBKDF2 in the browser) to stay inside Workers Free 10 ms CPU limits.
 4. **Magic Link** — advertised only when `RESEND_API_KEY` is configured; consumed exclusively via button `POST /v1/auth/magic-link/consume` so email scanners cannot burn links.
