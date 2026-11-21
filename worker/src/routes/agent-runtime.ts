@@ -38,7 +38,7 @@ import {
   readIdempotencyKey,
   type MintedTicket,
 } from "../lib/agent-runtime";
-import { AGENT_SCHEMA_VERSION } from "../agent/runtime";
+import { AGENT_SCHEMA_VERSION } from "../lib/agent-schema";
 import {
   actorHashFor,
   attachmentKind,
