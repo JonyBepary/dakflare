@@ -54,6 +54,9 @@ and `/v1/admin/agent/*` through its `AGENT_SVC` service binding. The agent Worke
 session cookie or `BETTER_AUTH_SECRET`; a tool that needs to send an SMS asks the main Worker
 through `CORE`, so scopes, limiters and audits still apply.
 
+The reasons are recorded in `docs/history/AGENT_WORKER_SPLIT.md`, including the two defects the
+move exposed.
+
 **Deploy the agent Worker first.** `AGENT_SVC` names it, and a deploy that binds a Worker which
 does not exist yet fails. `dakflare up` and the pack do this in order; a manual deploy is:
 

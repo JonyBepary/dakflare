@@ -6,6 +6,7 @@ written, not the tree as it is.
 
 | File | What it was |
 |---|---|
+| `AGENT_WORKER_SPLIT.md` | why `AssistantAgent` moved to its own Worker, and what it cost |
 | `AUTH_PLAN.md` | the authentication design: invites, passkeys, TOTP, password, magic link |
 | `CLI_PLAN.md` | the zero-dependency CLI contract |
 | `WAVE2_NATIVE_SMS.md` | the native SMS wave plan |
