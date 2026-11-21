@@ -333,7 +333,37 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
     }
   }
 
-  const res = await auth.handler(req);
+  // The verification POSTs use the same cached endpoint objects as the GETs.
+  // `auth.api` bypasses the router's media-type gate, so enforce the JSON
+  // contract here; parsing the bounded clone preserves the original body for
+  // the router fallback. The post-processing below (second factor, step-up,
+  // audit) still runs on the returned Response.
+  let direct: Response | null = null;
+  if (
+    req.method.toUpperCase() === "POST" &&
+    (relative === "/passkey/verify-authentication" || relative === "/passkey/verify-registration")
+  ) {
+    const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+    if (contentType.includes("application/json")) {
+      const parsed = await readJsonBoundedResult(req.clone(), MAX_BODY_BYTES);
+      if (parsed.ok) {
+        direct =
+          relative === "/passkey/verify-authentication"
+            ? await auth.api.verifyPasskeyAuthentication({
+                headers: req.headers,
+                body: parsed.value as { response: never },
+                asResponse: true,
+              })
+            : await auth.api.verifyPasskeyRegistration({
+                headers: req.headers,
+                body: parsed.value as { response: never },
+                asResponse: true,
+              });
+      }
+    }
+  }
+
+  const res = direct ?? (await auth.handler(req));
 
   if (relative === "/two-factor/verify-totp" && res.ok) {
     await clearFromVerifyResponse(res, env);
