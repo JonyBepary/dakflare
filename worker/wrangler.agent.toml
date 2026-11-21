@@ -25,8 +25,11 @@ database_id = "8d88069e-71cf-49a2-ba33-c150b02246b7"
 binding = "MEDIA_BUCKET"
 bucket_name = "dakflare-media"
 
-[ai]
-binding = "AI"
+# No `[ai]` binding here on purpose. Workers AI is remote-only, so a dev session
+# either opens a remote proxy (which needs CLOUDFLARE_API_TOKEN, and CI holds no
+# credentials) or refuses to start with `remote = false`. Nothing local can call
+# it anyway: the harness points chat at its OpenAI-compatible model stub. The
+# deployed agent Worker gets AI from `agent/cloudflare.config.ts`.
 
 [[services]]
 binding = "CORE"
