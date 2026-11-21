@@ -28,13 +28,6 @@ class_name = "AuthGuard"
 name = "AUTHORITY_GUARD"
 class_name = "AuthorityGuard"
 
-# The fourth Durable Object: the agent runtime (pass 3, stage A). One instance,
-# whose name is pinned server-side as `assistant`; `/agents/*` is rewritten to it
-# and `AGENT_RUNTIME=off` answers 503 without touching the object.
-[[durable_objects.bindings]]
-name = "ASSISTANT"
-class_name = "AssistantAgent"
-
 # The fifth Durable Object: one per external channel account. Addressed by
 # `getByName(\`${channel}:${account_id}\`)`, so five WhatsApp numbers are five isolated objects
 # rather than one hot one. Holds dedupe, the 24-hour window, and per-account token buckets.
@@ -58,10 +51,6 @@ type = "durable-object"
 storage = "sqlite"
 
 [exports.AuthorityGuard]
-type = "durable-object"
-storage = "sqlite"
-
-[exports.AssistantAgent]
 type = "durable-object"
 storage = "sqlite"
 
@@ -202,6 +191,11 @@ directory = "public"
 
 [triggers]
 crons = ["17 3 * * *", "*/5 * * * *"]
+
+# Split agent Worker (AssistantAgent + MCP + agent conversation routes).
+[[services]]
+binding = "AGENT_SVC"
+service = "dakflare-agent-worker"
 
 [observability]
 enabled = true

@@ -31,7 +31,7 @@ import {
 } from "../lib/authority";
 import { verifyApplyHandle } from "../lib/apply-handle";
 import { AUTHORITY_GUARD_OBJECT_NAME } from "../authority-guard";
-import { verifyDeploymentTotp } from "../mcp/elicitation";
+import { verifyDeploymentTotp } from "../lib/totp";
 
 /** What an approver needs to render the menu, without a second call. */
 function describeApproval(approval: ApprovalRecord): Record<string, unknown> {

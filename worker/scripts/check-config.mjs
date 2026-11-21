@@ -44,6 +44,7 @@ function bindingNames(file) {
       section === "r2_buckets" ||
       section === "queues.producers" ||
       section === "workflows" ||
+      section === "services" ||
       section === "ai"
     ) {
       const m = /^binding\s*=\s*"([^"]+)"/.exec(line);
@@ -206,7 +207,9 @@ function durableObjects(file) {
       }
     }
     if (exportName !== null && /^type\s*=\s*"durable-object"/.test(line)) {
-      classes.add(exportName);
+      if (!/^state\s*=\s*"deleted"/m.test(text.slice(text.indexOf(line), text.indexOf(line) + 200))) {
+        classes.add(exportName);
+      }
     }
     if (migration !== null) {
       const tag = /^tag\s*=\s*"([^"]+)"/.exec(line);
@@ -220,7 +223,8 @@ function durableObjects(file) {
 
   // TypeScript carriers.
   for (const m of text.matchAll(/^\s{2,}([A-Za-z][A-Za-z0-9_]*):\s*exports\.durableObject\(/gm)) {
-    classes.add(m[1]);
+    const context = text.slice(m.index, m.index + 160);
+    if (!/state:\s*"deleted"/.test(context)) classes.add(m[1]);
   }
   for (const m of text.matchAll(
     /^\s{2,}([A-Z][A-Z0-9_]*):\s*bindings\.durableObject\(\{([\s\S]*?)\}\)/gm

@@ -18,6 +18,7 @@ import { handleHealth } from "../routes/health";
 import { handleAgentDiagnose, handleAgentTelemetry, flowRunIdOf } from "../routes/agent";
 import { handleWorkflowGet, handleWorkflowPut } from "../routes/workflows";
 import { handleSend } from "../routes/send";
+import { coreFetch } from "../lib/core";
 import {
   acceptCreateRule,
   stageAssistantProposal,
@@ -92,6 +93,11 @@ export function realActDispatch(): ActDispatch {
       return outcome.ok ? Response.json(outcome.body) : outcome.response;
     },
     async sendSms(body, env, actor) {
+      // The split agent Worker has no DEVICE namespace. Its CORE binding calls
+      // the main Worker's /v1/sms/send, which owns the device gate.
+      if (env.CORE !== undefined) {
+        return coreFetch(env, "/v1/sms/send", { method: "POST", body });
+      }
       return handleSend(jsonRequest("/v1/sms/send", "POST", body), env, actor as AdminActor);
     },
     async deployFlow(flowId, body, env, actor) {
@@ -113,6 +119,11 @@ export function buildAgentTools(dispatch: ActDispatch = realActDispatch()): Agen
       kind: "read",
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async execute(_input, ctx) {
+        // In the split Worker, health must describe the main deployment, not
+        // this script's deliberately smaller binding set.
+        if (ctx.env.CORE !== undefined) {
+          return fromResponse(await coreFetch(ctx.env, "/v1/admin/health"));
+        }
         return fromResponse(await handleHealth(ctx.env));
       },
     },

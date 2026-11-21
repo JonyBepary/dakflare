@@ -51,13 +51,14 @@ export default defineConfig({
 		 * `storage: "sqlite"` matches the deployed backend exactly.
 		 */
 		exports: {
+			// Moved to dakflare-agent-worker; retire the old namespace explicitly.
+			AssistantAgent: exports.durableObject({ state: "deleted" }),
 			DeviceGateway: exports.durableObject({ storage: "sqlite" }),
 			// The single globally named failed-auth counter (lib/auth-limits.ts).
 			AuthGuard: exports.durableObject({ storage: "sqlite" }),
 			// The single globally named authority-grant expiry timer (v6.1 P0).
 			AuthorityGuard: exports.durableObject({ storage: "sqlite" }),
 			// The agent runtime (pass 3, stage A): one pinned `assistant` instance.
-			AssistantAgent: exports.durableObject({ storage: "sqlite" }),
 			// One per external channel account, addressed by `${channel}:${account_id}`.
 			ChannelConnection: exports.durableObject({ storage: "sqlite" }),
 			// The single globally named scheduled-send pacer (D1 is the queue).
@@ -171,6 +172,7 @@ export default defineConfig({
 
 			// ── Workers AI (v7.0) ────────────────────────────────────────────────
 			AI: bindings.ai(),
+			AGENT_SVC: bindings.worker({ worker: "dakflare-agent-worker" }),
 
 			// ── Durable Object ──────────────────────────────────────────────────
 			DEVICE: bindings.durableObject({
@@ -184,10 +186,6 @@ export default defineConfig({
 			AUTHORITY_GUARD: bindings.durableObject({
 				worker: "dakflare-worker",
 				exportName: "AuthorityGuard",
-			}),
-			ASSISTANT: bindings.durableObject({
-				worker: "dakflare-worker",
-				exportName: "AssistantAgent",
 			}),
 			CHANNEL_CONN: bindings.durableObject({
 				worker: "dakflare-worker",

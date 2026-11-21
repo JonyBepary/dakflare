@@ -495,11 +495,20 @@ export async function readConversationMessages(
         ? stripAttachmentBlock(raw, attachmentNames)
         : raw;
     if (text.trim() === "") continue;
+    // Sessions returns Date for rows written through append(), but an
+    // imported row can come back as the ISO string SQLite stored. Accept both.
+    const createdAt = message.createdAt;
+    const at =
+      createdAt instanceof Date
+        ? createdAt.toISOString()
+        : typeof createdAt === "string"
+          ? new Date(createdAt).toISOString()
+          : new Date().toISOString();
     readable.push({
       id: message.id,
       role,
       text,
-      at: message.createdAt?.toISOString() ?? new Date().toISOString(),
+      at,
     });
   }
   return {

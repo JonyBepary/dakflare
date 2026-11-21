@@ -74,11 +74,8 @@ import {
   handleDeviceApprovalReject,
   handleDeviceApprovals,
 } from "./routes/device-approvals";
-import { handleStreamableMcp, mcpDeploymentAudience } from "./mcp/http";
-import { handleMcpRequest } from "./mcp/server";
 import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
-import { routeAgentRequest } from "agents/routing";
-import { AssistantAgent } from "./agent/runtime";
+import type { AssistantAgent } from "./agent/runtime";
 import {
   ASSISTANT_OBJECT_NAME,
   assertAssistantRoute,
@@ -93,10 +90,15 @@ import {
   purgeExpiredAttachments,
   r2BlobStore,
 } from "./agent/attachments";
-import { handleAgentRuntimeRead, handleAgentSay,
- handleAgentTicketMint, handleAutonomyEnable, handleAutonomyRead, handleAutonomyRevoke,
- handleAgentConversationRead, handleAgentConversationClear,
- handleAgentAttachmentUpload, handleAgentAttachmentList, handleAgentAttachmentDelete } from "./routes/agent-runtime";
+import {
+  handleAgentTicketMint,
+  handleAutonomyEnable,
+  handleAutonomyRead,
+  handleAutonomyRevoke,
+  handleAgentAttachmentUpload,
+  handleAgentAttachmentList,
+  handleAgentAttachmentDelete,
+} from "./routes/agent-runtime";
 import {
   handleAgentDiagnose,
   handleAgentSynthesize,
@@ -173,7 +175,7 @@ import {
 import { handleTelegramRegister } from "./routes/telegram-register";
 import type { NormalizedChannelEvent } from "./channels/connection-do";
 
-export { DeviceGateway, AuthGuard, AuthorityGuard, AssistantAgent, Scheduler };
+export { DeviceGateway, AuthGuard, AuthorityGuard, Scheduler };
 
 /** HttpOnly session cookie carrying the dashboard's admin session. */
 const SESSION_COOKIE = "dakflare_admin";
@@ -193,6 +195,10 @@ export interface Env {
    * type-checks; `/agents/*` answers 503 until `AGENT_RUNTIME` is `on`.
    */
   ASSISTANT?: DurableObjectNamespace<AssistantAgent>;
+  /** Service binding to the split agent Worker (main Worker only). */
+  AGENT_SVC?: Fetcher;
+  /** Service binding to the main Worker (agent Worker only). */
+  CORE?: Fetcher;
   /**
    * `on` enables the agent runtime's WebSocket surface; anything else (including
    * absent) makes `/agents/*` answer `503 {error:"agent_runtime_off"}` while the
@@ -450,6 +456,48 @@ async function withAdmin(
  * negotiate this endpoint. It is the same credential the CLI holds, and the
  * `agent_tokens` table is what an OAuth front door would read anyway.
  */
+function actorHeaders(req: Request, actor: AdminActor): Headers {
+  const headers = new Headers(req.headers);
+  headers.delete("x-dakflare-actor");
+  headers.delete("x-dakflare-user-id");
+  headers.delete("x-dakflare-actor-role");
+  headers.delete("x-dakflare-agent-token-id");
+  headers.delete("x-dakflare-agent-device-id");
+  headers.delete("x-dakflare-agent-scopes");
+  headers.delete("x-dakflare-session-id");
+  headers.set("x-dakflare-actor", actor.label);
+  headers.set("x-dakflare-actor-role", actor.role);
+  if (actor.userId !== null) headers.set("x-dakflare-user-id", actor.userId);
+  if (actor.agentTokenId !== undefined) headers.set("x-dakflare-agent-token-id", actor.agentTokenId);
+  if (actor.agentDeviceId !== undefined && actor.agentDeviceId !== null) {
+    headers.set("x-dakflare-agent-device-id", actor.agentDeviceId);
+  }
+  if (actor.agentScopes !== undefined) headers.set("x-dakflare-agent-scopes", actor.agentScopes.join(","));
+  if (actor.sessionId !== undefined) headers.set("x-dakflare-session-id", actor.sessionId);
+  headers.set("x-dakflare-public-host", new URL(req.url).host);
+  return headers;
+}
+
+async function forwardToAgent(
+  req: Request,
+  env: Env,
+  path: string,
+  actor: AdminActor
+): Promise<Response> {
+  if (env.AGENT_SVC === undefined) {
+    return Response.json({ error: "agent_runtime_off" }, { status: 503 });
+  }
+  const method = req.method.toUpperCase();
+  const body = method === "GET" || method === "HEAD" ? undefined : req.body;
+  return env.AGENT_SVC.fetch(
+    new Request(`https://agent${path}`, {
+      method: req.method,
+      headers: actorHeaders(req, actor),
+      body,
+    })
+  );
+}
+
 async function handleMcpRoute(req: Request, env: Env, pathname: string): Promise<Response> {
   const bearer = readBearer(req);
   if (bearer === null) return mcpChallenge(req, "missing bearer token");
@@ -479,10 +527,15 @@ async function handleMcpRoute(req: Request, env: Env, pathname: string): Promise
     agentScopes: token.scopes,
   };
 
-  if (pathname === "/v1/mcp") {
-    return handleMcpRequest(req, env, actor);
+  if (env.AGENT_SVC === undefined) {
+    return Response.json({ error: "agent_runtime_off" }, { status: 503 });
   }
-  return handleStreamableMcp(req, env, actor, mcpDeploymentAudience(env, req));
+  const headers = actorHeaders(req, actor);
+  headers.set("x-dakflare-mcp-path", pathname);
+  const body = req.method.toUpperCase() === "POST" ? req.body : undefined;
+  return env.AGENT_SVC.fetch(
+    new Request("https://agent/internal/mcp", { method: req.method, headers, body })
+  );
 }
 
 /**
@@ -900,6 +953,8 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+import { verifyDeploymentTotp } from "./lib/totp";
+
 export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(req.url);
     const { pathname } = url;
@@ -1020,11 +1075,12 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         return new Request(request, { headers });
       };
 
-      const routed = await routeAgentRequest(routedRequest, env, {
-        onBeforeRequest: gate,
-        onBeforeConnect: gate,
-      });
-      return routed ?? Response.json({ error: "not_found" }, { status: 404 });
+      const gated = await gate(routedRequest, { className: "AssistantAgent" });
+      if (gated instanceof Response) return gated;
+      if (env.AGENT_SVC === undefined) {
+        return Response.json({ error: "agent_runtime_off" }, { status: 503 });
+      }
+      return env.AGENT_SVC.fetch(gated ?? routedRequest);
     }
 
     /* ---- public bootstrapping ----------------------------------------- */
@@ -1497,18 +1553,20 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     // One non-streaming turn for a machine caller; the console uses the socket.
     if (method === "POST" && pathname === "/v1/admin/agent/say") {
       return withAdminAccess(req, env, "write", "run one agent turn", (actor) =>
-        handleAgentSay(req, env, actor)
+        forwardToAgent(req, env, "/internal/agent/say", actor)
       );
     }
     // The durable transcript and the attachments it may carry. Every action is
     // absent from SCOPE_FOR_ACTION, so an agent credential is refused before the
     // handler runs: a transcript is operator data and a file upload is a write.
     if (method === "GET" && pathname === "/v1/admin/agent/conversation") {
-      return handleAgentConversationRead(req, env);
+      return withAdminAccess(req, env, "read", "read the agent conversation", (actor) =>
+        forwardToAgent(req, env, "/internal/agent/conversation", actor)
+      );
     }
     if (method === "DELETE" && pathname === "/v1/admin/agent/conversation") {
       return withAdminAccess(req, env, "write", "clear the agent conversation", (actor) =>
-        handleAgentConversationClear(req, env, actor)
+        forwardToAgent(req, env, "/internal/agent/conversation", actor)
       );
     }
     if (method === "POST" && pathname === "/v1/admin/agent/attachments") {
@@ -1532,32 +1590,27 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     }
     // One-shot migration hooks for moving AssistantAgent to its own Worker.
     // Both are admin-gated and removed after the cutover.
-    if (method === "POST" && pathname === "/v1/admin/agent/export") {
-      return withAdminAccess(req, env, "read", "export agent conversations", async () => {
-        if (env.ASSISTANT === undefined) {
-          return Response.json({ error: "agent_runtime_unavailable" }, { status: 503 });
+    if (method === "POST" && pathname === "/v1/admin/agent/totp") {
+      return withAdminAccess(req, env, "read", "verify an agent TOTP", async () => {
+        const body = (await req.json().catch(() => null)) as
+          | { actor?: AdminActor; code?: unknown }
+          | null;
+        if (body === null || body.actor === undefined || typeof body.code !== "string") {
+          return Response.json({ error: "bad_request" }, { status: 400 });
         }
-        const conversations = await env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME).exportConversations();
-        return Response.json({ conversations });
+        const ok = await verifyDeploymentTotp(env, body.actor, body.code);
+        return Response.json({ ok });
       });
     }
     if (method === "POST" && pathname === "/v1/admin/agent/import") {
-      return withAdminAccess(req, env, "write", "import agent conversations", async () => {
-        if (env.ASSISTANT === undefined) {
-          return Response.json({ error: "agent_runtime_unavailable" }, { status: 503 });
-        }
-        const body = (await req.json().catch(() => null)) as { conversations?: unknown } | null;
-        if (body === null || !Array.isArray(body.conversations)) {
-          return Response.json({ error: "bad_request" }, { status: 400 });
-        }
-        const result = await env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME).importConversations(
-          body.conversations as Parameters<AssistantAgent["importConversations"]>[0]
-        );
-        return Response.json(result);
-      });
+      return withAdminAccess(req, env, "write", "import agent conversations", (actor) =>
+        forwardToAgent(req, env, "/internal/agent/import", actor)
+      );
     }
     if (method === "GET" && pathname === "/v1/admin/agent/runtime") {
-      return handleAgentRuntimeRead(req, env);
+      return withAdminAccess(req, env, "read", "read the agent runtime", (actor) =>
+        forwardToAgent(req, env, "/internal/agent/runtime", actor)
+      );
     }
     // Autonomy control plane (pass 3, stage C). Human-only: the three actions
     // are absent from SCOPE_FOR_ACTION, and each handler calls assertHuman, so
