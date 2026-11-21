@@ -9,6 +9,7 @@
  */
 
 import type { Env } from "../index";
+import { coreFetch } from "./core";
 
 export interface OutboundCommandInput {
   deviceId: string;
@@ -47,6 +48,38 @@ export async function enqueueOutboundCommand(
   env: Env,
   command: OutboundCommandInput
 ): Promise<EnqueueOutcome> {
+  // The split agent Worker has no DEVICE namespace. It decides whether the send
+  // is authorised, then asks the main Worker to put the command in the object
+  // that owns the socket. Only the enqueue crosses: the authority check and the
+  // audit row stay with the Worker that served the request.
+  if (env.DEVICE === undefined && env.CORE !== undefined) {
+    const answer = await coreFetch(env, "/v1/admin/agent/enqueue", {
+      method: "POST",
+      body: {
+        device_id: command.deviceId,
+        command_id: command.commandId,
+        to: command.to,
+        body: command.body,
+        priority: command.priority,
+        expires_at: command.expiresAt,
+        idempotency_key: command.idempotencyKey ?? null,
+        ...(command.simSlot !== undefined ? { sim_slot: command.simSlot } : {}),
+      },
+    });
+    const data = (await answer.json().catch(() => null)) as
+      | { command_id?: unknown; replayed?: unknown }
+      | null;
+    if (!answer.ok || data === null) {
+      console.error(`[command] CORE enqueue rejected with HTTP ${answer.status}`);
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      commandId: typeof data.command_id === "string" ? data.command_id : command.commandId,
+      replayed: data.replayed === true,
+    };
+  }
+
   const stub = env.DEVICE.get(env.DEVICE.idFromName(command.deviceId));
   let res: Response;
   try {

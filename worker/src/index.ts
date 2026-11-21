@@ -69,6 +69,7 @@ import {
   handleGrantsList,
 } from "./routes/approvals";
 import { handleDlq, handleTrace, handleWsInspect } from "./routes/trace";
+import { enqueueOutboundCommand } from "./lib/commands";
 import {
   handleDeviceApprovalApprove,
   handleDeviceApprovalReject,
@@ -1607,6 +1608,44 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
       return withAdminAccess(req, env, "write", "import agent conversations", (actor) =>
         forwardToAgent(req, env, "/internal/agent/import", actor)
       );
+    }
+    // The split agent Worker checks authority itself, then asks this Worker to
+    // put the command in the Durable Object that owns the handset socket. Only
+    // the enqueue crosses the binding: the grant check and the audit row stay
+    // with the Worker that served the request. `CORE` presents the admin
+    // credential, and the action is absent from SCOPE_FOR_ACTION, so an agent
+    // token cannot reach it.
+    if (method === "POST" && pathname === "/v1/admin/agent/enqueue") {
+      return withAdminAccess(req, env, "write", "enqueue a device command", async () => {
+        const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+        if (body === null) return Response.json({ error: "bad_request" }, { status: 400 });
+        const deviceId = typeof body.device_id === "string" ? body.device_id : "";
+        const commandId = typeof body.command_id === "string" ? body.command_id : "";
+        const to = typeof body.to === "string" ? body.to : "";
+        const text = typeof body.body === "string" ? body.body : "";
+        const priority = typeof body.priority === "string" ? body.priority : "normal";
+        const expiresAt = typeof body.expires_at === "number" ? body.expires_at : 0;
+        const idempotencyKey =
+          typeof body.idempotency_key === "string" ? body.idempotency_key : undefined;
+        const simSlot = typeof body.sim_slot === "number" ? body.sim_slot : undefined;
+        if (deviceId === "" || commandId === "" || to === "" || text === "" || expiresAt <= 0) {
+          return Response.json({ error: "bad_request" }, { status: 400 });
+        }
+        const outcome = await enqueueOutboundCommand(env, {
+          deviceId,
+          commandId,
+          to,
+          body: text,
+          priority,
+          expiresAt,
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+          ...(simSlot !== undefined ? { simSlot } : {}),
+        });
+        if (!outcome.ok) {
+          return Response.json({ error: "enqueue_failed" }, { status: 502 });
+        }
+        return Response.json({ command_id: outcome.commandId, replayed: outcome.replayed });
+      });
     }
     if (method === "GET" && pathname === "/v1/admin/agent/runtime") {
       return withAdminAccess(req, env, "read", "read the agent runtime", (actor) =>

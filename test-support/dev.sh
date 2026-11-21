@@ -49,13 +49,21 @@ LEASE_MS="${LEASE_MS:-6000}"
 OFFLINE_ALERT_MS="${OFFLINE_ALERT_MS:-5000}"
 STALE_SOCKET_MS="${STALE_SOCKET_MS:-2000}"
 
+# The split means two Workers, and `wrangler dev` runs them in one Miniflare
+# instance with `-c` per Worker. That matters beyond convenience: the agent
+# Worker reads the same D1 rows as the main Worker, and Miniflare allows only
+# one process per persistence directory, so two `wrangler dev` processes cannot
+# share a database. `AGENT_CONFIG` is the second `-c`.
 if [ "${ACCOUNT_BACKED:-0}" = "1" ]; then
-  MODE_ARGS=(--config wrangler.account.toml --env-file .dev.vars)
+  MODE_ARGS=(-c wrangler.account.toml)
+  AGENT_SOURCE="wrangler.agent.toml"
+  AGENT_CONFIG="wrangler.agent.account.generated.toml"
   MIGRATE_DB="sms_gateway_preview"
   MIGRATE_FLAG="--remote"
   MODE_LABEL="account-backed (real PREVIEW D1 + KV)"
 else
-  MODE_ARGS=(--local)
+  MODE_ARGS=(-c wrangler.toml --local)
+  AGENT_CONFIG="wrangler.agent.toml"
   MIGRATE_DB="sms_gateway"
   MIGRATE_FLAG="--local"
   MODE_LABEL="local"
@@ -121,12 +129,26 @@ elif [ "$WORKER_PORT" != "8787" ]; then
   EXTRA_VARS+=(--var "AUTH_TRUSTED_ORIGINS:http://127.0.0.1:$WORKER_PORT")
 fi
 
+if [ "${ACCOUNT_BACKED:-0}" = "1" ]; then
+  # The agent Worker has to read the preview database, not a second local copy of
+  # the production id. Generated, git-ignored, and rewritten on every start.
+  PREVIEW_D1_ID="$(sed -n 's/^database_id = "\(.*\)"/\1/p' "$WORKER_DIR/wrangler.account.toml" | head -1)"
+  node -e '
+    const fs = require("fs");
+    const [source, target, id] = process.argv.slice(1);
+    const text = fs.readFileSync(source, "utf8")
+      .replace(/database_name = "sms_gateway"/, "database_name = \"sms_gateway_preview\"")
+      .replace(/database_id = "[^"]*"/, `database_id = "${id}"\nremote = true`);
+    fs.writeFileSync(target, text);
+  ' "$WORKER_DIR/$AGENT_SOURCE" "$WORKER_DIR/$AGENT_CONFIG" "$PREVIEW_D1_ID"
+fi
+
 echo "[dev.sh] starting Worker on :$WORKER_PORT ($MODE_LABEL, ACK_TIMEOUT_MS=$ACK_TIMEOUT_MS, LEASE_MS=$LEASE_MS)"
 export HARNESS_ACK_TIMEOUT_MS="$ACK_TIMEOUT_MS"
 export HARNESS_LEASE_MS="$LEASE_MS"
 (
   cd "$WORKER_DIR"
-  exec npx wrangler dev "${MODE_ARGS[@]}" --port "$WORKER_PORT" \
+  exec npx wrangler dev "${MODE_ARGS[@]}" -c "$AGENT_CONFIG" --port "$WORKER_PORT" --env-file .dev.vars \
     --var "ACK_TIMEOUT_MS:$ACK_TIMEOUT_MS" \
     --var "LEASE_MS:$LEASE_MS" \
     --var "OFFLINE_ALERT_MS:$OFFLINE_ALERT_MS" \

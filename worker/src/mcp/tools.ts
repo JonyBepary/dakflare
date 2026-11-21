@@ -449,6 +449,9 @@ export function toolDefinitions(env: Env): ToolDefinition[] {
         approval_request_id: z.string().nullable().optional(),
       }),
       run: async (args, environment, actor, options) => {
+        // The authority gate runs HERE, in whichever Worker serves MCP, because
+        // the approval a human grants is checked against this actor's grant. Only
+        // the enqueue it performs afterwards reaches the main Worker.
         const { status, data } = await callRoute(
           (request) => handleSend(request, environment, actor, options),
           "POST",
