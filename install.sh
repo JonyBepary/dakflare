@@ -242,7 +242,7 @@ if [ "$BINARY" -eq 1 ]; then
 
 			if [ "$CLI_ONLY" -eq 0 ] && [ "$PACK_INSTALLED" -eq 1 ]; then
 			# A pack deploy still needs cf, and cf is Node today. Keep it private:
-			# no sudo, no distro package drift, one checksum-verified Node 22.
+			# no sudo, no distro package drift, one checksum-verified current Node (22 floor).
 			NODE_READY=0
 			NODE_EXPORT=""
 			if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 &&
@@ -256,11 +256,11 @@ if [ "$BINARY" -eq 1 ]; then
 					"$NODE_DIR/bin/node" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
 					NODE_READY=1
 				else
-					printf '\nFetching a private Node 22 for cf...\n'
-					if bfetch "https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt" "$BTMP/SHASUMS256.txt" 2>/dev/null; then
+					printf '\nFetching a private Node for cf...\n'
+					if bfetch "https://nodejs.org/dist/latest/SHASUMS256.txt" "$BTMP/SHASUMS256.txt" 2>/dev/null; then
 						node_file=$(awk -v p="-${OS_NAME}-${ARCH_NAME}.tar.gz" '$2 ~ p { print $2 }' "$BTMP/SHASUMS256.txt" | tail -1)
 						node_sum=$(awk -v p="-${OS_NAME}-${ARCH_NAME}.tar.gz" '$2 ~ p { print $1 }' "$BTMP/SHASUMS256.txt" | tail -1)
-						if [ -n "$node_file" ] && bfetch "https://nodejs.org/dist/latest-v22.x/$node_file" "$BTMP/$node_file" 2>/dev/null; then
+						if [ -n "$node_file" ] && bfetch "https://nodejs.org/dist/latest/$node_file" "$BTMP/$node_file" 2>/dev/null; then
 							if command -v sha256sum >/dev/null 2>&1; then
 								node_actual=$(sha256sum "$BTMP/$node_file" | cut -d' ' -f1)
 							else
