@@ -141,14 +141,18 @@ if [ "${ACCOUNT_BACKED:-0}" = "1" ]; then
   # The agent Worker has to read the preview database, not a second local copy of
   # the production id. Generated, git-ignored, and rewritten on every start.
   PREVIEW_D1_ID="$(sed -n 's/^database_id = "\(.*\)"/\1/p' "$WORKER_DIR/wrangler.account.toml" | head -1)"
+  # The account config renames the main Worker, and a service binding resolves by
+  # name: `CORE = "dakflare-worker"` would point at nothing in this session.
+  MAIN_WORKER_NAME="$(sed -n 's/^name = "\(.*\)"/\1/p' "$WORKER_DIR/wrangler.account.toml" | head -1)"
   node -e '
     const fs = require("fs");
-    const [source, target, id] = process.argv.slice(1);
+    const [source, target, id, mainName] = process.argv.slice(1);
     const text = fs.readFileSync(source, "utf8")
       .replace(/database_name = "sms_gateway"/, "database_name = \"sms_gateway_preview\"")
-      .replace(/database_id = "[^"]*"/, `database_id = "${id}"\nremote = true`);
+      .replace(/database_id = "[^"]*"/, `database_id = "${id}"\nremote = true`)
+      .replace(/(binding = "CORE"\nservice = )"[^"]*"/, `$1"${mainName}"`);
     fs.writeFileSync(target, text);
-  ' "$WORKER_DIR/$AGENT_SOURCE" "$WORKER_DIR/$AGENT_CONFIG" "$PREVIEW_D1_ID"
+  ' "$WORKER_DIR/$AGENT_SOURCE" "$WORKER_DIR/$AGENT_CONFIG" "$PREVIEW_D1_ID" "$MAIN_WORKER_NAME"
 fi
 
 echo "[dev.sh] starting Worker on :$WORKER_PORT ($MODE_LABEL, ACK_TIMEOUT_MS=$ACK_TIMEOUT_MS, LEASE_MS=$LEASE_MS)"

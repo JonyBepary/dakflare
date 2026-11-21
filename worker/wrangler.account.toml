@@ -86,7 +86,7 @@ new_sqlite_classes = ["Scheduler"]
 [[d1_databases]]
 binding = "DB"
 database_name = "sms_gateway_preview"
-database_id = "10ac7c2d-9fcc-45af-9074-6e4329bda700"
+database_id = "a3b92ba7-9da3-444d-88b9-40b6c56c4720"
 remote = true
 
 [[kv_namespaces]]
