@@ -337,7 +337,10 @@ crons = ["17 3 * * *", "*/5 * * * *"]
 
 # ---------------------------------------------------------------------------
 # Workers Logs. Without this the deployment is a black box. Sampling 1.0 is the
-# documented default; lower it only once log volume is measured.
+# documented default, and it stays there: measured 2026-11-21 at ~0.5 requests/s
+# with the 401 CPU fix in place and tail CPU at 0, that is roughly 43k events a
+# day — inside the free allowance. Sampling 0.1 would save nothing and hide nine
+# requests in ten, including the one that failed.
 # ---------------------------------------------------------------------------
 # Split agent Worker (AssistantAgent + MCP + agent conversation routes).
 [[services]]

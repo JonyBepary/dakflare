@@ -51,8 +51,10 @@ Account-backed mode is the interesting one: the Worker and the DO still run loca
 but D1 and KV are the real resources. That exercises real D1 behaviour and real KV semantics without
 deploying anything.
 
-`dev.sh` starts the FCM/OAuth2 stub, applies the migration to the right target, and starts the Worker
-with the timing vars woven down so alarms fire in seconds instead of minutes:
+`dev.sh` starts the FCM/OAuth2 stub, applies the migration to the right target, and starts both
+Workers — the main one and `dakflare-agent-worker` — in a single `wrangler dev` session, which is
+also the only way they can share a local D1. The timing vars are woven down so alarms fire in
+seconds instead of minutes:
 
 ```
 ACK_TIMEOUT_MS=1500   LEASE_MS=6000   OFFLINE_ALERT_MS=5000   STALE_SOCKET_MS=2000

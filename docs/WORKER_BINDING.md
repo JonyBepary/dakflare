@@ -7,6 +7,15 @@ building a `Request` and remembering which header carries the credential.
 This is new: until now the only interfaces were the HTTP API (untyped `Request`/`Response`) and
 the raw Durable Object stubs, which bypass every gate this Worker has.
 
+The split agent Worker is the one caller inside this repository, and it uses the plain Fetcher
+form (`CORE: bindings.worker({ worker: "dakflare-worker" })`) rather than `DakFlareApi`, because
+`DakFlareApi` is typed for the public `/v1` contract and `CORE` also reaches internal routes such
+as `/v1/admin/agent/enqueue`. It sends `Authorization: Bearer $ADMIN_TOKEN` — the same credential
+the CLI uses — so scopes, limiters and audit rows still apply. The binding can name an entrypoint
+when a caller wants only the typed surface: `bindings.worker({ worker: "dakflare-worker",
+exportName: "DakFlareApi" })`. `docs/OPS_DEPLOY.md` has the deploy order and the secrets both
+Workers need.
+
 ## The consumer
 
 ```toml

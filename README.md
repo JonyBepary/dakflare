@@ -64,7 +64,10 @@ every request with a P-256 key held in `AndroidKeyStore`. The **Worker** verifie
 Meta's `X-Hub-Signature-256`, or Telegram's secret token — and answers inside Meta's five-second
 window. Storage and coordination live in **six SQLite Durable Objects**, one per unit that needs
 serialisation: `DeviceGateway` per handset, `ChannelConnection` per `(channel, account_id)`,
-`AuthGuard`, `AuthorityGuard` and `Scheduler` as singletons, and `AssistantAgent` pinned to one name.
+`AuthGuard`, `AuthorityGuard` and `Scheduler` as singletons in the main Worker, and `AssistantAgent`
+pinned to one name in the split agent Worker that also serves MCP. The split is a cost decision, not
+a trust boundary: the agent Worker has no public route and no auth secrets, and asks the main Worker
+for anything the handset owns.
 
 Official cloud APIs run directly on Workers; personal sessions stay off them, on the phone. That is
 why five accounts on one platform are five isolated objects rather than one hot one.

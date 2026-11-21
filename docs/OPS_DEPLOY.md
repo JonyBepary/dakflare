@@ -185,6 +185,11 @@ Five that have each cost this repository something:
   Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
   `npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
 
+- **The pack refuses an old `cf`.** A prebuilt pack is built by `cf` 1.0.0-rc.2 and
+  `dakflare up` checks the installed version against `pack.json.requires.cf` before it does
+  anything. A global `cf` from the 1.0.0 betas is `1.0.0-rc.0`, which sorts below the floor, so a
+  machine that has been deploying for weeks can still be told to upgrade:
+  `npm install -g cf@1.0.0-rc.2`.
 - **`deploy:no-dashboard` still uploads the console.** The name reads as "Worker only"; it
   means "do not run the dashboard build first". Whatever is in `worker/public/admin` goes
   live, including a build another process left there. The guard described under Deploying is

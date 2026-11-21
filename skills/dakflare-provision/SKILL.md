@@ -1,14 +1,15 @@
 ---
 name: dakflare-provision
-description: "Install, configure or repair a DakFlare deployment: a Worker on Cloudflare, a D1 database, and one paired Android handset. Use when setting up DakFlare for the first time, when `dakflare doctor` reports a failure, when a secret or binding is missing, or when a device needs pairing or revoking. Triggers: install dakflare, set up the gateway, doctor fails, missing secret, pair a phone, revoke a device, deploy the worker."
+description: "Install, configure or repair a DakFlare deployment: two Workers on Cloudflare, a D1 database, and one paired Android handset. Use when setting up DakFlare for the first time, when `dakflare doctor` reports a failure, when a secret or binding is missing, or when a device needs pairing or revoking. Triggers: install dakflare, set up the gateway, doctor fails, missing secret, pair a phone, revoke a device, deploy the worker."
 ---
 
 # DakFlare: provisioning and repair
 
-A deployment is three things: a Worker on the operator's own Cloudflare account, a D1
-database it owns, and one Android handset that holds the SIM. `dakflare up` is the one
-command that talks to Cloudflare: it drives `cf`, with no wrangler fallback. Every
-other command talks to the Worker.
+A deployment is three things: two Workers on the operator's own Cloudflare account — the public
+one and the internal agent Worker behind it — a D1 database they share, and one Android handset
+that holds the SIM. `dakflare up` is the one command that talks to Cloudflare: it drives `cf`,
+with no wrangler fallback, and it deploys the agent Worker first because the main Worker's
+`AGENT_SVC` binding names it. Every other command talks to the main Worker.
 
 ## Read this first
 
