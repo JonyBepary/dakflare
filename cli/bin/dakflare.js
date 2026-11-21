@@ -4473,9 +4473,11 @@ async function commandUp(argv) {
       : writeConfigIds(path.join(workerDir, 'cloudflare.config.ts'), databaseId, namespaceId, dryRun);
   plan.push(configChange);
 
-  // 5. Migrate, then deploy with the secrets `init --local` already wrote.
-  // `cf` applies to the remote database unless `--local` is passed; `--remote`
-  // is a wrangler flag and this CLI version rejects it.
+  // 5. Migrate, then deploy with the secrets `init --local` already wrote. A
+  //    local AUTH_BASE_URL/AUTH_TRUSTED_ORIGINS must not reach production: the
+  //    first makes the WebAuthn rpId 127.0.0.1 and the second rejects the live
+  //    console's origin. Keep them for wrangler dev, omit them from this upload.
+  const deployVarsPlan = prepareDeployVars(workerDir, true, plan);
   plan.push(
     source.kind === 'pack'
       ? `cf d1 migrations apply ${databaseId} --dir migrations`
@@ -4483,8 +4485,8 @@ async function commandUp(argv) {
   );
   plan.push(
     source.kind === 'pack'
-      ? 'cf deploy --prebuilt --secrets-file .dev.vars'
-      : 'cf deploy --secrets-file .dev.vars'
+      ? `cf deploy --prebuilt --secrets-file ${deployVarsPlan.name}`
+      : `cf deploy --secrets-file ${deployVarsPlan.name}`
   );
   plan.push(
     email === undefined
@@ -4512,37 +4514,45 @@ async function commandUp(argv) {
     }
   }
 
+  const deployVars = deployVarsPlan.temp
+    ? prepareDeployVars(workerDir, false, plan)
+    : deployVarsPlan;
+
   let deploy;
-  if (source.kind === 'pack') {
-    runCf(
-      ['d1', 'migrations', 'apply', databaseId, '--dir', 'migrations'],
-      workerDir,
-      'applying migrations'
-    );
-    deploy = runCf(
-      ['deploy', '--prebuilt', '--secrets-file', '.dev.vars'],
-      workerDir,
-      'deploying the prebuilt pack'
-    );
-  } else {
-    runCf(['d1', 'migrations', 'apply', databaseId], workerDir, 'applying migrations');
+  try {
+    if (source.kind === 'pack') {
+      runCf(
+        ['d1', 'migrations', 'apply', databaseId, '--dir', 'migrations'],
+        workerDir,
+        'applying migrations'
+      );
+      deploy = runCf(
+        ['deploy', '--prebuilt', '--secrets-file', deployVars.name],
+        workerDir,
+        'deploying the prebuilt pack'
+      );
+    } else {
+      runCf(['d1', 'migrations', 'apply', databaseId], workerDir, 'applying migrations');
 
-    const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
-    if (!fs.existsSync(dashboardEntry)) {
-      const built = spawnSync('npm', ['run', 'build:dashboard'], {
-        cwd: workerDir,
-        encoding: 'utf8',
-      });
-      if (built.error || built.status !== 0) {
-        throw new CliError(
-          `building console assets failed: ${(built.stderr || built.stdout || built.error?.message || '').trim()}`,
-          1,
-          { error: 'provision_failed', step: 'build:dashboard' }
-        );
+      const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
+      if (!fs.existsSync(dashboardEntry)) {
+        const built = spawnSync('npm', ['run', 'build:dashboard'], {
+          cwd: workerDir,
+          encoding: 'utf8',
+        });
+        if (built.error || built.status !== 0) {
+          throw new CliError(
+            `building console assets failed: ${(built.stderr || built.stdout || built.error?.message || '').trim()}`,
+            1,
+            { error: 'provision_failed', step: 'build:dashboard' }
+          );
+        }
       }
-    }
 
-    deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
+      deploy = runCf(['deploy', '--secrets-file', deployVars.name], workerDir, 'deploying');
+    }
+  } finally {
+    if (deployVars.temp) fs.rmSync(deployVars.path, { force: true });
   }
 
   // 6. Verify against the deployment, not against the exit status of a deploy.
@@ -4616,6 +4626,78 @@ async function commandUp(argv) {
     }
   }
   return 0;
+}
+
+/**
+ * A local .dev.vars is also the deploy secrets file. Local-only auth origins
+ * must not become production secrets: an AUTH_BASE_URL of 127.0.0.1 makes the
+ * WebAuthn rpId 127.0.0.1, and a local trusted-origin list rejects the live
+ * console's sign-in requests. Keep local values for `wrangler dev`, omit them
+ * from the upload.
+ */
+function prepareDeployVars(workerDir, dryRun, plan) {
+  const source = path.join(workerDir, '.dev.vars');
+  const target = path.join(workerDir, '.dev.vars.deploy');
+  const localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1|\[::1\])$/i;
+  const unquote = (value) => String(value).trim().replace(/^["']|["']$/g, '');
+
+  if (!fs.existsSync(source)) return { name: '.dev.vars', path: source, temp: false };
+
+  const lines = fs.readFileSync(source, 'utf8').split(/\r?\n/);
+  const kept = [];
+  let changed = false;
+
+  for (const line of lines) {
+    const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
+    if (!match) {
+      if (line !== '') kept.push(line);
+      continue;
+    }
+    const [, key, rawValue] = match;
+    let value = unquote(rawValue);
+
+    if (key === 'AUTH_BASE_URL' || key === 'AUTH_RP_ID') {
+      if (localHost.test(value)) {
+        changed = true;
+        continue;
+      }
+      kept.push(`${key}=${value}`);
+      continue;
+    }
+
+    if (key === 'AUTH_TRUSTED_ORIGINS') {
+      const origins = value.split(',').map((origin) => origin.trim()).filter(Boolean);
+      const publicOrigins = origins.filter((origin) => {
+        try {
+          return !localHost.test(new URL(origin).hostname);
+        } catch {
+          return false;
+        }
+      });
+      if (publicOrigins.length === 0) {
+        changed = true;
+        continue;
+      }
+      if (publicOrigins.length !== origins.length) changed = true;
+      kept.push(`${key}=${publicOrigins.join(',')}`);
+      continue;
+    }
+
+    kept.push(line);
+  }
+
+  if (!changed) return { name: '.dev.vars', path: source, temp: false };
+
+  plan.push('auth: local AUTH_* origins are not deployed');
+  if (dryRun) return { name: '.dev.vars.deploy', path: target, temp: true };
+
+  fs.writeFileSync(target, `${kept.join('\n')}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(target, 0o600);
+  } catch {
+    /* best effort */
+  }
+  return { name: '.dev.vars.deploy', path: target, temp: true };
 }
 
 /** Run `cf`, returning stdout, or null when the command failed. */
