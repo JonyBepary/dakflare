@@ -4205,6 +4205,34 @@ async function commandSetup(argv) {
     }
   }
 
+  // A pack's Build Output v1 needs cf 1.0.0-rc.2. Upgrade an older cf instead of
+  // letting the deploy fail later with a version the check already knows about.
+  let packCf = packCfState(source);
+  if (source.kind === 'pack' && cf.installed && !packCf.ok && !dryRun && npmAvailable) {
+    const upgrade = interactive
+      ? await confirmDefaultYes(
+          `cf ${cf.version} is older than the pack requires. Install cf@${packCf.floor}? [Y/n] `,
+          true
+        )
+      : yes;
+    if (upgrade) {
+      if (!MODE.json) out(`Upgrading cf to ${packCf.floor}...`);
+      const result = spawnSync('npm', ['install', '-g', `cf@${packCf.floor}`], {
+        encoding: 'utf8',
+        timeout: 300_000,
+      });
+      if (!result.error && result.status === 0) {
+        cf = cfSetupState();
+        packCf = packCfState(source);
+      } else {
+        const detail = String(result.stderr || result.stdout || result.error?.message || '')
+          .trim()
+          .split(/\r?\n/)[0];
+        if (!MODE.json) out(`${warn('!')} cf upgrade failed: ${detail || 'npm install failed'}`);
+      }
+    }
+  }
+
   // 4. The star. Explicit --star or an interactive yes; --yes alone is not
   // consent to touch the account's GitHub stars.
   let star = { requested: false, starred: false, via: null, url: githubUrl(), repo: githubSlug() };
