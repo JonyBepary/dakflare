@@ -19,7 +19,7 @@ deployments coordinated with the physical Android handset.
 |---|---|---|
 | `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical definition of the **main** Worker: bindings, exports, triggers |
 | `worker/agent/cloudflare.config.ts` | `cf`, run from `worker/agent` | the **agent** Worker: `AssistantAgent`, no public route, no auth secrets |
-| `worker/wrangler.toml` | `wrangler` (local dev, `tail`, `d1 export`) | `cf` sets secrets now (`cf workers secrets update`), but cannot stream logs, and the conformance suite needs `wrangler dev --local` with Durable Object SQLite and alarms |
+| `worker/wrangler.toml` | `wrangler` (local dev, `d1 export`) | `cf` owns deploy, secrets, D1 migrations and live logs now, but has no local runtime: the conformance suite needs `wrangler dev --local` with Durable Object SQLite, queues and alarms. `cf build` also delegates to the project's Wrangler, so it stays a dependency either way |
 | `worker/wrangler.agent.toml` | `wrangler` (agent Worker local dev and `tail`) | the same split for the agent Worker; `CORE` points at the main Worker |
 | `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1` test lane) | the preview D1 and KV are `remote = true`; the Worker and Durable Object still run locally |
 
@@ -183,10 +183,12 @@ Five that have each cost this repository something:
 - **D1 migrations need the database ID, never the name.** `cf d1 migrations list sms_gateway`
   answers `Expected a D1 database ID, but received <database>="sms_gateway". Database names and
   binding names are not accepted.` The ID is `8d88069e-71cf-49a2-ba33-c150b02246b7`.
-- **`tail` is still Wrangler; secrets are not.** `cf workers secrets update <NAME> --type secret_text`
-  sets one (it asks for the value, so the key never reaches argv). `cf` still cannot stream logs.
-  Wrangler does not read `cloudflare.config.ts`, so pass the worker name:
-  `npx cf workers secrets update ADMIN_TOKEN --worker dakflare-worker --type secret_text`.
+- **`tail` moved to `cf`; `d1 export` did not.** `cf observability tail --worker dakflare-worker`
+  streams live events — request, cron, alarm and Durable Object RPC — with the script version, the
+  object id and CPU time attached, which `wrangler tail` never showed. Secrets are `cf` too
+  (`cf workers secrets update <NAME> --type secret_text` asks for the value, so the key never
+  reaches argv; pass `--worker dakflare-worker`). The two things still Wrangler-only are the local
+  runtime and `wrangler d1 export`, the SQL dump `docs/OPS_BACKUP.md` leans on.
 
 - **The pack refuses an old `cf`.** A prebuilt pack is built by `cf` 1.0.0-rc.2 and
   `dakflare up` checks the installed version against `pack.json.requires.cf` before it does
