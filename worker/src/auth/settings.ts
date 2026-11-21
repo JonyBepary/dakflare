@@ -257,6 +257,10 @@ function buildAuth(env: Env, request?: Request) {
     rateLimit: { enabled: false },
     // No outbound telemetry from a self-hosted Worker.
     telemetry: { enabled: false },
+    // Better Auth wraps every endpoint and hook in an OpenTelemetry span even
+    // when no tracer is installed. The Worker already has Workers Logs; the
+    // wrapper is pure per-request CPU here.
+    experimental: { instrumentation: { enabled: false } },
   });
 }
 
@@ -266,21 +270,27 @@ function buildAuth(env: Env, request?: Request) {
  * The key includes everything configuration depends on, so a secret rotation or
  * a different D1 binding cannot reuse a stale instance.
  */
-let cached: { key: string; auth: Auth } | null = null;
+const instances = new Map<string, Auth>();
+const MAX_AUTH_INSTANCES = 8;
 
 export function getAuth(env: Env, request?: Request): Auth | null {
   if (env.BETTER_AUTH_SECRET === undefined || env.BETTER_AUTH_SECRET === "") return null;
+
   // A deployment can answer on more than one host (its workers.dev name and a
   // custom domain). Passkeys are bound to the rpId they were created under, so
-  // the instance is cached per origin rather than per Worker.
+  // when the rpId comes from the request the instance is cached per origin.
+  // When the operator pinned AUTH_RP_ID/AUTH_BASE_URL the request changes
+  // nothing, and a single shared instance is correct — and much cheaper.
+  const pinned = (env.AUTH_RP_ID ?? "") !== "" || (env.AUTH_BASE_URL ?? "") !== "";
   let origin = "";
-  if (request !== undefined) {
+  if (!pinned && request !== undefined) {
     try {
       origin = new URL(request.url).origin;
     } catch {
       origin = "";
     }
   }
+
   const key = [
     env.BETTER_AUTH_SECRET,
     env.AUTH_BASE_URL ?? "",
@@ -291,8 +301,12 @@ export function getAuth(env: Env, request?: Request): Auth | null {
     // cached instance holding the old ring.
     env.AUTH_PEPPER ?? "",
   ].join("\u0000");
-  if (cached !== null && cached.key === key) return cached.auth;
+
+  const existing = instances.get(key);
+  if (existing !== undefined) return existing;
+
   const auth = buildAuth(env, request);
-  cached = { key, auth };
+  if (instances.size >= MAX_AUTH_INSTANCES) instances.clear();
+  instances.set(key, auth);
   return auth;
 }

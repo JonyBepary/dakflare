@@ -105,21 +105,39 @@ const SHORTCODE_PATTERN = "[A-Za-z]|^[^0-9]*" + "[0-9][^0-9]*".repeat(10);
 type CompileResult = { ok: true; graph: Graph } | { ok: false; reason: string };
 
 /**
- * Compiled graphs, keyed by the rule row object itself.
+ * Compiled graphs, keyed by the rule's stored material.
  *
- * `routes/incoming.ts` evaluates one rule list against every message in a batch
- * and hands the same objects to each call, so a `WeakMap` turns the compile into
- * once per rule per batch instead of once per rule per message. Object identity
- * is the correctness argument: a row object is never mutated, so a hit cannot be
- * stale. A `WeakMap` also means the entries go away with the rows.
+ * A WeakMap keyed by the D1 row object only hits within one batch: every
+ * request builds new row objects, so every inbound batch recompiled every
+ * regex and revalidated every graph. The key below is the rule's identity plus
+ * every field compileRule reads; a changed rule cannot reuse a stale result.
  */
-const compiled = new WeakMap<RuleRecord, CompileResult>();
+const compiled = new Map<string, CompileResult>();
+const MAX_COMPILED_RULES = 512;
+
+function compileKey(rule: RuleRecord): string {
+  return [
+    rule.id,
+    rule.updated_at ?? 0,
+    rule.enabled,
+    rule.matcher_type,
+    rule.matcher_value,
+    rule.body_type,
+    rule.body_value,
+    rule.reply_template,
+    rule.allow_shortcode,
+    rule.cooldown_s,
+    rule.max_per_hour,
+  ].join("\u0000");
+}
 
 function compileCached(rule: RuleRecord): CompileResult {
-  const hit = compiled.get(rule);
+  const key = compileKey(rule);
+  const hit = compiled.get(key);
   if (hit !== undefined) return hit;
   const result = compileRule(rule);
-  compiled.set(rule, result);
+  if (compiled.size >= MAX_COMPILED_RULES) compiled.clear();
+  compiled.set(key, result);
   return result;
 }
 

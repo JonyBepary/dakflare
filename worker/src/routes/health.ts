@@ -19,6 +19,14 @@ import type { Env } from "../index";
 import { passwordMode, timingConfig } from "../lib/config";
 import { VERSION } from "../lib/version";
 
+/**
+ * Health is polled by the console and by `doctor`; each call runs six D1
+ * statements including a COUNT(*) over messages. Ten seconds of isolate-local
+ * memory is enough truth for a health check and removes almost all of that.
+ */
+let healthMemo: { at: number; status: number; body: string } | null = null;
+const HEALTH_MEMO_MS = 10_000;
+
 interface HealthCounts {
   devices: number;
   messages: number;
@@ -28,6 +36,16 @@ interface HealthCounts {
 }
 
 export async function handleHealth(env: Env): Promise<Response> {
+  if (healthMemo !== null && Date.now() - healthMemo.at < HEALTH_MEMO_MS) {
+    return new Response(healthMemo.body, {
+      status: healthMemo.status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "x-dakflare-health": "memo",
+      },
+    });
+  }
+
   const bindings = {
     DB: Boolean(env.DB),
     KV: Boolean(env.KV),
@@ -88,8 +106,7 @@ export async function handleHealth(env: Env): Promise<Response> {
   const schemaReady = migrations.length > 0 && dbError === null;
   const ok = schemaReady && bindings.DB && bindings.KV && bindings.DEVICE;
 
-  return Response.json(
-    {
+  const payload = {
       ok,
       version: VERSION,
       // Cheap, explicit, and the two things support will ask for first.
@@ -116,7 +133,12 @@ export async function handleHealth(env: Env): Promise<Response> {
       last_message_at: lastMessageAt,
       db_error: dbError,
       checked_at: Date.now(),
-    },
-    { status: ok ? 200 : 503 }
-  );
+  };
+  const body = JSON.stringify(payload);
+  const status = ok ? 200 : 503;
+  healthMemo = { at: Date.now(), status, body };
+  return new Response(body, {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }

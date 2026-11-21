@@ -25,6 +25,11 @@ compatibility_date = "2026-04-07"
 # device protocol paths.
 compatibility_flags = ["nodejs_compat"]
 
+# Resolve stack traces and .pprof frames to TypeScript. `cf build` already emits
+# and uploads source maps; this keeps a wrangler deploy equivalent rather than
+# dependent on the Wrangler version's default.
+upload_source_maps = true
+
 # Preview URLs are public by default and are not part of any route the device
 # uses. Keep them off.
 preview_urls = false

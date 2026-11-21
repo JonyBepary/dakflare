@@ -91,14 +91,6 @@ function parseGraph(text: string): unknown {
   }
 }
 
-/** `node_count` for the list view: parse only to count, never to return. */
-function countNodes(text: string): number {
-  const parsed = parseGraph(text);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return 0;
-  const nodes = (parsed as { nodes?: unknown }).nodes;
-  return Array.isArray(nodes) ? nodes.length : 0;
-}
-
 function toPayload(row: WorkflowRow): WorkflowPayload {
   return {
     id: row.id,
@@ -180,11 +172,19 @@ export async function handleDeviceFlows(env: Env, deviceId: string): Promise<Res
 
 /** `GET /v1/admin/workflows` — ids and metadata, newest save first, no graphs. */
 export async function handleWorkflowsList(env: Env): Promise<Response> {
+  // Count in SQLite. Selecting every graph only to JSON.parse it here cost a
+  // full document transfer plus a parse per workflow on each console load.
   const rows = await env.DB.prepare(
-    `SELECT id, name, enabled, device_id, graph, updated_at
+    `SELECT id, name, enabled, device_id, updated_at,
+            COALESCE(json_array_length(json_extract(graph, '$.nodes')), 0) AS node_count
        FROM workflows
-      ORDER BY updated_at DESC`
-  ).all<Pick<WorkflowRow, "id" | "name" | "enabled" | "device_id" | "graph" | "updated_at">>();
+      ORDER BY updated_at DESC
+      LIMIT 500`
+  ).all<
+    Pick<WorkflowRow, "id" | "name" | "enabled" | "device_id" | "updated_at"> & {
+      node_count: number | null;
+    }
+  >();
 
   const workflows = (rows.results ?? []).map((row) => ({
     id: row.id,
@@ -192,7 +192,7 @@ export async function handleWorkflowsList(env: Env): Promise<Response> {
     enabled: Number(row.enabled) === 1,
     device_id: row.device_id,
     updated_at: Number(row.updated_at),
-    node_count: countNodes(row.graph),
+    node_count: Number(row.node_count ?? 0),
   }));
 
   return Response.json({ workflows });

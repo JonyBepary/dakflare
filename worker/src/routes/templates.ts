@@ -426,14 +426,12 @@ export async function handleContactsList(
   }
   const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
 
-  const list = await env.DB.prepare(
+  const listStatement = env.DB.prepare(
     `SELECT id, channel, peer, name, attrs_json, tags_json, timezone, opt_out,
             created_at, updated_at
        FROM contacts ${where}
       ORDER BY created_at DESC LIMIT ? OFFSET ?`
-  )
-    .bind(...params, limit, offset)
-    .all<ContactRow>();
+  ).bind(...params, limit, offset);
 
   // The summary deliberately ignores the opt_out filter so the console can say
   // "N of M opted out" while showing only one side of that split.
@@ -443,15 +441,20 @@ export async function handleContactsList(
     summaryWhere = "WHERE channel = ?";
     summaryParams.push(channel);
   }
-  const summary = await env.DB.prepare(
-    `SELECT COUNT(*) AS total, COALESCE(SUM(opt_out), 0) AS opted_out
-       FROM contacts ${summaryWhere}`
-  )
-    .bind(...summaryParams)
-    .first<{ total: number; opted_out: number }>();
+  // Two independent reads: one round trip, not two.
+  const [list, summaryResult] = await env.DB.batch([
+    listStatement,
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total, COALESCE(SUM(opt_out), 0) AS opted_out
+         FROM contacts ${summaryWhere}`
+    ).bind(...summaryParams),
+  ]);
+  const summary = (summaryResult.results?.[0] ?? null) as
+    | { total: number; opted_out: number }
+    | null;
 
   return json({
-    contacts: (list.results ?? []).map(contactView),
+    contacts: ((list.results ?? []) as ContactRow[]).map(contactView),
     total: summary?.total ?? 0,
     opted_out: summary?.opted_out ?? 0,
   });

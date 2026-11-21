@@ -106,7 +106,7 @@ export async function requireRole(
   permission: Permission,
   options: RequireRoleOptions = {}
 ): Promise<GuardResult> {
-  const auth = getAuth(env);
+  const auth = getAuth(env, req);
   if (auth === null) {
     // Fail closed, but distinguish "auth is not configured here" from "you are
     // not signed in": a 401 would send the operator hunting for a session when
