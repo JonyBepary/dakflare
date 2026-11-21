@@ -19,7 +19,7 @@ deployments coordinated with the physical Android handset.
 |---|---|---|
 | `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical definition of the **main** Worker: bindings, exports, triggers |
 | `worker/agent/cloudflare.config.ts` | `cf`, run from `worker/agent` | the **agent** Worker: `AssistantAgent`, no public route, no auth secrets |
-| `worker/wrangler.toml` | `wrangler` (local dev, `d1 export`) | `cf` owns deploy, secrets, D1 migrations and live logs now, but has no local runtime: the conformance suite needs `wrangler dev --local` with Durable Object SQLite, queues and alarms. `cf build` also delegates to the project's Wrangler, so it stays a dependency either way |
+| `worker/wrangler.toml` | `wrangler` (local dev, `d1 export`) | `cf` owns deploy, secrets, D1 migrations and live logs now. Its `cf dev` only dispatches to the project's dev server and its `cf build` delegates to the project's Wrangler, so the local runtime the conformance suite needs — `wrangler dev --local` with Durable Object SQLite, queues and alarms — keeps Wrangler a dependency either way |
 | `worker/wrangler.agent.toml` | `wrangler` (agent Worker local dev and `tail`) | the same split for the agent Worker; `CORE` points at the main Worker |
 | `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1` test lane) | the preview D1 and KV are `remote = true`; the Worker and Durable Object still run locally |
 
@@ -187,8 +187,8 @@ Five that have each cost this repository something:
   streams live events — request, cron, alarm and Durable Object RPC — with the script version, the
   object id and CPU time attached, which `wrangler tail` never showed. Secrets are `cf` too
   (`cf workers secrets update <NAME> --type secret_text` asks for the value, so the key never
-  reaches argv; pass `--worker dakflare-worker`). The two things still Wrangler-only are the local
-  runtime and `wrangler d1 export`, the SQL dump `docs/OPS_BACKUP.md` leans on.
+  reaches argv; pass `--worker dakflare-worker`). What is still Wrangler-only is `wrangler d1 export`, the SQL
+  dump `docs/OPS_BACKUP.md` leans on; `cf dev` is a dispatcher that ends up there too.
 
 - **The pack refuses an old `cf`.** A prebuilt pack is built by `cf` 1.0.0-rc.2 and
   `dakflare up` checks the installed version against `pack.json.requires.cf` before it does
