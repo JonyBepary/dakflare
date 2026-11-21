@@ -48,7 +48,9 @@ the Durable Object still run locally:
 | Account-backed | `ACCOUNT_BACKED=1 ./test-support/dev.sh` | **real** D1 + KV | local |
 
 Account-backed mode is the interesting one: the Worker and the DO still run locally under `workerd`,
-but D1 and KV are the real resources. That exercises real D1 behaviour and real KV semantics without
+but D1 and KV are the real resources. It applies migrations with `wrangler.account.toml`, because
+`sms_gateway_preview` exists only there, and it stops on a failed migration rather than starting a
+stack that would 500 on the first write. That exercises real D1 behaviour and real KV semantics without
 deploying anything.
 
 `dev.sh` starts the FCM/OAuth2 stub, applies the migration to the right target, and starts both

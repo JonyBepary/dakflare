@@ -54,8 +54,10 @@ STALE_SOCKET_MS="${STALE_SOCKET_MS:-2000}"
 # Worker reads the same D1 rows as the main Worker, and Miniflare allows only
 # one process per persistence directory, so two `wrangler dev` processes cannot
 # share a database. `AGENT_CONFIG` is the second `-c`.
+MIGRATE_EXTRA=()
 if [ "${ACCOUNT_BACKED:-0}" = "1" ]; then
   MODE_ARGS=(-c wrangler.account.toml)
+  MIGRATE_EXTRA=(--config wrangler.account.toml)
   AGENT_SOURCE="wrangler.agent.toml"
   AGENT_CONFIG="wrangler.agent.account.generated.toml"
   MIGRATE_DB="sms_gateway_preview"
@@ -105,8 +107,14 @@ SA_JSON="$(node -e '
   process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(p, "utf8"))));
 ' "$HERE/stub-service-account.json")"
 
+# The config matters: `sms_gateway_preview` exists only in wrangler.account.toml, so
+# a migration run against wrangler.toml fails — and this used to swallow that, leaving
+# the preview database behind the code and the first write 500ing on a missing column.
 echo "[dev.sh] applying D1 migration ($MIGRATE_DB $MIGRATE_FLAG)"
-( cd "$WORKER_DIR" && npx wrangler d1 migrations apply "$MIGRATE_DB" "$MIGRATE_FLAG" >/dev/null 2>&1 ) || true
+if ! ( cd "$WORKER_DIR" && npx wrangler d1 migrations apply "$MIGRATE_DB" "$MIGRATE_FLAG" "${MIGRATE_EXTRA[@]}" ); then
+  echo "[dev.sh] the migration for $MIGRATE_DB did not apply; the suite would fail on a schema error" >&2
+  exit 1
+fi
 
 EXTRA_VARS=()
 if [ -n "${AUTH_PEPPER:-}" ]; then
