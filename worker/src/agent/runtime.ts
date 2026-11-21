@@ -30,7 +30,7 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
-import { Sessions } from "agents/sessions";
+import { Sessions, type SessionMessage } from "agents/sessions";
 import { Streams, type StreamJson, type StreamWriter } from "agents/streams";
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
@@ -1389,6 +1389,67 @@ export class AssistantAgent extends Agent<Env, AssistantState> {
         now
       );
     }
+  }
+
+  /**
+   * One-shot migration export: every conversation session's active branch.
+   * Read-only; used before moving this class to a new Worker (a new script
+   * means a new Durable Object namespace and no access to this SQLite).
+   */
+  async exportConversations(): Promise<
+    Array<{ id: string; messages: Array<Omit<SessionMessage, "createdAt"> & { createdAt?: string }> }>
+  > {
+    const rows = [
+      ...this.ctx.storage.sql.exec<{ session_id: string }>(
+        `SELECT DISTINCT session_id FROM cf_agents_session_messages
+          WHERE session_id LIKE 'conversation:%'`
+      ),
+    ];
+    const out: Array<{
+      id: string;
+      messages: Array<Omit<SessionMessage, "createdAt"> & { createdAt?: string }>;
+    }> = [];
+    for (const row of rows) {
+      const history = await this.sessions.session(row.session_id).getHistory();
+      out.push({
+        id: row.session_id,
+        messages: history.map((message) => ({
+          ...message,
+          createdAt: message.createdAt instanceof Date ? message.createdAt.toISOString() : message.createdAt,
+        })),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * One-shot migration import into the new namespace. Parent ids are rebuilt
+   * from the exported order; `importMessage` keeps ids/timestamps verbatim and
+   * is idempotent on id.
+   */
+  async importConversations(
+    conversations: Array<{
+      id: string;
+      messages: Array<Omit<SessionMessage, "createdAt"> & { createdAt?: string }>;
+    }>
+  ): Promise<{ sessions: number; messages: number }> {
+    let sessions = 0;
+    let messages = 0;
+    for (const conversation of conversations) {
+      const session = this.sessions.session(conversation.id);
+      let parentId: string | null = null;
+      for (const message of conversation.messages) {
+        const createdAt = message.createdAt === undefined ? Date.now() : Date.parse(message.createdAt);
+        await session.importMessage(
+          { ...message, createdAt: new Date(Number.isFinite(createdAt) ? createdAt : Date.now()) },
+          { parentId, createdAt: Number.isFinite(createdAt) ? createdAt : Date.now() }
+        );
+        parentId = message.id;
+        messages += 1;
+      }
+      sessions += 1;
+    }
+    return { sessions, messages };
   }
 }
 

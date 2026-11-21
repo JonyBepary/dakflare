@@ -1530,6 +1530,32 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         handleAgentTicketMint(req, env, actor)
       );
     }
+    // One-shot migration hooks for moving AssistantAgent to its own Worker.
+    // Both are admin-gated and removed after the cutover.
+    if (method === "POST" && pathname === "/v1/admin/agent/export") {
+      return withAdminAccess(req, env, "read", "export agent conversations", async () => {
+        if (env.ASSISTANT === undefined) {
+          return Response.json({ error: "agent_runtime_unavailable" }, { status: 503 });
+        }
+        const conversations = await env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME).exportConversations();
+        return Response.json({ conversations });
+      });
+    }
+    if (method === "POST" && pathname === "/v1/admin/agent/import") {
+      return withAdminAccess(req, env, "write", "import agent conversations", async () => {
+        if (env.ASSISTANT === undefined) {
+          return Response.json({ error: "agent_runtime_unavailable" }, { status: 503 });
+        }
+        const body = (await req.json().catch(() => null)) as { conversations?: unknown } | null;
+        if (body === null || !Array.isArray(body.conversations)) {
+          return Response.json({ error: "bad_request" }, { status: 400 });
+        }
+        const result = await env.ASSISTANT.getByName(ASSISTANT_OBJECT_NAME).importConversations(
+          body.conversations as Parameters<AssistantAgent["importConversations"]>[0]
+        );
+        return Response.json(result);
+      });
+    }
     if (method === "GET" && pathname === "/v1/admin/agent/runtime") {
       return handleAgentRuntimeRead(req, env);
     }
