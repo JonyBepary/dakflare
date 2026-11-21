@@ -31,7 +31,6 @@ binding = "AI"
 [[services]]
 binding = "CORE"
 service = "dakflare-worker"
-entrypoint = "DakFlareApi"
 
 [vars]
 AGENT_RUNTIME = "on"

@@ -77,6 +77,7 @@ import {
 import { handleWellKnown, mcpUnauthorized as mcpChallenge } from "./mcp/oauth";
 import type { AssistantAgent } from "./agent/runtime";
 import {
+  ASSISTANT_BINDING,
   ASSISTANT_OBJECT_NAME,
   assertAssistantRoute,
   checkUpgradeRequest,
@@ -1075,7 +1076,7 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         return new Request(request, { headers });
       };
 
-      const gated = await gate(routedRequest, { className: "AssistantAgent" });
+      const gated = await gate(routedRequest, { className: ASSISTANT_BINDING });
       if (gated instanceof Response) return gated;
       if (env.AGENT_SVC === undefined) {
         return Response.json({ error: "agent_runtime_off" }, { status: 503 });

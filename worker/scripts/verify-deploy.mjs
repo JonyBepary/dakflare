@@ -111,6 +111,11 @@ const routes = [
   ["/admin/", 200, "the console is served"],
   ["/v1/admin/agent/attachments", 401, "the attachments route exists and demands auth"],
   ["/v1/admin/agent/conversation", 401, "the conversation route exists and demands auth"],
+  ["/v1/admin/agent/runtime", 401, "the agent runtime proxy exists and demands auth"],
+  // The split made `/agents/*` a proxy. A 426 is the gate refusing a plain read;
+  // a 404 is what a wrong `className` in the gate returns, which is how the
+  // first split deploy answered every socket as missing.
+  ["/agents/assistant/assistant", 426, "the agent gate is wired to the split Worker"],
 ];
 for (const [path, want, why] of routes) {
   // Sequentially, so a failure reads in order against the route it belongs to.
