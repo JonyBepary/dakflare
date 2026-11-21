@@ -30,9 +30,9 @@ must never become the version a newcomer installs.
 
 ```bash
 # the version string, not just the tag, carries the suffix — one version everywhere
-#   cli/bin/dakflare.js  → CLI_VERSION = '6.3.0-alpha.2'
-#   worker/package.json  → "version": "6.3.0-alpha.2"
-git tag v6.3.0-alpha.2 && git push origin v6.3.0-alpha.2
+#   cli/bin/dakflare.js  → CLI_VERSION = '6.3.0-alpha.3'
+#   worker/package.json  → "version": "6.3.0-alpha.3"
+git tag v6.3.0-alpha.3 && git push origin v6.3.0-alpha.3
 ```
 
 The workflow passes `--prerelease --latest=false` when the tag contains `-alpha`, `-beta` or

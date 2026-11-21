@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '6.3.0-alpha.2';
+const CLI_VERSION = '6.3.0-alpha.3';
 
 const HOME = os.homedir();
 const CONFIG_DIR = process.env.DAKFLARE_CONFIG
