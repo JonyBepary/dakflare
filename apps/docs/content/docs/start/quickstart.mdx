@@ -78,7 +78,7 @@ dakflare up --email you@example.com             # provision D1/KV, write IDs, ap
 ```
 
 What `dakflare up` executes in order:
-1. Finds or creates D1 database `sms_gateway` and KV namespace `KV`, writing their IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
+1. Finds or creates D1 database `sms_gateway`, KV namespace `KV`, the three queues, and the R2 media bucket `dakflare-media`, writing the D1 and KV IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
 2. Applies D1 migrations `0001_baseline.sql` through `0019_templates_and_scheduling.sql`.
 3. Uploads secrets from `worker/.dev.vars` to `dakflare-worker`.
 4. Builds `dashboard/` into `worker/public/admin` and deploys `dakflare-worker` via `cf deploy`.

@@ -64,7 +64,7 @@ test('init --local outside a checkout exits 2 and writes nothing anywhere', asyn
   await fs.rm(cwd, { recursive: true, force: true });
 });
 
-test('init --local writes .dev.vars in a temp worker checkout with all four keys', async () => {
+test('init --local writes .dev.vars in a temp worker checkout with secrets and a local origin', async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'dakflare-init-worker-'));
   const worker = path.join(cwd, 'worker');
   await fs.mkdir(worker);
@@ -81,6 +81,8 @@ test('init --local writes .dev.vars in a temp worker checkout with all four keys
     'AUTH_PEPPER',
     'BETTER_AUTH_SECRET',
     'WEBHOOK_SECRET_KEY',
+    'AUTH_BASE_URL',
+    'AUTH_TRUSTED_ORIGINS',
   ]);
 
   const file = path.join(worker, '.dev.vars');

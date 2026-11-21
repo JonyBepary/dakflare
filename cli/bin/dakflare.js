@@ -1705,12 +1705,21 @@ async function initLocal(flags, json, workerDirectory = null, { quiet = false } 
     );
   }
 
+  const fresh = !fs.existsSync(file);
   const generated = {
     ADMIN_TOKEN: `dk_adm_${crypto.randomBytes(32).toString('base64url')}`,
     AUTH_PEPPER: `v1:${crypto.randomBytes(32).toString('base64')}`,
     BETTER_AUTH_SECRET: crypto.randomBytes(32).toString('base64'),
     WEBHOOK_SECRET_KEY: crypto.randomBytes(32).toString('base64'),
   };
+  // A fresh local file is for `wrangler dev` on http. Without an explicit
+  // origin, Better Auth would sign `__Secure-` cookies the browser then refuses
+  // over http. `up` filters these two when it deploys, so they never become
+  // production secrets. An existing file keeps whatever origin it names.
+  if (fresh) {
+    generated.AUTH_BASE_URL = 'http://127.0.0.1:8787';
+    generated.AUTH_TRUSTED_ORIGINS = 'http://127.0.0.1:8787';
+  }
 
   let existing = '';
   if (fs.existsSync(file)) {
@@ -4457,12 +4466,14 @@ async function commandUp(argv) {
     databaseId = ensureD1('sms_gateway', dryRun, plan);
     namespaceId = ensureKv('KV', dryRun, plan);
     ensureQueues(dryRun, plan);
+    ensureR2(MEDIA_BUCKET, dryRun, plan);
   } else {
     databaseId = '<new-database-id>';
     namespaceId = '<new-namespace-id>';
     plan.push('d1 sms_gateway: create or reuse (cf not authenticated)');
     plan.push('kv KV: create or reuse (cf not authenticated)');
     for (const name of UP_QUEUES) plan.push(`queue ${name}: create if missing (cf not authenticated)`);
+    plan.push(`r2 ${MEDIA_BUCKET}: create if missing (cf not authenticated)`);
   }
 
   // 4. Write the ids into the config the deploy reads. A pack carries a Build
@@ -4750,6 +4761,7 @@ function cfJsonArray(args) {
 }
 
 const UP_QUEUES = ['dakflare-webhook-queue', 'dakflare-ingest-queue', 'dakflare-ingest-dlq'];
+const MEDIA_BUCKET = 'dakflare-media';
 
 /**
  * Install what the build and deploy read. A missing `node_modules` is repaired
@@ -4823,6 +4835,24 @@ async function ensureWebhookSecretKey(workerDir, dryRun, plan, label = 'worker/.
 }
 
 /** Create the queues the Worker consumes, before the deploy binds them. */
+/**
+ * The media bucket is a binding like KV, but `cf deploy` does not create it.
+ * A brand-new account without it fails the deploy on a missing bucket rather
+ * than on anything the operator did, so `up` converges it first.
+ */
+function ensureR2(name, dryRun, plan) {
+  if (cf(['r2', 'buckets', 'get', name], { allowFailure: true }) !== null) {
+    plan.push(`r2 ${name}: reuse`);
+    return;
+  }
+  if (dryRun) {
+    plan.push(`r2 ${name}: create`);
+    return;
+  }
+  runCf(['r2', 'buckets', 'create', '--name', name], undefined, `creating R2 bucket ${name}`);
+  plan.push(`r2 ${name}: created`);
+}
+
 function ensureQueues(dryRun, plan) {
   const rows = cfJsonArray(['queues', 'list']) ?? [];
   const existing = new Set(

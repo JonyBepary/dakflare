@@ -19,8 +19,10 @@ installs the CLI only; `--no-setup` skips the wizard. `--dry-run` previews the c
 In an existing checkout, `npm install -g .` installs the same binary, and
 `node cli/bin/dakflare.js` runs it without installing.
 
-`init --local` writes `worker/.dev.vars` with a fresh `ADMIN_TOKEN`, `AUTH_PEPPER` and
-`BETTER_AUTH_SECRET` for `wrangler dev`; it does not contact a Worker.
+`init --local` writes `worker/.dev.vars` with a fresh `ADMIN_TOKEN`, `AUTH_PEPPER`,
+`BETTER_AUTH_SECRET` and `WEBHOOK_SECRET_KEY`, plus a local `AUTH_BASE_URL` for
+`wrangler dev`; it does not contact a Worker. `up` drops the local auth origins before
+uploading the rest.
 
 `dakflare up --email you@example.com` provisions a deployment end to end: resources, deploy, the first
 owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questions.
@@ -37,7 +39,7 @@ install or build the Worker tree. `--checkout` forces the source path when a pac
 |---|---|---|
 | `setup` | `--pack --checkout --yes --star --deploy --email --dry-run` | first-run wizard: pack or source, toolchain, secrets, star, optional `up` |
 | `init` | `--url --token --token-file --local --force` | verify a Worker and save the URL and token |
-| `up` | `--pack --checkout --email --yes --dry-run` | pack or source, local secrets, cf login, queues, migrations, prebuilt deploy, owner, pairing QR, saved config |
+| `up` | `--pack --checkout --email --yes --dry-run` | pack or source, local secrets, cf login, D1/KV/queues/R2, migrations, prebuilt deploy, owner, pairing QR, saved config |
 | `doctor` | `--max-age --serial` | config, health, schema, migrations, bindings, phone |
 | `pair` | `--label --qr --ttl` | mint a pairing code; `--qr` renders it in the terminal |
 | `devices` | none | list paired devices and their last contact |
