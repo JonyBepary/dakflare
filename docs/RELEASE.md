@@ -72,23 +72,40 @@ dakflare-pack-<version>/
     workers/default/worker.config.json
     workers/default/bundle/
     workers/default/assets/        # console, landing, screenshots
+  agent/.cloudflare/output/v1/     # dakflare-agent-worker
+    workers/default/worker.config.json
+    workers/default/bundle/
   migrations/*.sql
 ```
 
-It is built once with `cf build`; `cf deploy --prebuilt` uploads it without running a build. The
-D1 and KV ids in `worker.config.json` are placeholders:
+It is built once with `cf build` — twice, because the split has two Workers, and the agent
+project is built from `worker/agent` with its own wrangler install (a `cf` project is whatever
+manifest sits in the directory it runs from). `cf deploy --prebuilt` uploads each without
+running a build, and `cf deploy --prebuilt --dry-run` in the pack and in `agent/` is part of
+building it, so a pack that cannot deploy fails the release instead of the operator.
+
+`pack.json` names the second Worker:
+
+```json
+"agent": { "name": "dakflare-agent-worker", "dir": "agent", "bos": ".cloudflare/output/v1" }
+```
+
+The D1 and KV ids in both `worker.config.json` files are placeholders:
 
 ```text
 __DAKFLARE_D1_ID__
 __DAKFLARE_KV_ID__
 ```
 
-`dakflare up --pack <dir>` creates or reuses the resources, replaces the placeholders, applies the
-migrations with `--dir`, and runs:
+`dakflare up --pack <dir>` creates or reuses the resources, replaces the placeholders in both
+files, applies the migrations with `--dir`, and runs:
 
 ```bash
+cf deploy --prebuilt --secrets-file .dev.vars   # in agent/ first
 cf deploy --prebuilt --secrets-file .dev.vars
 ```
+
+The agent Worker goes first because the main Worker's `AGENT_SVC` binding names it.
 
 No `npm install`, no `npm run build:dashboard`, and no Worker type-check happen on the operator's
 machine.

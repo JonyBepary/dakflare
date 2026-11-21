@@ -68,7 +68,7 @@ install them into another repository unchanged.
 
 | Path | What |
 |---|---|
-| `worker/` | the Worker, D1 schema, Durable Objects, auth |
+| `worker/` | the main Worker, D1 schema, Durable Objects, auth; `worker/agent/` is the split agent Worker (`AssistantAgent`, MCP), deployed first |
 | `dashboard/` | the SvelteKit console, served by the Worker at `/admin` |
 | `cli/` | `dakflare`, zero dependencies, Node 22+ |
 | `simulator/` | the Android app (Tauri + Rust core) |
@@ -90,5 +90,7 @@ static gate passed.
 
 `node dakflare_test_harness.mjs pair && node dakflare_test_harness.mjs suite` against a
 local stack (`./test-support/dev.sh`), `cargo test` in `simulator/core` and
-`simulator/flow`, `npm run typecheck && npm run check:config` in `worker/`, and
-`npm run check` in `dashboard/`. A summary is a claim; the suite is evidence.
+`simulator/flow`, `npm run typecheck && npm run check:config && npm test` in `worker/`, and
+`npm run check` in `dashboard/`. The Worker tests are two Vitest projects because the deployment
+is two Workers: `main` mounts the real agent Worker through `AGENT_SVC`, and `agent` runs the
+object's own storage, journal and stream tests. A summary is a claim; the suite is evidence.

@@ -104,6 +104,13 @@ writeJson(workerConfigPath, workerConfig);
 // one first.
 console.log('Building the agent Worker Build Output');
 const agentDir = path.join(worker, 'agent');
+// `cf` finds its local runtime by reading the manifest in the directory it runs
+// from, so the agent project installs its own wrangler instead of borrowing the
+// parent's `node_modules` — which is also what a checkout install does.
+run('npm', ['install', '--no-save', '--no-audit', '--no-fund'], {
+  cwd: agentDir,
+  inherit: true,
+});
 run('npx', ['cf', 'build'], { cwd: agentDir, inherit: true });
 
 const agentOutput = path.join(agentDir, '.cloudflare', 'output', 'v1');

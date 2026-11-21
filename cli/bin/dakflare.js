@@ -4904,7 +4904,7 @@ const MEDIA_BUCKET = 'dakflare-media';
  * rather than reported: the install is convergent and the failure names the
  * exact directory that broke.
  */
-function ensureRepoDependencies(repoRoot, dryRun, plan, dirs = ['worker', 'dashboard']) {
+function ensureRepoDependencies(repoRoot, dryRun, plan, dirs = ['worker', 'dashboard', 'worker/agent']) {
   for (const dir of dirs) {
     const full = path.join(repoRoot, dir);
     if (!fs.existsSync(path.join(full, 'package.json'))) {
