@@ -35,6 +35,22 @@ semantic → component, and `src/app.css` imports it. Styling is hand-written CS
 with no utility framework. Tokens cover colour, type, spacing, radii and the
 component geometry; screens should use semantic tokens rather than primitives.
 
+## Frozen frame inspector
+
+`/console-inspect` serves `worker/public/console-inspect.html`, one self-contained
+file with every console frame: the 17 deployed routes at 1440x1000 and 390x844,
+plus 890 states from the local state workbench (`dashboard/src/routes/states`,
+which is deliberately not part of the production build). Frames are frozen DOM
+with the production CSS inlined, not screenshots and not iframes of the live app:
+links and forms are inert, and stubbed data is whichever state was captured.
+`/ui-inspect` links to it.
+
+The file is a snapshot, not a route. Regenerating it needs the workbench running
+(`npm run dev` in `dashboard/`) and a headless Chromium capture; the shared shell
+of each workbench page is stored once, which keeps the 924-frame file at about
+18 MiB. Do not treat a frame as evidence that a live route currently renders
+that way: the live deployment frames are the ones marked "As deployed".
+
 ## Local work
 
 ```bash
