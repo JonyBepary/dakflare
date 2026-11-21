@@ -23,7 +23,7 @@ DakFlare is built around one thesis: **the handset is the radio, the Worker is t
 
 ## Repository & Data Architecture
 
-- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 19 D1 migrations (`0001_baseline.sql`–`0019_templates_and_scheduling.sql`), 6 SQLite Durable Objects, 5 channel adapters (SMS, Telegram, WhatsApp Cloud, Messenger, Instagram), `flow.wasm`, Clef System 1, and `/mcp`.
+- **`worker/`**: TypeScript Cloudflare Worker (`dakflare-worker`), 20 D1 migrations (`0001_baseline.sql`–`0020_perf_indexes.sql`), 6 SQLite Durable Objects, 5 channel adapters (SMS, Telegram, WhatsApp Cloud, Messenger, Instagram), `flow.wasm`, Clef System 1, and `/mcp`.
 - **`simulator/`**: Tauri v2 + Rust `core/` + Rust `flow/` + `flow-wasm/` + Kotlin telephony bridge (`SmsReceiver`, `SmsSender`, `SmsProvider`, `GatewayService`, `BootReceiver`, `KeyVault`) + Svelte 5 SPA.
 - **`dashboard/`**: Svelte 5 with SvelteKit static console (`adapter-static` → `worker/public/admin`), container-query responsive tables (measured at 390–1440 px), Svelte Flow editor with WebMCP, and floating Assistant.
 - **`cli/`**: Zero-dependency Node 22+ `dakflare` CLI (33 commands).

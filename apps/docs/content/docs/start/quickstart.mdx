@@ -74,12 +74,12 @@ Sign in to Cloudflare locally and run `dakflare up`:
 ```bash
 cf auth login
 dakflare up --email you@example.com --dry-run   # preview the plan without mutating Cloudflare
-dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 19 migrations, deploy, bootstrap owner
+dakflare up --email you@example.com             # provision D1/KV, write IDs, apply 20 migrations, deploy, bootstrap owner
 ```
 
 What `dakflare up` executes in order:
 1. Finds or creates D1 database `sms_gateway`, KV namespace `KV`, the three queues, and the R2 media bucket `dakflare-media`, writing the D1 and KV IDs into `worker/cloudflare.config.ts` (the file `cf deploy` reads).
-2. Applies D1 migrations `0001_baseline.sql` through `0019_templates_and_scheduling.sql`.
+2. Applies D1 migrations `0001_baseline.sql` through `0020_perf_indexes.sql`.
 3. Uploads secrets from `worker/.dev.vars` to `dakflare-worker`.
 4. Builds `dashboard/` into `worker/public/admin` and deploys `dakflare-worker` via `cf deploy`.
 5. Bootstraps the first `owner` account (`POST /v1/admin/bootstrap`) and prints a one-time invite URL.

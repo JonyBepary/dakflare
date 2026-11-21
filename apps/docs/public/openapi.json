@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "DakFlare Edge API",
-    "version": "6.3.0-alpha.3",
+    "version": "6.3.0-alpha.4",
     "summary": "Sovereign multi-platform messaging hub, Android SMS gateway, Wasm flow engine, and agent control plane on Cloudflare Workers.",
     "license": {
       "name": "AGPL-3.0-only"

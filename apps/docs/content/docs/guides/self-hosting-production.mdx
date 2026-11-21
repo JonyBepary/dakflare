@@ -46,7 +46,7 @@ npx cf workers secrets update WEBHOOK_SECRET_KEY --worker dakflare-worker --type
 
 ## Schema Migration Order of Operations
 
-Migrations (`0001_baseline.sql` through `0019_templates_and_scheduling.sql`) are **never** applied by CI:
+Migrations (`0001_baseline.sql` through `0020_perf_indexes.sql`) are **never** applied by CI:
 
 1. **Snapshot first**: Record a D1 Time Travel bookmark or run `npx wrangler d1 export sms_gateway --remote --output backup.sql`.
 2. **Apply by database UUID** (`cf` rejects database names):
