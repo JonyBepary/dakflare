@@ -239,6 +239,10 @@ namespace_id = "1007"
 simple = { limit = 20, period = 60 }
 
 [vars]
+# Set D1_READ_REPLICATION = "on" only after enabling read replication on the
+# database. When unset/off, requests skip the D1 session wrapper (and its
+# per-request allocation of a copied env and a cloned response).
+# D1_READ_REPLICATION = "off"
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
 AGENT_RUNTIME = "on"

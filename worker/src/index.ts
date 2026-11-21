@@ -369,6 +369,11 @@ export interface Env {
    * alert JSON to it, best-effort: a webhook outage must never fail the alarm.
    */
   ALERT_WEBHOOK_URL?: string;
+  /**
+   * "on" only when D1 read replication is enabled for this database. Off means
+   * the request path skips `withSession` and its per-request allocations.
+   */
+  D1_READ_REPLICATION?: string;
 }
 
 type DeviceHandler = (
@@ -739,6 +744,13 @@ interface D1SessionHelper {
  * Tracks bookmarks across requests to prevent read-after-write anomalies across replicas.
  */
 function createD1SessionHelper(env: Env, req: Request): D1SessionHelper {
+  // `withSession` only buys read-after-write consistency when D1 read
+  // replication is enabled for the database. With replication disabled it
+  // still allocates a session wrapper, spreads every binding into a new env
+  // and clones every response. Keep the behaviour, but make it opt-in.
+  if (env.D1_READ_REPLICATION !== "on") {
+    return { env, attachBookmark: (res) => res };
+  }
   if (typeof env.DB?.withSession !== "function") {
     return {
       env,
