@@ -745,10 +745,11 @@ interface D1SessionHelper {
  */
 function createD1SessionHelper(env: Env, req: Request): D1SessionHelper {
   // `withSession` only buys read-after-write consistency when D1 read
-  // replication is enabled for the database. With replication disabled it
-  // still allocates a session wrapper, spreads every binding into a new env
-  // and clones every response. Keep the behaviour, but make it opt-in.
-  if (env.D1_READ_REPLICATION !== "on") {
+  // replication is enabled. It is therefore ON by default: a deployment that
+  // enables replication but forgets this var must not silently lose
+  // consistency. Set D1_READ_REPLICATION="off" only when the database's
+  // read_replication.mode is disabled; verify:deploy asserts the pair.
+  if (env.D1_READ_REPLICATION === "off") {
     return { env, attachBookmark: (res) => res };
   }
   if (typeof env.DB?.withSession !== "function") {

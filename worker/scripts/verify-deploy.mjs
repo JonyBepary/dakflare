@@ -145,6 +145,22 @@ if (migrations === null) {
   );
 }
 
+// ── 5. Read replication and the D1 wrapper must agree ────────────────────────
+// The session wrapper is fail-safe (on unless D1_READ_REPLICATION=off). A
+// database with replication enabled and a missing/off var would silently lose
+// sequential consistency, so the pair is a deploy gate rather than a comment.
+const database = await cfJson(["d1", "get", D1_ID]);
+const version = newest === null ? null : await cfJson(["workers", "versions", "get", newest, "--worker", WORKER]);
+const replicationMode = database?.read_replication?.mode ?? "unknown";
+const replicationFlag =
+  version?.bindings?.find((binding) => binding.name === "D1_READ_REPLICATION")?.text ?? "";
+record(
+  replicationMode !== "unknown" &&
+    (replicationMode === "enabled") === (replicationFlag === "on"),
+  `D1 read replication (${replicationMode}) agrees with D1_READ_REPLICATION=${replicationFlag || "unset"}`,
+  replicationMode === "unknown" ? "cf returned no database metadata" : "",
+);
+
 const failed = results.filter((r) => !r.ok);
 console.log(
   failed.length === 0

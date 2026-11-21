@@ -264,6 +264,25 @@ export async function handleAuthRequest(req: Request, env: Env): Promise<Respons
     }
   }
 
+  // The two option endpoints are pure reads of a freshly generated challenge.
+  // `auth.handler` rebuilds Better Auth's HTTP router for every call; these
+  // endpoint functions are already constructed once on the cached instance.
+  // Verification still goes through `auth.handler`, which owns its checks.
+  if (req.method.toUpperCase() === "GET") {
+    if (relative === "/passkey/generate-authenticate-options") {
+      return auth.api.generatePasskeyAuthenticationOptions({
+        headers: req.headers,
+        asResponse: true,
+      });
+    }
+    if (relative === "/passkey/generate-register-options") {
+      return auth.api.generatePasskeyRegistrationOptions({
+        headers: req.headers,
+        asResponse: true,
+      });
+    }
+  }
+
   if (relative === "/two-factor/verify-backup-code" && req.method.toUpperCase() === "POST") {
     const challenge = await resolveSignInChallenge(env, req);
     if (challenge !== null) {

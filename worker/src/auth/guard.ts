@@ -100,24 +100,30 @@ export function forbiddenFor(permission: Permission, action?: string): Response 
   return Response.json({ error: "forbidden", message }, { status: 403 });
 }
 
+/**
+ * Does this request carry a Better Auth session cookie?
+ *
+ * A browser request without one cannot be a session, so `requireRole` returns
+ * 401 before constructing Better Auth (tens of ms on a cold isolate). Names
+ * accepted by better-auth 1.7.14: `better-auth.session_token`,
+ * `__Secure-better-auth.session_token`, the legacy hyphenated
+ * `better-auth-session_token`, and chunked `.0`/`.1` variants.
+ */
+export function hasSessionCookie(req: Request): boolean {
+  const cookies = req.headers.get("cookie") ?? "";
+  return /(?:^|;\s*)(?:__Secure-)?better-auth[.-]session_token(?:\.\d+)?=/.test(cookies);
+}
+
 export async function requireRole(
   req: Request,
   env: Env,
   permission: Permission,
   options: RequireRoleOptions = {}
 ): Promise<GuardResult> {
-  // A browser request with no session cookie cannot be a session. Return the
-  // 401 before building Better Auth: on a cold isolate the adapter/schema
-  // construction is tens of milliseconds, and every anonymous probe paid it.
-  // Chunked session cookies are `${name}.0`, `${name}.1`, ...
-  const cookies = req.headers.get("cookie") ?? "";
-  const hasSessionCookie =
-    /(?:^|;\s*)(?:__Secure-)?better-auth\.session_token(?:\.\d+)?=/.test(cookies);
-
   if (env.BETTER_AUTH_SECRET === undefined || env.BETTER_AUTH_SECRET === "") {
     return { ok: false, response: Response.json({ error: "auth_unavailable" }, { status: 503 }) };
   }
-  if (!hasSessionCookie) return { ok: false, response: unauthorized() };
+  if (!hasSessionCookie(req)) return { ok: false, response: unauthorized() };
 
   const auth = getAuth(env, req);
   if (auth === null) {

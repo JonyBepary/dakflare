@@ -190,6 +190,9 @@ simple = { limit = 20, period = 60 }
 # Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless console
 # assistant is unaffected. Flip to "on" only after a ticket smoke test.
 AGENT_RUNTIME = "on"
+# Must match the database's read_replication.mode. "off" skips the D1 session
+# wrapper; "on" (the fail-safe default if unset) keeps sequential consistency.
+D1_READ_REPLICATION = "off"
 # Worker-to-worker interface trust mode (DakFlareApi). See src/binding.ts.
 BINDING_AUTH = "trusted"
 # `AUTH_MODE` is retired: one gate, two credentials (Better Auth session, or

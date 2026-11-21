@@ -176,7 +176,7 @@ export async function handleWorkflowsList(env: Env): Promise<Response> {
   // full document transfer plus a parse per workflow on each console load.
   const rows = await env.DB.prepare(
     `SELECT id, name, enabled, device_id, updated_at,
-            COALESCE(json_array_length(json_extract(graph, '$.nodes')), 0) AS node_count
+            CASE WHEN json_valid(graph) THEN COALESCE(json_array_length(json_extract(graph, '$.nodes')), 0) ELSE 0 END AS node_count
        FROM workflows
       ORDER BY updated_at DESC
       LIMIT 500`

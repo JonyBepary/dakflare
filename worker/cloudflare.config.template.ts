@@ -118,6 +118,8 @@ export default defineConfig({
 			// Agent runtime (pass 3). `off` keeps /agents/* at 503; the stateless
 			// console assistant is unaffected.
 			AGENT_RUNTIME: bindings.text("off"),
+			// Must match D1 read_replication.mode; verify:deploy asserts it.
+			D1_READ_REPLICATION: bindings.text("off"),
 			// Who may call the worker-to-worker interface (DakFlareApi). `trusted` lets
 			// any Worker in the account that binds this service act without a token;
 			// `agent_token` requires a dkf_agt_ token per call. See src/binding.ts.
