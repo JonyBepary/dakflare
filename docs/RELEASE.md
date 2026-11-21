@@ -49,6 +49,9 @@ lying about itself.
 | `dakflare-cli-<version>.tar.gz` | the source checkout | contributors and the `--source` fallback |
 | `*.sha256` | `sha256sum` | the installer and manual verification |
 
+Every asset is also covered by a GitHub build-provenance attestation. Verify one
+with `gh attestation verify dist/dakflare-linux-x64 --repo JonyBepary/dakflare`.
+
 ### The CLI binaries
 
 The binaries are Bun-compiled standalone executables. They run `init`, `send`, `status`, `doctor`,
@@ -118,9 +121,10 @@ gh release upload v6.3.0 path/to/app-universal-release.apk
 Attaching it automatically needs the keystore in release secrets; deploying from the app needs the
 direct Cloudflare API deployer, because Android cannot run `cf`.
 
-**Detached signatures and a channel manifest.** Every asset has a SHA-256. Signatures and one
-stable manifest for independent `cli`, `pack` and `android` channels are the next layer; see
-“Channels and signatures” below.
+**Detached offline signatures and a channel manifest.** Every asset has a SHA-256 and GitHub
+build-provenance attestation. A key that does not depend on GitHub, and one stable manifest for
+independent `cli`, `pack` and `android` channels, are the next layer; see “Channels and
+signatures” below.
 
 **The D1 schema.** Migrations are applied with `cf d1 migrations apply` before the deploy that
 needs them (`docs/OPS_DEPLOY.md`); a tag does not touch production.
