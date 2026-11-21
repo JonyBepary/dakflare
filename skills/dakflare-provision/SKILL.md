@@ -23,10 +23,12 @@ phone, and each failing check names the command that fixes it in the envelope's
 
 ## The sequence
 
-`dakflare setup` is the first-run wizard: it checks Node, npm, git, `cf` and `gh`, installs the
-Worker, console and docs dependencies, creates `worker/.dev.vars`, and offers to star the
-repository and run `up`. It never stars without an interactive yes or `--star`. `--dry-run`
-previews it; `--yes` skips prompts but still needs `--star`/`--deploy` for those effects.
+`dakflare setup` is the first-run wizard: it checks Node, npm, git, `cf` and `gh`, uses the
+precompiled Worker pack by default (or a source checkout with `--checkout`), creates the local
+secrets, and offers to star the repository and run `up`. It never stars without an interactive yes
+or `--star`. `--dry-run` previews it; `--yes` skips prompts but still needs `--star`/`--deploy` for
+those effects. The installer prefers the standalone CLI binary and pack; `--source` forces the
+checkout, and a pack deploy needs no npm install or console build.
 
 ```bash
 # 0. one-time wizard (the installer starts it on a terminal)
@@ -39,7 +41,7 @@ cf auth login
 dakflare init --local
 
 # 3. provision, migrate, deploy, create the owner, mint a pairing code
-dakflare up --email you@example.com
+dakflare up --email you@example.com   # or: up --pack ~/.local/share/dakflare/pack
 
 # 4. point the CLI at the Worker
 dakflare init --url https://<worker>.workers.dev --token-file worker/.dev.vars

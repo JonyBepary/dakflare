@@ -20,14 +20,14 @@ This tutorial takes you from a clean checkout to a live DakFlare deployment on y
 
 ## Prerequisites
 
-- **Node.js 22+** (required by the zero-dependency `dakflare` CLI)
+- **Node.js 22+** only for a source checkout or `cf`; the prebuilt CLI and pack need no Node
 - **Cloudflare `cf` CLI** authenticated to your account (`cf auth login`)
 - **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
 - **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/docs/guides/android-node-pairing/))
 
 ## Step 1: Install the Repository and CLI
 
-One command installs both. It checks Node 22, fetches the checkout to `./dakflare`, links
+One command installs the prebuilt CLI and the Worker pack. It verifies their SHA-256, installs
 `dakflare` into `~/.local/bin`, and runs `dakflare --version` to prove the command works. If that
 directory is not on your `PATH`, it prints the `export PATH` line to add:
 
@@ -35,11 +35,10 @@ directory is not on your `PATH`, it prints the `export PATH` line to add:
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 ```
 
-On an interactive terminal the installer starts `dakflare setup`, which installs the Worker,
-console and docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, and offers to star
-the repository. `install.sh --no-setup` installs the files only; `dakflare setup` reruns the wizard.
-`node cli/bin/dakflare.js` still works from the checkout, and `install.sh --cli-only` installs the
-CLI without the Worker tree.
+On an interactive terminal the installer starts `dakflare setup`, which uses the pack, creates its
+secrets, checks `cf` and `gh`, and offers to star the repository. `install.sh --source` installs the
+checkout and builds from it; `--no-setup` installs the files only; `dakflare setup` reruns the
+wizard. `node cli/bin/dakflare.js` still works from a checkout.
 
 Verify the CLI is available and speaks its machine contract:
 
@@ -52,8 +51,8 @@ Expected output: a single compact JSON document with `"status": "ok"` listing al
 ## Step 2: Generate Local Secrets
 
 `dakflare setup` performs this step and the next one for you, and asks before it touches GitHub or
-Cloudflare. The manual equivalent, from the checkout, generates fresh cryptographic secrets into
-`worker/.dev.vars` (git-ignored):
+Cloudflare. The manual equivalent, for a source checkout, generates fresh cryptographic secrets
+into `worker/.dev.vars` (git-ignored):
 
 ```bash
 cd dakflare

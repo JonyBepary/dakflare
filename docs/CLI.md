@@ -1,7 +1,9 @@
 # `dakflare` operator CLI
 
-Zero-dependency Node 22+ CLI for one DakFlare deployment. It talks to the Worker over `fetch`, keeps
-its config in `~/.config/dakflare/config.json` (mode 600), and never needs a build step.
+A zero-dependency CLI for one DakFlare deployment. It talks to the Worker over `fetch`, keeps its
+config in `~/.config/dakflare/config.json` (mode 600), and never needs a build step. The release
+ships standalone Bun binaries; Node is only needed for `cf` (the deploy path) and for the source
+fallback.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
@@ -9,9 +11,10 @@ dakflare setup
 dakflare doctor
 ```
 
-On an interactive terminal the installer starts `dakflare setup`: it installs the Worker, console and
-docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, offers to star the repository,
-and can hand off to `up`. `--no-setup` skips it; `--dry-run` previews the changes.
+The installer prefers the prebuilt binary and the Worker pack, verifies their SHA-256, and starts
+`dakflare setup`: it installs the pack, creates `pack/.dev.vars`, checks `cf` and `gh`, offers to
+star the repository, and can hand off to `up`. `--source` installs the checkout; `--no-pack`
+installs the CLI only; `--no-setup` skips the wizard. `--dry-run` previews the changes.
 
 In an existing checkout, `npm install -g .` installs the same binary, and
 `node cli/bin/dakflare.js` runs it without installing.
@@ -22,15 +25,19 @@ In an existing checkout, `npm install -g .` installs the same binary, and
 `dakflare up --email you@example.com` provisions a deployment end to end: resources, deploy, the first
 owner and a pairing code. `--dry-run` prints the plan, `--yes` skips the questions.
 
+`--pack <dir>` deploys a precompiled release pack: it fills the pack's D1/KV ids, applies
+`migrations` with `cf d1 migrations apply --dir`, and runs `cf deploy --prebuilt`. It does not
+install or build the Worker tree. `--checkout` forces the source path when a pack is installed.
+
 ## Commands
 
 ### Provision
 
 | Command | Flags | What it does |
 |---|---|---|
-| `setup` | `--yes --star --deploy --email --dry-run` | first-run wizard: dependencies, toolchain, secrets, star, optional `up` |
+| `setup` | `--pack --checkout --yes --star --deploy --email --dry-run` | first-run wizard: pack or source, toolchain, secrets, star, optional `up` |
 | `init` | `--url --token --token-file --local --force` | verify a Worker and save the URL and token |
-| `up` | `--email --yes --dry-run` | dependencies, local secrets, cf login, queues, deploy, owner, pairing QR, saved config |
+| `up` | `--pack --checkout --email --yes --dry-run` | pack or source, local secrets, cf login, queues, migrations, prebuilt deploy, owner, pairing QR, saved config |
 | `doctor` | `--max-age --serial` | config, health, schema, migrations, bindings, phone |
 | `pair` | `--label --qr --ttl` | mint a pairing code; `--qr` renders it in the terminal |
 | `devices` | none | list paired devices and their last contact |

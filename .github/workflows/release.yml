@@ -16,6 +16,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -39,7 +41,22 @@ jobs:
           node dakflare_test_harness.mjs selftest
           node dakflare_test_harness.mjs verify-vectors
 
-      - name: Assemble the CLI archive
+      - name: Install the build dependencies for the pack
+        run: |
+          npm ci --prefix worker
+          npm ci --prefix dashboard
+
+      - name: Build the precompiled Worker pack
+        run: node scripts/release/build-pack.mjs --out dist
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Build the standalone CLI binaries
+        run: node scripts/release/build-cli.mjs --out dist
+
+      - name: Assemble the CLI archive and pack aliases
         id: archive
         run: |
           set -eu
@@ -47,12 +64,26 @@ jobs:
           stage="dist/dakflare-${version}"
           mkdir -p "$stage"
           # What a user actually runs: the CLI, the four skills, the licence and the readme.
-          # The Worker and the console are deployed, not downloaded.
+          # The Worker and the console are deployed from the precompiled pack.
           cp -r cli skills LICENSE README.md "$stage"/
           tar -czf "dist/dakflare-cli-${version}.tar.gz" -C dist "dakflare-${version}"
           ( cd dist && sha256sum "dakflare-cli-${version}.tar.gz" > "dakflare-cli-${version}.tar.gz.sha256" )
+          cp "dist/dakflare-pack-${version}.tar.gz" "dist/dakflare-pack.tar.gz"
+          ( cd dist && sha256sum "dakflare-pack.tar.gz" > "dakflare-pack.tar.gz.sha256" )
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           ls -l dist
+
+      - name: Attest the built artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/dakflare-linux-x64
+            dist/dakflare-linux-arm64
+            dist/dakflare-darwin-x64
+            dist/dakflare-darwin-arm64
+            dist/dakflare-windows-x64.exe
+            dist/dakflare-pack.tar.gz
+            dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz
 
       - name: Publish
         env:
@@ -68,6 +99,14 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz" \
             "dist/dakflare-cli-${{ steps.archive.outputs.version }}.tar.gz.sha256" \
+            "dist/dakflare-pack-${{ steps.archive.outputs.version }}.tar.gz" \
+            "dist/dakflare-pack.tar.gz" \
+            "dist/dakflare-pack.tar.gz.sha256" \
+            "dist/dakflare-linux-x64" "dist/dakflare-linux-x64.sha256" \
+            "dist/dakflare-linux-arm64" "dist/dakflare-linux-arm64.sha256" \
+            "dist/dakflare-darwin-x64" "dist/dakflare-darwin-x64.sha256" \
+            "dist/dakflare-darwin-arm64" "dist/dakflare-darwin-arm64.sha256" \
+            "dist/dakflare-windows-x64.exe" "dist/dakflare-windows-x64.exe.sha256" \
             --title "DakFlare $GITHUB_REF_NAME" \
             --generate-notes \
             $kind

@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '6.3.0-alpha.1';
+const CLI_VERSION = '6.3.0-alpha.2';
 
 const HOME = os.homedir();
 const CONFIG_DIR = process.env.DAKFLARE_CONFIG
@@ -358,8 +358,10 @@ const COMMAND_SPECS = {
     summary: 'First-run wizard: dependencies, toolchain, secrets, star, and up',
     effect: 'mutating',
     usage:
-      'dakflare setup [--yes] [--star] [--deploy] [--email <address>] [--dry-run]',
+      'dakflare setup [--pack <dir>] [--yes] [--star] [--deploy] [--email <address>] [--dry-run]',
     flags: {
+      pack: { type: 'string', note: 'use this prebuilt pack instead of a source checkout' },
+      checkout: { type: 'boolean', note: 'force the source checkout even when a pack is installed' },
       yes: { type: 'boolean', note: 'no prompts; install and check, but do not star or deploy without their flags' },
       star: { type: 'boolean', note: 'star the repository with gh, or print/open its GitHub URL' },
       deploy: { type: 'boolean', note: 'run `dakflare up` after setup' },
@@ -667,11 +669,13 @@ const COMMAND_SPECS = {
     },
     summary: 'Provision the deployment: resources, deploy, owner, pairing',
     effect: 'mutating',
-    usage: 'dakflare up [--email <address>] [--yes] [--dry-run]',
+    usage: 'dakflare up [--email <address>] [--yes] [--dry-run] [--pack <dir>]',
     flags: {
       email: { type: 'string', note: 'owner address; skips the bootstrap prompt' },
       yes: { type: 'boolean', note: 'skip the confirmation before deploying' },
       'dry-run': { type: 'boolean', note: 'resolve, check and print the plan; change nothing' },
+      pack: { type: 'string', note: 'deploy this prebuilt pack instead of this checkout' },
+      checkout: { type: 'boolean', note: 'force the source checkout even when a pack is installed' },
     },
     examples: [
       'dakflare up --dry-run',
@@ -1118,6 +1122,7 @@ const VALUE_FLAGS = new Set([
   'for',
   'state',
   'file',
+  'pack',
   'id',
   'peer',
   'samples',
@@ -3714,6 +3719,146 @@ async function commandSchedule(argv) {
 
 const SETUP_DEPENDENCY_DIRS = ['worker', 'dashboard', 'apps/docs'];
 const DEFAULT_GITHUB_REPO = 'JonyBepary/dakflare';
+const DEFAULT_PACK_DIR = path.join(HOME, '.local', 'share', 'dakflare', 'pack');
+const PACK_CF_FLOOR = '1.0.0-rc.2';
+
+/** Read and validate a precompiled pack without touching it. */
+function readPack(directory) {
+  const root = path.resolve(directory);
+  const file = path.join(root, 'pack.json');
+  if (!fs.existsSync(file)) {
+    throw new CliError(`no pack.json at ${file}; run the installer with the release pack, or pass --pack <dir>.`, 2, {
+      error: 'pack_not_found',
+      pack: root,
+    });
+  }
+  let pack;
+  try {
+    pack = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new CliError(`pack.json at ${file} is not valid JSON: ${String(error?.message ?? error)}`, 2, {
+      error: 'pack_invalid',
+      pack: root,
+    });
+  }
+  if (pack?.schema !== 1 || typeof pack.version !== 'string' || typeof pack.bos !== 'string') {
+    throw new CliError(`pack.json at ${file} does not describe a schema 1 pack.`, 2, {
+      error: 'pack_invalid',
+      pack: root,
+    });
+  }
+  const bos = path.join(root, pack.bos);
+  const workerConfig = path.join(bos, 'workers', 'default', 'worker.config.json');
+  if (!fs.existsSync(workerConfig)) {
+    throw new CliError(`the pack at ${root} has no ${path.relative(root, workerConfig)}.`, 2, {
+      error: 'pack_invalid',
+      pack: root,
+    });
+  }
+  const migrations = path.join(root, pack.migrations ?? 'migrations');
+  if (!fs.existsSync(migrations)) {
+    throw new CliError(`the pack at ${root} has no migrations directory.`, 2, {
+      error: 'pack_invalid',
+      pack: root,
+    });
+  }
+  return { root, pack, bos, workerConfig, migrations };
+}
+
+/**
+ * Checkout or pack: explicit --pack, then DAKFLARE_PACK_DIR, then the current
+ * checkout, then the installer's default pack. A binary has no checkout, so the
+ * default pack is the path that makes `dakflare up` work without Node build.
+ */
+function provisioningSource(packFlag, forceCheckout = false) {
+  if (packFlag !== undefined && forceCheckout) {
+    throw usage('--pack and --checkout are mutually exclusive');
+  }
+  if (packFlag !== undefined) {
+    const data = readPack(packFlag);
+    return { kind: 'pack', root: data.root, workerDir: data.root, pack: data.pack, data };
+  }
+  if (!forceCheckout && process.env.DAKFLARE_PACK_DIR) {
+    const data = readPack(process.env.DAKFLARE_PACK_DIR);
+    return { kind: 'pack', root: data.root, workerDir: data.root, pack: data.pack, data };
+  }
+  if (!forceCheckout && fs.existsSync(path.join(DEFAULT_PACK_DIR, 'pack.json'))) {
+    const data = readPack(DEFAULT_PACK_DIR);
+    return { kind: 'pack', root: data.root, workerDir: data.root, pack: data.pack, data };
+  }
+  const repoRoot = process.env.DAKFLARE_REPO_DIR
+    ? path.resolve(process.env.DAKFLARE_REPO_DIR)
+    : path.join(__dirname, '..', '..');
+  if (fs.existsSync(path.join(repoRoot, 'worker', 'package.json'))) {
+    return { kind: 'checkout', root: repoRoot, workerDir: path.join(repoRoot, 'worker'), pack: null, data: null };
+  }
+  if (!forceCheckout && fs.existsSync(path.join(DEFAULT_PACK_DIR, 'pack.json'))) {
+    const data = readPack(DEFAULT_PACK_DIR);
+    return { kind: 'pack', root: data.root, workerDir: data.root, pack: data.pack, data };
+  }
+  return null;
+}
+
+/** Compare the simple semantic versions cf uses (1.0.0-rc.2). */
+function versionAtLeast(actual, floor) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(value).trim());
+    if (!match) return null;
+    return {
+      core: [Number(match[1]), Number(match[2]), Number(match[3])],
+      pre: match[4] ? match[4].split('.') : [],
+    };
+  };
+  const a = parse(actual);
+  const b = parse(floor);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (a.core[i] !== b.core[i]) return a.core[i] > b.core[i];
+  }
+  if (a.pre.length === 0 && b.pre.length === 0) return true;
+  if (a.pre.length === 0) return true;
+  if (b.pre.length === 0) return false;
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i += 1) {
+    const x = a.pre[i];
+    const y = b.pre[i];
+    if (x === undefined) return false;
+    if (y === undefined) return true;
+    const nx = /^\d+$/.test(x) ? Number(x) : null;
+    const ny = /^\d+$/.test(y) ? Number(y) : null;
+    if (nx !== null && ny !== null && nx !== ny) return nx > ny;
+    if (nx !== null && ny === null) return false;
+    if (nx === null && ny !== null) return true;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+function packCfState(source) {
+  if (source?.kind !== 'pack') return { ok: true };
+  const actual = toolVersion(CF);
+  if (actual === null) return { ok: false, reason: 'missing' };
+  const floor = source.pack?.requires?.cf ?? PACK_CF_FLOOR;
+  return { ok: versionAtLeast(actual, floor), actual, floor, reason: 'old' };
+}
+
+/** Fill the pack's Build Output with the account's D1 and KV ids. */
+function writePackIds(source, databaseId, namespaceId, dryRun) {
+  const file = source.data.workerConfig;
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!config.env?.DB || !config.env?.KV) {
+    throw new CliError(`the pack at ${source.root} has no DB/KV binding to fill.`, 2, {
+      error: 'pack_invalid',
+      pack: source.root,
+    });
+  }
+  config.env.DB.id = databaseId;
+  config.env.KV.id = namespaceId;
+  const detail = `pack: set DB/KV ids in worker.config.json`;
+  if (dryRun) return detail;
+  fs.writeFileSync(file, `${JSON.stringify(config)}\n`);
+  return detail;
+}
+
 const GH = process.env.DAKFLARE_GH || 'gh';
 const CF = process.env.DAKFLARE_CF || 'cf';
 
@@ -3761,7 +3906,7 @@ function ghSetupState() {
 }
 
 /** A checklist an operator can read and an agent can parse. */
-function setupChecks(repoRoot) {
+function setupChecks(source) {
   const nodeMajor = Number(String(process.versions.node).split('.')[0]);
   const checks = [
     {
@@ -3782,11 +3927,14 @@ function setupChecks(repoRoot) {
   });
 
   const cf = cfSetupState();
+  const packFloor = source.kind === 'pack' ? source.pack?.requires?.cf ?? PACK_CF_FLOOR : null;
+  const cfNewEnough = packFloor === null || (cf.installed && versionAtLeast(cf.version, packFloor));
   checks.push({
     name: 'cf',
-    status: cf.installed ? (cf.authenticated ? 'ok' : 'warn') : 'warn',
+    status: cf.installed ? (cf.authenticated && cfNewEnough ? 'ok' : 'warn') : 'warn',
     detail: cf.installed
-      ? `${cf.version}${cf.authenticated ? ' · signed in' : ' · not signed in'}`
+      ? `${cf.version}${cf.authenticated ? ' · signed in' : ' · not signed in'}` +
+        (cfNewEnough ? '' : ` · needs ${packFloor}`)
       : 'not installed',
   });
 
@@ -3799,27 +3947,41 @@ function setupChecks(repoRoot) {
       : 'not installed (star opens the browser)',
   });
 
-  for (const dir of SETUP_DEPENDENCY_DIRS) {
-    const full = path.join(repoRoot, dir);
-    if (!fs.existsSync(path.join(full, 'package.json'))) {
-      checks.push({ name: dir, status: 'warn', detail: 'no package.json in this checkout' });
-    } else if (fs.existsSync(path.join(full, 'node_modules'))) {
-      checks.push({ name: dir, status: 'ok', detail: 'dependencies present' });
-    } else {
-      checks.push({ name: dir, status: 'warn', detail: 'dependencies missing' });
+  if (source.kind === 'pack') {
+    checks.push({
+      name: 'pack',
+      status: 'ok',
+      detail: `${source.pack.version} · ${source.root}`,
+    });
+    checks.push({
+      name: 'bos',
+      status: 'ok',
+      detail: 'Build Output v1 present',
+    });
+  } else {
+    for (const dir of SETUP_DEPENDENCY_DIRS) {
+      const full = path.join(source.root, dir);
+      if (!fs.existsSync(path.join(full, 'package.json'))) {
+        checks.push({ name: dir, status: 'warn', detail: 'no package.json in this checkout' });
+      } else if (fs.existsSync(path.join(full, 'node_modules'))) {
+        checks.push({ name: dir, status: 'ok', detail: 'dependencies present' });
+      } else {
+        checks.push({ name: dir, status: 'warn', detail: 'dependencies missing' });
+      }
     }
   }
 
-  const devVars = path.join(repoRoot, 'worker', '.dev.vars');
+  const secretsLabel = source.kind === 'pack' ? 'pack/.dev.vars' : 'worker/.dev.vars';
+  const devVars = path.join(source.workerDir, '.dev.vars');
   if (!fs.existsSync(devVars)) {
-    checks.push({ name: 'secrets', status: 'warn', detail: 'worker/.dev.vars missing' });
+    checks.push({ name: 'secrets', status: 'warn', detail: `${secretsLabel} missing` });
   } else {
     const raw = fs.readFileSync(devVars, 'utf8');
     const hasHook = /^WEBHOOK_SECRET_KEY=/m.test(raw);
     checks.push({
       name: 'secrets',
       status: hasHook ? 'ok' : 'warn',
-      detail: `worker/.dev.vars present${hasHook ? ' · WEBHOOK_SECRET_KEY set' : ' · WEBHOOK_SECRET_KEY missing'}`,
+      detail: `${secretsLabel} present${hasHook ? ' · WEBHOOK_SECRET_KEY set' : ' · WEBHOOK_SECRET_KEY missing'}`,
     });
   }
 
@@ -3938,18 +4100,17 @@ async function commandSetup(argv) {
     throw usage('--email must be an address, for example you@example.com');
   }
 
-  const repoRoot = process.env.DAKFLARE_REPO_DIR
-    ? path.resolve(process.env.DAKFLARE_REPO_DIR)
-    : path.join(__dirname, '..', '..');
-  const workerDir = path.join(repoRoot, 'worker');
-  if (!fs.existsSync(path.join(workerDir, 'package.json'))) {
+  const source = provisioningSource(stringFlag(flags, 'pack'), flags.checkout === true);
+  if (source === null) {
     throw new CliError(
-      '`dakflare setup` needs the full repository checkout, not a --cli-only install. ' +
-        'Re-run the installer without --cli-only, or clone the repository.',
+      '`dakflare setup` needs a source checkout or a prebuilt pack. Run the installer, pass ' +
+        '--pack <dir>, or clone the repository.',
       2,
-      { error: 'worker_not_found', checkout: repoRoot }
+      { error: 'worker_not_found' }
     );
   }
+  const repoRoot = source.root;
+  const workerDir = source.workerDir;
 
   const nodeMajor = Number(String(process.versions.node).split('.')[0]);
   if (!Number.isFinite(nodeMajor) || nodeMajor < 22) {
@@ -3959,15 +4120,19 @@ async function commandSetup(argv) {
       { error: 'node_too_old', node: process.versions.node, floor: '22' }
     );
   }
-  if (toolVersion('npm') === null) {
-    throw new CliError('npm is not on PATH; install Node 22+ with npm, then re-run.', 6, {
-      error: 'npm_missing',
-    });
+  const npmAvailable = toolVersion('npm') !== null;
+  if (!npmAvailable && !(source.kind === 'pack' && cfSetupState().installed)) {
+    throw new CliError(
+      'npm is not on PATH. A pack deploy needs either npm (to install cf) or an already ' +
+        'installed cf; install Node 22+ or cf, then re-run.',
+      6,
+      { error: 'npm_missing' }
+    );
   }
 
   const interactive = !MODE.json && !AGENT && !yes && process.stdin.isTTY;
   const plan = [];
-  let checks = setupChecks(repoRoot);
+  let checks = setupChecks(source);
 
   if (!MODE.json) {
     out('DakFlare setup');
@@ -3978,23 +4143,27 @@ async function commandSetup(argv) {
     out('');
   }
 
-  // 1. The three Node projects. `up` only needs two, but a full checkout is a
-  // complete install, and the docs build is part of the repository.
-  ensureRepoDependencies(repoRoot, dryRun, plan, SETUP_DEPENDENCY_DIRS);
+  // 1. A pack is already built; a checkout needs its Node projects.
+  if (source.kind === 'checkout') {
+    ensureRepoDependencies(repoRoot, dryRun, plan, SETUP_DEPENDENCY_DIRS);
+  } else {
+    plan.push(`pack ${source.pack.version} · ${source.root}`);
+  }
 
   // 2. Local secrets. Never overwrite an existing file; append only the one key
   // the deploy requires.
   const devVars = path.join(workerDir, '.dev.vars');
+  const secretsLabel = source.kind === 'pack' ? 'pack/.dev.vars' : 'worker/.dev.vars';
   if (!fs.existsSync(devVars)) {
     if (dryRun) {
-      plan.push('worker/.dev.vars: create with fresh local secrets');
+      plan.push(`${secretsLabel}: create with fresh local secrets`);
     } else {
       await initLocal({}, false, workerDir, { quiet: true });
-      plan.push('worker/.dev.vars: created with fresh local secrets');
-      if (!MODE.json) out(`${ok('✓')} ${pad('secrets', 12)} worker/.dev.vars created (mode 600)`);
+      plan.push(`${secretsLabel}: created with fresh local secrets`);
+      if (!MODE.json) out(`${ok('✓')} ${pad('secrets', 12)} ${secretsLabel} created (mode 600)`);
     }
   } else {
-    await ensureWebhookSecretKey(workerDir, dryRun, plan);
+    await ensureWebhookSecretKey(workerDir, dryRun, plan, source.kind === 'pack' ? 'pack/.dev.vars' : 'worker/.dev.vars');
   }
 
   // 3. cf is the one Cloudflare dependency. Offer the npm install, but never
@@ -4005,7 +4174,7 @@ async function commandSetup(argv) {
     if (!dryRun) {
       install = interactive
         ? await confirmDefaultYes(
-            'Cloudflare CLI (cf) is not installed. Install it with `npm install -g cf`? [Y/n] ',
+            `Cloudflare CLI (cf) is not installed. Install it with \`npm install -g cf@${PACK_CF_FLOOR}\`? [Y/n] `,
             true
           )
         : yes;
@@ -4014,7 +4183,10 @@ async function commandSetup(argv) {
       plan.push('cf: npm install -g cf (missing)');
     } else if (install) {
       if (!MODE.json) out('Installing the Cloudflare CLI...');
-      const result = spawnSync('npm', ['install', '-g', 'cf'], { encoding: 'utf8', timeout: 300_000 });
+      const result = spawnSync('npm', ['install', '-g', `cf@${PACK_CF_FLOOR}`], {
+        encoding: 'utf8',
+        timeout: 300_000,
+      });
       if (!result.error && result.status === 0) {
         cf = cfSetupState();
         if (!MODE.json) {
@@ -4061,7 +4233,8 @@ async function commandSetup(argv) {
   // 5. The deployment. Default no: `up` creates real Cloudflare resources, so
   // it needs a deliberate yes or --deploy.
   let deploy = { requested: deployRequested, started: false };
-  let next = `dakflare up${email ? ` --email ${email}` : ''}`;
+  const packArg = source.kind === 'pack' ? ` --pack ${source.root}` : '';
+  let next = `dakflare up${packArg}${email ? ` --email ${email}` : ''}`;
 
   if (dryRun) {
     plan.push(deployRequested ? 'deploy: dakflare up' : `next: ${next}`);
@@ -4077,7 +4250,7 @@ async function commandSetup(argv) {
         if (email !== undefined && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
           throw usage('the owner email must be an address, for example you@example.com');
         }
-        next = `dakflare up${email ? ` --email ${email}` : ''}`;
+        next = `dakflare up${packArg}${email ? ` --email ${email}` : ''}`;
       }
       deploy.started = true;
       if (!MODE.json) {
@@ -4086,6 +4259,7 @@ async function commandSetup(argv) {
         out('');
       }
       const childArgs = [fileURLToPath(import.meta.url), 'up', '--yes'];
+      if (source.kind === 'pack') childArgs.push('--pack', source.root);
       if (email) childArgs.push('--email', email);
       // Both machine modes run the child without prompts; one document on stdout.
       if (MODE.json || MODE.agent) childArgs.push('--agent');
@@ -4102,7 +4276,7 @@ async function commandSetup(argv) {
     }
   }
 
-  checks = setupChecks(repoRoot);
+  checks = setupChecks(source);
 
   if (MODE.json) {
     emitJson(
@@ -4132,7 +4306,7 @@ async function commandSetup(argv) {
   }
 
   out(`${ok('Setup complete')}`);
-  out(`  ${pad('checkout', 12)} ${repoRoot}`);
+  out(`  ${pad(source.kind === 'pack' ? 'pack' : 'checkout', 12)} ${repoRoot}`);
   out(`  ${pad('star', 12)} ${star.starred ? 'starred' : star.requested ? 'not completed' : 'skipped'}`);
   out(`  ${pad('deploy', 12)} ${deploy.started ? 'started' : 'not started'}`);
   out(`  ${pad('next', 12)} ${next}`);
@@ -4175,14 +4349,26 @@ async function commandUp(argv) {
     throw usage('--email must be an address, for example you@example.com');
   }
 
-  const repoRoot = process.env.DAKFLARE_REPO_DIR
-    ? path.resolve(process.env.DAKFLARE_REPO_DIR)
-    : path.join(__dirname, '..', '..');
-  const workerDir = path.join(repoRoot, 'worker');
+  const source = provisioningSource(stringFlag(flags, 'pack'), flags.checkout === true);
+  if (source === null) {
+    throw new CliError(
+      '`dakflare up` needs a source checkout or a prebuilt pack. Run it from the repository, ' +
+        'pass --pack <dir>, or run the installer so it can download the release pack.',
+      2,
+      { error: 'worker_not_found' }
+    );
+  }
+  const repoRoot = source.root;
+  const workerDir = source.workerDir;
   const plan = [];
 
-  // 1. Dependencies and local secrets: both are inputs to the deploy below.
-  ensureRepoDependencies(repoRoot, dryRun, plan);
+  // 1. Dependencies and local secrets: both are inputs to the deploy below. A
+  //    pack is already built; its only install-time input is .dev.vars.
+  if (source.kind === 'checkout') {
+    ensureRepoDependencies(repoRoot, dryRun, plan);
+  } else {
+    plan.push(`pack ${source.pack.version} · ${source.root}`);
+  }
   await ensureWebhookSecretKey(workerDir, dryRun, plan);
 
   // 2. cf, and a session it can use. Both failures name the fix rather than
@@ -4192,6 +4378,16 @@ async function commandUp(argv) {
     throw new CliError('the Cloudflare CLI (`cf`) is not on PATH.', 2, {
       error: 'cf_missing',
     });
+  }
+  const packCf = packCfState(source);
+  if (!packCf.ok) {
+    throw new CliError(
+      `this pack needs cf ${packCf.floor ?? PACK_CF_FLOOR} or newer; this is ` +
+        `${packCf.actual ?? 'not installed'}. Install it with ` +
+        `\`npm install -g cf@${packCf.floor ?? PACK_CF_FLOOR}\`, then re-run.`,
+      6,
+      { error: 'cf_too_old', found: packCf.actual ?? null, floor: packCf.floor ?? PACK_CF_FLOOR }
+    );
   }
   let authenticated = cf(['accounts', 'list'], { allowFailure: true }) !== null;
   if (!authenticated && dryRun) {
@@ -4241,16 +4437,27 @@ async function commandUp(argv) {
     for (const name of UP_QUEUES) plan.push(`queue ${name}: create if missing (cf not authenticated)`);
   }
 
-  // 4. Write the ids into the config the deploy reads.
-  const configPath = path.join(workerDir, 'cloudflare.config.ts');
-  const configChange = writeConfigIds(configPath, databaseId, namespaceId, dryRun);
+  // 4. Write the ids into the config the deploy reads. A pack carries a Build
+  //    Output; its worker.config.json is the file to fill.
+  const configChange =
+    source.kind === 'pack'
+      ? writePackIds(source, databaseId, namespaceId, dryRun)
+      : writeConfigIds(path.join(workerDir, 'cloudflare.config.ts'), databaseId, namespaceId, dryRun);
   plan.push(configChange);
 
   // 5. Migrate, then deploy with the secrets `init --local` already wrote.
   // `cf` applies to the remote database unless `--local` is passed; `--remote`
   // is a wrangler flag and this CLI version rejects it.
-  plan.push(`cf d1 migrations apply ${databaseId}`);
-  plan.push('cf deploy --secrets-file .dev.vars');
+  plan.push(
+    source.kind === 'pack'
+      ? `cf d1 migrations apply ${databaseId} --dir migrations`
+      : `cf d1 migrations apply ${databaseId}`
+  );
+  plan.push(
+    source.kind === 'pack'
+      ? 'cf deploy --prebuilt --secrets-file .dev.vars'
+      : 'cf deploy --secrets-file .dev.vars'
+  );
   plan.push(
     email === undefined
       ? 'owner: skipped (pass --email to bootstrap one)'
@@ -4277,24 +4484,38 @@ async function commandUp(argv) {
     }
   }
 
-  runCf(['d1', 'migrations', 'apply', databaseId], workerDir, 'applying migrations');
+  let deploy;
+  if (source.kind === 'pack') {
+    runCf(
+      ['d1', 'migrations', 'apply', databaseId, '--dir', 'migrations'],
+      workerDir,
+      'applying migrations'
+    );
+    deploy = runCf(
+      ['deploy', '--prebuilt', '--secrets-file', '.dev.vars'],
+      workerDir,
+      'deploying the prebuilt pack'
+    );
+  } else {
+    runCf(['d1', 'migrations', 'apply', databaseId], workerDir, 'applying migrations');
 
-  const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
-  if (!fs.existsSync(dashboardEntry)) {
-    const built = spawnSync('npm', ['run', 'build:dashboard'], {
-      cwd: workerDir,
-      encoding: 'utf8',
-    });
-    if (built.error || built.status !== 0) {
-      throw new CliError(
-        `building console assets failed: ${(built.stderr || built.stdout || built.error?.message || '').trim()}`,
-        1,
-        { error: 'provision_failed', step: 'build:dashboard' }
-      );
+    const dashboardEntry = path.join(workerDir, 'public', 'admin', 'index.html');
+    if (!fs.existsSync(dashboardEntry)) {
+      const built = spawnSync('npm', ['run', 'build:dashboard'], {
+        cwd: workerDir,
+        encoding: 'utf8',
+      });
+      if (built.error || built.status !== 0) {
+        throw new CliError(
+          `building console assets failed: ${(built.stderr || built.stdout || built.error?.message || '').trim()}`,
+          1,
+          { error: 'provision_failed', step: 'build:dashboard' }
+        );
+      }
     }
-  }
 
-  const deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
+    deploy = runCf(['deploy', '--secrets-file', '.dev.vars'], workerDir, 'deploying');
+  }
 
   // 6. Verify against the deployment, not against the exit status of a deploy.
   const url = readDeployUrl(deploy.stdout) ?? readConfigUrl();
@@ -4459,27 +4680,27 @@ function ensureRepoDependencies(repoRoot, dryRun, plan, dirs = ['worker', 'dashb
  * because a sealed webhook secret cannot be created without it. An existing file
  * gains only the missing key; its other lines are never touched.
  */
-async function ensureWebhookSecretKey(workerDir, dryRun, plan) {
+async function ensureWebhookSecretKey(workerDir, dryRun, plan, label = 'worker/.dev.vars') {
   const file = path.join(workerDir, '.dev.vars');
   if (!fs.existsSync(file)) {
     if (dryRun) {
       plan.push(
-        'worker/.dev.vars: create (ADMIN_TOKEN, AUTH_PEPPER, BETTER_AUTH_SECRET, WEBHOOK_SECRET_KEY)'
+        `${label}: create (ADMIN_TOKEN, AUTH_PEPPER, BETTER_AUTH_SECRET, WEBHOOK_SECRET_KEY)`
       );
       return;
     }
     await initLocal({}, false, workerDir, { quiet: true });
-    plan.push('worker/.dev.vars: created with WEBHOOK_SECRET_KEY');
+    plan.push(`${label}: created with WEBHOOK_SECRET_KEY`);
     return;
   }
 
   const raw = fs.readFileSync(file, 'utf8');
   if (/^WEBHOOK_SECRET_KEY=/m.test(raw)) {
-    plan.push('worker/.dev.vars: present (WEBHOOK_SECRET_KEY set)');
+    plan.push(`${label}: present (WEBHOOK_SECRET_KEY set)`);
     return;
   }
   if (dryRun) {
-    plan.push('worker/.dev.vars: append WEBHOOK_SECRET_KEY');
+    plan.push(`${label}: append WEBHOOK_SECRET_KEY`);
     return;
   }
   const separator = raw === '' || raw.endsWith('\n') ? '' : '\n';
@@ -4488,7 +4709,7 @@ async function ensureWebhookSecretKey(workerDir, dryRun, plan) {
     `${separator}WEBHOOK_SECRET_KEY=${crypto.randomBytes(32).toString('base64')}\n`,
     { encoding: 'utf8', mode: 0o600 }
   );
-  plan.push('worker/.dev.vars: appended WEBHOOK_SECRET_KEY');
+  plan.push(`${label}: appended WEBHOOK_SECRET_KEY`);
 }
 
 /** Create the queues the Worker consumes, before the deploy binds them. */
@@ -9273,14 +9494,17 @@ apply --dry-run reports create/update/unchanged per rule and writes nothing.
 test is the honest answer to "why did this message get no reply": disabled,
 sender_mismatch, body_mismatch and cooldown are all reported, not just matches.`,
 
-  setup: `Usage: dakflare setup [--yes] [--star] [--deploy] [--email <address>] [--dry-run]
+  setup: `Usage: dakflare setup [--pack <dir>] [--yes] [--star] [--deploy] [--email <address>] [--dry-run]
 
-First-run wizard for a fresh checkout. It checks Node, npm, git, cf and gh;
-installs the worker, dashboard and docs Node dependencies; creates
-worker/.dev.vars when it is missing (and appends WEBHOOK_SECRET_KEY when it is
+First-run wizard. It checks Node, npm, git, cf and gh; installs the worker,
+dashboard and docs Node dependencies for a source checkout (a pack skips them);
+creates .dev.vars when it is missing (and appends WEBHOOK_SECRET_KEY when it is
 not); offers to install cf with npm; asks for a GitHub star; and optionally runs
 dakflare up.
 
+  --pack <dir>       use a prebuilt release pack instead of this checkout; the
+                     installer downloads one to ~/.local/share/dakflare/pack
+  --checkout         build from this checkout even when a pack is installed
   --yes              no prompts: install and check, but do not star or deploy
                      unless --star or --deploy says so
   --star             star JonyBepary/dakflare. Uses gh when it is installed and
@@ -9295,7 +9519,7 @@ DAKFLARE_REPO=owner/repo to star a fork, and DAKFLARE_NO_BROWSER=1 to always
 print the URL instead of opening one.
 `,
 
-  up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--agent]
+  up: `Usage: dakflare up [--email <address>] [--yes] [--dry-run] [--pack <dir>] [--agent]
 
 Provisions the deployment on the account \`cf\` is logged into: installs missing
 dependencies, writes worker/.dev.vars (with WEBHOOK_SECRET_KEY) when it is
@@ -9311,6 +9535,10 @@ deployment repairs it rather than replacing it.
   --email <address>  bootstrap this owner; skipped when one already exists
   --yes              skip the confirmation before deploying
   --dry-run          resolve, check and print the plan; change nothing
+  --pack <dir>       deploy a prebuilt pack instead of this checkout; fills the
+                     pack's D1/KV ids, applies its migrations and runs
+                     cf deploy --prebuilt. No npm install or console build.
+  --checkout         build from this checkout even when a pack is installed
 
 Requires \`cf\` on PATH. When it is not authenticated, an interactive run starts
 \`cf auth login\`; --agent and non-TTY runs refuse and name that command. There is

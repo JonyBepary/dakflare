@@ -15,7 +15,7 @@ description: Reference for all 33 dakflare CLI commands, semantic exit codes, Cl
 
 ## `dakflare` CLI Machine Contract
 
-- Zero dependencies, Node 22+, config stored at `~/.config/dakflare/config.json` (mode `600`).
+- Zero npm dependencies. The release binaries need no Node; `cf` and a source checkout do. Config is stored at `~/.config/dakflare/config.json` (mode `600`).
 - `--agent` (or `--json`): emits one compact JSON document per invocation, never prompts, never emits ANSI colors.
 - Pass `--yes` on destructive or interactive commands in automation.
 
@@ -46,8 +46,13 @@ description: Reference for all 33 dakflare CLI commands, semantic exit codes, Cl
 - **Contract**: `capabilities`, `describe`, `schema` (`schema states`), `examples`, `mcp serve`, `key fingerprint`
 
 `dakflare setup` is the interactive first-run path: it checks Node, npm, git, `cf` and `gh`,
-installs the Worker/console/docs dependencies, writes the local secrets, offers to star the
+prepares the Worker pack or source dependencies, writes the local secrets, offers to star the
 repository, and can run `up`. `--yes` never stars or deploys without `--star`/`--deploy`.
+
+`--pack <dir>` uses a precompiled release pack (a Cloudflare Build Output v1 plus migrations and
+`pack.json`); `up --pack` fills its D1/KV ids and runs `cf deploy --prebuilt`, with no npm install
+or console build. `--checkout` forces the source path. The release binaries and pack are described
+in `docs/RELEASE.md`.
 
 ## Cloudflare Bindings (`worker/cloudflare.config.ts` & `worker/wrangler.toml`)
 

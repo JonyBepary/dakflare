@@ -215,3 +215,40 @@ test('setup refuses a checkout without worker/package.json', async () => {
   const document = JSON.parse(result.stdout);
   assert.equal(document.error.code, 'worker_not_found');
 });
+
+test('setup --pack reports a prebuilt pack without touching a checkout', async () => {
+  const root = await temp('dakflare-pack-');
+  await fs.mkdir(path.join(root, 'migrations'), { recursive: true });
+  await fs.writeFile(path.join(root, 'migrations', '0001.sql'), 'select 1;\n');
+  await fs.mkdir(path.join(root, '.cloudflare', 'output', 'v1', 'workers', 'default'), { recursive: true });
+  await fs.writeFile(
+    path.join(root, '.cloudflare', 'output', 'v1', 'workers', 'default', 'worker.config.json'),
+    JSON.stringify({ name: 'dakflare-worker', env: { DB: { id: 'x' }, KV: { id: 'y' } } })
+  );
+  await fs.writeFile(
+    path.join(root, 'pack.json'),
+    JSON.stringify({
+      schema: 1,
+      version: 'test',
+      worker: 'dakflare-worker',
+      bos: '.cloudflare/output/v1',
+      migrations: 'migrations',
+      requires: { cf: '1.0.0-rc.2' },
+    })
+  );
+  const cf = await fakeCf();
+  const gh = await fakeGh();
+  const config = await temp('dakflare-config-');
+  const result = await run(['setup', '--pack', root, '--dry-run', '--agent'], {
+    DAKFLARE_CF: cf,
+    DAKFLARE_GH: gh.file,
+    DAKFLARE_CONFIG: config,
+    DAKFLARE_NO_BROWSER: '1',
+  });
+  const document = data(result);
+  assert.ok(document.checks.some((check) => check.name === 'pack' && check.status === 'ok'));
+  assert.ok(document.checks.some((check) => check.name === 'bos' && check.status === 'ok'));
+  assert.ok(!document.checks.some((check) => check.name === 'worker'));
+  assert.ok(document.plan.some((step) => step.startsWith('pack ')));
+  await assert.rejects(fs.stat(path.join(root, '.dev.vars')), /ENOENT/);
+});

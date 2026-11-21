@@ -126,24 +126,21 @@ The operator surface and the handset app, captured from the current build:
 
 ## Quick Start
 
-Requires **Node.js 22+** and an authenticated Cloudflare [`cf`](https://developers.cloudflare.com/) CLI (`cf auth login`).
-
-Install the repository and the `dakflare` command in one line. It checks Node, fetches the
-checkout to `./dakflare`, links `dakflare` into `~/.local/bin` (printing the `export PATH` line if
-that directory is not on your `PATH`), and runs it once to prove the binary:
+The **prebuilt CLI** needs no Node. A pack deploy still uses [`cf`](https://developers.cloudflare.com/),
+which is a Node package, and a source install needs Node 22+; the installer prefers the binary and
+the precompiled Worker pack, and falls back to source only when the platform has no artifact.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JonyBepary/dakflare/main/install.sh | sh
 ```
 
-On an interactive terminal the installer starts `dakflare setup`. The wizard installs the Worker,
-console and docs dependencies, creates `worker/.dev.vars`, checks `cf` and `gh`, asks whether to
-star the repository, and can hand off to `up`. It never stars without an explicit yes or `--star`.
-Skip it with `install.sh --no-setup`; run it later with `dakflare setup`.
+On an interactive terminal the installer starts `dakflare setup`. It installs the Worker pack and
+the local secrets, checks `cf` and `gh`, asks whether to star the repository, and can hand off to
+`up`. It never stars without an explicit yes or `--star`. `--source` installs and builds from the
+checkout instead; `--no-pack` installs the CLI only; `--no-setup` skips the wizard.
 
-Then provision. `up` converges the deployment: it installs any missing dependency, writes
-`worker/.dev.vars` when missing, launches `cf auth login` when needed, creates the queues, applies
-migrations `0001` to `0019`, deploys, saves the CLI config, and prints the pairing QR:
+Then provision. A pack deploy creates or reuses D1/KV/queues, applies migrations `0001` to `0019`,
+and runs `cf deploy --prebuilt`; there is no npm install or console build on your machine:
 
 ```bash
 dakflare setup --deploy --email you@example.com
@@ -151,6 +148,8 @@ dakflare setup --deploy --email you@example.com
 dakflare up --email you@example.com
 dakflare doctor
 ```
+
+A source checkout uses `dakflare up --checkout` when you want to build from the working tree.
 
 Open the printed owner invite URL on the Worker's own HTTPS hostname, enroll a **Passkey**, pair your Android handset (`dakflare pair --qr`), and send your first verified SMS:
 
@@ -272,7 +271,7 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 | `worker/` | Cloudflare Worker, 6 SQLite Durable Objects, 19 D1 migrations, channels, `flow.wasm`, MCP server |
 | `dashboard/` | Svelte 5 on SvelteKit 3 operator console, built into `worker/public/admin` and served at `/admin` |
 | `simulator/` | Tauri v2 Android handset app (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
-| `cli/` | Zero-dependency Node 22+ `dakflare` CLI (33 commands) + `cli/schema/flow-v2.json` |
+| `cli/` | Zero-dependency `dakflare` CLI (33 commands), released as standalone binaries + `cli/schema/flow-v2.json` |
 | `apps/docs/` | Dual-audience Fumadocs site (`/llms.txt`, `.md`, `/openapi.json`, `/SKILL.md`, `/mcp`) |
 | `skills/` | Five `SKILL.md` packages for coding agents |
 | `contracts/` | `mcp-tools.json`, generated from `tools/list` by `worker/scripts/mcp-contract.mjs` |
