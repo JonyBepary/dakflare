@@ -1,6 +1,6 @@
 # Deploying
 
-One sovereign deploy path, three configuration files, and an air-gapped CI pipeline
+One sovereign deploy path, five configuration files, and an air-gapped CI pipeline
 that verifies every check without holding any production credentials.
 
 ```bash
@@ -13,7 +13,7 @@ Deployment is **decoupled from GitHub Actions**: CI runs with zero repository se
 guaranteeing complete supply-chain immunity for edge credentials while keeping production
 deployments coordinated with the physical Android handset.
 
-## The three configs
+## The configs
 
 | File | Read by | Why it exists |
 |---|---|---|
