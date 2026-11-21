@@ -4489,6 +4489,9 @@ async function commandUp(argv) {
   //    first makes the WebAuthn rpId 127.0.0.1 and the second rejects the live
   //    console's origin. Keep them for wrangler dev, omit them from this upload.
   const deployVarsPlan = prepareDeployVars(workerDir, true, plan);
+  for (const name of deployVarsPlan.dropped) {
+    plan.push(`secret ${name}: delete the local-only value from the deployment`);
+  }
   plan.push(
     source.kind === 'pack'
       ? `cf d1 migrations apply ${databaseId} --dir migrations`
@@ -4528,6 +4531,20 @@ async function commandUp(argv) {
   const deployVars = deployVarsPlan.temp
     ? prepareDeployVars(workerDir, false, plan)
     : deployVarsPlan;
+
+  // A secret left over from an earlier deploy does not disappear because the
+  // new file omits it. Delete the local-only ones before the deploy so the
+  // Worker derives the origin and rpId from its requests; a first deploy has
+  // nothing to delete and is allowed to fail here.
+  if (deployVars.dropped.length > 0) {
+    const workerName = workerScriptName(source);
+    for (const name of deployVars.dropped) {
+      cf(['workers', 'secrets', 'delete', name, '--worker', workerName, '--force'], {
+        allowFailure: true,
+        cwd: workerDir,
+      });
+    }
+  }
 
   let deploy;
   try {
@@ -4646,16 +4663,40 @@ async function commandUp(argv) {
  * console's sign-in requests. Keep local values for `wrangler dev`, omit them
  * from the upload.
  */
+function workerScriptName(source) {
+  if (source.kind === 'pack' && typeof source.pack?.worker === 'string') return source.pack.worker;
+  try {
+    const config = fs.readFileSync(path.join(source.workerDir, 'cloudflare.config.ts'), 'utf8');
+    const match = /\bname:\s*["']([^"']+)["']/.exec(config);
+    if (match !== null) return match[1];
+  } catch {
+    /* fall through to the default */
+  }
+  return 'dakflare-worker';
+}
+
 function prepareDeployVars(workerDir, dryRun, plan) {
   const source = path.join(workerDir, '.dev.vars');
   const target = path.join(workerDir, '.dev.vars.deploy');
-  const localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1|\[::1\])$/i;
+  const localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1|\[::1\]|\.localhost)$/i;
   const unquote = (value) => String(value).trim().replace(/^["']|["']$/g, '');
+  // AUTH_BASE_URL holds a full origin (http://127.0.0.1:8787), while
+  // AUTH_RP_ID may hold a bare host. Test the hostname of either.
+  const localTarget = (value) => {
+    const raw = unquote(value);
+    try {
+      const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
+      return localHost.test(url.hostname);
+    } catch {
+      return false;
+    }
+  };
 
-  if (!fs.existsSync(source)) return { name: '.dev.vars', path: source, temp: false };
+  if (!fs.existsSync(source)) return { name: '.dev.vars', path: source, temp: false, dropped: [] };
 
   const lines = fs.readFileSync(source, 'utf8').split(/\r?\n/);
   const kept = [];
+  const dropped = [];
   let changed = false;
 
   for (const line of lines) {
@@ -4668,8 +4709,9 @@ function prepareDeployVars(workerDir, dryRun, plan) {
     let value = unquote(rawValue);
 
     if (key === 'AUTH_BASE_URL' || key === 'AUTH_RP_ID') {
-      if (localHost.test(value)) {
+      if (localTarget(value)) {
         changed = true;
+        dropped.push(key);
         continue;
       }
       kept.push(`${key}=${value}`);
@@ -4687,6 +4729,7 @@ function prepareDeployVars(workerDir, dryRun, plan) {
       });
       if (publicOrigins.length === 0) {
         changed = true;
+        dropped.push(key);
         continue;
       }
       if (publicOrigins.length !== origins.length) changed = true;
@@ -4697,10 +4740,10 @@ function prepareDeployVars(workerDir, dryRun, plan) {
     kept.push(line);
   }
 
-  if (!changed) return { name: '.dev.vars', path: source, temp: false };
+  if (!changed) return { name: '.dev.vars', path: source, temp: false, dropped: [] };
 
   plan.push('auth: local AUTH_* origins are not deployed');
-  if (dryRun) return { name: '.dev.vars.deploy', path: target, temp: true };
+  if (dryRun) return { name: '.dev.vars.deploy', path: target, temp: true, dropped };
 
   fs.writeFileSync(target, `${kept.join('\n')}\n`, { mode: 0o600 });
   try {
@@ -4708,7 +4751,7 @@ function prepareDeployVars(workerDir, dryRun, plan) {
   } catch {
     /* best effort */
   }
-  return { name: '.dev.vars.deploy', path: target, temp: true };
+  return { name: '.dev.vars.deploy', path: target, temp: true, dropped };
 }
 
 /** Run `cf`, returning stdout, or null when the command failed. */
