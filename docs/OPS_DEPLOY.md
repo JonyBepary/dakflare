@@ -17,8 +17,10 @@ deployments coordinated with the physical Android handset.
 
 | File | Read by | Why it exists |
 |---|---|---|
-| `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical Worker definition: bindings, exports, triggers |
+| `worker/cloudflare.config.ts` | `cf` (deploy, resources, `cf d1 migrations apply`) | the canonical definition of the **main** Worker: bindings, exports, triggers |
+| `worker/agent/cloudflare.config.ts` | `cf`, run from `worker/agent` | the **agent** Worker: `AssistantAgent`, no public route, no auth secrets |
 | `worker/wrangler.toml` | `wrangler` (local dev, `tail`, `d1 export`) | `cf` sets secrets now (`cf workers secrets update`), but cannot stream logs, and the conformance suite needs `wrangler dev --local` with Durable Object SQLite and alarms |
+| `worker/wrangler.agent.toml` | `wrangler` (agent Worker local dev and `tail`) | the same split for the agent Worker; `CORE` points at the main Worker |
 | `worker/wrangler.account.toml` | `wrangler` (`ACCOUNT_BACKED=1` test lane) | the preview D1 and KV are `remote = true`; the Worker and Durable Object still run locally |
 
 `cf build` delegates to Wrangler, which is also why `wrangler.toml`'s `[assets] directory`
@@ -30,6 +32,62 @@ it. It caught a real one: the `cf` migration dropped `AUTH_PASSWORD_MODE`, `MAGI
 and `MAGIC_LINK_TTL_SECONDS`, so a `cf` deploy had silently disabled the password factor that
 `wrangler.toml` had been enabling. Adding a binding to one file and not the others is a
 binding that is `undefined` in one tool and present in the other.
+
+## Two Workers
+
+`dakflare-worker` is the public edge: auth, the console, `/v1`, the handset socket and every
+queue consumer. `dakflare-agent-worker` owns `AssistantAgent`, the MCP surface and the agent
+conversation routes. The split exists because the assistant's dependencies — the agents SDK,
+the MCP SDK, the model providers — were 2.2 MB of bundle and about 50 ms of startup paid by
+every request, including a device heartbeat.
+
+| | Main Worker | Agent Worker |
+|---|---|---|
+| public route | yes | none (`workers_dev = false`) |
+| `AssistantAgent` | retired (deleted tombstone) | owns a **new** namespace |
+| auth | sessions, passkeys, TOTP, `ADMIN_TOKEN` | none; `CORE` calls back for SMS, health and TOTP |
+| D1 / R2 | both | the same database and bucket |
+| reached by | the internet | `AGENT_SVC` from the main Worker only |
+
+The main Worker resolves the actor and the ticket, then forwards `/agents/*`, `/v1/mcp`, `/mcp`
+and `/v1/admin/agent/*` through its `AGENT_SVC` service binding. The agent Worker never sees a
+session cookie or `BETTER_AUTH_SECRET`; a tool that needs to send an SMS asks the main Worker
+through `CORE`, so scopes, limiters and audits still apply.
+
+**Deploy the agent Worker first.** `AGENT_SVC` names it, and a deploy that binds a Worker which
+does not exist yet fails. `dakflare up` and the pack do this in order; a manual deploy is:
+
+```bash
+cd worker/agent && npx cf deploy     # then
+cd .. && npm run deploy
+```
+
+**The namespace move is one-way.** The agent Worker's `AssistantAgent` is a different Durable
+Object namespace from the one the main Worker used to export, and the old one is retired with an
+explicit `state: "deleted"` export. The transcript does not follow automatically: it was exported
+and imported once with `/v1/admin/agent/export` and `/v1/admin/agent/import` before the move.
+D1 rows and R2 objects are unaffected, because the object keys are the same.
+
+**Secrets that must exist on both.** `ADMIN_TOKEN` has to be identical on both Workers,
+because the agent Worker presents it to `CORE`. The provider keys move with the model call: the
+turn runs inside the agent Worker's Durable Object, so `AI_CHAT_API_KEY` (or
+`AI_PROVIDER_API_KEY`) and `TOKENLAB_API_KEY` have to be set there too. A secret set with
+`cf workers secrets update` exists on one Worker only — it is not inherited through a service
+binding, and it cannot be read back, so each one is set twice:
+
+```bash
+npx cf workers secrets update ADMIN_TOKEN --worker dakflare-agent-worker --type secret_text
+npx cf workers secrets update AI_CHAT_API_KEY --worker dakflare-agent-worker --type secret_text
+npx cf workers secrets update TOKENLAB_API_KEY --worker dakflare-agent-worker --type secret_text
+```
+
+`npm run verify:deploy` fails when the agent Worker has no chat key, because the alternative is
+an assistant panel that answers `missing_key` only when someone uses it. A `dakflare up` install
+does not hit this: it deploys both Workers with the same `--secrets-file`, so whatever is in
+`.dev.vars` lands on both.
+
+The release pack carries both Build Outputs (`pack.json` → `agent`), and `dakflare up` fills the
+D1 id into both `worker.config.json` files before deploying.
 
 ## The pipeline
 
@@ -149,11 +207,12 @@ Five that have each cost this repository something:
   on version `9675e667`: exit `1`, new routes answering `401` instead of `404`, and the
   workflow listed and current. So when it happens the exit code is wrong, not the deploy.
   A release gate therefore reads the evidence, not the status: `npm run verify:deploy` in
-  `worker/` checks the newest version id, four live routes (two of them answering `401`
-  rather than `404`, which is how a route that exists differs from one that was never
-  deployed), the workflow still bound to the deployed script, and an empty unapplied
-  migration ledger. `node scripts/verify-deploy.mjs --expect <id8>` pins the version the
-  build was supposed to become. Re-running `cf workers triggers deploy` alone exits `0`
+  `worker/` checks the newest version id, six live routes (four answering `401` rather than
+  `404`, which is how a route that exists differs from one that was never deployed, and
+  `/agents/assistant/assistant` answering `426` rather than `404`, which is how a gate wired to
+  the split Worker differs from one whose `className` never matches), the workflow still bound
+  to the deployed script, and an empty unapplied migration ledger. `node
+  scripts/verify-deploy.mjs --expect <id8>` pins the version the build was supposed to become. Re-running `cf workers triggers deploy` alone exits `0`
   and changes nothing, which is a safe second opinion when in doubt.
 
 ## Rolling back

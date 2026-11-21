@@ -166,6 +166,27 @@ record(
   replicationMode === "unknown" ? "cf returned no database metadata" : "",
 );
 
+// ── 6. The agent Worker can actually answer a turn ───────────────────────────
+// The split moved the model call out of the main Worker, and a secret set with
+// `cf workers secrets update` on one Worker does not exist on the other. A turn
+// without a key answers `missing_key` at request time, which is exactly the
+// kind of gap a deploy gate should catch instead of an operator.
+const agentWorker = process.env.AGENT_WORKER_NAME ?? "dakflare-agent-worker";
+const agentSecrets = await cfJson(["workers", "secrets", "list", "--worker", agentWorker]);
+const agentSecretNames = Array.isArray(agentSecrets) ? agentSecrets.map((s) => s.name) : null;
+const hasChatKey =
+  agentSecretNames !== null &&
+  (agentSecretNames.includes("AI_PROVIDER_API_KEY") || agentSecretNames.includes("AI_CHAT_API_KEY"));
+record(
+  hasChatKey,
+  `${agentWorker} has a chat provider key`,
+  agentSecretNames === null
+    ? "cf returned no secret list"
+    : hasChatKey
+      ? "a turn can resolve an adapter"
+      : `missing AI_PROVIDER_API_KEY or AI_CHAT_API_KEY (has ${agentSecretNames.join(", ") || "none"})`,
+);
+
 const failed = results.filter((r) => !r.ok);
 console.log(
   failed.length === 0

@@ -98,10 +98,33 @@ workerConfig.env.DB.id = '__DAKFLARE_D1_ID__';
 workerConfig.env.KV.id = '__DAKFLARE_KV_ID__';
 writeJson(workerConfigPath, workerConfig);
 
+// The split agent Worker is a second, separately deployed Build Output. An
+// install that ships only the main Worker would deploy a `AGENT_SVC` binding
+// that names nothing, so the pack carries both and the installer deploys this
+// one first.
+console.log('Building the agent Worker Build Output');
+const agentDir = path.join(worker, 'agent');
+run('npx', ['cf', 'build'], { cwd: agentDir, inherit: true });
+
+const agentOutput = path.join(agentDir, '.cloudflare', 'output', 'v1');
+const agentConfigPath = path.join(agentOutput, 'workers', 'default', 'worker.config.json');
+if (!fs.existsSync(agentConfigPath)) {
+  throw new Error(
+    `cf build did not write ${path.relative(repo, agentOutput)}. The agent Worker needs ` +
+      `cf ${CF_VERSION} and wrangler ${WRANGLER_VERSION}, the same as the main Worker.`
+  );
+}
+
+const agentConfig = readJson(agentConfigPath);
+if (!agentConfig.env?.DB) throw new Error('agent worker.config.json has no DB binding');
+agentConfig.env.DB.id = '__DAKFLARE_D1_ID__';
+writeJson(agentConfigPath, agentConfig);
+
 const stage = path.join(outDir, `dakflare-pack-${version}`);
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 copyDir(output, path.join(stage, '.cloudflare', 'output', 'v1'));
+copyDir(agentOutput, path.join(stage, 'agent', '.cloudflare', 'output', 'v1'));
 copyDir(path.join(worker, 'migrations'), path.join(stage, 'migrations'));
 fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(stage, 'LICENSE'));
 fs.copyFileSync(path.join(repo, 'README.md'), path.join(stage, 'README.md'));
@@ -111,6 +134,11 @@ writeJson(path.join(stage, 'pack.json'), {
   version,
   worker: workerConfig.name,
   bos: '.cloudflare/output/v1',
+  agent: {
+    name: agentConfig.name,
+    dir: 'agent',
+    bos: '.cloudflare/output/v1',
+  },
   migrations: 'migrations',
   secrets: ['ADMIN_TOKEN', 'AUTH_PEPPER', 'BETTER_AUTH_SECRET', 'WEBHOOK_SECRET_KEY'],
   placeholders: {
@@ -130,6 +158,11 @@ if (!skipVerify) {
   console.log('Verifying the pack with cf deploy --prebuilt --dry-run');
   run('npx', ['--yes', `cf@${CF_VERSION}`, 'deploy', '--prebuilt', '--dry-run'], {
     cwd: stage,
+    inherit: true,
+  });
+  console.log('Verifying the agent pack with cf deploy --prebuilt --dry-run');
+  run('npx', ['--yes', `cf@${CF_VERSION}`, 'deploy', '--prebuilt', '--dry-run'], {
+    cwd: path.join(stage, 'agent'),
     inherit: true,
   });
   run('npx', ['--yes', `cf@${CF_VERSION}`, 'd1', 'migrations', 'apply', '00000000-0000-0000-0000-000000000000', '--dir', 'migrations', '--dry-run'], {

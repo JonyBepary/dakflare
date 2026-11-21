@@ -252,3 +252,58 @@ test('setup --pack reports a prebuilt pack without touching a checkout', async (
   assert.ok(document.plan.some((step) => step.startsWith('pack ')));
   await assert.rejects(fs.stat(path.join(root, '.dev.vars')), /ENOENT/);
 });
+
+test('setup --pack reports the split agent Worker and refuses a pack without its Build Output', async () => {
+  const root = await temp('dakflare-pack-agent-');
+  await fs.mkdir(path.join(root, 'migrations'), { recursive: true });
+  await fs.writeFile(path.join(root, 'migrations', '0001.sql'), 'select 1;\n');
+  const bos = path.join(root, '.cloudflare', 'output', 'v1', 'workers', 'default');
+  await fs.mkdir(bos, { recursive: true });
+  await fs.writeFile(
+    path.join(bos, 'worker.config.json'),
+    JSON.stringify({ name: 'dakflare-worker', env: { DB: { id: 'x' }, KV: { id: 'y' } } })
+  );
+  const agentBos = path.join(root, 'agent', '.cloudflare', 'output', 'v1', 'workers', 'default');
+  const pack = {
+    schema: 1,
+    version: 'test',
+    worker: 'dakflare-worker',
+    bos: '.cloudflare/output/v1',
+    agent: { name: 'dakflare-agent-worker', dir: 'agent', bos: '.cloudflare/output/v1' },
+    migrations: 'migrations',
+    requires: { cf: '1.0.0-rc.2' },
+  };
+  await fs.writeFile(path.join(root, 'pack.json'), JSON.stringify(pack));
+
+  // The agent entry is declared but its Build Output is absent: that pack would
+  // install a main Worker whose AGENT_SVC binding names nothing, so it is refused.
+  const cf = await fakeCf();
+  const gh = await fakeGh();
+  const config = await temp('dakflare-config-');
+  const refused = await run(['setup', '--pack', root, '--dry-run', '--agent'], {
+    DAKFLARE_CF: cf,
+    DAKFLARE_GH: gh.file,
+    DAKFLARE_CONFIG: config,
+    DAKFLARE_NO_BROWSER: '1',
+  });
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.stdout + refused.stderr, /agent\/\.cloudflare\/output/);
+
+  await fs.mkdir(agentBos, { recursive: true });
+  await fs.writeFile(
+    path.join(agentBos, 'worker.config.json'),
+    JSON.stringify({ name: 'dakflare-agent-worker', env: { DB: { id: 'x' } } })
+  );
+  const accepted = await run(['setup', '--pack', root, '--dry-run', '--agent'], {
+    DAKFLARE_CF: cf,
+    DAKFLARE_GH: gh.file,
+    DAKFLARE_CONFIG: config,
+    DAKFLARE_NO_BROWSER: '1',
+  });
+  const document = data(accepted);
+  assert.ok(
+    document.checks.some(
+      (check) => check.name === 'agent' && check.status === 'ok' && /dakflare-agent-worker/.test(check.detail)
+    )
+  );
+});

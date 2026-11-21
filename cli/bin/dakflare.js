@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createQr, renderQr } from '../lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_VERSION = '6.3.0-alpha.4';
+const CLI_VERSION = '6.3.0-alpha.5';
 
 const HOME = os.homedir();
 const CONFIG_DIR = process.env.DAKFLARE_CONFIG
@@ -3771,7 +3771,37 @@ function readPack(directory) {
       pack: root,
     });
   }
-  return { root, pack, bos, workerConfig, migrations };
+
+  // The split agent Worker travels as a second Build Output. A pack built before
+  // the split has no `agent` entry and still installs, but only against a
+  // deployment whose main Worker has no AGENT_SVC binding.
+  let agent = null;
+  if (pack.agent !== undefined && pack.agent !== null) {
+    if (typeof pack.agent !== 'object' || typeof pack.agent.dir !== 'string') {
+      throw new CliError(`pack.json at ${file} has an agent entry without a dir.`, 2, {
+        error: 'pack_invalid',
+        pack: root,
+      });
+    }
+    const agentDir = path.join(root, pack.agent.dir);
+    const agentBos = path.join(agentDir, pack.agent.bos ?? '.cloudflare/output/v1');
+    const agentWorkerConfig = path.join(agentBos, 'workers', 'default', 'worker.config.json');
+    if (!fs.existsSync(agentWorkerConfig)) {
+      throw new CliError(
+        `the pack at ${root} has no ${path.relative(root, agentWorkerConfig)}.`,
+        2,
+        { error: 'pack_invalid', pack: root }
+      );
+    }
+    agent = {
+      dir: agentDir,
+      bos: agentBos,
+      workerConfig: agentWorkerConfig,
+      name: typeof pack.agent.name === 'string' ? pack.agent.name : 'dakflare-agent-worker',
+    };
+  }
+
+  return { root, pack, bos, workerConfig, migrations, agent };
 }
 
 /**
@@ -3850,22 +3880,42 @@ function packCfState(source) {
   return { ok: versionAtLeast(actual, floor), actual, floor, reason: 'old' };
 }
 
-/** Fill the pack's Build Output with the account's D1 and KV ids. */
+/**
+ * Fill a pack Build Output with the account's ids.
+ *
+ * The main Worker binds D1 and KV; the split agent Worker binds D1 only and
+ * shares the same database, so one id fills both files.
+ */
 function writePackIds(source, databaseId, namespaceId, dryRun) {
-  const file = source.data.workerConfig;
-  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!config.env?.DB || !config.env?.KV) {
-    throw new CliError(`the pack at ${source.root} has no DB/KV binding to fill.`, 2, {
-      error: 'pack_invalid',
-      pack: source.root,
-    });
+  const targets = [{ file: source.data.workerConfig, kv: true }];
+  if (source.data.agent !== null && source.data.agent !== undefined) {
+    targets.push({ file: source.data.agent.workerConfig, kv: false });
   }
-  config.env.DB.id = databaseId;
-  config.env.KV.id = namespaceId;
-  const detail = `pack: set DB/KV ids in worker.config.json`;
-  if (dryRun) return detail;
-  fs.writeFileSync(file, `${JSON.stringify(config)}\n`);
-  return detail;
+  for (const target of targets) {
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(target.file, 'utf8'));
+    } catch (error) {
+      throw new CliError(
+        `the pack's ${path.basename(target.file)} is not valid JSON: ${String(error?.message ?? error)}`,
+        2,
+        { error: 'pack_invalid', pack: source.root }
+      );
+    }
+    if (!config.env?.DB || (target.kv && !config.env?.KV)) {
+      throw new CliError(
+        `the pack at ${source.root} has no ${target.kv ? 'DB/KV' : 'DB'} binding to fill.`,
+        2,
+        { error: 'pack_invalid', pack: source.root }
+      );
+    }
+    config.env.DB.id = databaseId;
+    if (target.kv) config.env.KV.id = namespaceId;
+    if (!dryRun) fs.writeFileSync(target.file, `${JSON.stringify(config)}\n`);
+  }
+  return dryRun
+    ? 'pack: would set the DB/KV ids in both worker.config.json files'
+    : 'pack: set the DB/KV ids in both worker.config.json files';
 }
 
 const GH = process.env.DAKFLARE_GH || 'gh';
@@ -3966,6 +4016,13 @@ function setupChecks(source) {
       name: 'bos',
       status: 'ok',
       detail: 'Build Output v1 present',
+    });
+    checks.push({
+      name: 'agent',
+      status: source.data?.agent ? 'ok' : 'warn',
+      detail: source.data?.agent
+        ? `${source.data.agent.name} · Build Output v1 present`
+        : 'this pack ships no split agent Worker',
     });
   } else {
     for (const dir of SETUP_DEPENDENCY_DIRS) {
@@ -4483,6 +4540,10 @@ async function commandUp(argv) {
       ? writePackIds(source, databaseId, namespaceId, dryRun)
       : writeConfigIds(path.join(workerDir, 'cloudflare.config.ts'), databaseId, namespaceId, dryRun);
   plan.push(configChange);
+  if (source.kind === 'checkout') {
+    const agentConfig = path.join(workerDir, 'agent', 'cloudflare.config.ts');
+    if (fs.existsSync(agentConfig)) plan.push(writeAgentConfigIds(agentConfig, databaseId, dryRun));
+  }
 
   // 5. Migrate, then deploy with the secrets `init --local` already wrote. A
   //    local AUTH_BASE_URL/AUTH_TRUSTED_ORIGINS must not reach production: the
@@ -4497,6 +4558,19 @@ async function commandUp(argv) {
       ? `cf d1 migrations apply ${databaseId} --dir migrations`
       : `cf d1 migrations apply ${databaseId}`
   );
+  // The agent Worker goes first: the main Worker's `AGENT_SVC` binding names it,
+  // and a deploy that binds a Worker which does not exist yet fails.
+  const hasAgentWorker =
+    source.kind === 'pack'
+      ? source.data.agent !== null
+      : fs.existsSync(path.join(workerDir, 'agent', 'cloudflare.config.ts'));
+  if (hasAgentWorker) {
+    plan.push(
+      source.kind === 'pack'
+        ? `cf deploy --prebuilt --secrets-file ${deployVarsPlan.name} (agent Worker, first)`
+        : `cf deploy --secrets-file ${deployVarsPlan.name} (agent Worker, first)`
+    );
+  }
   plan.push(
     source.kind === 'pack'
       ? `cf deploy --prebuilt --secrets-file ${deployVarsPlan.name}`
@@ -4546,6 +4620,9 @@ async function commandUp(argv) {
     }
   }
 
+  // Absolute, because the agent Worker deploys from its own directory and a
+  // relative `.dev.vars.deploy` would resolve against the wrong one.
+  const secretsFile = deployVars.path ?? deployVars.name;
   let deploy;
   try {
     if (source.kind === 'pack') {
@@ -4554,8 +4631,15 @@ async function commandUp(argv) {
         workerDir,
         'applying migrations'
       );
+      if (source.data.agent !== null) {
+        runCf(
+          ['deploy', '--prebuilt', '--secrets-file', secretsFile],
+          source.data.agent.dir,
+          'deploying the split agent Worker'
+        );
+      }
       deploy = runCf(
-        ['deploy', '--prebuilt', '--secrets-file', deployVars.name],
+        ['deploy', '--prebuilt', '--secrets-file', secretsFile],
         workerDir,
         'deploying the prebuilt pack'
       );
@@ -4577,7 +4661,16 @@ async function commandUp(argv) {
         }
       }
 
-      deploy = runCf(['deploy', '--secrets-file', deployVars.name], workerDir, 'deploying');
+      const agentDir = path.join(workerDir, 'agent');
+      if (fs.existsSync(path.join(agentDir, 'cloudflare.config.ts'))) {
+        runCf(
+          ['deploy', '--secrets-file', secretsFile],
+          agentDir,
+          'deploying the split agent Worker'
+        );
+      }
+
+      deploy = runCf(['deploy', '--secrets-file', secretsFile], workerDir, 'deploying');
     }
   } finally {
     if (deployVars.temp) fs.rmSync(deployVars.path, { force: true });
@@ -4990,6 +5083,20 @@ function writeConfigIds(configPath, databaseId, namespaceId, dryRun) {
   }
   if (!dryRun) fs.writeFileSync(configPath, withDb);
   return `cloudflare.config.ts: ${dryRun ? 'would set' : 'set'} DB and KV ids`;
+}
+
+/** Fill the split agent Worker's D1 id; it binds no KV. */
+function writeAgentConfigIds(configPath, databaseId, dryRun) {
+  let source;
+  try {
+    source = fs.readFileSync(configPath, 'utf8');
+  } catch {
+    return 'agent/cloudflare.config.ts: missing';
+  }
+  const withDb = source.replace(/(DB: bindings\.d1\(\{[\s\S]*?id:\s*")[^"]*(")/, `$1${databaseId}$2`);
+  if (withDb === source) return 'agent/cloudflare.config.ts: ids already match';
+  if (!dryRun) fs.writeFileSync(configPath, withDb);
+  return `agent/cloudflare.config.ts: ${dryRun ? 'would set' : 'set'} the DB id`;
 }
 
 /** The deployment URL from a `cf deploy` transcript, if it prints one. */
