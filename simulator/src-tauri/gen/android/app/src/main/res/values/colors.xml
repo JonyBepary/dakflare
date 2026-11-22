@@ -4,7 +4,7 @@
          primitives df-p-cream-100 and df-p-umber-900. The arc is left as a
          literal in the foreground drawable because it is not a Material resource
          colour. -->
-    <color name="dakflare_field">#FFFBF6EE</color>
+    <color name="dakflare_field">#FFF4E9D2</color>
     <color name="dakflare_ink">#FF241F1A</color>
 
     <color name="purple_200">#FFBB86FC</color>
