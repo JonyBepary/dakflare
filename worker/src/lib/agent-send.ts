@@ -29,7 +29,13 @@ import {
   type ApprovalRecord,
   type GrantRecord,
 } from "./authority";
-import { consumeSendQuota, peekSendQuota, rollbackSendQuota } from "./agent-tokens";
+import {
+  TRANSACTIONAL_SCOPE,
+  consumeSendQuota,
+  peekSendQuota,
+  rollbackSendQuota,
+} from "./agent-tokens";
+import type { AgentTokenKind } from "./agent-tokens";
 import { GRANT_LADDER_S, SCOPE_CAPS } from "./agent-scopes";
 
 /** The grant scope every send is checked against. There is no unsandboxed path. */
@@ -39,6 +45,13 @@ export interface AgentSendIdentity {
   tokenId: string;
   /** The handset this token is bound to, or null for fleet-wide. */
   boundDeviceId: string | null;
+  /** `agent` needs a human grant; `service` may hold the transactional scope. */
+  kind: AgentTokenKind;
+  scopes: string[];
+  /** `service` only: the handsets this token may send from, or null for any. */
+  allowedDeviceIds: string[] | null;
+  /** `service` only: the channels this token may use, or null for any. */
+  allowedChannels: string[] | null;
 }
 
 export interface AgentSendRequest {
@@ -66,10 +79,12 @@ export interface AgentSendOptions {
 }
 
 export type AgentSendAuthority =
-  | { ok: true; grant: GrantRecord }
+  | { ok: true; grant: GrantRecord | null }
   | { ok: false; kind: "approval"; approval: ApprovalRecord }
   | { ok: false; kind: "quota"; used: number; limit: number; resets_at: number }
-  | { ok: false; kind: "device_mismatch"; boundDeviceId: string };
+  | { ok: false; kind: "device_mismatch"; boundDeviceId: string }
+  | { ok: false; kind: "device_not_allowed"; allowedDeviceIds: string[] }
+  | { ok: false; kind: "channel_not_allowed"; channel: string };
 
 export async function authorizeAgentSend(
   env: Env,
@@ -86,6 +101,32 @@ export async function authorizeAgentSend(
     recipients: request.recipients,
     device_id: request.deviceId,
   };
+
+  // A `service` token holding `sms:send:transactional` is the one unattended
+  // path. It is not a grant bypass: the human decision happened at mint time,
+  // where the device and channel allowlists and the hourly budget were set, and
+  // the budget is spent with the same atomic UPDATE an agent token uses. The
+  // scope is refused on an `agent` token at mint, so this branch cannot be
+  // reached by a token a model could have talked an operator into.
+  if (identity.kind === "service" && identity.scopes.includes(TRANSACTIONAL_SCOPE)) {
+    if (identity.allowedDeviceIds !== null && !identity.allowedDeviceIds.includes(request.deviceId)) {
+      return { ok: false, kind: "device_not_allowed", allowedDeviceIds: identity.allowedDeviceIds };
+    }
+    if (identity.allowedChannels !== null && !identity.allowedChannels.includes("sms")) {
+      return { ok: false, kind: "channel_not_allowed", channel: "sms" };
+    }
+    const quota = await consumeSendQuota(env, identity.tokenId, Date.now(), count);
+    if (!quota.ok) {
+      return {
+        ok: false,
+        kind: "quota",
+        used: quota.used,
+        limit: quota.limit,
+        resets_at: quota.resets_at,
+      };
+    }
+    return { ok: true, grant: null };
+  }
 
   // The legacy transport ignores every grant that predates this round. A grant
   // is still the thing that lets the retry through, but only the one a human
@@ -223,7 +264,16 @@ export type AgentSendEnforcement =
  */
 export async function enforceAgentSend(
   env: Env,
-  actor: { agentTokenId?: string; agentDeviceId?: string | null } | undefined,
+  actor:
+    | {
+        agentTokenId?: string;
+        agentDeviceId?: string | null;
+        agentTokenKind?: AgentTokenKind;
+        agentScopes?: string[];
+        agentAllowedDeviceIds?: string[] | null;
+        agentAllowedChannels?: string[] | null;
+      }
+    | undefined,
   request: AgentSendRequest,
   options: AgentSendOptions = {}
 ): Promise<AgentSendEnforcement> {
@@ -232,17 +282,50 @@ export async function enforceAgentSend(
 
   const authority = await authorizeAgentSend(
     env,
-    { tokenId: actor.agentTokenId, boundDeviceId: actor.agentDeviceId ?? null },
+    {
+      tokenId: actor.agentTokenId,
+      boundDeviceId: actor.agentDeviceId ?? null,
+      kind: actor.agentTokenKind === "service" ? "service" : "agent",
+      scopes: actor.agentScopes ?? [],
+      allowedDeviceIds: actor.agentAllowedDeviceIds ?? null,
+      allowedChannels: actor.agentAllowedChannels ?? null,
+    },
     request,
     options
   );
 
-  if (authority.ok) return { ok: true, grantId: authority.grant.id, count };
+  if (authority.ok) return { ok: true, grantId: authority.grant?.id ?? null, count };
   if (authority.kind === "approval") {
     return { ok: false, response: approvalResponse(authority.approval) };
   }
   if (authority.kind === "quota") {
     return { ok: false, response: quotaResponse(authority) };
+  }
+  if (authority.kind === "device_not_allowed") {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "device_not_allowed",
+          message: "this service token is not allowed to send from that handset",
+          allowed_device_ids: authority.allowedDeviceIds,
+        },
+        { status: 403 }
+      ),
+    };
+  }
+  if (authority.kind === "channel_not_allowed") {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "channel_not_allowed",
+          message: `this service token is not allowed to use the ${authority.channel} channel`,
+          channel: authority.channel,
+        },
+        { status: 403 }
+      ),
+    };
   }
   return {
     ok: false,

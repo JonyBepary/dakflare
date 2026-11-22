@@ -41,6 +41,11 @@ export const TOKEN_SCOPES = [
   "devices:write",
   "rules:write",
   "webhooks:write",
+  "webhooks:replay",
+  // Unattended, bounded sends for a `kind = 'service'` token. Never mintable on
+  // an `agent` token: an LLM that can spend money without a human is the failure
+  // the grant boundary exists to prevent.
+  "sms:send:transactional",
   // Writes that cost money, interrupt traffic, or redeploy production. Each one
   // also requires a live grant, even though the token may hold the scope.
   "sms:send:production",
@@ -119,6 +124,10 @@ export const SCOPE_CAPS: Readonly<Record<string, ScopeCap>> = {
   flow_deploy_prod: { max_ttl_s: 86_400, requires: "flow" },
   "rules:write": { max_ttl_s: 86_400, requires: null },
   "webhooks:write": { max_ttl_s: 86_400, requires: null },
+  "webhooks:replay": { max_ttl_s: 86_400, requires: null },
+  // No grant and no ladder: the ceiling is the token's hourly budget and its
+  // device/channel allowlist, which a human sets at mint time.
+  "sms:send:transactional": { max_ttl_s: 86_400, requires: "device" },
   "messages:read": { max_ttl_s: 2_592_000, requires: null },
   "devices:read": { max_ttl_s: 2_592_000, requires: null },
   "flows:read": { max_ttl_s: 2_592_000, requires: null },
@@ -182,6 +191,11 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
   "pair devices": "devices:write",
   "archive devices": "devices:write",
   "unarchive devices": "devices:write",
+  // Integration surface (v6.3). The manifest and health are reads a service
+  // token needs before it can call anything; replay is a bounded write.
+  "read the integration manifest": "devices:read",
+  "read integration health": "devices:read",
+  "replay a webhook delivery": "webhooks:replay",
 
   // Never for an agent token. Listed so the refusal is a decision.
   "revoke devices": null,
@@ -208,6 +222,24 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
 export function scopeForAction(action: string): string | null {
   const entry = SCOPE_FOR_ACTION[action];
   return entry === undefined ? null : entry;
+}
+
+/**
+ * Does this token hold what `scope` needs?
+ *
+ * One implication, written down rather than inferred at three call sites: a
+ * `service` token holding `sms:send:transactional` may reach the send route,
+ * which is gated on `sms:send`. The transactional scope is the stricter one — it
+ * carries no human grant — so requiring the caller to mint both would be a way
+ * to forget one, not a way to be safer.
+ */
+export function tokenCoversScope(
+  scopes: readonly string[],
+  scope: string,
+  kind: "agent" | "service"
+): boolean {
+  if (scopes.includes(scope)) return true;
+  return scope === "sms:send" && kind === "service" && scopes.includes("sms:send:transactional");
 }
 
 /** Scopes whose use must be covered by a live grant in addition to the token. */

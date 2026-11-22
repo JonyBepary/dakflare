@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DakFlare Integration Envelope Contract v1",
+  "version": "1.0",
+  "signing": {
+    "version": "v1",
+    "algorithm": "HMAC-SHA256",
+    "canonical_format": "v1.<unix_seconds>.<delivery_id>.<raw_body>",
+    "max_skew_seconds": 300,
+    "headers": {
+      "timestamp": "X-Dakflare-Timestamp",
+      "delivery": "X-Dakflare-Delivery",
+      "signature": "X-Dakflare-Signature",
+      "key_id": "X-Dakflare-Key-Id",
+      "trace_id": "X-Trace-Id"
+    }
+  },
+  "golden_vectors": [
+    {
+      "name": "v1_allowlisted_raw_sms_event",
+      "secret": "whsec_test_dakflare_integration_v1_0123456789abcdef",
+      "timestamp_seconds": 1795200000,
+      "delivery_id": "deliv_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9",
+      "key_id": "k1",
+      "raw_body": "{\"event_id\":\"evt_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9\",\"event_type\":\"message.received\",\"delivery_id\":\"deliv_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9\",\"device_id\":\"dev_7f9a2c1e\",\"channel\":\"sms\",\"content_class\":\"allowlisted_raw\",\"sender\":\"bKash\",\"received_at\":1795199998000,\"message_id\":\"msg_01JFK7Z8Q00001\",\"body\":\"You have received Tk 1,500.00 from 017****8901. TrxID 9K8L7M6N5P.\"}",
+      "canonical": "v1.1795200000.deliv_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9.{\"event_id\":\"evt_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9\",\"event_type\":\"message.received\",\"delivery_id\":\"deliv_01JFK7Z8Q9W2X3Y4Z5A6B7C8D9\",\"device_id\":\"dev_7f9a2c1e\",\"channel\":\"sms\",\"content_class\":\"allowlisted_raw\",\"sender\":\"bKash\",\"received_at\":1795199998000,\"message_id\":\"msg_01JFK7Z8Q00001\",\"body\":\"You have received Tk 1,500.00 from 017****8901. TrxID 9K8L7M6N5P.\"}",
+      "expected_signature": "v1=e4a98c57fdba61f69f16811617046bdbbef87770b717ad643876ad013f382044"
+    }
+  ],
+  "schemas": {
+    "DeviceSnapshot": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "status",
+        "last_seen_at"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "live",
+            "synced",
+            "stale",
+            "offline",
+            "revoked"
+          ]
+        },
+        "attestation_tier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "last_seen_at": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "required": [
+        "event_id",
+        "event_type",
+        "delivery_id",
+        "device_id",
+        "channel",
+        "content_class",
+        "received_at"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "event_type": {
+          "enum": [
+            "message.received",
+            "message.sensitive_redacted",
+            "device.status_changed",
+            "device.revoked"
+          ]
+        },
+        "delivery_id": {
+          "type": "string"
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "content_class": {
+          "enum": [
+            "otp_or_pin",
+            "allowlisted_raw",
+            "general"
+          ]
+        },
+        "sender": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "received_at": {
+          "type": "integer"
+        }
+      }
+    },
+    "DeliveryAck": {
+      "type": "object",
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "external_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routing": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

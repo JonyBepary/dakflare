@@ -15,7 +15,8 @@ import type { Env } from "../index";
 import { runFlow } from "./engine";
 import { enqueueOutboundCommand, isOtpOrPinMessage, persistOutboundMessage } from "../lib/commands";
 import { isBlockedWebhookHost } from "../lib/flow-ir";
-import { signOutboundRequest } from "../lib/outbound-webhook";
+import { findOutboundWebhook, signOutboundRequest } from "../lib/outbound-webhook";
+import { enqueueDelivery } from "../lib/integration-delivery";
 import { getChannelPlugin } from "../channels";
 
 export interface AcceptedMessage {
@@ -454,20 +455,62 @@ export async function dispatchFlows(
             console.warn(`[flow] ${workflow.id}: webhook to '${action.url}' refused (not authorized in webhooks table or grants)`);
             continue;
           }
+          // One trace for this delivery. It reaches the receiver as X-Trace-Id,
+          // so a flow run in the D1 log and a request in the receiver's log are
+          // the same line.
+          const traceId = crypto.randomUUID();
+
+          // One flow run is one event. The body is operator-authored (the flow
+          // action's own template), so it is not subject to the received-content
+          // policy — but the OTP/PIN hard block applies to it exactly as it does
+          // to a message body: a template that interpolates a code must never
+          // leave raw, whatever the policy says.
+          const actionBody = action.body || "{}";
+          const sensitive = isOtpOrPinMessage(actionBody);
+          const hook = await findOutboundWebhook(env, action.url);
+          const payload = {
+            event_type: "flow.webhook",
+            flow_id: workflow.id,
+            device_id: deviceId,
+            message_id: message.localId,
+            content_class: sensitive ? "otp_or_pin" : "operator_authored",
+            ...(sensitive ? {} : { body: actionBody }),
+          };
+
+          if (sensitive) {
+            console.warn(
+              `[flow] ${workflow.id}: webhook body withheld (otp_or_pin); metadata only`
+            );
+          }
+
           if (env.WEBHOOK_QUEUE) {
-            await env.WEBHOOK_QUEUE.send({
-              url: action.url,
-              headers: {
-                "User-Agent": "DakFlare-Worker/7.0",
-                "X-Dakflare-Device": deviceId,
-                "X-Dakflare-Flow": workflow.id,
-              },
-              body: action.body || "{}",
-            });
+            if (hook !== null) {
+              // A registered outbound hook gets a ledger row, a stable delivery
+              // id and a v1 signature; the queue carries the claim, not the body.
+              await enqueueDelivery(env, {
+                webhook: hook,
+                eventType: "flow.webhook",
+                eventId: `${workflow.id}:${message.localId}:${action.url}`,
+                payload,
+                traceId,
+                headers: { "X-Dakflare-Flow": workflow.id },
+              });
+            } else {
+              await env.WEBHOOK_QUEUE.send({
+                url: action.url,
+                headers: {
+                  "User-Agent": "DakFlare-Worker/7.0",
+                  "X-Dakflare-Device": deviceId,
+                  "X-Dakflare-Flow": workflow.id,
+                },
+                body: JSON.stringify(payload),
+                traceId,
+              });
+            }
             executedWebhookOrDelay = true;
           } else {
             try {
-              const bodyString = action.body || "{}";
+              const bodyString = JSON.stringify(payload);
               // Sign here, not at enqueue: this branch has no queue wait, but the
               // timestamp must still be minted immediately before the request.
               const headers = await signOutboundRequest(
@@ -479,7 +522,8 @@ export async function dispatchFlows(
                   "X-Dakflare-Device": deviceId,
                   "X-Dakflare-Flow": workflow.id,
                 },
-                bodyString
+                bodyString,
+                { deliveryId: `dlv_${crypto.randomUUID().replace(/-/g, "")}`, traceId }
               );
               await fetch(action.url, {
                 method: "POST",

@@ -34,6 +34,7 @@
  *   #12 `expires_at` and the ack timers were previously fed unclamped numbers.
  */
 
+import { emitDeviceEvent } from "./lib/integration-delivery";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./index";
 import { err } from "./lib/errors";
@@ -1860,6 +1861,16 @@ export class DeviceGateway extends DurableObject<Env> {
     }
 
     if (!inserted) return;
+
+    // The durable alert is the operator's copy; this is the integration's. It is
+    // emitted only for a newly inserted alert, so a deduped outage cannot
+    // re-notify a subscriber with a fresh timestamp.
+    await emitDeviceEvent(
+      this.env,
+      { type: "device.status_changed", deviceId, status: "offline", reason: detail },
+      crypto.randomUUID()
+    );
+
     const webhook = this.env.ALERT_WEBHOOK_URL;
     if (!webhook) return;
 

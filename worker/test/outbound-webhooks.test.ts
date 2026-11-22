@@ -12,11 +12,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "../src/index";
 import type { AdminActor } from "../src/audit";
 import {
+  OUTBOUND_DELIVERY_HEADER,
+  OUTBOUND_KEY_ID_HEADER,
   OUTBOUND_SIGNATURE_HEADER,
   OUTBOUND_TIMESTAMP_HEADER,
   findOutboundWebhook,
   signOutboundRequest,
-  signOutboundWebhook,
 } from "../src/lib/outbound-webhook";
 import { hmacSha256Hex } from "../src/routes/webhooks";
 import {
@@ -86,29 +87,29 @@ afterEach(() => {
 });
 
 describe("outbound webhook signing", () => {
-  it("matches the documented HMAC vector and header format", async () => {
-    const signature = await signOutboundWebhook("whsec_test", 1_700_000_000, '{"a":1}');
-    expect(signature).toBe(
-      "sha256=38877139021993b830af32feea6e18a8da83eb2f6e49ee50bd9e4cf4ca4d3789"
-    );
-    expect(signature.startsWith("sha256=")).toBe(true);
-    expect(signature.slice(7)).toMatch(/^[0-9a-f]{64}$/);
-
+  it("signs the v1 envelope: version, timestamp, delivery id, raw body", async () => {
     const url = `https://signed.example.com/${unique("path")}`;
     const { secret } = await createOutbound(url);
     const now = 1_700_000_000_000;
+    const deliveryId = "dlv_test_0001";
+    const rawBody = '{"a":1}';
     const headers = await signOutboundRequest(
       testEnv,
       url,
       { "Content-Type": "application/json" },
-      '{"a":1}',
-      now
+      rawBody,
+      { deliveryId, now }
     );
     expect(headers["Content-Type"]).toBe("application/json");
     expect(headers[OUTBOUND_TIMESTAMP_HEADER]).toBe("1700000000");
+    expect(headers[OUTBOUND_DELIVERY_HEADER]).toBe(deliveryId);
+    expect(headers[OUTBOUND_KEY_ID_HEADER]).toBe("k1");
+    // Recomputed here from the canonical string the contract documents, not from
+    // this module: a test that called the signer twice would prove nothing.
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).toBe(
-      `sha256=${await hmacSha256Hex(secret, "1700000000." + '{"a":1}')}`
+      `v1=${await hmacSha256Hex(secret, `v1.1700000000.${deliveryId}.${rawBody}`)}`
     );
+    expect(headers[OUTBOUND_SIGNATURE_HEADER].slice(3)).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("prefers an exact target_url match, then the same origin", async () => {
@@ -138,7 +139,8 @@ describe("outbound webhook signing", () => {
       testEnv,
       url,
       { "Content-Type": "application/json" },
-      "{}"
+      "{}",
+      { deliveryId: "dlv_legacy" }
     );
     expect(headers[OUTBOUND_TIMESTAMP_HEADER]).toBeUndefined();
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).toBeUndefined();
@@ -152,8 +154,11 @@ describe("outbound webhook signing", () => {
         "Content-Type": "application/json",
         [OUTBOUND_TIMESTAMP_HEADER]: "1",
         [OUTBOUND_SIGNATURE_HEADER]: "sha256=deadbeef",
+        [OUTBOUND_DELIVERY_HEADER]: "stale",
+        [OUTBOUND_KEY_ID_HEADER]: "k0",
       },
-      "{}"
+      "{}",
+      { deliveryId: "dlv_test" }
     );
     expect(headers[OUTBOUND_TIMESTAMP_HEADER]).toBeUndefined();
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).toBeUndefined();
@@ -328,9 +333,12 @@ describe("outbound webhook test ping", () => {
     const headers = capturedInit?.headers as Record<string, string>;
     const body = String(capturedInit?.body);
     const timestamp = Number(headers[OUTBOUND_TIMESTAMP_HEADER]);
+    const deliveryId = headers[OUTBOUND_DELIVERY_HEADER];
     expect(Number.isInteger(timestamp)).toBe(true);
+    expect(deliveryId.startsWith("test_")).toBe(true);
+    expect(headers[OUTBOUND_KEY_ID_HEADER]).toBe("k1");
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).toBe(
-      await signOutboundWebhook(secret, timestamp, body)
+      `v1=${await hmacSha256Hex(secret, `v1.${timestamp}.${deliveryId}.${body}`)}`
     );
     expect(body).toContain('"event":"test"');
     expect(JSON.stringify(result)).not.toContain(secret);
@@ -418,10 +426,13 @@ describe("webhook queue consumer", () => {
 
     const message = fakeMessage({
       url: targetUrl,
+      deliveryId: "dlv_queue_0001",
+      traceId: "trace-queue-0001",
       headers: {
         "Content-Type": "application/json",
         [OUTBOUND_TIMESTAMP_HEADER]: "1",
         [OUTBOUND_SIGNATURE_HEADER]: "sha256=stale",
+        [OUTBOUND_DELIVERY_HEADER]: "stale",
       },
       body: '{"queued":true}',
     });
@@ -439,9 +450,11 @@ describe("webhook queue consumer", () => {
     expect(timestamp).toBeGreaterThan(1_700_000_000);
     expect(Math.abs(timestamp - Math.floor(Date.now() / 1000))).toBeLessThan(10);
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).not.toBe("sha256=stale");
+    expect(headers[OUTBOUND_DELIVERY_HEADER]).toBe("dlv_queue_0001");
     expect(headers[OUTBOUND_SIGNATURE_HEADER]).toBe(
-      await signOutboundWebhook(secret, timestamp, body)
+      `v1=${await hmacSha256Hex(secret, `v1.${timestamp}.dlv_queue_0001.${body}`)}`
     );
+    expect(headers["X-Trace-Id"]).toBe("trace-queue-0001");
   });
 
   it("sends unsigned when no outbound hook matches", async () => {

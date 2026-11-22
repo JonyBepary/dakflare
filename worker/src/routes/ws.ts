@@ -13,8 +13,20 @@
  */
 
 import type { Env } from "../index";
+import { emitDeviceEvent } from "../lib/integration-delivery";
 
-export async function handleWs(req: Request, env: Env, deviceId: string): Promise<Response> {
+export async function handleWs(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  deviceId: string
+): Promise<Response> {
+  // A socket opening is the one unambiguous "online" edge this Worker sees. It
+  // is reported from `waitUntil` so a slow receiver cannot delay the upgrade,
+  // and it is a notification about the handset, not a credential.
+  ctx.waitUntil(
+    emitDeviceEvent(env, { type: "device.status_changed", deviceId, status: "online" })
+  );
   const stub = env.DEVICE.get(env.DEVICE.idFromName(deviceId));
   const url = new URL(req.url);
   url.search = "";

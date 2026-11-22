@@ -23,7 +23,14 @@
 
 import type { Env } from "../index";
 import type { AdminActor } from "../audit";
-import { GRANT_LADDER_S, SCOPE_CAPS, NEVER_GRANTABLE, isTokenScope, scopeForAction } from "./agent-scopes";
+import {
+  GRANT_LADDER_S,
+  SCOPE_CAPS,
+  NEVER_GRANTABLE,
+  isTokenScope,
+  scopeForAction,
+  tokenCoversScope,
+} from "./agent-scopes";
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./agent-tokens";
 import { requireRole, type Permission } from "../auth/guard";
 
@@ -234,7 +241,7 @@ export async function runAsAgent(
         { status: 403 }
       );
     }
-    if (!token.scopes.includes(scope)) {
+    if (!tokenCoversScope(token.scopes, scope, token.kind)) {
       return Response.json(
         {
           error: "forbidden",
@@ -261,6 +268,9 @@ export async function runAsAgent(
       agentTokenId: token.id,
       agentDeviceId: token.device_id,
       agentScopes: token.scopes,
+      agentTokenKind: token.kind,
+      agentAllowedDeviceIds: token.allowed_device_ids,
+      agentAllowedChannels: token.allowed_channels,
     });
   }
 

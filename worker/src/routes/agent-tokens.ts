@@ -32,6 +32,21 @@ const DEFAULT_TOKEN_TTL_S = 30 * 86_400;
 const MIN_TOKEN_TTL_S = 60;
 const MAX_TOKEN_TTL_S = 365 * 86_400;
 
+/**
+ * Read an optional string array. `undefined` means "the field was the wrong
+ * shape" (a 400); `null` means "unset".
+ */
+function readStringList(value: unknown, max: number): string[] | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length > max) return undefined;
+  const cleaned: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim() === "" || entry.length > 128) return undefined;
+    cleaned.push(entry.trim());
+  }
+  return cleaned.length === 0 ? null : cleaned;
+}
+
 /** `POST /v1/admin/agent-tokens` — mint one. The value is printed once. */
 export async function handleAgentTokenMint(
   req: Request,
@@ -79,10 +94,48 @@ export async function handleAgentTokenMint(
 
   const maxPerHour = clampSendsPerHour(input.max_per_hour ?? DEFAULT_AGENT_SENDS_PER_HOUR);
 
+  // `kind` is the one structural difference between an agent credential and an
+  // integration credential. It is not inferred from the scopes: an operator says
+  // which they are minting, and the gate reads the row.
+  const kindRaw = input.kind === undefined || input.kind === null ? "agent" : input.kind;
+  if (kindRaw !== "agent" && kindRaw !== "service") {
+    return err("bad_request", 400);
+  }
+  const kind = kindRaw as "agent" | "service";
+
+  const allowedDeviceIds = readStringList(input.allowed_device_ids, 20);
+  if (allowedDeviceIds === undefined) return err("bad_request", 400);
+  const allowedChannels = readStringList(input.allowed_channels, 10);
+  if (allowedChannels === undefined) return err("bad_request", 400);
+  if (allowedDeviceIds !== null && allowedDeviceIds.length > 0) {
+    // Every allowed handset must exist, for the same reason `device_id` must:
+    // an allowlist naming a missing device refuses every send after a successful
+    // mint, which reads as a bug rather than a typo.
+    for (const allowed of allowedDeviceIds) {
+      const device = await env.DB.prepare(
+        `SELECT 1 AS ok FROM devices WHERE device_id = ? AND revoked_at IS NULL`
+      )
+        .bind(allowed)
+        .first();
+      if (device === null) return err("device_unknown", 404);
+    }
+  }
+  const metadata =
+    input.metadata === undefined || input.metadata === null
+      ? null
+      : typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        ? (input.metadata as Record<string, unknown>)
+        : undefined;
+  if (metadata === undefined) return err("bad_request", 400);
+
   const minted = await mintAgentToken(env, {
     name,
     scopes: scopes as string[],
+    kind,
     deviceId,
+    allowedDeviceIds,
+    allowedChannels,
+    metadata,
     maxPerHour,
     expiresAt: Date.now() + ttlSeconds * 1_000,
     createdBy: actor.label,
@@ -90,6 +143,12 @@ export async function handleAgentTokenMint(
   if (!minted.ok) {
     // Named, not dropped: a token that silently lacks a scope it printed is
     // worse than one that refused to mint.
+    if ("refused" in minted) {
+      return Response.json(
+        { error: "bad_request", message: minted.refused },
+        { status: 400 }
+      );
+    }
     return Response.json(
       { error: "bad_request", message: "unknown scope", unknown_scopes: minted.unknown },
       { status: 400 }
@@ -103,7 +162,10 @@ export async function handleAgentTokenMint(
     detail: {
       name,
       scopes: minted.minted.record.scopes,
+      kind,
       device_id: deviceId,
+      allowed_device_ids: allowedDeviceIds,
+      allowed_channels: allowedChannels,
       expires_in_s: ttlSeconds,
       max_per_hour: maxPerHour,
       token_prefix: AGENT_TOKEN_PREFIX,

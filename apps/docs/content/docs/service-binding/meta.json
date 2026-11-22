@@ -1,4 +1,10 @@
 {
   "title": "Service binding",
-  "pages": ["index", "worker", "workflow", "reference"]
+  "pages": [
+    "index",
+    "worker",
+    "workflow",
+    "integration",
+    "reference"
+  ]
 }

@@ -6,20 +6,47 @@
  * Worker signs the request so the receiver can prove it came from this
  * deployment and that the body was not altered in transit.
  *
- * Canonical string: `<unix-seconds>.<raw-body>`. The timestamp is inside the
- * signed value, so a receiver can reject a stale delivery without trusting an
- * unsigned header. Signing happens at the edge, immediately before `fetch`,
- * which is why the queue consumer signs at consumption rather than enqueue: a
- * queued job may wait, and a timestamp minted at enqueue would be stale.
+ * Two schemes exist and only one is written now:
+ *
+ *   v1  `v1.<unix-seconds>.<delivery-id>.<raw-body>` — the delivery id inside
+ *       the signed value is the idempotency key AND the nonce, so a replay of a
+ *       captured request cannot be re-labelled with a fresh timestamp. This is
+ *       what `buildSignedEnvelopeHeaders` emits, alongside `X-Dakflare-Key-Id`
+ *       and the propagated `X-Trace-Id`.
+ *   v0  `<unix-seconds>.<raw-body>` — the original scheme. Kept exported, and
+ *       still verified by receivers that have not migrated, but no producer in
+ *       this repository signs with it any more.
  *
  * The secret never reaches a log line, and neither does the request body.
  */
 
 import type { Env } from "../index";
 import { openSecret } from "../routes/webhooks";
+import {
+  HEADER_DELIVERY,
+  HEADER_KEY_ID,
+  HEADER_SIGNATURE,
+  HEADER_TIMESTAMP,
+  HEADER_TRACE_ID,
+  buildSignedEnvelopeHeaders,
+} from "./integration-envelope";
+import { parseBodyAllowlist, type BodyAllowlistConfig, type WebhookBodyPolicy } from "./content-policy";
 
-export const OUTBOUND_TIMESTAMP_HEADER = "X-Dakflare-Timestamp";
-export const OUTBOUND_SIGNATURE_HEADER = "X-Dakflare-Signature";
+export const OUTBOUND_TIMESTAMP_HEADER = HEADER_TIMESTAMP;
+export const OUTBOUND_SIGNATURE_HEADER = HEADER_SIGNATURE;
+export const OUTBOUND_DELIVERY_HEADER = HEADER_DELIVERY;
+export const OUTBOUND_KEY_ID_HEADER = HEADER_KEY_ID;
+export const OUTBOUND_TRACE_HEADER = HEADER_TRACE_ID;
+
+const SIGNATURE_HEADERS: ReadonlySet<string> = new Set(
+  [
+    HEADER_TIMESTAMP,
+    HEADER_SIGNATURE,
+    HEADER_DELIVERY,
+    HEADER_KEY_ID,
+    HEADER_TRACE_ID,
+  ].map((name) => name.toLowerCase())
+);
 
 const encoder = new TextEncoder();
 
@@ -32,9 +59,8 @@ function toHex(bytes: Uint8Array): string {
 /**
  * `sha256=<lowercase hex>` over `` `${timestampSeconds}.${rawBody}` ``.
  *
- * Exactly the inbound scheme (`routes/webhooks.ts`) with the timestamp folded
- * into the signed string. One HMAC, one prefix, so a receiver does not need a
- * second parser for the outbound direction.
+ * The v0 scheme. It is still here because a receiver written against v0 must
+ * keep working while it migrates; nothing inside this Worker emits it.
  */
 export async function signOutboundWebhook(
   secret: string,
@@ -61,13 +87,77 @@ export interface OutboundWebhookMatch {
   target_url: string;
   /** Plaintext signing secret, or `null` for a legacy row with no sealed copy. */
   secret: string | null;
+  /** Which key signed, so a rotation can accept two keys at once. */
+  keyId: string;
+  bodyPolicy: WebhookBodyPolicy;
+  bodyAllowlist: BodyAllowlistConfig;
+  events: string[];
+  customHeaders: Record<string, string>;
+  timeoutMs: number;
+  maxAttempts: number;
 }
 
 interface OutboundWebhookRow {
   id: string;
   target_url: string;
   secret_sealed: string | null;
+  signing_key_id: string | null;
+  body_policy: string | null;
+  body_allowlist_json: string | null;
+  events_json: string | null;
+  custom_headers_json: string | null;
+  timeout_ms: number | null;
+  max_attempts: number | null;
 }
+
+function asPolicy(value: string | null): WebhookBodyPolicy {
+  return value === "allowlisted_raw" || value === "full" ? value : "redacted";
+}
+
+function parseStringArray(value: string | null): string[] {
+  if (value === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseHeaderMap(value: string | null): Record<string, string> {
+  if (value === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [name, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof entry === "string") out[name] = entry;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function toMatch(row: OutboundWebhookRow): OutboundWebhookMatch {
+  return {
+    id: row.id,
+    target_url: row.target_url,
+    secret: null,
+    keyId: row.signing_key_id && row.signing_key_id.trim() !== "" ? row.signing_key_id : "k1",
+    bodyPolicy: asPolicy(row.body_policy),
+    bodyAllowlist: parseBodyAllowlist(row.body_allowlist_json),
+    events: parseStringArray(row.events_json),
+    customHeaders: parseHeaderMap(row.custom_headers_json),
+    timeoutMs: row.timeout_ms ?? 10_000,
+    maxAttempts: row.max_attempts ?? 8,
+  };
+}
+
+const SELECT_COLUMNS = `id, target_url, secret_sealed, signing_key_id, body_policy,
+            body_allowlist_json, events_json, custom_headers_json, timeout_ms, max_attempts`;
 
 /**
  * Find the enabled outbound hook for a URL.
@@ -90,7 +180,7 @@ export async function findOutboundWebhook(
   }
 
   const rows = await env.DB.prepare(
-    `SELECT id, target_url, secret_sealed
+    `SELECT ${SELECT_COLUMNS}
        FROM webhooks
       WHERE kind = 'outbound' AND enabled = 1`
   ).all<OutboundWebhookRow>();
@@ -117,43 +207,64 @@ export async function findOutboundWebhook(
   }
   if (match === null) return null;
 
-  const secret = await openSecret(env, match.secret_sealed);
-  return { id: match.id, target_url: match.target_url, secret };
+  const result = toMatch(match);
+  result.secret = await openSecret(env, match.secret_sealed);
+  return result;
+}
+
+/** Enabled outbound hooks subscribed to one event type. */
+export async function findSubscribedWebhooks(
+  env: Env,
+  eventType: string
+): Promise<OutboundWebhookMatch[]> {
+  const rows = await env.DB.prepare(
+    `SELECT ${SELECT_COLUMNS}
+       FROM webhooks
+      WHERE kind = 'outbound' AND enabled = 1`
+  ).all<OutboundWebhookRow>();
+  const subscribed = (rows.results ?? []).filter((row) =>
+    parseStringArray(row.events_json).includes(eventType)
+  );
+  return Promise.all(
+    subscribed.map(async (row) => {
+      const match = toMatch(row);
+      match.secret = await openSecret(env, row.secret_sealed);
+      return match;
+    })
+  );
 }
 
 /**
  * Merge the signing headers into a request's headers.
  *
  * With no matching hook, or a legacy hook with no secret, the base headers are
- * returned unchanged. Any signature headers already present are dropped first:
- * a producer that queued a stale pair must not have it forwarded, because the
- * receiver would verify it against the wrong timestamp.
+ * returned unchanged. Every signature header already present is dropped first: a
+ * producer that queued a stale set must not have it forwarded, because the
+ * receiver would verify it against the wrong timestamp or the wrong delivery id.
  */
 export async function signOutboundRequest(
   env: Env,
   url: string,
   baseHeaders: Record<string, string>,
   rawBody: string,
-  now: number = Date.now()
+  options: { deliveryId: string; traceId?: string; now?: number }
 ): Promise<Record<string, string>> {
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(baseHeaders)) {
-    const lower = name.toLowerCase();
-    if (
-      lower === OUTBOUND_TIMESTAMP_HEADER.toLowerCase() ||
-      lower === OUTBOUND_SIGNATURE_HEADER.toLowerCase()
-    ) {
-      continue;
-    }
+    if (SIGNATURE_HEADERS.has(name.toLowerCase())) continue;
     headers[name] = value;
   }
 
   const hook = await findOutboundWebhook(env, url);
   if (hook === null || hook.secret === null) return headers;
 
-  const timestampSeconds = Math.floor(now / 1000);
-  const signature = await signOutboundWebhook(hook.secret, timestampSeconds, rawBody);
-  headers[OUTBOUND_TIMESTAMP_HEADER] = String(timestampSeconds);
-  headers[OUTBOUND_SIGNATURE_HEADER] = signature;
-  return headers;
+  const signed = await buildSignedEnvelopeHeaders({
+    secret: hook.secret,
+    deliveryId: options.deliveryId,
+    rawBody,
+    keyId: hook.keyId,
+    traceId: options.traceId,
+    nowMs: options.now,
+  });
+  return { ...headers, ...signed };
 }

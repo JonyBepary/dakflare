@@ -1,0 +1,128 @@
+---
+title: Integration surface v1
+description: The manifest, the v1 outbound signature, service tokens, delivery replay and the content policy an external Worker or HTTP receiver integrates against.
+---
+
+{/* llms-ignore:start */}
+<PageBanner
+  kicker="The contract"
+  title="Integrate without the admin token"
+  lede="Read the manifest, verify one signature, replay one delivery, and never hold a credential that can do more than send."
+  code={{ label: "FIRST CALL", lines: ["GET /v1/integration/manifest", "X-Dakflare-Signature: v1=<hex>", "POST /v1/webhooks/:id/deliveries/:id/replay", "scope: sms:send:transactional"] }}
+  facts={[{ label: "Envelope", value: "v1 · HMAC-SHA256" }, { label: "Skew", value: "300 s" }, { label: "Tokens", value: "agent · service" }, { label: "Ack cap", value: "2 KB" }]}
+/>
+{/* llms-ignore:end */}
+
+An integration needs three things and this deployment promises exactly three: something to read
+that describes the contract, one signature a receiver can verify without calling back, and one way
+to ask for a delivery again when the receiver missed it. Nothing here names a vertical.
+
+## Read the manifest first
+
+`GET /v1/integration/manifest` returns the canonical string, the exact header names, the skew
+window, the mintable scopes and the limits. Read it from the deployment you are talking to rather
+than from a document that may be older than the release.
+
+```json
+{
+  "schema_version": "1.0",
+  "dakflare_version": "6.3.0-alpha.5",
+  "capabilities": ["outbound_webhooks_v1", "service_tokens", "transactional_sms",
+                   "device_lifecycle_events", "delivery_replay",
+                   "content_policy_allowlist", "trace_propagation"],
+  "signing": {
+    "version": "v1",
+    "alg": "HMAC-SHA256",
+    "canonical": "v1.<unix_seconds>.<delivery_id>.<raw_body>",
+    "max_skew_seconds": 300,
+    "headers": {
+      "timestamp": "X-Dakflare-Timestamp",
+      "delivery": "X-Dakflare-Delivery",
+      "signature": "X-Dakflare-Signature",
+      "key_id": "X-Dakflare-Key-Id",
+      "trace_id": "X-Trace-Id"
+    }
+  }
+}
+```
+
+## Verify one signature
+
+The delivery id is inside the signed value, so a replay of a captured request cannot be re-labelled
+with a fresh timestamp: it would need a new signature, and it cannot get one.
+
+```ts
+const canonical = `v1.${timestamp}.${deliveryId}.${rawBody}`;
+const expected = await hmacSha256(secret, canonical); // lowercase hex
+const ok = timingSafeEqual(`v1=${expected}`, signature) &&
+  Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp)) <= 300;
+```
+
+| Header | Meaning |
+|---|---|
+| `X-Dakflare-Timestamp` | Unix seconds, signed. Reject outside 300 s. |
+| `X-Dakflare-Delivery` | The delivery UUID. Your idempotency key and the nonce. |
+| `X-Dakflare-Signature` | `v1=<lowercase hex sha256>`. |
+| `X-Dakflare-Key-Id` | Which signing key (`k1` by default), for rotation. |
+| `X-Trace-Id` | The trace that caused this delivery. Log it. |
+
+The previous scheme (`sha256=<hex>` over `<timestamp>.<body>`) is still exported by the Worker for a
+receiver that has not migrated, but no producer signs with it any more.
+
+## Two kinds of token
+
+`kind` is a property of the token row, not a convention:
+
+| | `agent` | `service` |
+|---|---|---|
+| who | an LLM acting on an operator's behalf | an integration you wrote |
+| send scope | `sms:send` + a live `sms:send:production` grant | `sms:send:transactional` |
+| human in the loop | yes, per recipients and per window | no; the decision was made at mint time |
+| limits | the grant and the hourly budget | `allowed_device_ids`, `allowed_channels`, the hourly budget |
+
+`sms:send:transactional` cannot be minted on an `agent` token: the mint refuses it with a 400. A
+`service` token that does not name `allowed_device_ids` may send from any paired handset; naming
+them is the narrower credential and the one to prefer.
+
+```bash
+curl -X POST "$WORKER/v1/admin/agent-tokens" \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"edgepay","kind":"service","scopes":["sms:send:transactional"],
+       "allowed_device_ids":["dev_7f9a2c1e"],"max_per_hour":60}'
+```
+
+## Device lifecycle events
+
+An outbound hook subscribes by naming the event in `events`: `device.status_changed` and
+`device.revoked`. An empty list stays silent, so upgrading the deployment does not start sending a
+new event to an integration that never asked for one.
+
+## Replay one delivery
+
+`POST /v1/webhooks/:id/deliveries/:deliveryId/replay` resets a `RETRYING` or `DEAD_LETTER` row to
+`PENDING` and re-enqueues it. The lookup is by **both** ids: a delivery id from one hook replayed
+through another answers `404`, the same answer a missing id gets. `DELIVERED` is `409`, because
+replay is for a receiver that missed a delivery, not a way to duplicate one that worked. The action
+is audited as `webhook.delivery.replay`.
+
+Requires `webhooks:replay` on a token, or a human credential.
+
+## Content policy
+
+`isOtpOrPinMessage()` is a hard boundary: an OTP or PIN body is never forwarded raw, whatever a
+hook's `body_policy` says. On top of it, a hook may set:
+
+| `body_policy` | What a receiver gets |
+|---|---|
+| `redacted` (default) | metadata and an id reference, no message body |
+| `allowlisted_raw` | the raw body only when the sender or a bounded pattern matches `body_allowlist` |
+| `full` | the raw body, an explicit opt-in at creation |
+
+`body_allowlist` is validated at create time — at most 20 senders and 20 patterns, each pattern at
+most 160 characters and proven to compile — so a bad regex fails the write instead of throwing
+under traffic.
+
+## Health
+
+`GET /v1/integration/health` is the one read to poll: paired and active devices, deliveries by state
+(`pending`, `retrying`, `delivered`, `dead_letter`) and the last successful delivery time.

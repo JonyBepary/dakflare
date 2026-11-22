@@ -214,3 +214,24 @@ Read `ASSISTANT.md` for the routes, the budget and the proposal lifecycle, and
   that authorises a change.
 - It does not guess a provider: the settings row decides, and a missing key or a refused base
   URL is an error with a reason rather than a fallback to a different vendor.
+
+## Integration surface v1
+
+Three routes serve an external Worker or HTTP receiver without handing it `ADMIN_TOKEN`:
+
+| Route | Credential | What it answers |
+|---|---|---|
+| `GET /v1/integration/manifest` | `devices:read` | canonical signing string, header names, skew, scopes, limits |
+| `GET /v1/integration/health` | `devices:read` | devices and deliveries by state |
+| `POST /v1/webhooks/:id/deliveries/:deliveryId/replay` | `webhooks:replay` | re-queues one delivery, `404` across webhooks |
+
+Outbound deliveries sign with the **v1** envelope: `v1.<unix_seconds>.<delivery_id>.<raw_body>`,
+sent as `X-Dakflare-Timestamp`, `X-Dakflare-Delivery`, `X-Dakflare-Signature: v1=<hex>` and
+`X-Dakflare-Key-Id`. The delivery id is inside the signed value, so a captured request cannot be
+replayed with a fresh timestamp. The old `sha256=` scheme stays exported for a receiver that has
+not migrated; nothing here emits it.
+
+A `service` token (`kind = 'service'`) may hold `sms:send:transactional` and send unattended, bounded
+by `allowed_device_ids`, `allowed_channels` and its hourly budget. An `agent` token cannot be minted
+with that scope, and still needs a human `sms:send:production` grant for every send. See
+`apps/docs/content/docs/service-binding/integration.mdx` for the verification recipe.

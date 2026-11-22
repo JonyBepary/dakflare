@@ -21,17 +21,20 @@
  */
 
 import type { Env } from "../index";
+import {
+  MAX_ALLOWLIST_PATTERNS,
+  validateBodyAllowlist,
+  type BodyAllowlistConfig,
+  type WebhookBodyPolicy,
+} from "../lib/content-policy";
 import type { AdminActor } from "../audit";
 import { assertHuman } from "../lib/authority";
 import { err } from "../lib/errors";
 import { readBodyBounded } from "../lib/body";
 import { ASSISTANT_OBJECT_NAME } from "../lib/agent-runtime";
 import { isBlockedWebhookHost } from "../lib/flow-ir";
-import {
-  OUTBOUND_SIGNATURE_HEADER,
-  OUTBOUND_TIMESTAMP_HEADER,
-  signOutboundWebhook,
-} from "../lib/outbound-webhook";
+import { findOutboundWebhook } from "../lib/outbound-webhook";
+import { buildSignedEnvelopeHeaders } from "../lib/integration-envelope";
 
 /** A webhook body is an event, not a batch upload. */
 export const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
@@ -397,6 +400,88 @@ async function createOutboundWebhook(
       ? body.device_id.trim()
       : null;
 
+  // Content policy. `redacted` is the default because a webhook receiver is a
+  // third party: it should not start receiving message bodies because someone
+  // registered a URL. `full` is an explicit opt-in, and `allowlisted_raw` names
+  // who or what may be forwarded raw.
+  const policyRaw = body.body_policy === undefined ? "redacted" : body.body_policy;
+  if (policyRaw !== "redacted" && policyRaw !== "allowlisted_raw" && policyRaw !== "full") {
+    return Response.json(
+      { error: "bad_request", message: "body_policy must be 'redacted', 'allowlisted_raw' or 'full'" },
+      { status: 400 }
+    );
+  }
+  const bodyPolicy = policyRaw as WebhookBodyPolicy;
+
+  let allowlist: BodyAllowlistConfig | null = null;
+  if (body.body_allowlist !== undefined) {
+    if (
+      body.body_allowlist === null ||
+      typeof body.body_allowlist !== "object" ||
+      Array.isArray(body.body_allowlist)
+    ) {
+      return Response.json(
+        { error: "bad_request", message: "body_allowlist must be an object" },
+        { status: 400 }
+      );
+    }
+    const raw = body.body_allowlist as Record<string, unknown>;
+    const senders = Array.isArray(raw.senders)
+      ? raw.senders.filter((entry): entry is string => typeof entry === "string")
+      : undefined;
+    const bodyPatterns = Array.isArray(raw.body_patterns)
+      ? raw.body_patterns.filter((entry): entry is string => typeof entry === "string")
+      : undefined;
+    if (
+      (raw.senders !== undefined && (!Array.isArray(raw.senders) || senders === undefined)) ||
+      (raw.body_patterns !== undefined &&
+        (!Array.isArray(raw.body_patterns) || bodyPatterns === undefined))
+    ) {
+      return Response.json(
+        { error: "bad_request", message: "body_allowlist names senders and body_patterns only" },
+        { status: 400 }
+      );
+    }
+    allowlist = {
+      ...(senders === undefined ? {} : { senders }),
+      ...(bodyPatterns === undefined ? {} : { body_patterns: bodyPatterns }),
+    };
+    // A pattern is evaluated as a regex on every dispatch, so it is bounded and
+    // proven to compile at write time rather than throwing under traffic.
+    const problem = validateBodyAllowlist(allowlist);
+    if (problem !== null) {
+      return Response.json({ error: "bad_request", message: problem }, { status: 400 });
+    }
+    if ((senders?.length ?? 0) > MAX_ALLOWLIST_PATTERNS) {
+      return Response.json(
+        { error: "bad_request", message: `senders may hold at most ${MAX_ALLOWLIST_PATTERNS} entries` },
+        { status: 400 }
+      );
+    }
+  }
+
+  const signingKeyIdRaw = body.signing_key_id;
+  const signingKeyId =
+    signingKeyIdRaw === undefined ? "k1" : typeof signingKeyIdRaw === "string" ? signingKeyIdRaw.trim() : "";
+  if (signingKeyId === "" || signingKeyId.length > 32 || !/^[A-Za-z0-9._-]+$/.test(signingKeyId)) {
+    return Response.json(
+      { error: "bad_request", message: "signing_key_id must be 1..32 of [A-Za-z0-9._-]" },
+      { status: 400 }
+    );
+  }
+
+  let metadataJson: string | null = null;
+  if (body.metadata !== undefined && body.metadata !== null) {
+    if (typeof body.metadata !== "object" || Array.isArray(body.metadata)) {
+      return Response.json({ error: "bad_request", message: "metadata must be an object" }, { status: 400 });
+    }
+    const serialised = JSON.stringify(body.metadata);
+    if (serialised.length > 2_048) {
+      return Response.json({ error: "bad_request", message: "metadata is over 2 KB" }, { status: 400 });
+    }
+    metadataJson = serialised;
+  }
+
   const secret = randomHex(32);
   const secretHash = await sha256Hex(secret);
   const sealed = await sealSecret(env, secret);
@@ -417,9 +502,10 @@ async function createOutboundWebhook(
     `INSERT INTO webhooks
        (id, name, vertical, target_url, enabled, events_json, secret_ring,
         custom_headers_json, timeout_ms, max_attempts, device_id,
+        signing_key_id, body_policy, body_allowlist_json, metadata_json,
         created_at, updated_at, kind, secret_hash, secret_sealed, created_by,
         last_delivery_at)
-     VALUES (?, ?, 'generic', ?, 1, ?, '', ?, ?, ?, ?, ?, ?, 'outbound', ?, ?, ?, NULL)`
+     VALUES (?, ?, 'generic', ?, 1, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'outbound', ?, ?, ?, NULL)`
   )
     .bind(
       id,
@@ -430,6 +516,10 @@ async function createOutboundWebhook(
       timeoutMs,
       maxAttempts,
       deviceId,
+      signingKeyId,
+      bodyPolicy,
+      allowlist === null ? null : JSON.stringify(allowlist),
+      metadataJson,
       createdAt,
       createdAt,
       secretHash,
@@ -615,19 +705,27 @@ export async function handleWebhookTest(
   }
 
   const now = Date.now();
-  const timestampSeconds = Math.floor(now / 1000);
   const body = JSON.stringify({
     event: "test",
     webhook_id: row.id,
     sent_at: new Date(now).toISOString(),
   });
-  const signature = await signOutboundWebhook(secret, timestampSeconds, body);
+  // A test ping is signed exactly like a delivery, with an id the receiver can
+  // treat as its idempotency key, so "the signature verifies" is proven against
+  // the same scheme the real traffic uses.
+  const hook = await findOutboundWebhook(env, row.target_url);
+  const signed = await buildSignedEnvelopeHeaders({
+    secret,
+    deliveryId: `test_${crypto.randomUUID().replace(/-/g, "")}`,
+    rawBody: body,
+    keyId: hook?.keyId,
+    nowMs: now,
+  });
   const headers: Record<string, string> = {
     ...parseHeaders(row.custom_headers_json),
     "Content-Type": "application/json",
     "User-Agent": "DakFlare-Worker/7.0",
-    [OUTBOUND_TIMESTAMP_HEADER]: String(timestampSeconds),
-    [OUTBOUND_SIGNATURE_HEADER]: signature,
+    ...signed,
   };
 
   const started = Date.now();

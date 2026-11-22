@@ -92,7 +92,10 @@ export async function handleSend(
   // signs METHOD, PATH, timestamp, nonce and the body digest only. A header
   // would be the one input to this call that the device's signature does not
   // cover.
-  const rawKey = input.idempotency_key;
+  // A service integration usually has one place to put a key per request, and
+  // HTTP's is the header. The body wins when both are present, because that is
+  // the field the signed device path has always used.
+  const rawKey = input.idempotency_key ?? req.headers.get("idempotency-key") ?? undefined;
   let idempotencyKey: string | null = null;
   if (rawKey !== undefined && rawKey !== null) {
     if (

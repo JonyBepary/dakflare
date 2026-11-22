@@ -39,6 +39,12 @@ import {
 } from "./routes/workflows";
 import { handleHealth } from "./routes/health";
 import {
+  handleIntegrationHealth,
+  handleIntegrationManifest,
+  handleWebhookDeliveryReplay,
+} from "./routes/integration";
+import { HEADER_TRACE_ID } from "./lib/integration-envelope";
+import {
   handleWebhookCreate,
   handleWebhookDelete,
   handleWebhookDeliveries,
@@ -113,9 +119,10 @@ import { getChannelPlugin } from "./channels";
 import { dispatchFlows } from "./flow/dispatch";
 import { isBlockedWebhookHost } from "./lib/flow-ir";
 import { signOutboundRequest } from "./lib/outbound-webhook";
+import { recordDeliveryResult } from "./lib/integration-delivery";
 export { FlowExecutionWorkflow };
 import { looksLikeAgentToken, recordTokenUse, resolveAgentToken } from "./lib/agent-tokens";
-import { scopeForAction } from "./lib/agent-scopes";
+import { scopeForAction, tokenCoversScope } from "./lib/agent-scopes";
 import {
   handleAuthRequest,
   handleMagicLinkConsume,
@@ -631,7 +638,7 @@ async function withAgentAccess(
       { status: 403 }
     );
   }
-  if (!token.scopes.includes(scope)) {
+  if (!tokenCoversScope(token.scopes, scope, token.kind)) {
     return Response.json(
       {
         error: "forbidden",
@@ -657,6 +664,9 @@ async function withAgentAccess(
     agentTokenId: token.id,
     agentDeviceId: token.device_id,
     agentScopes: token.scopes,
+    agentTokenKind: token.kind,
+    agentAllowedDeviceIds: token.allowed_device_ids,
+    agentAllowedChannels: token.allowed_channels,
   });
 }
 
@@ -912,14 +922,41 @@ export default {
 
     for (const msg of batch.messages) {
       try {
-        const payload = msg.body as { url?: string; headers?: Record<string, string>; body?: unknown } | null;
+        const payload = msg.body as {
+          url?: string;
+          headers?: Record<string, string>;
+          body?: unknown;
+          deliveryId?: string;
+          eventType?: string;
+          traceId?: string;
+        } | null;
         if (payload?.url) {
           if (isBlockedWebhookHost(payload.url)) {
+            if (typeof payload.deliveryId === "string") {
+              // Not retryable: the URL is refused, so a retry would be refused too.
+              await recordDeliveryResult(env, {
+                deliveryId: payload.deliveryId,
+                httpStatus: 0,
+                ok: false,
+                error: "blocked_target_url",
+              });
+            }
             msg.ack();
             continue;
           }
           const bodyString =
             typeof payload.body === "string" ? payload.body : JSON.stringify(payload.body ?? {});
+          // The delivery id is inside the signed string, so it must be the row's
+          // id and must not change on a retry. A legacy job without one is still
+          // signed, with an id minted here, because an unsigned request is worse.
+          const deliveryId =
+            typeof payload.deliveryId === "string" && payload.deliveryId !== ""
+              ? payload.deliveryId
+              : crypto.randomUUID();
+          const traceId =
+            typeof payload.traceId === "string" && payload.traceId !== ""
+              ? payload.traceId
+              : crypto.randomUUID();
           // Sign at consumption: a job may have waited, so a timestamp minted at
           // enqueue would be stale. `signOutboundRequest` also drops any signature
           // headers an older producer put on the payload, so one edge signs once.
@@ -927,7 +964,8 @@ export default {
             env,
             payload.url,
             { "Content-Type": "application/json", ...(payload.headers ?? {}) },
-            bodyString
+            bodyString,
+            { deliveryId, traceId }
           );
           const res = await fetch(payload.url, {
             method: "POST",
@@ -936,7 +974,40 @@ export default {
             redirect: "manual",
             signal: AbortSignal.timeout(10_000),
           });
-          if (!res.ok) {
+
+          // A 2xx with an empty body is a valid answer (202 Accepted is the
+          // common one). Reading it is best-effort: a receipt that cannot be
+          // parsed is still a delivery.
+          let ack: unknown = null;
+          if (res.ok) {
+            const text = await res.text().catch(() => "");
+            if (text.trim() !== "") {
+              try {
+                ack = JSON.parse(text);
+              } catch {
+                ack = { text: text.slice(0, 512) };
+              }
+            }
+          }
+
+          if (typeof payload.deliveryId === "string") {
+            const outcome = await recordDeliveryResult(env, {
+              deliveryId: payload.deliveryId,
+              httpStatus: res.status,
+              ok: res.ok,
+              ack,
+              error: res.ok ? undefined : `HTTP ${res.status}`,
+            });
+            if (!res.ok && outcome.retry) {
+              msg.retry();
+              continue;
+            }
+            if (!res.ok && outcome.deadLettered) {
+              console.error(
+                `[webhook] delivery ${payload.deliveryId} dead-lettered after ${outcome.attempts} attempts`
+              );
+            }
+          } else if (!res.ok) {
             msg.retry();
             continue;
           }
@@ -949,9 +1020,24 @@ export default {
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const traceId = req.headers.get(HEADER_TRACE_ID)?.trim() || crypto.randomUUID();
     const sessionHelper = createD1SessionHelper(env, req);
     const res = await handleFetch(req, sessionHelper.env, ctx);
-    return sessionHelper.attachBookmark(res);
+    const withBookmark = sessionHelper.attachBookmark(res);
+    // One trace per request, echoed whether the caller supplied it or not, so a
+    // consumer can correlate its own log line with an outbound delivery this
+    // request caused. A 101 is returned untouched: a WebSocket response cannot
+    // be re-wrapped without losing the socket.
+    if (withBookmark.status === 101 || withBookmark.headers.has(HEADER_TRACE_ID)) {
+      return withBookmark;
+    }
+    const headers = new Headers(withBookmark.headers);
+    headers.set(HEADER_TRACE_ID, traceId);
+    return new Response(withBookmark.body, {
+      status: withBookmark.status,
+      statusText: withBookmark.statusText,
+      headers,
+    });
   },
 } satisfies ExportedHandler<Env>;
 
@@ -1514,6 +1600,36 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
         handleWebhookDeliveries(env, decodeURIComponent(webhookDeliveriesMatch[1]), actor)
       );
     }
+    /* ---- generic integration surface (v6.3) --------------------------- */
+    // The manifest and health are reads a service token needs before it can call
+    // anything, so they are reachable with `devices:read`. Replay is a bounded
+    // write with its own scope; it names the webhook AND the delivery, so a
+    // credential cannot replay someone else's row.
+    if (method === "GET" && pathname === "/v1/integration/manifest") {
+      return withAdminAccess(req, env, "read", "read the integration manifest", async () =>
+        handleIntegrationManifest(req)
+      );
+    }
+    if (method === "GET" && pathname === "/v1/integration/health") {
+      return withAdminAccess(req, env, "read", "read integration health", () =>
+        handleIntegrationHealth(req, env)
+      );
+    }
+    const deliveryReplayMatch = pathname.match(
+      /^\/v1\/webhooks\/([^/]+)\/deliveries\/([^/]+)\/replay$/
+    );
+    if (method === "POST" && deliveryReplayMatch) {
+      return withAdminAccess(req, env, "write", "replay a webhook delivery", (actor) =>
+        handleWebhookDeliveryReplay(
+          req,
+          env,
+          actor,
+          decodeURIComponent(deliveryReplayMatch[1]),
+          decodeURIComponent(deliveryReplayMatch[2])
+        )
+      );
+    }
+
     const webhookDeleteMatch = pathname.match(/^\/v1\/admin\/webhooks\/([^/]+)$/);
     if (method === "DELETE" && webhookDeleteMatch) {
       return withAdminAccess(req, env, "write", "delete webhooks", (actor) =>
@@ -2062,7 +2178,7 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
 
     /* ---- ECDSA-authenticated device routes ----------------------------- */
     if (method === "GET" && pathname === "/v1/device/ws") {
-      return withDevice(req, env, ctx, (r, e, deviceId) => handleWs(r, e, deviceId));
+      return withDevice(req, env, ctx, (r, e, deviceId) => handleWs(r, e, ctx, deviceId));
     }
     if (method === "POST" && pathname === "/v1/edge/incoming/batch") {
       return handleEdgeIncomingBatch(req, env, ctx);

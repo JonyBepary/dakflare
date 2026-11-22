@@ -31,15 +31,32 @@ export const MAX_AGENT_SENDS_PER_HOUR = 1_000;
 /** The fixed window the send budget is counted over. */
 const QUOTA_WINDOW_MS = 3_600_000;
 
+/** The unattended-send scope a `service` token may hold. */
+export const TRANSACTIONAL_SCOPE = "sms:send:transactional";
+
 /** How stale `last_used_at` may get before a request writes it again. */
 const LAST_USED_REFRESH_MS = 60_000;
+
+export type AgentTokenKind = "agent" | "service";
 
 export interface AgentTokenRecord {
   id: string;
   name: string;
   scopes: string[];
+  /**
+   * `agent` is the default and the only kind that can act on a human grant.
+   * `service` is an integration credential: it may hold
+   * `sms:send:transactional` and send unattended under its allowlists.
+   */
+  kind: AgentTokenKind;
   /** NULL means fleet-wide; a grant then has to narrow each action. */
   device_id: string | null;
+  /** `service` only: JSON array of device ids, or null for any. */
+  allowed_device_ids: string[] | null;
+  /** `service` only: JSON array of channels, or null for any. */
+  allowed_channels: string[] | null;
+  /** Free-form integration metadata. Never read by the send gate. */
+  metadata: Record<string, unknown> | null;
   max_per_hour: number;
   sent_current_hour: number;
   hour_window_start: number;
@@ -55,7 +72,11 @@ interface AgentTokenRow {
   name: string;
   token_hash: string;
   scopes_json: string;
+  kind: string | null;
   device_id: string | null;
+  allowed_device_ids_json: string | null;
+  allowed_channels_json: string | null;
+  metadata_json: string | null;
   max_per_hour: number;
   sent_current_hour: number;
   hour_window_start: number;
@@ -108,6 +129,11 @@ export interface MintedAgentToken {
 export interface MintAgentTokenInput {
   name: string;
   scopes: string[];
+  /** Defaults to `agent`. Only `service` may hold `sms:send:transactional`. */
+  kind?: AgentTokenKind;
+  allowedDeviceIds?: string[] | null;
+  allowedChannels?: string[] | null;
+  metadata?: Record<string, unknown> | null;
   deviceId: string | null;
   maxPerHour: number;
   /** Absolute expiry in ms, or null for a token that does not expire on its own. */
@@ -126,9 +152,26 @@ export interface MintAgentTokenInput {
 export async function mintAgentToken(
   env: Env,
   input: MintAgentTokenInput
-): Promise<{ ok: true; minted: MintedAgentToken } | { ok: false; unknown: string[] }> {
+): Promise<
+  | { ok: true; minted: MintedAgentToken }
+  | { ok: false; unknown: string[] }
+  | { ok: false; refused: string }
+> {
   const unknown = input.scopes.filter((scope) => !isTokenScope(scope));
-  if (unknown.length > 0) return { ok: false, unknown };
+  if (unknown.length > 0) return { ok: false, unknown: unknown };
+
+  // The one coupling between a token's kind and a scope, enforced at mint rather
+  // than only at send: an `agent` token that printed `sms:send:transactional`
+  // would be a credential that claims a capability the gate will refuse.
+  const kind: AgentTokenKind = input.kind === "service" ? "service" : "agent";
+  if (kind === "agent" && input.scopes.includes(TRANSACTIONAL_SCOPE)) {
+    return {
+      ok: false,
+      refused:
+        `${TRANSACTIONAL_SCOPE} is only valid on a service token; mint with kind: "service" ` +
+        "or use sms:send with a human grant",
+    };
+  }
 
   const id = randomHex(AGENT_TOKEN_ID_CHARS / 2);
   const secretBytes = new Uint8Array(32);
@@ -138,18 +181,27 @@ export async function mintAgentToken(
   const now = Date.now();
   const scopes = [...new Set(input.scopes)];
 
+  const allowedDeviceIds = normalizeIdList(input.allowedDeviceIds);
+  const allowedChannels = normalizeIdList(input.allowedChannels);
   await env.DB.prepare(
     `INSERT INTO agent_tokens
-       (id, name, token_hash, scopes_json, device_id, max_per_hour,
+       (id, name, token_hash, scopes_json, kind, device_id, allowed_device_ids_json,
+        allowed_channels_json, metadata_json, max_per_hour,
         sent_current_hour, hour_window_start, created_at, created_by, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
   )
     .bind(
       id,
       input.name,
       tokenHash,
       JSON.stringify(scopes),
+      kind,
       input.deviceId,
+      allowedDeviceIds === null ? null : JSON.stringify(allowedDeviceIds),
+      allowedChannels === null ? null : JSON.stringify(allowedChannels),
+      input.metadata === undefined || input.metadata === null
+        ? null
+        : JSON.stringify(input.metadata),
       input.maxPerHour,
       now,
       input.createdBy,
@@ -166,7 +218,11 @@ export async function mintAgentToken(
         id,
         name: input.name,
         scopes,
+        kind,
         device_id: input.deviceId,
+        allowed_device_ids: allowedDeviceIds,
+        allowed_channels: allowedChannels,
+        metadata: input.metadata ?? null,
         max_per_hour: input.maxPerHour,
         sent_current_hour: 0,
         hour_window_start: 0,
@@ -207,7 +263,11 @@ function toRecord(row: AgentTokenRow): AgentTokenRecord {
     id: row.id,
     name: row.name,
     scopes: parseScopes(row.scopes_json),
+    kind: row.kind === "service" ? "service" : "agent",
     device_id: row.device_id,
+    allowed_device_ids: parseStringList(row.allowed_device_ids_json),
+    allowed_channels: parseStringList(row.allowed_channels_json),
+    metadata: parseMetadata(row.metadata_json),
     max_per_hour: row.max_per_hour,
     sent_current_hour: row.sent_current_hour,
     hour_window_start: row.hour_window_start,
@@ -217,6 +277,35 @@ function toRecord(row: AgentTokenRow): AgentTokenRecord {
     expires_at: row.expires_at,
     revoked_at: row.revoked_at,
   };
+}
+
+function parseStringList(value: string | null): string[] | null {
+  if (value === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((entry): entry is string => typeof entry === "string");
+  } catch {
+    return null;
+  }
+}
+
+function parseMetadata(value: string | null): Record<string, unknown> | null {
+  if (value === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Deduplicate, drop blanks, and treat an empty list as "unset" (null). */
+function normalizeIdList(value: string[] | null | undefined): string[] | null {
+  if (value === undefined || value === null) return null;
+  const cleaned = [...new Set(value.map((entry) => entry.trim()).filter((entry) => entry !== ""))];
+  return cleaned.length === 0 ? null : cleaned;
 }
 
 function parseScopes(value: string): string[] {
@@ -245,7 +334,8 @@ export async function resolveAgentToken(
   if (parsed === null) return null;
 
   const row = await env.DB.prepare(
-    `SELECT id, name, token_hash, scopes_json, device_id, max_per_hour,
+    `SELECT id, name, token_hash, scopes_json, kind, device_id,
+            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens WHERE id = ?`
@@ -308,7 +398,8 @@ export async function listAgentTokens(
   options: { includeRevoked?: boolean } = {}
 ): Promise<AgentTokenRecord[]> {
   const rows = await env.DB.prepare(
-    `SELECT id, name, token_hash, scopes_json, device_id, max_per_hour,
+    `SELECT id, name, token_hash, scopes_json, kind, device_id,
+            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens
@@ -321,7 +412,8 @@ export async function listAgentTokens(
 
 export async function getAgentToken(env: Env, id: string): Promise<AgentTokenRecord | null> {
   const row = await env.DB.prepare(
-    `SELECT id, name, token_hash, scopes_json, device_id, max_per_hour,
+    `SELECT id, name, token_hash, scopes_json, kind, device_id,
+            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens WHERE id = ?`

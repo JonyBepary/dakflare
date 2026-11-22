@@ -43,6 +43,16 @@ export interface AdminActor extends AuditActor {
   /** What the token may attempt. Read by the MCP tool registry. */
   agentScopes?: string[];
   /**
+   * `service` tokens may hold `sms:send:transactional`, which sends unattended
+   * under a device/channel allowlist and the token's hourly budget. `agent`
+   * tokens never can: they stay behind a human production grant.
+   */
+  agentTokenKind?: "agent" | "service";
+  /** `service` only: handsets this token may send from, or null for any. */
+  agentAllowedDeviceIds?: string[] | null;
+  /** `service` only: channels this token may use, or null for any. */
+  agentAllowedChannels?: string[] | null;
+  /**
    * The Better Auth session row, when the credential was a session cookie. A
    * short-lived agent-runtime ticket is bound to it, so a ticket minted for one
    * session cannot be spent from another.

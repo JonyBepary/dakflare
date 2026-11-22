@@ -16,6 +16,7 @@
  */
 
 import type { Env } from "../index";
+import { emitDeviceEvent } from "../lib/integration-delivery";
 import type { AdminActor } from "../audit";
 import { writeAudit } from "../audit";
 import { err } from "../lib/errors";
@@ -67,6 +68,16 @@ export async function handleDeviceRevoke(
       actor: actor === undefined ? null : { userId: actor.userId, label: actor.label },
       subject: deviceId,
       detail: { tombstoned: true },
+    });
+    // An integration that owns the handset has to learn it is gone, and a poll
+    // of the fleet is not a notification. Only subscribed hooks receive it: an
+    // empty `events` list stays silent, so upgrading this deployment does not
+    // start sending a new event to an integration that never asked for one.
+    await emitDeviceEvent(env, {
+      type: "device.revoked",
+      deviceId,
+      status: "revoked",
+      reason: "operator_revoked",
     });
   }
 

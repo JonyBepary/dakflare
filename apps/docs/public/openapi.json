@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "DakFlare Edge API",
-    "version": "6.3.0-alpha.4",
+    "version": "6.3.0-alpha.5",
     "summary": "Sovereign multi-platform messaging hub, Android SMS gateway, Wasm flow engine, and agent control plane on Cloudflare Workers.",
     "license": {
       "name": "AGPL-3.0-only"
@@ -981,6 +981,98 @@
           },
           "device_id": {
             "type": "string"
+          }
+        }
+      },
+      "IntegrationManifest": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "dakflare_version",
+          "capabilities",
+          "scopes",
+          "signing",
+          "limits"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "1.0"
+          },
+          "dakflare_version": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "signing": {
+            "type": "object",
+            "required": [
+              "version",
+              "alg",
+              "canonical",
+              "max_skew_seconds",
+              "headers"
+            ],
+            "properties": {
+              "version": {
+                "type": "string",
+                "const": "v1"
+              },
+              "alg": {
+                "type": "string",
+                "const": "HMAC-SHA256"
+              },
+              "canonical": {
+                "type": "string"
+              },
+              "max_skew_seconds": {
+                "type": "integer"
+              },
+              "headers": {
+                "type": "object",
+                "properties": {
+                  "timestamp": {
+                    "type": "string"
+                  },
+                  "delivery": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string"
+                  },
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "trace_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "max_ack_bytes": {
+                "type": "integer"
+              },
+              "max_allowlist_patterns": {
+                "type": "integer"
+              },
+              "default_service_sends_per_hour": {
+                "type": "integer"
+              }
+            }
           }
         }
       }
@@ -4108,6 +4200,210 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/integration/manifest": {
+      "get": {
+        "tags": [
+          "Integration"
+        ],
+        "summary": "Capabilities, signing scheme and limits",
+        "description": "Read this before calling anything else. Returns the v1 signing canonical string, the exact header names, the skew window, the mintable scopes and the size limits, so a receiver verifies against the deployment it is talking to instead of a document that may be older than the release. Readable by a service token holding `devices:read`.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationManifest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential"
+          },
+          "403": {
+            "description": "The token lacks devices:read"
+          }
+        }
+      }
+    },
+    "/v1/integration/health": {
+      "get": {
+        "tags": [
+          "Integration"
+        ],
+        "summary": "Database, fleet and delivery-queue health",
+        "description": "One read an integration can poll: paired and active device counts, deliveries by state (pending, retrying, delivered, dead_letter) and the last successful delivery time.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Health snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "dakflare_version",
+                    "devices",
+                    "deliveries"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "dakflare_version": {
+                      "type": "string"
+                    },
+                    "devices": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer"
+                        },
+                        "active": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "deliveries": {
+                      "type": "object",
+                      "properties": {
+                        "pending": {
+                          "type": "integer"
+                        },
+                        "retrying": {
+                          "type": "integer"
+                        },
+                        "delivered": {
+                          "type": "integer"
+                        },
+                        "dead_letter": {
+                          "type": "integer"
+                        },
+                        "last_delivery_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential"
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{id}/deliveries/{deliveryId}/replay": {
+      "post": {
+        "tags": [
+          "Integration",
+          "Webhooks"
+        ],
+        "summary": "Replay one outbound delivery",
+        "description": "Resets a RETRYING or DEAD_LETTER delivery back to PENDING and re-enqueues it. The row is looked up by BOTH ids: a delivery id from one hook replayed through another is a 404, the same answer a missing id gets. A DELIVERED row is 409 rather than re-sent, so replay cannot duplicate a notification that worked. Requires `webhooks:replay` (or a human credential) and writes `webhook.delivery.replay` to the audit log.",
+        "security": [
+          {
+            "BetterAuthSession": []
+          },
+          {
+            "AdminMachineToken": []
+          },
+          {
+            "AgentToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deliveryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Re-queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "replayed",
+                    "webhook_id",
+                    "delivery_id",
+                    "trace_id"
+                  ],
+                  "properties": {
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "webhook_id": {
+                      "type": "string"
+                    },
+                    "delivery_id": {
+                      "type": "string"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential"
+          },
+          "403": {
+            "description": "The token lacks webhooks:replay"
+          },
+          "404": {
+            "description": "No such delivery for that webhook"
+          },
+          "409": {
+            "description": "The delivery is already DELIVERED"
           }
         }
       }
