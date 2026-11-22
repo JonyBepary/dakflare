@@ -1,6 +1,6 @@
 {
 	"name": "dakflare-worker",
-	"version": "6.3.0-alpha.5",
+	"version": "6.3.0-alpha.6",
 	"private": true,
 	"type": "module",
 	"license": "AGPL-3.0-only",
