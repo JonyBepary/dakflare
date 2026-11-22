@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.Manifest
 import android.app.Activity

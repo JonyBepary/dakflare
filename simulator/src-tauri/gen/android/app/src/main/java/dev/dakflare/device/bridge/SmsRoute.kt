@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 /**
  * One pending sms:/smsto: route, written by `MainActivity` when a SENDTO/VIEW

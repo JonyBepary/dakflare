@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.kotlin
+package dev.dakflare.device.kotlin
 
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException

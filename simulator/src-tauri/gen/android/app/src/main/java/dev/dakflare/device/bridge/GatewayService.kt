@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -15,7 +15,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
-import dev.dakflare.simulator.MainActivity
+import dev.dakflare.device.MainActivity
 import java.util.Date
 
 /**

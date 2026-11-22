@@ -26,7 +26,7 @@ per-account Durable Object, and the same `messages` / `conversations` rows.
 | Tier | Where it runs | What it covers |
 | --- | --- | --- |
 | `worker_do` | Cloudflare Worker + one `ChannelConnection` Durable Object per account | Official webhook and REST APIs: WhatsApp Cloud and Coexistence, Telegram Bot and Business Bot, Facebook Messenger, and Instagram's three login modes. Uses `crypto.subtle` and `fetch`; no platform SDK. |
-| `edge_device` | The Android handset (`dev.dakflare.simulator`) | Personal sessions observed from notifications: `whatsapp_personal`, `telegram_personal`, `messenger_personal`, `instagram_personal`. |
+| `edge_device` | The Android handset (`dev.dakflare.device`) | Personal sessions observed from notifications: `whatsapp_personal`, `telegram_personal`, `messenger_personal`, `instagram_personal`. |
 
 The handset bridge is `MessagingNotificationBridge.kt`. It is an Android
 `NotificationListenerService` that reads the notification stream of the installed messaging app and

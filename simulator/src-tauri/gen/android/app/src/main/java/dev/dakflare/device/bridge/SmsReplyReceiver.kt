@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.Manifest
 import android.app.PendingIntent
@@ -37,7 +37,7 @@ import androidx.core.app.RemoteInput
  */
 object SmsReply {
     /** The explicit broadcast [SmsReplyReceiver] performs. */
-    const val ACTION_REPLY = "dev.dakflare.simulator.SMS_REPLY"
+    const val ACTION_REPLY = "dev.dakflare.device.SMS_REPLY"
 
     /** The [RemoteInput] result key the system fills with the typed reply. */
     const val RESULT_KEY = "dakflare.reply.text"

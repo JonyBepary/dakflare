@@ -2,7 +2,7 @@
 
 One Android handset as the SMS radio for a DakFlare deployment: device identity,
 SMS receive and send, local flows, and reports to the Worker. Package
-`dev.dakflare.simulator`.
+`dev.dakflare.device`.
 
 ## Shape
 

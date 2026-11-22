@@ -92,7 +92,7 @@ const DEFAULT_FACTS: DeviceFacts = {
 	sim_carrier: 'Grameenphone',
 	permissions: { sms: true, send: true, phone_numbers: true },
 	battery_optimized: false,
-	default_sms_app: 'dev.dakflare.simulator'
+	default_sms_app: 'dev.dakflare.device'
 };
 
 const MESSAGES_DEV_1: Message[] = [

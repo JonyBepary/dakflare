@@ -701,7 +701,7 @@ fn sms_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("dakflare-sms")
         .setup(|app, api| {
             let handle =
-                api.register_android_plugin("dev.dakflare.simulator.bridge", "SmsPlugin")?;
+                api.register_android_plugin("dev.dakflare.device.bridge", "SmsPlugin")?;
             app.manage(SmsBridge(handle));
             Ok(())
         })
@@ -866,7 +866,7 @@ fn permission_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("dakflare-permissions")
         .setup(|app, api| {
             let handle =
-                api.register_android_plugin("dev.dakflare.simulator.bridge", "PermissionPlugin")?;
+                api.register_android_plugin("dev.dakflare.device.bridge", "PermissionPlugin")?;
             app.manage(PermissionBridge(handle));
             Ok(())
         })
@@ -906,7 +906,7 @@ fn edge_channel_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("dakflare-edge")
         .setup(|app, api| {
             let handle = api
-                .register_android_plugin("dev.dakflare.simulator.bridge", "EdgeChannelPlugin")?;
+                .register_android_plugin("dev.dakflare.device.bridge", "EdgeChannelPlugin")?;
             app.manage(EdgeChannelBridge(handle));
             Ok(())
         })

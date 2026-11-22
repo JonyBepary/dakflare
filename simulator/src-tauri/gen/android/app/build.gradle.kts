@@ -1,4 +1,4 @@
-import dev.dakflare.simulator.kotlin.VerifyReleaseSigningTask
+import dev.dakflare.device.kotlin.VerifyReleaseSigningTask
 import groovy.json.JsonSlurper
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -93,12 +93,12 @@ if (gradle.startParameter.taskNames.any { it.contains("Release") } && !releaseSi
 
 android {
     compileSdk = 37
-    namespace = "dev.dakflare.simulator"
+    namespace = "dev.dakflare.device"
     defaultConfig {
         // The release app is HTTPS-only. Debug overrides this to true for the
         // Vite dev server on http://localhost:1420.
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "dev.dakflare.simulator"
+        applicationId = "dev.dakflare.device"
         minSdk = 24
         targetSdk = 37
         versionCode = appVersionCode

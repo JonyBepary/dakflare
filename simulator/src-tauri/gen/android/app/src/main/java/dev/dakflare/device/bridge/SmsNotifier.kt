@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.Manifest
 import android.app.NotificationChannel
@@ -13,7 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.RemoteInput
-import dev.dakflare.simulator.MainActivity
+import dev.dakflare.device.MainActivity
 
 /**
  * One notification channel and one notification per inbound message.

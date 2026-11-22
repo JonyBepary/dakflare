@@ -39,7 +39,7 @@
 	// not a missing value, so it gets its own honest row.
 	const noDefaultSms = $derived(defaultSmsRaw === 'none');
 	const defaultSms = $derived(noDefaultSms ? null : defaultSmsRaw);
-	const isDefaultSms = $derived(defaultSmsRaw === 'dev.dakflare.simulator');
+	const isDefaultSms = $derived(defaultSmsRaw === 'dev.dakflare.device');
 	const hasAnyFact = $derived(
 		Boolean(
 			selfNumber ||

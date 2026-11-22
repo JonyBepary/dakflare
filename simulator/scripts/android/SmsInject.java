@@ -43,8 +43,8 @@ public final class SmsInject {
 
         Intent intent = new Intent("android.provider.Telephony.SMS_RECEIVED");
         intent.setComponent(new ComponentName(
-                "dev.dakflare.simulator",
-                "dev.dakflare.simulator.bridge.SmsReceiver"));
+                "dev.dakflare.device",
+                "dev.dakflare.device.bridge.SmsReceiver"));
         intent.putExtra("pdus", pdus);
         intent.putExtra("format", "3gpp");
         if (args.length > 1) {

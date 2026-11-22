@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.app.PendingIntent
 import android.content.Context
@@ -26,8 +26,8 @@ import android.net.Uri
  */
 internal object SendReceipt {
     /** The explicit broadcast [SendStatusReceiver] listens for. */
-    const val ACTION_SENT = "dev.dakflare.simulator.SMS_SENT"
-    const val ACTION_DELIVERED = "dev.dakflare.simulator.SMS_DELIVERED"
+    const val ACTION_SENT = "dev.dakflare.device.SMS_SENT"
+    const val ACTION_DELIVERED = "dev.dakflare.device.SMS_DELIVERED"
     const val EXTRA_LOCAL_ID = "local_id"
     const val EXTRA_DEVICE_ID = "device_id"
 

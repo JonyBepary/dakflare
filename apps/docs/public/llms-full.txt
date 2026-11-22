@@ -2,7 +2,7 @@
 
 # DakFlare — Sovereign Multi-Platform Messaging Hub & SMS Gateway
 
-DakFlare pairs an Android handset (`dev.dakflare.simulator`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates six SQLite-backed Durable Objects (`DeviceGateway`, `ChannelConnection`, `Scheduler`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 19 migrations `0001`–`0019`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
+DakFlare pairs an Android handset (`dev.dakflare.device`) with a Cloudflare Worker (`dakflare-worker`). The handset holds the SIM, acts as the Android default SMS app (`android.app.role.SMS`), signs every HTTP/WebSocket request with a hardware-wrapped P-256 key (`keystore:v1:<iv>:<ciphertext>`), and evaluates `dakflare.flow/v2` graphs locally in Rust. The Worker verifies signatures and replay nonces, orchestrates six SQLite-backed Durable Objects (`DeviceGateway`, `ChannelConnection`, `Scheduler`, `AuthGuard`, `AuthorityGuard`, `AssistantAgent`), stores state in D1 (`sms_gateway`, 19 migrations `0001`–`0019`), dispatches webhooks via `WEBHOOK_QUEUE` and long delays via `FlowExecutionWorkflow`, serves the SvelteKit console at `/admin`, and exposes an agent control plane (`/mcp`, `/v1/agent/*`, `DakFlareApi` service binding).
 
 ## Navigation Index (Ordered by Onboarding Priority)
 
@@ -39,7 +39,7 @@ This tutorial takes you from a clean checkout to a live DakFlare deployment on y
 - **Node.js 22+** only for a source checkout or `cf`; the prebuilt CLI and pack need no Node
 - **Cloudflare `cf` CLI** authenticated to your account (`cf auth login`)
 - **Wrangler** (installed via `worker/package.json` for local dev, `tail`, and `d1 export`)
-- **One Android handset** with `dev.dakflare.simulator` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/docs/guides/android-node-pairing/))
+- **One Android handset** with `dev.dakflare.device` installed (or the local desktop simulator for testing; see [Android Handset & Pairing](/docs/guides/android-node-pairing/))
 
 ## Step 1: Install the Repository and CLI
 
@@ -392,9 +392,9 @@ Revocation takes effect immediately on the very next request.
 
 # Android Handset & Pairing
 
-> Build, sign, install, pair, and verify the Tauri v2 + Rust Android SMS radio app (dev.dakflare.simulator).
+> Build, sign, install, pair, and verify the Tauri v2 + Rust Android SMS radio app (dev.dakflare.device).
 
-The Android app (`simulator/`, package `dev.dakflare.simulator`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
+The Android app (`simulator/`, package `dev.dakflare.device`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
 
 ## Toolchain & Debug Build
 
@@ -436,7 +436,7 @@ cd simulator/flow && cargo test
 
 ## Wake Capability: `poll-only` vs. FCM Push
 
-The Worker supports FCM HTTP v1 wake pushes (`worker/src/lib/fcm.ts`, bearer token cached in `KV`) whenever a `devices` row carries an `fcm_token`. However, `dev.dakflare.simulator` deliberately does **not** register an FCM token because target handsets run GMS-free LineageOS (`com.google.android.gms` absent). The handset operates honestly as `poll-only`—maintaining a persistent WebSocket (`GET /v1/device/ws`) when online and falling back to `POST /v1/sms/outgoing/poll`.
+The Worker supports FCM HTTP v1 wake pushes (`worker/src/lib/fcm.ts`, bearer token cached in `KV`) whenever a `devices` row carries an `fcm_token`. However, `dev.dakflare.device` deliberately does **not** register an FCM token because target handsets run GMS-free LineageOS (`com.google.android.gms` absent). The handset operates honestly as `poll-only`—maintaining a persistent WebSocket (`GET /v1/device/ws`) when online and falling back to `POST /v1/sms/outgoing/poll`.
 
 ## On-Device Verification (8 Checks)
 
@@ -458,7 +458,7 @@ simulator/scripts/release-apk.sh
 dakflare key fingerprint   # prints the release certificate SHA-256
 ```
 
-**Losing the release keystore permanently prevents updating existing installations under `dev.dakflare.simulator`.**
+**Losing the release keystore permanently prevents updating existing installations under `dev.dakflare.device`.**
 
 ---
 
@@ -650,7 +650,7 @@ per-account Durable Object, and the same `messages` / `conversations` rows.
 | Tier | Where it runs | What it covers |
 | --- | --- | --- |
 | `worker_do` | Cloudflare Worker + one `ChannelConnection` Durable Object per account | Official webhook and REST APIs: WhatsApp Cloud and Coexistence, Telegram Bot and Business Bot, Facebook Messenger, and Instagram's three login modes. Uses `crypto.subtle` and `fetch`; no platform SDK. |
-| `edge_device` | The Android handset (`dev.dakflare.simulator`) | Personal sessions observed from notifications: `whatsapp_personal`, `telegram_personal`, `messenger_personal`, `instagram_personal`. |
+| `edge_device` | The Android handset (`dev.dakflare.device`) | Personal sessions observed from notifications: `whatsapp_personal`, `telegram_personal`, `messenger_personal`, `instagram_personal`. |
 
 The handset bridge is `MessagingNotificationBridge.kt`. It is an Android
 `NotificationListenerService` that reads the notification stream of the installed messaging app and

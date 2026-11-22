@@ -9,7 +9,7 @@ Use this skill whenever provisioning, debugging, messaging, authoring `dakflare.
 
 ## Core Architecture & Canonical Names
 
-- **Handset (`dev.dakflare.simulator`)**: Tauri v2 + Rust `core/` + Kotlin telephony + Svelte 5. Holds `android.app.role.SMS`, wraps its P-256 private key in Android Keystore (`keystore:v1:<iv>:<ciphertext>`), runs `simulator/flow` offline, and operates honestly as `poll-only` on GMS-free LineageOS.
+- **Handset (`dev.dakflare.device`)**: Tauri v2 + Rust `core/` + Kotlin telephony + Svelte 5. Holds `android.app.role.SMS`, wraps its P-256 private key in Android Keystore (`keystore:v1:<iv>:<ciphertext>`), runs `simulator/flow` offline, and operates honestly as `poll-only` on GMS-free LineageOS.
 - **Edge Coordinator (`dakflare-worker`)**: Cloudflare Worker with 4 SQLite Durable Objects (`DeviceGateway`/`DEVICE`, `AuthGuard`/`AUTH_GUARD`, `AuthorityGuard`/`AUTHORITY_GUARD`, `AssistantAgent`/`ASSISTANT`), D1 `sms_gateway` (17 migrations `0001`–`0017`), `KV` (FCM cache), `MEDIA_BUCKET` (R2, 24h `agent_attachments`), `WEBHOOK_QUEUE`, `FLOW_WORKFLOW` (`FlowExecutionWorkflow`), `AI` (Clef System 1), and 7 rate limiters.
 - **Canonical Identifiers (Never Substitute Synonyms)**: `device_id` (never `handsetId`), `command_id`, `local_id`, `dkf_agt_` (agent token), `ag1_` (apply handle), `dakflare.flow/v2`, `DakFlareApi`.
 

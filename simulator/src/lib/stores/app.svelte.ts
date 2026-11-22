@@ -3,7 +3,7 @@ import { goto } from '$app/navigation';
 import { grantSentence } from '$lib/approvals';
 
 /** This app's applicationId; the default-SMS fact reports a package name. */
-export const DEFAULT_SMS_PACKAGE = 'dev.dakflare.simulator';
+export const DEFAULT_SMS_PACKAGE = 'dev.dakflare.device';
 
 export type Device = {
 	device_id: string;

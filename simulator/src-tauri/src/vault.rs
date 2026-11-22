@@ -30,7 +30,7 @@ use jni::{JNIEnv, JavaVM};
 static VM: OnceLock<JavaVM> = OnceLock::new();
 static CLASS: OnceLock<GlobalRef> = OnceLock::new();
 
-const CLASS_NAME: &str = "dev.dakflare.simulator.KeyVault";
+const CLASS_NAME: &str = "dev.dakflare.device.KeyVault";
 
 /// The cipher handed to `Store::open_with_cipher` on Android.
 #[derive(Debug, Clone, Copy)]
@@ -139,13 +139,13 @@ fn call(
     Ok(reply)
 }
 
-/// `dev.dakflare.simulator.KeyVault.nativeInstall()`
+/// `dev.dakflare.device.KeyVault.nativeInstall()`
 ///
 /// Cache the VM and the class reference. Idempotent and silent: failing to
 /// install is not fatal here, it makes every later unwrap fail closed with the
 /// one clear sentence.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_KeyVault_nativeInstall(
+pub extern "system" fn Java_dev_dakflare_device_KeyVault_nativeInstall(
     env: JNIEnv,
     class: JClass,
 ) {

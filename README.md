@@ -77,7 +77,7 @@ why five accounts on one platform are five isolated objects rather than one hot 
 
 ```mermaid
 flowchart LR
-  subgraph Edge["Edge Android Handset (dev.dakflare.simulator)"]
+  subgraph Edge["Edge Android Handset (dev.dakflare.device)"]
     SIM["SIM Radio\n(SmsReceiver / SmsSender)"]
     NOTIF["Personal Apps\n(NotificationListener + RemoteInput)"]
     CORE["Rust Core + flow.wasm\n(P-256 AndroidKeyStore)"]

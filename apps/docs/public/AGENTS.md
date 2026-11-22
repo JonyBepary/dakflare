@@ -1,6 +1,6 @@
 # Notes for Coding Agents (`dakflare`)
 
-DakFlare is a sovereign multi-platform messaging hub and SMS gateway: one Android handset (`dev.dakflare.simulator`), one Cloudflare Worker (`dakflare-worker`), one SvelteKit console (`/admin`), and one zero-dependency CLI (`dakflare`).
+DakFlare is a sovereign multi-platform messaging hub and SMS gateway: one Android handset (`dev.dakflare.device`), one Cloudflare Worker (`dakflare-worker`), one SvelteKit console (`/admin`), and one zero-dependency CLI (`dakflare`).
 
 ## Documentation Surfaces (Dual-Audience)
 

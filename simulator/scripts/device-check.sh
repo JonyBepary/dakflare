@@ -5,7 +5,7 @@
 #
 # The checks exercise the real paths, not mocks:
 #   attached      adb sees the handset, the debug app is installed, version
-#   role          android.app.role.SMS is held by dev.dakflare.simulator
+#   role          android.app.role.SMS is held by dev.dakflare.device
 #   key           simulator.db has no plaintext PKCS#8 key and a Keystore blob
 #   receive       a real SMS_DELIVER PDU through inject-sms.sh -> exactly one row
 #   provider      the same body reached content://sms/inbox with this app as creator
@@ -30,7 +30,7 @@
 # 2 usage/missing tool.
 set -uo pipefail
 
-PKG=dev.dakflare.simulator
+PKG=dev.dakflare.device
 ACT="$PKG/.MainActivity"
 SERIAL="${ANDROID_SERIAL:-100.110.66.88:5555}"
 ADB="${ADB:-adb}"
@@ -500,7 +500,7 @@ except OSError as error:
 
 seen = 0
 for block in re.split(r'(?=\n    NotificationRecord\()', text):
-    if 'pkg=dev.dakflare.simulator' not in block:
+    if 'pkg=dev.dakflare.device' not in block:
         continue
     match = re.search(
         r'NotificationRecord\([^\n]*?\bid=(-?\d+) tag=dakflare-message(?!-)[^\n]*',

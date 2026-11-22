@@ -1,4 +1,4 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.Manifest
 import android.app.PendingIntent
@@ -329,7 +329,7 @@ class SmsReceiver : BroadcastReceiver() {
         add(NativeBridge.getDeviceFactSafely(appDir, "phone_number"))
 
         try {
-            val prefs = context.getSharedPreferences("dev.dakflare.simulator.prefs", Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences("dev.dakflare.device.prefs", Context.MODE_PRIVATE)
             add(prefs.getString("configured_phone_number", null))
             add(prefs.getString("self_number", null))
         } catch (_: Throwable) {

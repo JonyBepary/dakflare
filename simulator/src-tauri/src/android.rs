@@ -42,14 +42,14 @@ const MAX_STATE_LEN: usize = 16;
 const MAX_AWAIT_MS: i64 = 120_000;
 const DB_FILE: &str = "simulator.db";
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.storeIncoming`
+/// `dev.dakflare.device.bridge.NativeBridge.storeIncoming`
 ///
 /// Persistence-only entry kept for callers built before M5.2. It runs the same
 /// path (the inbound row is written before any flow runs) but returns no
 /// actions: `{"ok":true,"device_id":"…","local_id":"…"}` or
 /// `{"ok":false,"error":"unpaired"|"bad_input"|"storage"}`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeIncoming(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_storeIncoming(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -69,7 +69,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeInco
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.processIncoming`
+/// `dev.dakflare.device.bridge.NativeBridge.processIncoming`
 ///
 /// Persists one inbound SMS, runs the locally cached flows and returns the
 /// replies the receiver must send:
@@ -80,7 +80,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeInco
 /// The inbound row is written before flows run, so a reply failure never loses
 /// the message.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIncoming(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_processIncoming(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -100,7 +100,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIn
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.storeEdgeInbound`
+/// `dev.dakflare.device.bridge.NativeBridge.storeEdgeInbound`
 ///
 /// Persist one personal-channel notification on the same inbound row path as
 /// SMS, without running flows: `{"ok":true,"device_id":"…","local_id":"…"}` or
@@ -110,7 +110,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_processIn
 /// a re-posted notification resolves to one row. The sender and body are never
 /// logged.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeEdgeInbound(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_storeEdgeInbound(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -132,14 +132,14 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_storeEdge
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.flushEdgePending`
+/// `dev.dakflare.device.bridge.NativeBridge.flushEdgePending`
 ///
 /// Upload the personal-channel rows the SMS flush never selects:
 /// `{"ok":true,"uploaded":N,"batches":B,"refused":[]}`. A row that alone exceeds
 /// the batch budget is reported in `refused` and left pending, so the sync loop
 /// can say one message could not be uploaded rather than losing it silently.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushEdgePending(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_flushEdgePending(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -149,7 +149,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushEdge
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.queueOutbound`
+/// `dev.dakflare.device.bridge.NativeBridge.queueOutbound`
 ///
 /// Queues one SMS typed on this phone before the radio is touched:
 /// `{"ok":true,"local_id":"compose-…"}` or
@@ -160,7 +160,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushEdge
 /// exists, so a double tap cannot create two rows for one send. The number and
 /// the body are never logged.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_queueOutbound(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_queueOutbound(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -172,7 +172,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_queueOutb
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.markOutbound`
+/// `dev.dakflare.device.bridge.NativeBridge.markOutbound`
 ///
 /// Records what happened to a queued reply row:
 /// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
@@ -181,7 +181,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_queueOutb
 /// `markDelivered` for a real carrier report). A `failed` row is not mirrored
 /// until M5.5's retry flips it back to `queued`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbound(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_markOutbound(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -194,7 +194,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutboundWithError(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_markOutboundWithError(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -214,7 +214,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.markDelivered`
+/// `dev.dakflare.device.bridge.NativeBridge.markDelivered`
 ///
 /// Marks a reply row `delivered` from a carrier delivery report:
 /// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
@@ -223,7 +223,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markOutbo
 /// `queued` (the report arrived before the `SENT` broadcast); the core writes
 /// `sent` then `delivered` in one transaction. A `failed` row is refused.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markDelivered(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_markDelivered(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -259,7 +259,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markDeliv
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.recordTransientFailure`
+/// `dev.dakflare.device.bridge.NativeBridge.recordTransientFailure`
 ///
 /// Records one radio failure that is worth retrying (`RADIO_OFF` or
 /// `NO_SERVICE`). The core puts the row back to `queued` and spends one attempt,
@@ -267,7 +267,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_markDeliv
 /// `{"ok":true,"state":"queued"|"failed","attempts":<n>}` or
 /// `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_recordTransientFailure(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_recordTransientFailure(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -308,14 +308,14 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_recordTra
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.retryableOutbound`
+/// `dev.dakflare.device.bridge.NativeBridge.retryableOutbound`
 ///
 /// Lists the local ids the gateway tick may retry (queued, fewer than three
 /// attempts, older than 60 s): `{"ok":true,"local_ids":["…"]}` or
 /// `{"ok":false,"error":"bad_input"|"storage"}`. Only ids cross this boundary;
 /// the body and recipient are read back from the stored row before a re-send.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_retryableOutbound(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_retryableOutbound(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -351,7 +351,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_retryable
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.resendOutbound`
+/// `dev.dakflare.device.bridge.NativeBridge.resendOutbound`
 ///
 /// Reads the stored row a retry may send. It takes only the row's `local_id`:
 /// the recipient, body and SIM slot come back from the store, so they never
@@ -362,7 +362,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_retryable
 /// `{"ok":false,"error":"bad_input"|"not_found"|"storage"}`. A row that is no
 /// longer `queued` is `not_found`, so a stale id cannot re-send a finished row.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_resendOutbound(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_resendOutbound(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -402,13 +402,13 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_resendOut
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.checkSend`
+/// `dev.dakflare.device.bridge.NativeBridge.checkSend`
 ///
 /// The one recipient/body policy, so Kotlin cannot drift from Rust or from the
 /// webview. Returns `{"ok":true}` or `{"ok":false,"error":"<sentence>"}` where
 /// the sentence is the one the UI already shows. No number or body is logged.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_checkSend(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_checkSend(
     mut env: JNIEnv,
     _class: JClass,
     to: JString,
@@ -433,14 +433,14 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_checkSend
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.getDeviceFact`
+/// `dev.dakflare.device.bridge.NativeBridge.getDeviceFact`
 ///
 /// Reads one whitelisted handset fact back. The receiver uses it for
 /// `self_number`: a cold start cannot always read the phone number from the
 /// radio yet, and the self-number guard must not silently switch itself off.
 /// Returns `{"ok":true,"value":"…"|null}` or `{"ok":false,"error":"bad_input"|"storage"}`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_getDeviceFact(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_getDeviceFact(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -476,7 +476,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_getDevice
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.messageByLocalId`
+/// `dev.dakflare.device.bridge.NativeBridge.messageByLocalId`
 ///
 /// Reads one stored message by its deterministic local id. The `SENT` receipt
 /// carries only ids, so the status receiver uses this to recover the address,
@@ -486,7 +486,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_getDevice
 ///
 /// The body crosses JNI because the caller must write it; it is never logged.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_messageByLocalId(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_messageByLocalId(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -538,14 +538,14 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_messageBy
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.setDeviceFact`
+/// `dev.dakflare.device.bridge.NativeBridge.setDeviceFact`
 ///
 /// Persists one whitelisted handset fact (`self_number`, `sim_slot`,
 /// `sim_carrier`, `permissions`, `battery_optimized`, `default_sms_app`):
 /// `{"ok":true}` or `{"ok":false,"error":"bad_input"|"storage"}`. Neither the
 /// key nor the value is ever logged.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_setDeviceFact(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_setDeviceFact(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -556,7 +556,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_setDevice
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.flushPending`
+/// `dev.dakflare.device.bridge.NativeBridge.flushPending`
 ///
 /// Drains everything this deployment has not accepted yet — pending inbound
 /// rows, their stored flow runs and unmirrored outbound rows — in one atomic
@@ -567,7 +567,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_setDevice
 /// Best effort: a failed call leaves the rows pending, and the next call (or
 /// the next `poll_device`) retries them.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPending(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_flushPending(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -604,7 +604,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.awaitCommand`
+/// `dev.dakflare.device.bridge.NativeBridge.awaitCommand`
 ///
 /// Parks this thread until the device socket delivers commands, or until
 /// `timeout_ms` passes. Returns `{"ok":true,"captured":["<local id>"],"live":bool}`
@@ -614,7 +614,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_flushPend
 /// The commands are already recorded as `queued` rows by the time this returns;
 /// the caller's job is the radio, then the acknowledgement.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_awaitCommand(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_awaitCommand(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -653,7 +653,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_awaitComm
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.reportStatus`
+/// `dev.dakflare.device.bridge.NativeBridge.reportStatus`
 ///
 /// Tells the deployment how a collected command ended. Returns
 /// `{"ok":true,"reported":true|false}` — `false` means the row was not a
@@ -662,7 +662,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_awaitComm
 /// §6.1: a rejected transition is a successful no-op, so a command that already
 /// reached a terminal state is not an error here.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportStatus(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_reportStatus(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -702,7 +702,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
 
 /// Variant of `reportStatus` carrying optional machine-readable `error_code` and `error_message`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportStatusWithError(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_reportStatusWithError(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -751,7 +751,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.ackCommand`
+/// `dev.dakflare.device.bridge.NativeBridge.ackCommand`
 ///
 /// Acknowledges one recorded command after the radio accepted the send. Returns
 /// `{"ok":true,"acked":true|false}` — `false` means the row carried no lease
@@ -762,7 +762,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_reportSta
 /// leaves it in place, so a later retry can use the same lease; an ack the edge
 /// rejects is a successful no-op there and simply clears the local token.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_ackCommand(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_ackCommand(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -799,7 +799,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_ackComman
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.drainOutbox`
+/// `dev.dakflare.device.bridge.NativeBridge.drainOutbox`
 ///
 /// Fetches the deployment's queued commands and records them locally as
 /// `queued` outbound rows. Returns `{"ok":true,"captured":["out-…"]}` or
@@ -808,7 +808,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_ackComman
 /// The ids are what the gateway tick hands to the radio. This call never sends:
 /// an id here means "the phone holds it", not "the phone sent it".
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_drainOutbox(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_drainOutbox(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -844,7 +844,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_drainOutb
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.syncFlows`
+/// `dev.dakflare.device.bridge.NativeBridge.syncFlows`
 ///
 /// Replaces the cached flow set with this deployment's current set. The gateway
 /// service calls it in the same tick as its flush, so a Worker-side edit reaches
@@ -855,7 +855,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_drainOutb
 /// Best effort: on failure the previous cache stays in place and the next tick
 /// retries. An empty list is success and clears the cache.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_syncFlows(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_syncFlows(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,
@@ -891,7 +891,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_syncFlows
     to_jstring(&mut env, json)
 }
 
-/// `dev.dakflare.simulator.bridge.NativeBridge.hasIdentity`
+/// `dev.dakflare.device.bridge.NativeBridge.hasIdentity`
 ///
 /// Reports the paired identity in this store:
 /// `{"ok":true,"device_id":"…"}` or
@@ -901,7 +901,7 @@ pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_syncFlows
 /// UI only need yes/no; one call answers both. A device row without a private
 /// key is not a usable identity and is reported as `unpaired`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_dakflare_simulator_bridge_NativeBridge_hasIdentity(
+pub extern "system" fn Java_dev_dakflare_device_bridge_NativeBridge_hasIdentity(
     mut env: JNIEnv,
     _class: JClass,
     app_dir: JString,

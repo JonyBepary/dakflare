@@ -90,7 +90,7 @@ const FULL_FACTS: DeviceFacts = {
 	sim_carrier: 'Grameenphone',
 	permissions: { sms: true, send: true, phone_numbers: true },
 	battery_optimized: true,
-	default_sms_app: 'dev.dakflare.simulator'
+	default_sms_app: 'dev.dakflare.device'
 };
 
 const PENDING_APPROVALS: PendingApproval[] = [

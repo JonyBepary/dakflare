@@ -1,4 +1,4 @@
-package dev.dakflare.simulator
+package dev.dakflare.device
 
 import android.Manifest
 import android.app.role.RoleManager
@@ -17,11 +17,11 @@ import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import dev.dakflare.simulator.bridge.AppVisibility
-import dev.dakflare.simulator.bridge.GatewayService
-import dev.dakflare.simulator.bridge.NativeBridge
-import dev.dakflare.simulator.bridge.SmsNotifier
-import dev.dakflare.simulator.bridge.SmsRoute
+import dev.dakflare.device.bridge.AppVisibility
+import dev.dakflare.device.bridge.GatewayService
+import dev.dakflare.device.bridge.NativeBridge
+import dev.dakflare.device.bridge.SmsNotifier
+import dev.dakflare.device.bridge.SmsRoute
 import org.json.JSONObject
 
 /**

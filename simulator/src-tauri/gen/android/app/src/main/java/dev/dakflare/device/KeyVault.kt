@@ -1,4 +1,4 @@
-package dev.dakflare.simulator
+package dev.dakflare.device
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -25,8 +25,8 @@ import javax.crypto.spec.GCMParameterSpec
  * the alias.
  *
  * The key deliberately does **not** require user authentication. The identity is
- * used by [dev.dakflare.simulator.bridge.SmsReceiver] and
- * [dev.dakflare.simulator.bridge.GatewayService] in a process with no Activity
+ * used by [dev.dakflare.device.bridge.SmsReceiver] and
+ * [dev.dakflare.device.bridge.GatewayService] in a process with no Activity
  * and no unlocked screen; a key that demanded authentication would leave the
  * gateway unable to sign after a reboot.
  *
@@ -54,7 +54,7 @@ object KeyVault {
      *
      * Called from `MainActivity.onCreate` before `super.onCreate()` (so Tauri's
      * setup, which opens the store and migrates the key, already has it) and from
-     * [dev.dakflare.simulator.bridge.NativeBridge]'s initializer (so a cold-start
+     * [dev.dakflare.device.bridge.NativeBridge]'s initializer (so a cold-start
      * receiver or the boot-started service has it with no Activity). Idempotent;
      * a failure is logged and leaves every unwrap failing closed.
      */

@@ -1,7 +1,7 @@
-package dev.dakflare.simulator.bridge
+package dev.dakflare.device.bridge
 
 import android.util.Log
-import dev.dakflare.simulator.KeyVault
+import dev.dakflare.device.KeyVault
 import org.json.JSONObject
 
 /**
