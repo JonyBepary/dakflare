@@ -2,7 +2,7 @@
 //
 // Two things in this pass could only be checked by looking at the real app:
 //
-//   A. discovery — the rail carries "AI assistant", the topbar names it, and the
+//   A. discovery — the rail carries "AI settings", the topbar names it, and the
 //      settings page shows the *absence* of a key as a command rather than as an
 //      empty field (a key typed into a browser ends up in a log).
 //   B. handover — the assistant panel hands a `stage_workflow_patch` proposal to
@@ -342,13 +342,13 @@ try {
 			};
 		})()`
 	);
-	check('the rail carries exactly one AI assistant entry', nav.railItem === 1, nav.railLabel);
+	check('the rail carries exactly one AI settings entry', nav.railItem === 1, nav.railLabel);
 	check(
 		'every current marker names the AI page (Sign-in does not claim it)',
-		nav.current.length > 0 && nav.current.every((label) => /AI assistant/i.test(label)),
+		nav.current.length > 0 && nav.current.every((label) => /AI settings/i.test(label)),
 		nav.current.join(' | ')
 	);
-	check('the topbar names the page', /AI assistant/i.test(nav.topbar), nav.topbar.slice(0, 60));
+	check('the topbar names the page', /AI settings/i.test(nav.topbar), nav.topbar.slice(0, 60));
 
 	const key = await evaluate(
 		cdp,
