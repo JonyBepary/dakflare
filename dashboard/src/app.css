@@ -569,9 +569,12 @@ time {
 	font-size: var(--df-p-text-xs);
 	color: var(--df-text-meta);
 	font-variant-numeric: tabular-nums;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	/* The role and the session's own expiry are the only statement of either, so
+	   this wraps rather than ellipsizing: `member · expires just n…` reads as a
+	   broken value, not a short one. */
+	white-space: normal;
+	overflow-wrap: anywhere;
+	line-height: 1.4;
 }
 
 .topbar {

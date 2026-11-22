@@ -524,19 +524,24 @@
 		title="Rules"
 		description="One reply, rate-limited per rule and device. Evaluated on the gateway as messages sync."
 	>
+		<!-- A failed read owns its recovery: the panel's "Try again" sits at the
+		     cause, so the header does not offer a second control for the same
+		     action. -->
+		{#if !error}
+			<button
+				type="button"
+				class="btn"
+				onclick={() => void loadRules()}
+				disabled={loading || refreshing}
+				aria-busy={refreshing}
+			>
+				{#if refreshing}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
+				Refresh
+			</button>
+		{/if}
 		<button
 			type="button"
-			class="btn"
-			onclick={() => void loadRules()}
-			disabled={loading || refreshing}
-			aria-busy={refreshing}
-		>
-			{#if refreshing}<Spinner />{:else}<Icon name="refresh" size={14} />{/if}
-			Refresh
-		</button>
-		<button
-			type="button"
-			class="btn {canWrite && !formOpen ? 'btn-primary' : ''}"
+			class="btn {canWrite && !formOpen && !error ? 'btn-primary' : ''}"
 			onclick={() => (formOpen ? closeForm() : openForm())}
 			disabled={!canWrite}
 			title={canWrite ? undefined : readOnlyWhy}

@@ -56,6 +56,7 @@ docs/archive/
 .openchamber/
 .slim/deepwork/
 .ui-review/
+.gridlines/
 .design-system/
 
 # The extracted design kit this work came from: input, not repository content.
