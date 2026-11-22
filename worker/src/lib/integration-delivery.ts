@@ -17,6 +17,7 @@
 import type { Env } from "../index";
 import type { OutboundWebhookMatch } from "./outbound-webhook";
 import { findSubscribedWebhooks } from "./outbound-webhook";
+import { evaluateOutboundBody } from "./content-policy";
 
 /** The largest `ack_json` this stores. A receiver's answer is a receipt, not a log. */
 export const MAX_ACK_BYTES = 2_048;
@@ -262,5 +263,80 @@ export async function emitDeviceEvent(
     }
   } catch (error) {
     console.error(`[integration] ${input.type} emit failed: ${String(error)}`);
+  }
+}
+
+
+export interface MessageEventInput {
+  deviceId: string;
+  /** Stable per message: the row id, so a replay of the same batch is one event. */
+  messageId: string;
+  /** Idempotency key when the source has its own id (a channel event id). */
+  eventId?: string;
+  sender: string;
+  body: string;
+  channel?: string;
+  receivedAt: number;
+}
+
+/**
+ * Emit `message.received` for inbound messages to every subscribed hook.
+ *
+ * This is where `body_policy` finally decides something. The OTP/PIN block runs
+ * first and is not negotiable: a body that `isOtpOrPinMessage()` recognises never
+ * leaves raw, whatever the hook asked for. On top of it:
+ *
+ *   redacted        metadata only
+ *   allowlisted_raw the body only on a sender or pattern match
+ *   full            the body, an explicit opt-in at hook creation
+ *
+ * A redacted message is still delivered, with its `content_class`, because an
+ * integration that owns a number needs to know a code arrived even when it must
+ * not read it. Nothing is emitted when no enabled hook subscribes to the event.
+ */
+export async function emitMessageEvents(
+  env: Env,
+  messages: ReadonlyArray<MessageEventInput>,
+  traceId: string = crypto.randomUUID()
+): Promise<void> {
+  if (messages.length === 0) return;
+  try {
+    const hooks = await findSubscribedWebhooks(env, "message.received");
+    if (hooks.length === 0) return;
+    for (const message of messages) {
+      for (const hook of hooks) {
+        const evaluated = evaluateOutboundBody({
+          sender: message.sender,
+          body: message.body,
+          policy: hook.bodyPolicy,
+          allowlist: hook.bodyAllowlist,
+        });
+        const payload: Record<string, unknown> = {
+          device_id: message.deviceId,
+          message_id: message.messageId,
+          channel: message.channel ?? "sms",
+          sender: message.sender,
+          received_at: message.receivedAt,
+          content_class: evaluated.content_class,
+        };
+        if (evaluated.include_raw_body && evaluated.body !== null) {
+          payload.body = evaluated.body;
+        }
+        // One message is one event across every hook: the idempotency key keeps a
+        // replayed upload from notifying twice, and a retry stays the delivery.
+        await enqueueDelivery(env, {
+          webhook: hook,
+          eventType: "message.received",
+          eventId: message.eventId ?? message.messageId,
+          payload,
+          traceId,
+          headers: { "X-Dakflare-Device": message.deviceId },
+        });
+      }
+    }
+  } catch (error) {
+    // A webhook is a notification about a message that is already durable; losing
+    // it must not fail the upload the handset is waiting on.
+    console.error(`[integration] message.received emit failed: ${String(error)}`);
   }
 }

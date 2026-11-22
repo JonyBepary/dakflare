@@ -29,6 +29,7 @@
  */
 
 import type { Env } from "../index";
+import { emitMessageEvents } from "../lib/integration-delivery";
 import type { NormalizedChannelEvent } from "./connection-do";
 import { whatsappMessageIdFromEventId } from "./whatsapp-cloud";
 import { mirrorScheduledStatus } from "../lib/scheduled";
@@ -93,7 +94,8 @@ const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
  */
 export async function consumeIngestBatch(
   batch: MessageBatch<NormalizedChannelEvent>,
-  env: Env
+  env: Env,
+  ctx?: ExecutionContext
 ): Promise<number> {
   if (batch.messages.length === 0) {
     batch.ackAll();
@@ -123,6 +125,16 @@ export async function consumeIngestBatch(
         OR excluded.last_inbound_at   > COALESCE(conversations.last_inbound_at, 0)`
   );
 
+  const emitted: Array<{
+    deviceId: string;
+    messageId: string;
+    eventId: string;
+    sender: string;
+    body: string;
+    channel: string;
+    receivedAt: number;
+  }> = [];
+
   const messageStmt = env.DB.prepare(
     `INSERT OR IGNORE INTO messages
        (id, device_id, local_id, direction, peer, body, received_at, channel, conversation_id)
@@ -147,6 +159,7 @@ export async function consumeIngestBatch(
     const event = msg.body;
 
     if (event.eventKind === "inbound_message") {
+      const messageId = crypto.randomUUID();
       const accountId = event.accountId || "default";
       const convId = conversationId(event.channel, accountId, event.peerId);
       const deviceId = channelDeviceId(event.channel, accountId);
@@ -171,7 +184,7 @@ export async function consumeIngestBatch(
 
       statements.push(
         messageStmt.bind(
-          crypto.randomUUID(),
+          messageId,
           deviceId,
           event.eventId,
           event.peerId,
@@ -181,6 +194,17 @@ export async function consumeIngestBatch(
           convId
         )
       );
+      // The integration event keeps the channel's own id as its idempotency key,
+      // so a replayed batch produces one delivery, not one per replay.
+      emitted.push({
+        deviceId,
+        messageId,
+        eventId: event.eventId,
+        sender: event.peerId,
+        body: event.body ?? "",
+        channel: event.channel,
+        receivedAt: event.timestamp,
+      });
       continue;
     }
 
@@ -245,6 +269,11 @@ export async function consumeIngestBatch(
   }
 
   batch.ackAll();
+  if (emitted.length > 0) {
+    const work = emitMessageEvents(env, emitted);
+    if (ctx !== undefined) ctx.waitUntil(work);
+    else await work;
+  }
   return written;
 }
 

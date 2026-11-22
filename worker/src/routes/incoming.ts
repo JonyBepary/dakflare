@@ -29,6 +29,7 @@ import { err } from "../lib/errors";
 import { RE_DEVICE_ID } from "../auth/canonical";
 import { dispatchFlows, type AcceptedMessage } from "../flow/dispatch";
 import { enqueueOutboundCommand, isOtpOrPinMessage } from "../lib/commands";
+import { emitMessageEvents } from "../lib/integration-delivery";
 import {
   evaluateRules,
   type RuleHit,
@@ -134,7 +135,8 @@ export async function handleIncomingBatch(
   _req: Request,
   env: Env,
   deviceId: string,
-  rawBody: string
+  rawBody: string,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   let payload: unknown;
   try {
@@ -469,6 +471,22 @@ export async function handleIncomingBatch(
       } else {
         duplicates++;
       }
+    }
+
+    // Integrations learn about the messages this batch inserted, not the
+    // duplicates it skipped. `waitUntil` because the handset is waiting on this
+    // response: a slow receiver must not extend the upload.
+    const emitted = acceptedInbound.map((row) => ({
+      deviceId,
+      messageId: row.id,
+      sender: row.sender,
+      body: row.body,
+      receivedAt: row.receivedAt,
+    }));
+    if (emitted.length > 0) {
+      const work = emitMessageEvents(env, emitted);
+      if (ctx !== undefined) ctx.waitUntil(work);
+      else await work;
     }
 
     // Persist the device's own runs, but only for rows this batch actually

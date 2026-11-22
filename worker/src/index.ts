@@ -904,7 +904,11 @@ export default {
     // One consumer, three queues. Inbound channel events are deduped in the DO before they get
     // here, so this half only has to write them atomically and refuse to drop a failed batch.
     if (batch.queue === "dakflare-ingest-queue") {
-      const written = await consumeIngestBatch(batch as MessageBatch<NormalizedChannelEvent>, env);
+      const written = await consumeIngestBatch(
+        batch as MessageBatch<NormalizedChannelEvent>,
+        env,
+        _ctx
+      );
       if (written > 0) console.log(`[ingest] wrote ${written} rows from ${batch.messages.length} events`);
       return;
     }
@@ -2185,7 +2189,7 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
     }
     if (method === "POST" && pathname === "/v1/sms/incoming/batch") {
       return withDevice(req, env, ctx, (r, e, deviceId, body) =>
-        handleIncomingBatch(r, e, deviceId, body)
+        handleIncomingBatch(r, e, deviceId, body, ctx)
       );
     }
     if (method === "POST" && pathname === "/v1/sms/outgoing/poll") {

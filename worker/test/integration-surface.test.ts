@@ -21,7 +21,7 @@ import { DakFlareApi } from "../src/binding-api";
 import { mintAgentToken, type AgentTokenKind } from "../src/lib/agent-tokens";
 import { handleWebhookCreate } from "../src/routes/webhooks";
 import { handleWebhookDeliveryReplay } from "../src/routes/integration";
-import { emitDeviceEvent } from "../src/lib/integration-delivery";
+import { emitDeviceEvent, emitMessageEvents } from "../src/lib/integration-delivery";
 import { hmacSha256Hex } from "../src/routes/webhooks";
 import type { AdminActor } from "../src/audit";
 
@@ -263,7 +263,10 @@ describe("DakFlareApi under BINDING_AUTH=agent_token", () => {
   });
 });
 
-async function createHook(events: string[] = []): Promise<{ id: string; secret: string }> {
+async function createHook(
+  events: string[] = [],
+  extra: Record<string, unknown> = {}
+): Promise<{ id: string; secret: string }> {
   const response = await handleWebhookCreate(
     new Request("https://example.com/v1/admin/webhooks", {
       method: "POST",
@@ -273,6 +276,7 @@ async function createHook(events: string[] = []): Promise<{ id: string; secret: 
         name: unique("hook"),
         target_url: `https://${unique("hook")}.example.com/receive`,
         events,
+        ...extra,
       }),
     }),
     testEnv,
@@ -457,5 +461,103 @@ describe("device lifecycle events", () => {
       .first<{ state: string; ack_json: string | null; last_http_status: number }>();
     expect(delivered).toMatchObject({ state: "DELIVERED", last_http_status: 200 });
     expect(JSON.parse(delivered?.ack_json ?? "{}")).toMatchObject({ accepted: true });
+  });
+});
+
+
+describe("message.received events", () => {
+  it("applies body_policy: allowlisted sender forwards raw, OTP never, redacted never", async () => {
+    const allowlisted = await createHook(["message.received"], {
+      body_policy: "allowlisted_raw",
+      body_allowlist: { senders: ["bKash"] },
+    });
+    const redacted = await createHook(["message.received"]);
+    const queue = fakeQueue();
+    const withQueue = new Proxy(testEnv, {
+      get(target, prop, receiver) {
+        if (prop === "WEBHOOK_QUEUE") return queue.queue;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const payment = "You have received Tk 1,500.00 from 017****8901. TrxID 9K8L7M6N5P.";
+    const otp = "Your bKash verification code is 482910. Never share OTP.";
+    await emitMessageEvents(
+      withQueue,
+      [
+        { deviceId: "dev_a", messageId: "msg_pay", sender: "bKash", body: payment, receivedAt: 1 },
+        { deviceId: "dev_a", messageId: "msg_otp", sender: "bKash", body: otp, receivedAt: 2 },
+      ],
+      "trace-msg-1"
+    );
+
+    // Two hooks, two messages, four deliveries.
+    expect(queue.sent).toHaveLength(4);
+    const payloads = queue.sent.map((m) => {
+      const message = m as { webhookId: string; body: string; traceId: string };
+      return { webhookId: message.webhookId, body: JSON.parse(message.body), traceId: message.traceId };
+    });
+
+    const allowPay = payloads.find(
+      (p) => p.webhookId === allowlisted.id && p.body.message_id === "msg_pay"
+    );
+    expect(allowPay?.body).toMatchObject({
+      event_type: "message.received",
+      content_class: "allowlisted_raw",
+      sender: "bKash",
+      channel: "sms",
+      body: payment,
+    });
+    expect(allowPay?.traceId).toBe("trace-msg-1");
+
+    const allowOtp = payloads.find(
+      (p) => p.webhookId === allowlisted.id && p.body.message_id === "msg_otp"
+    );
+    expect(allowOtp?.body.content_class).toBe("otp_or_pin");
+    expect(allowOtp?.body).not.toHaveProperty("body");
+
+    const redPay = payloads.find(
+      (p) => p.webhookId === redacted.id && p.body.message_id === "msg_pay"
+    );
+    expect(redPay?.body).not.toHaveProperty("body");
+    expect(redPay?.body.content_class).toBe("general");
+    const redOtp = payloads.find(
+      (p) => p.webhookId === redacted.id && p.body.message_id === "msg_otp"
+    );
+    expect(redOtp?.body).not.toHaveProperty("body");
+    expect(redOtp?.body.content_class).toBe("otp_or_pin");
+
+    const rows = await env.DB.prepare(
+      `SELECT state, idempotency_key FROM integration_deliveries WHERE webhook_id IN (?, ?)`
+    )
+      .bind(allowlisted.id, redacted.id)
+      .all<{ state: string; idempotency_key: string }>();
+    expect(rows.results?.length).toBe(4);
+    expect(rows.results?.every((r) => r.state === "PENDING")).toBe(true);
+  });
+
+  it("emits once per message when the same batch is replayed", async () => {
+    const hook = await createHook(["message.received"]);
+    const queue = fakeQueue();
+    const withQueue = new Proxy(testEnv, {
+      get(target, prop, receiver) {
+        if (prop === "WEBHOOK_QUEUE") return queue.queue;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const message = { deviceId: "dev_a", messageId: "msg_once", sender: "bKash", body: "hi", receivedAt: 3 };
+    await emitMessageEvents(withQueue, [message]);
+    const afterFirst = queue.sent.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    // Hooks from earlier tests in this file are still enabled, so the count is
+    // "one per subscribed hook"; what must not grow is the second pass.
+    await emitMessageEvents(withQueue, [message]);
+    expect(queue.sent.length).toBe(afterFirst);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM integration_deliveries WHERE webhook_id = ?`
+    )
+      .bind(hook.id)
+      .first<{ n: number }>();
+    expect(row?.n).toBe(1);
   });
 });
