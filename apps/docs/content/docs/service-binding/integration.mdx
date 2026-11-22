@@ -48,6 +48,20 @@ than from a document that may be older than the release.
 
 ## Verify one signature
 
+<figure className="my-8">
+  <img
+    src="/drawings/signed-envelope.svg"
+    alt="The canonical string v1, timestamp, delivery id and body sit inside one signed span. A second, shorter span measures only the delivery id, inside the first."
+    width={560}
+    height={440}
+    className="w-full max-w-[560px] dark:invert"
+  />
+  <figcaption className="mt-3 text-sm text-fd-muted-foreground">
+    The delivery id is one of the signed terms — not a label beside them. Recompute the span and
+    a changed id fails exactly as a changed body does.
+  </figcaption>
+</figure>
+
 The delivery id is inside the signed value, so a replay of a captured request cannot be re-labelled
 with a fresh timestamp: it would need a new signature, and it cannot get one.
 

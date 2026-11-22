@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 440" width="560" height="440" fill="none" stroke="#171717" stroke-width="1" data-plotter="" role="img" aria-labelledby="envelope-env-title" aria-describedby="envelope-env-desc" style="font-family:Cal Sans, sans-serif;font-optical-sizing:auto;font-synthesis:none;font-variation-settings:'GEOM' 25;font-weight:400">
+<title id="envelope-env-title">The signed value, with its delivery id inside</title>
+<desc id="envelope-env-desc">The canonical string v1, timestamp, delivery id and body sit inside one signed span. A second dimension measures only the delivery id, showing that the id is a term of the signed value rather than a label beside it.</desc>
+<rect x="208" y="168" width="156" height="48" fill="#171717" stroke="none" fill-opacity="0.055" data-plotter-fill="highlight" />
+<rect x="60" y="168" width="440" height="48" data-plotter-role="primary" stroke-width="1" opacity="1" stroke-dasharray="none" />
+<circle cx="104" cy="192" r="1.6" fill="#171717" stroke="none" /><circle cx="208" cy="192" r="1.6" fill="#171717" stroke="none" /><circle cx="364" cy="192" r="1.6" fill="#171717" stroke="none" />
+<text x="82" y="196" text-anchor="middle" font-size="11" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">v1</text><text x="156" y="196" text-anchor="middle" font-size="11" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">1795200000</text><text x="286" y="196" text-anchor="middle" font-size="11" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">dlv_01J7Q9W2</text><text x="432" y="196" text-anchor="middle" font-size="10" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">{"amount_minor":…}</text>
+<path d="M60 160L60 124 M500 160L500 124" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<path d="M60 132L244 132 M316 132L500 132" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<path d="M56 136L64 128 M496 136L504 128" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<text x="280" y="136" text-anchor="middle" font-size="11" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">signed value</text>
+<path d="M208 224L208 268 M364 224L364 268" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<path d="M208 260L250 260 M322 260L364 260" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<path d="M204 264L212 256 M360 264L368 256" data-plotter-role="dimension" stroke-width="1" opacity="0.32" stroke-dasharray="none" />
+<text x="286" y="264" text-anchor="middle" font-size="11" opacity="0.72" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">delivery id</text>
+<text x="280" y="318" text-anchor="middle" font-size="10" opacity="0.5" font-family="Cal Sans, sans-serif" font-weight="400" fill="#171717" stroke="none">change the id and the signature no longer verifies</text>
+</svg>
