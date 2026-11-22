@@ -20,8 +20,7 @@
 	import { formatAbsolute, formatCount, plural } from '$lib/format';
 	import { ROUTES } from '$lib/paths';
 	import { session } from '$lib/session.svelte';
-	import AgentTelemetryPanel from '$lib/components/AgentTelemetryPanel.svelte';
-	import AlertHistory from '$lib/components/AlertHistory.svelte';
+		import AlertHistory from '$lib/components/AlertHistory.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -142,9 +141,15 @@
 			: 'The gateway, schema and bindings are healthy. Fleet reachability is below.';
 	});
 
-	const bindingTotal = $derived(Object.keys(health?.bindings ?? {}).length);
+	// The stat must agree with the banner above it. Counting every binding made a
+	// deployment whose only absence is optional read "BINDINGS 8/9" inside a green
+	// "healthy" banner, which is the shape of a broken check rather than a fact.
+	const requiredBindingEntries = $derived(
+		Object.entries(health?.bindings ?? {}).filter(([key]) => !OPTIONAL_BINDINGS.has(key))
+	);
+	const bindingTotal = $derived(requiredBindingEntries.length);
 	const attachedBindings = $derived(
-		Object.values(health?.bindings ?? {}).filter((present) => present).length
+		requiredBindingEntries.filter(([, present]) => present).length
 	);
 
 	async function loadHealth(): Promise<void> {
@@ -504,8 +509,10 @@
 				</section>
 			</div>
 
-			<!-- 8 + 4 — the fleet, and the quiet (or alert) state beside it. -->
-			<div class="bento" class:settle={!refreshNote} style="--i: 2">
+			<!-- 8 + 4 — the fleet, and the quiet (or alert) state beside it. The two
+			     cards keep their own heights: stretching the device list to match an
+			     illustrated alert panel leaves a column of empty cream. -->
+			<div class="bento" class:settle={!refreshNote} style="--i: 2; align-items: start">
 				<section class="card span-8" aria-labelledby="devices-heading">
 					<div class="card-head">
 						<h2 id="devices-heading" class="card-title">Devices</h2>
@@ -648,7 +655,6 @@
 			<!-- 12 — ask about the state above. Read-only; the panel hides itself
 			     when the session has no read role. -->
 			<div class="bento" class:settle={!refreshNote} style="--i: 3">
-				<AgentTelemetryPanel />
 			</div>
 
 			<!-- 12 — what answers a stranger. -->
