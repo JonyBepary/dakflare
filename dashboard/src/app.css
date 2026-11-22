@@ -530,6 +530,10 @@ time {
 	background: var(--df-surface-card);
 }
 
+.operator-signout {
+	justify-self: end;
+}
+
 .operator-id {
 	display: flex;
 	align-items: center;

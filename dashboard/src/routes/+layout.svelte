@@ -56,9 +56,9 @@
 					href: ROUTES.rules,
 					label: 'Automation',
 					icon: 'workflow',
-					match: [ROUTES.rules, ROUTES.workflows],
-					count: 'rules',
-					countWord: 'authored'
+					match: [ROUTES.rules, ROUTES.workflows]
+					// No count: health reports rules only, and one badge over a section
+					// that also holds workflows read as "1 of 2".
 				}
 			]
 		},
@@ -74,10 +74,13 @@
 					countWord: 'waiting'
 				},
 				{ href: ROUTES.audit, label: 'Audit log', icon: 'history' },
-				{ href: ROUTES.security, label: 'Sign-in', icon: 'shield', exact: true },
-				// Sits under Sign-in because a model key is a credential: the same
-				// section answers "who can spend this gateway".
-				{ href: ROUTES.ai, label: 'AI assistant', icon: 'sparkles' }
+				// The route holds passkeys, 2FA, password, invites and agent tokens, so
+				// "Sign-in" named the old half of it and read as a broken auth state
+				// while signed in.
+				{ href: ROUTES.security, label: 'Sessions & keys', icon: 'shield', exact: true },
+				// Model keys are credentials; the page is settings, not the assistant,
+				// which has its own launcher in the header.
+				{ href: ROUTES.ai, label: 'AI settings', icon: 'sparkles' }
 			]
 		}
 	];
@@ -579,6 +582,19 @@
 							</span>
 						</span>
 					</div>
+					<!-- Sign out lives with the identity it ends. In the header it sat one
+					     4px gap from the theme toggle, same size and weight, and the only
+					     destructive control in the chrome was the easiest to hit by mistake. -->
+					<button
+						type="button"
+						class="btn btn-icon btn-sm operator-signout"
+						onclick={() => void logout()}
+						disabled={loggingOut}
+						aria-label="Sign out"
+						title="Sign out"
+					>
+						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={16} />{/if}
+					</button>
 				</div>
 			</div>
 		</aside>
@@ -610,16 +626,6 @@
 						<Icon name="keyboard" size={16} />
 					</button>
 					<ThemeToggle />
-					<button
-						type="button"
-						class="btn btn-icon btn-sm"
-						onclick={() => void logout()}
-						disabled={loggingOut}
-						aria-label="Sign out"
-						title="Sign out"
-					>
-						{#if loggingOut}<Spinner />{:else}<Icon name="logout" size={16} />{/if}
-					</button>
 					<!-- The assistant's one launcher, in the header's own row rather than
 					     over the page. A fixed pill in the corner is a control that covers
 					     whatever the page puts there — a table's last action, a paginator,
