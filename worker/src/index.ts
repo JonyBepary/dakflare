@@ -905,7 +905,22 @@ export default {
   async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext): Promise<void> {
     // One consumer, three queues. Inbound channel events are deduped in the DO before they get
     // here, so this half only has to write them atomically and refuse to drop a failed batch.
-    if (batch.queue === "dakflare-ingest-queue") {
+    // The same code serves more than one deployment. The EdgePay-owned isolated
+    // Worker binds `edgepay-dakflare-*` queues; the original deployment binds
+    // `dakflare-*`. `MessageBatch.queue` carries the real name, so both are
+    // accepted here instead of rejecting the isolated queues as unknown.
+    const queueName = batch.queue;
+    const isIngestQueue =
+      queueName === "dakflare-ingest-queue" ||
+      queueName === "edgepay-dakflare-ingest-queue";
+    const isIngestDlq =
+      queueName === "dakflare-ingest-dlq" ||
+      queueName === "edgepay-dakflare-ingest-dlq";
+    const isWebhookQueue =
+      queueName === "dakflare-webhook-queue" ||
+      queueName === "edgepay-dakflare-webhook-queue";
+
+    if (isIngestQueue) {
       const written = await consumeIngestBatch(
         batch as MessageBatch<NormalizedChannelEvent>,
         env,
@@ -914,14 +929,14 @@ export default {
       if (written > 0) console.log(`[ingest] wrote ${written} rows from ${batch.messages.length} events`);
       return;
     }
-    if (batch.queue === "dakflare-ingest-dlq") {
+    if (isIngestDlq) {
       await consumeIngestDeadLetter(batch, env);
       return;
     }
 
-    if (batch.queue !== "dakflare-webhook-queue") {
+    if (!isWebhookQueue) {
       // An unknown queue is a misconfiguration, not a message: retrying it forever hides it.
-      console.error(`[queue] no consumer for "${batch.queue}"; acknowledging so it is not retried`);
+      console.error(`[queue] no consumer for "${queueName}"; acknowledging so it is not retried`);
       batch.ackAll();
       return;
     }
