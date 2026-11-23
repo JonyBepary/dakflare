@@ -66,6 +66,7 @@ async function mint(
     deviceId?: string | null;
     allowedDeviceIds?: string[] | null;
     allowedChannels?: string[] | null;
+    allowedRecipients?: string[] | null;
     maxPerHour?: number;
   } = {}
 ): Promise<{ token: string; id: string } | { refused: string }> {
@@ -76,6 +77,7 @@ async function mint(
     deviceId: options.deviceId ?? null,
     allowedDeviceIds: options.allowedDeviceIds ?? null,
     allowedChannels: options.allowedChannels ?? null,
+    allowedRecipients: options.allowedRecipients ?? null,
     maxPerHour: options.maxPerHour ?? 20,
     expiresAt: Date.now() + 3_600_000,
     createdBy: "test",
@@ -845,5 +847,64 @@ describe("webhook secret rotation", () => {
     await expect(new DakFlareAdminApi(ctx(), testEnv).rotateWebhookSecret(created.id)).rejects.toMatchObject({
       status: 409,
     });
+  });
+});
+
+
+describe("service token recipient allowlist", () => {
+  function ctx(): ExecutionContext {
+    return { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  }
+
+  it("refuses a recipient outside the prefix list, and allows one inside it", async () => {
+    const deviceId = await insertDevice();
+    const token = await mint({
+      scopes: ["sms:send:transactional"],
+      allowedDeviceIds: [deviceId],
+      allowedRecipients: ["+8801711"],
+      maxPerHour: 5,
+    });
+    if (!("token" in token)) throw new Error(token.refused);
+
+    const inside = await sendAs(token.token, deviceId);
+    expect(inside.status).toBe(200);
+
+    const outside = await worker.fetch(
+      new Request("https://example.com/v1/sms/send", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token.token}` },
+        body: JSON.stringify({ device_id: deviceId, to: "+8801911000111", body: "no" }),
+      }),
+      testEnv,
+      ctx()
+    );
+    expect(outside.status).toBe(403);
+    await expect(outside.json()).resolves.toMatchObject({
+      error: "recipient_not_allowed",
+      allowed_recipients: ["+8801711"],
+    });
+  });
+
+  it("validates the prefixes at mint time", async () => {
+    const response = await worker.fetch(
+      new Request("https://example.com/v1/admin/agent-tokens", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${env.ADMIN_TOKEN ?? ""}`,
+          "x-dakflare-client": "cli",
+        },
+        body: JSON.stringify({
+          name: unique("bad-prefix"),
+          kind: "service",
+          scopes: ["sms:send:transactional"],
+          allowed_recipients: ["+"],
+        }),
+      }),
+      testEnv,
+      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "bad_request" });
   });
 });

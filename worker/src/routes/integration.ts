@@ -62,6 +62,7 @@ export function handleIntegrationManifest(req: Request): Response {
             "integrationHealth",
             "listDevices",
             "mintServiceToken",
+            "revokeServiceToken",
             "createWebhook",
             "rotateWebhookSecret",
             "putWorkflow",

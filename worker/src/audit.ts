@@ -52,6 +52,8 @@ export interface AdminActor extends AuditActor {
   agentAllowedDeviceIds?: string[] | null;
   /** `service` only: channels this token may use, or null for any. */
   agentAllowedChannels?: string[] | null;
+  /** `service` only: E.164 prefixes this token may message, or null for any. */
+  agentAllowedRecipients?: string[] | null;
   /**
    * The Better Auth session row, when the credential was a session cookie. A
    * short-lived agent-runtime ticket is bound to it, so a ticket minted for one

@@ -18,7 +18,7 @@ the CLI uses — so scopes, limiters and audit rows still apply.
 | Binding | Entrypoint | Auth | Use |
 |---|---|---|---|
 | `DAKFLARE_ADMIN` | `DakFlareAdminApi` | trusted, same account, no token | provision: mint a service token, create a webhook, rotate its secret, put a flow, list deliveries, replay |
-| `DAKFLARE_RUNTIME` | `DakFlareRuntimeApi` | a service token passed per call | send, read devices/messages, manifest, health |
+| `DAKFLARE_RUNTIME` | `DakFlareRuntimeApi` | a service token passed per call | send, read devices/messages, manifest, health, usage |
 | inbound | HTTPS webhook | v1 envelope, `X-Dakflare-Delivery` as nonce | carrier messages into the consumer |
 
 The runtime entrypoint has **no** `request` method and no admin route: it cannot
@@ -38,6 +38,18 @@ already-sent request can still be in flight), not a policy window. A consumer th
 wants to accept the old secret for a day is making its own rule; this field only
 promises what the deployment can keep. The route is human-only and audited as
 `webhook.secret_rotated`.
+
+### What a service token cannot do
+
+A service token is bounded on four axes, set at mint and enforced by the send gate:
+`allowed_device_ids`, `allowed_channels`, `allowed_recipients` (E.164 prefixes —
+`+8801` covers every BD mobile, a full number covers one) and `max_per_hour`. A
+leaked token can therefore spend its hour, on its handsets, to its numbers. It
+cannot reach an admin route, mint another token, or rotate a signing secret.
+
+Per-recipient and per-device **rate** limits are deliberately not here yet: they
+need a counter table and an atomic window, and a half-built quota would be a
+promise the deployment cannot keep.
 
 Inbound delivery stays a signed webhook on purpose. An RPC would be a second
 delivery model beside `integration_deliveries`, and two ledgers is how a

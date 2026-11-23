@@ -107,6 +107,23 @@ export async function handleAgentTokenMint(
   if (allowedDeviceIds === undefined) return err("bad_request", 400);
   const allowedChannels = readStringList(input.allowed_channels, 10);
   if (allowedChannels === undefined) return err("bad_request", 400);
+  const allowedRecipients = readStringList(input.allowed_recipients, 100);
+  if (allowedRecipients === undefined) return err("bad_request", 400);
+  if (allowedRecipients !== null) {
+    for (const prefix of allowedRecipients) {
+      // A prefix shorter than four characters (or a bare "+") would allow most
+      // of the world, which is the opposite of narrowing the token.
+      if (!/^\+[1-9][0-9]{2,14}$/.test(prefix)) {
+        return Response.json(
+          {
+            error: "bad_request",
+            message: `allowed_recipients entries must be E.164 prefixes like "+8801"; got "${prefix}"`,
+          },
+          { status: 400 }
+        );
+      }
+    }
+  }
   if (allowedDeviceIds !== null && allowedDeviceIds.length > 0) {
     // Every allowed handset must exist, for the same reason `device_id` must:
     // an allowlist naming a missing device refuses every send after a successful
@@ -135,6 +152,7 @@ export async function handleAgentTokenMint(
     deviceId,
     allowedDeviceIds,
     allowedChannels,
+    allowedRecipients,
     metadata,
     maxPerHour,
     expiresAt: Date.now() + ttlSeconds * 1_000,
@@ -166,6 +184,7 @@ export async function handleAgentTokenMint(
       device_id: deviceId,
       allowed_device_ids: allowedDeviceIds,
       allowed_channels: allowedChannels,
+      allowed_recipients: allowedRecipients,
       expires_in_s: ttlSeconds,
       max_per_hour: maxPerHour,
       token_prefix: AGENT_TOKEN_PREFIX,

@@ -55,6 +55,8 @@ export interface AgentTokenRecord {
   allowed_device_ids: string[] | null;
   /** `service` only: JSON array of channels, or null for any. */
   allowed_channels: string[] | null;
+  /** `service` only: E.164 prefixes this token may message, or null for any. */
+  allowed_recipients: string[] | null;
   /** Free-form integration metadata. Never read by the send gate. */
   metadata: Record<string, unknown> | null;
   max_per_hour: number;
@@ -76,6 +78,7 @@ interface AgentTokenRow {
   device_id: string | null;
   allowed_device_ids_json: string | null;
   allowed_channels_json: string | null;
+  allowed_recipients_json: string | null;
   metadata_json: string | null;
   max_per_hour: number;
   sent_current_hour: number;
@@ -133,6 +136,8 @@ export interface MintAgentTokenInput {
   kind?: AgentTokenKind;
   allowedDeviceIds?: string[] | null;
   allowedChannels?: string[] | null;
+  /** E.164 prefixes. `+8801` allows every BD mobile; a full number allows one. */
+  allowedRecipients?: string[] | null;
   metadata?: Record<string, unknown> | null;
   deviceId: string | null;
   maxPerHour: number;
@@ -183,12 +188,13 @@ export async function mintAgentToken(
 
   const allowedDeviceIds = normalizeIdList(input.allowedDeviceIds);
   const allowedChannels = normalizeIdList(input.allowedChannels);
+  const allowedRecipients = normalizeIdList(input.allowedRecipients);
   await env.DB.prepare(
     `INSERT INTO agent_tokens
        (id, name, token_hash, scopes_json, kind, device_id, allowed_device_ids_json,
-        allowed_channels_json, metadata_json, max_per_hour,
+        allowed_channels_json, allowed_recipients_json, metadata_json, max_per_hour,
         sent_current_hour, hour_window_start, created_at, created_by, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`
   )
     .bind(
       id,
@@ -199,6 +205,7 @@ export async function mintAgentToken(
       input.deviceId,
       allowedDeviceIds === null ? null : JSON.stringify(allowedDeviceIds),
       allowedChannels === null ? null : JSON.stringify(allowedChannels),
+      allowedRecipients === null ? null : JSON.stringify(allowedRecipients),
       input.metadata === undefined || input.metadata === null
         ? null
         : JSON.stringify(input.metadata),
@@ -222,6 +229,7 @@ export async function mintAgentToken(
         device_id: input.deviceId,
         allowed_device_ids: allowedDeviceIds,
         allowed_channels: allowedChannels,
+        allowed_recipients: allowedRecipients,
         metadata: input.metadata ?? null,
         max_per_hour: input.maxPerHour,
         sent_current_hour: 0,
@@ -267,6 +275,7 @@ function toRecord(row: AgentTokenRow): AgentTokenRecord {
     device_id: row.device_id,
     allowed_device_ids: parseStringList(row.allowed_device_ids_json),
     allowed_channels: parseStringList(row.allowed_channels_json),
+    allowed_recipients: parseStringList(row.allowed_recipients_json),
     metadata: parseMetadata(row.metadata_json),
     max_per_hour: row.max_per_hour,
     sent_current_hour: row.sent_current_hour,
@@ -335,7 +344,8 @@ export async function resolveAgentToken(
 
   const row = await env.DB.prepare(
     `SELECT id, name, token_hash, scopes_json, kind, device_id,
-            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
+            allowed_device_ids_json, allowed_channels_json, allowed_recipients_json,
+            metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens WHERE id = ?`
@@ -399,7 +409,8 @@ export async function listAgentTokens(
 ): Promise<AgentTokenRecord[]> {
   const rows = await env.DB.prepare(
     `SELECT id, name, token_hash, scopes_json, kind, device_id,
-            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
+            allowed_device_ids_json, allowed_channels_json, allowed_recipients_json,
+            metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens
@@ -413,7 +424,8 @@ export async function listAgentTokens(
 export async function getAgentToken(env: Env, id: string): Promise<AgentTokenRecord | null> {
   const row = await env.DB.prepare(
     `SELECT id, name, token_hash, scopes_json, kind, device_id,
-            allowed_device_ids_json, allowed_channels_json, metadata_json, max_per_hour,
+            allowed_device_ids_json, allowed_channels_json, allowed_recipients_json,
+            metadata_json, max_per_hour,
             sent_current_hour, hour_window_start, created_at, created_by,
             last_used_at, expires_at, revoked_at
        FROM agent_tokens WHERE id = ?`

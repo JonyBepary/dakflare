@@ -52,6 +52,8 @@ export interface AgentSendIdentity {
   allowedDeviceIds: string[] | null;
   /** `service` only: the channels this token may use, or null for any. */
   allowedChannels: string[] | null;
+  /** `service` only: E.164 prefixes this token may message, or null for any. */
+  allowedRecipients: string[] | null;
 }
 
 export interface AgentSendRequest {
@@ -84,7 +86,8 @@ export type AgentSendAuthority =
   | { ok: false; kind: "quota"; used: number; limit: number; resets_at: number }
   | { ok: false; kind: "device_mismatch"; boundDeviceId: string }
   | { ok: false; kind: "device_not_allowed"; allowedDeviceIds: string[] }
-  | { ok: false; kind: "channel_not_allowed"; channel: string };
+  | { ok: false; kind: "channel_not_allowed"; channel: string }
+  | { ok: false; kind: "recipient_not_allowed"; recipient: string; allowedRecipients: string[] };
 
 export async function authorizeAgentSend(
   env: Env,
@@ -114,6 +117,25 @@ export async function authorizeAgentSend(
     }
     if (identity.allowedChannels !== null && !identity.allowedChannels.includes("sms")) {
       return { ok: false, kind: "channel_not_allowed", channel: "sms" };
+    }
+    // A leaked runtime token must not be able to message arbitrary numbers. An
+    // entry is an E.164 prefix: `+8801` covers every BD mobile, a full number
+    // covers exactly one, and an empty list is refused at mint.
+    if (identity.allowedRecipients !== null) {
+      const blocked = request.recipients.find(
+        (recipient) =>
+          !identity.allowedRecipients!.some(
+            (prefix) => recipient === prefix || recipient.startsWith(prefix)
+          )
+      );
+      if (blocked !== undefined) {
+        return {
+          ok: false,
+          kind: "recipient_not_allowed",
+          recipient: blocked,
+          allowedRecipients: identity.allowedRecipients,
+        };
+      }
     }
     const quota = await consumeSendQuota(env, identity.tokenId, Date.now(), count);
     if (!quota.ok) {
@@ -272,6 +294,7 @@ export async function enforceAgentSend(
         agentScopes?: string[];
         agentAllowedDeviceIds?: string[] | null;
         agentAllowedChannels?: string[] | null;
+        agentAllowedRecipients?: string[] | null;
       }
     | undefined,
   request: AgentSendRequest,
@@ -289,6 +312,7 @@ export async function enforceAgentSend(
       scopes: actor.agentScopes ?? [],
       allowedDeviceIds: actor.agentAllowedDeviceIds ?? null,
       allowedChannels: actor.agentAllowedChannels ?? null,
+      allowedRecipients: actor.agentAllowedRecipients ?? null,
     },
     request,
     options
@@ -309,6 +333,20 @@ export async function enforceAgentSend(
           error: "device_not_allowed",
           message: "this service token is not allowed to send from that handset",
           allowed_device_ids: authority.allowedDeviceIds,
+        },
+        { status: 403 }
+      ),
+    };
+  }
+  if (authority.kind === "recipient_not_allowed") {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: "recipient_not_allowed",
+          message: "this service token is not allowed to message that recipient",
+          recipient: authority.recipient,
+          allowed_recipients: authority.allowedRecipients,
         },
         { status: 403 }
       ),

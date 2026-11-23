@@ -314,6 +314,7 @@ export class DakFlareAdminApi extends WorkerEntrypoint<Env> {
     scopes: string[];
     allowedDeviceIds?: string[];
     allowedChannels?: string[];
+    allowedRecipients?: string[];
     maxPerHour: number;
     expiresInS?: number;
   }): Promise<unknown> {
@@ -331,6 +332,9 @@ export class DakFlareAdminApi extends WorkerEntrypoint<Env> {
           ...(input.allowedChannels === undefined
             ? {}
             : { allowed_channels: input.allowedChannels }),
+          ...(input.allowedRecipients === undefined
+            ? {}
+            : { allowed_recipients: input.allowedRecipients }),
           max_per_hour: input.maxPerHour,
           ...(input.expiresInS === undefined ? {} : { expires_in_s: input.expiresInS }),
         },
@@ -339,6 +343,16 @@ export class DakFlareAdminApi extends WorkerEntrypoint<Env> {
   }
 
   /** Create an outbound hook. The signing secret is returned once. */
+  /** Revoke a token by id. Returns the row as it was, or 404. */
+  async revokeServiceToken(id: string): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: `/v1/admin/agent-tokens/${encodeURIComponent(id)}`,
+        method: "DELETE",
+      })
+    ).body;
+  }
+
   async createWebhook(input: {
     name: string;
     targetUrl: string;

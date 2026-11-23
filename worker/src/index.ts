@@ -671,6 +671,7 @@ async function withAgentAccess(
     agentTokenKind: token.kind,
     agentAllowedDeviceIds: token.allowed_device_ids,
     agentAllowedChannels: token.allowed_channels,
+    agentAllowedRecipients: token.allowed_recipients,
   });
 }
 

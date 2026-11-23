@@ -1,0 +1,11 @@
+-- DakFlare v6.3 — a service token may be narrowed to recipient prefixes.
+--
+-- A leaked runtime token could previously send its whole hourly budget to any
+-- number from any allowed handset. This column is a list of E.164 prefixes: a
+-- recipient is allowed when it equals an entry or starts with one. `+8801`
+-- therefore allows every Bangladeshi mobile, and a full number allows exactly
+-- that number. NULL means unrestricted, which is what every existing row means.
+--
+-- Per-recipient and per-device RATE limits are a separate change: they need a
+-- counter table and an atomic window, and a half-built quota is a false promise.
+ALTER TABLE agent_tokens ADD COLUMN allowed_recipients_json TEXT;
