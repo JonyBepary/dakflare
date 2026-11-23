@@ -142,7 +142,26 @@ the local secrets, checks `cf` and `gh`, asks whether to star the repository, an
 `up`. It never stars without an explicit yes or `--star`. `--source` installs and builds from the
 checkout instead; `--no-pack` installs the CLI only; `--no-setup` skips the wizard.
 
-Then provision. A pack deploy creates or reuses D1/KV/queues, applies migrations `0001` to `0019`,
+### The handset app
+
+The phone is a separate install: Android 7.0+, arm64, package `dev.dakflare.device`. It needs a
+Worker you control and a pairing code; it has no account, no analytics and no push dependency.
+
+```bash
+gh release download device-v6.3.0 --pattern '*universal.apk' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+adb install -r DakFlare-Device-6.3.0-universal.apk
+dakflare pair            # paste the code into the app
+```
+
+[Obtainium](https://github.com/ImranR98/Obtainium) tracks the same release: add
+`https://github.com/JonyBepary/dakflare`, filter tags by `device-v`, APKs by `universal`. Every
+release is signed with one key whose certificate digest is recorded in
+[`docs/PHONE_RELEASE.md`](docs/PHONE_RELEASE.md); verify it with `apksigner verify --print-certs`.
+The full channel list — IzzyOnDroid, F-Droid, a self-hosted repository — is in
+[`docs/STORE_RELEASE.md`](docs/STORE_RELEASE.md).
+
+Then provision. A pack deploy creates or reuses D1/KV/queues, applies migrations `0001` to `0021`,
 and runs `cf deploy --prebuilt`; there is no npm install or console build on your machine:
 
 ```bash
@@ -273,7 +292,7 @@ DakFlare ships a dual-audience **Fumadocs** site in [apps/docs](./apps/docs) alo
 | :--- | :--- |
 | `worker/` | Cloudflare Worker, 6 SQLite Durable Objects, 19 D1 migrations, channels, `flow.wasm`, MCP server |
 | `dashboard/` | Svelte 5 on SvelteKit 3 operator console, built into `worker/public/admin` and served at `/admin` |
-| `simulator/` | Tauri v2 Android handset app (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
+| `simulator/` | Tauri v2 Android handset app, `dev.dakflare.device` (Rust `core/`, `flow/`, `flow-wasm/`, Kotlin `bridge/`, Svelte 5 UI) |
 | `cli/` | Zero-dependency `dakflare` CLI (33 commands), released as standalone binaries + `cli/schema/flow-v2.json` |
 | `apps/docs/` | Dual-audience Fumadocs site (`/llms.txt`, `.md`, `/openapi.json`, `/SKILL.md`, `/mcp`) |
 | `skills/` | Five `SKILL.md` packages for coding agents |

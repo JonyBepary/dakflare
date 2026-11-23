@@ -18,6 +18,26 @@ description: Build, sign, install, pair, and verify the Tauri v2 + Rust Android 
 
 The Android app (`simulator/`, package `dev.dakflare.device`) is a full default SMS client—not a background-only config stub. It presents four dock tabs (**Threads · Device · Flows · Settings**), writes inbound messages to `content://sms`, supports inline notification replies, runs `simulator/flow` offline, and signs every request to `dakflare-worker` with a hardware-wrapped P-256 key.
 
+## Install the release
+
+Most handsets should not be built for. Each release is a signed, checksummed APK for
+`dev.dakflare.device`:
+
+```sh
+gh release download device-v6.3.0 --pattern '*universal.apk' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+apksigner verify --print-certs DakFlare-Device-6.3.0-universal.apk
+adb install -r DakFlare-Device-6.3.0-universal.apk
+```
+
+The certificate digest must match the one in `docs/PHONE_RELEASE.md`; any other signer is not the
+project's. Obtainium follows the same release (tag filter `device-v`, APK filter `universal`), and
+`docs/STORE_RELEASE.md` covers IzzyOnDroid, F-Droid and the self-hosted repository. The APK is
+arm64 only and needs Android 7.0 or newer.
+
+**Upgrading from the old id:** releases before 6.3.0 used `dev.dakflare.simulator`. The new package
+installs beside it; pair again in the new app, then uninstall the old one.
+
 ## Toolchain & Debug Build
 
 Install JDK 21, Android SDK 37, NDK 27, and Rust Android targets under `$HOME` (~8 GB disk space):

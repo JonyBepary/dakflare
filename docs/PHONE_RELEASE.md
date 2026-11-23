@@ -114,6 +114,19 @@ only increase.
 
 ## Install
 
+**From a release** (the supported path; every artifact is signed and checksummed):
+
+```sh
+gh release download device-v6.3.0 --pattern '*universal.apk' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+apksigner verify --print-certs DakFlare-Device-6.3.0-universal.apk
+adb install -r DakFlare-Device-6.3.0-universal.apk
+```
+
+Obtainium can track the same release; `docs/STORE_RELEASE.md` has the filter and
+the other channels. **From a local build**:
+
+
 ```sh
 adb install -r simulator/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
