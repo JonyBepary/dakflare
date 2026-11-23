@@ -13,6 +13,25 @@ form (`CORE: bindings.worker({ worker: "dakflare-worker" })`) rather than `DakFl
 as `/v1/admin/agent/enqueue`. It sends `Authorization: Bearer $ADMIN_TOKEN` — the same credential
 the CLI uses — so scopes, limiters and audit rows still apply.
 
+### Three transports, one job each
+
+| Binding | Entrypoint | Auth | Use |
+|---|---|---|---|
+| `DAKFLARE_ADMIN` | `DakFlareAdminApi` | trusted, same account, no token | provision: mint a service token, create a webhook, put a flow, list deliveries, replay |
+| `DAKFLARE_RUNTIME` | `DakFlareRuntimeApi` | a service token passed per call | send, read devices/messages, manifest, health |
+| inbound | HTTPS webhook | v1 envelope, `X-Dakflare-Delivery` as nonce | carrier messages into the consumer |
+
+The runtime entrypoint has **no** `request` method and no admin route: it cannot
+mint a token or create a webhook even if a caller names one. The admin entrypoint
+refuses to run under `BINDING_AUTH=agent_token`, because an admin path with no
+admin credential is a misconfiguration rather than a fallback. Both dispatch
+through the same router, so an error code and a limiter are the HTTP ones, and
+`GET /v1/integration/manifest` publishes this table as `rpc`.
+
+Inbound delivery stays a signed webhook on purpose. An RPC would be a second
+delivery model beside `integration_deliveries`, and two ledgers is how a
+duplicate settlement happens.
+
 ### A trusted binding can present a weaker credential
 
 Under `BINDING_AUTH=trusted` a call with no token runs as the deployment. That is right for

@@ -46,6 +46,36 @@ export function handleIntegrationManifest(req: Request): Response {
         "trace_propagation",
       ],
       scopes: TOKEN_SCOPES,
+      // The same contract, reached two other ways. The HTTP routes above stay
+      // canonical: the RPC entrypoints dispatch through them, so an error is the
+      // same error and a limiter is the same limiter.
+      rpc: {
+        admin: {
+          entrypoint: "DakFlareAdminApi",
+          auth: "trusted service binding, same account, no token",
+          methods: [
+            "manifest",
+            "integrationHealth",
+            "listDevices",
+            "mintServiceToken",
+            "createWebhook",
+            "putWorkflow",
+            "listWebhookDeliveries",
+            "replayDelivery",
+          ],
+        },
+        runtime: {
+          entrypoint: "DakFlareRuntimeApi",
+          auth: "service token passed per call; no admin credential, no escape hatch",
+          methods: ["manifest", "integrationHealth", "devices", "messages", "sendSms"],
+          enforces: ["sms:send:transactional", "allowed_device_ids", "allowed_channels", "max_per_hour", "idempotency_key"],
+        },
+        inbound: {
+          transport: "https",
+          auth: "v1 envelope, X-Dakflare-Delivery as nonce and idempotency key, 300 s skew",
+          note: "delivery stays a signed webhook; it is not an RPC",
+        },
+      },
       signing: {
         version: ENVELOPE_VERSION,
         alg: "HMAC-SHA256",

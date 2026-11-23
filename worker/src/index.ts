@@ -2584,7 +2584,7 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
  * `handleFetch`, so the scopes, limiters, audits and idempotency are the same ones the HTTP API
  * applies. See `src/binding.ts` for the trust modes.
  */
-export { DakFlareApi } from "./binding-api";
+export { DakFlareAdminApi, DakFlareApi, DakFlareRuntimeApi } from "./binding-api";
 
 /** Exported class: a Durable Object only exists if the entry module exports it. */
 export { ChannelConnection };

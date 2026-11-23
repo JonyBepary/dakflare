@@ -17,7 +17,7 @@
 import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "../src/index";
-import { DakFlareApi } from "../src/binding-api";
+import { DakFlareAdminApi, DakFlareApi, DakFlareRuntimeApi } from "../src/binding-api";
 import { mintAgentToken, type AgentTokenKind } from "../src/lib/agent-tokens";
 import { handleWebhookCreate } from "../src/routes/webhooks";
 import { handleWebhookDeliveryReplay } from "../src/routes/integration";
@@ -632,5 +632,74 @@ describe("trusted binding with a per-call service token", () => {
     expect(hooks.status).toBe(200);
     const fleet = (await client.devices()) as { devices: unknown[] };
     expect(Array.isArray(fleet.devices)).toBe(true);
+  });
+});
+
+
+describe("the two named entrypoints", () => {
+  function ctx(): ExecutionContext {
+    return { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  }
+
+  it("runtime refuses to run without a token, and has no escape hatch", async () => {
+    const runtime = new DakFlareRuntimeApi(ctx(), testEnv);
+    await expect(runtime.devices()).rejects.toMatchObject({ code: "binding_token_required" });
+    await expect(
+      runtime.sendSms({ to: "+8801711000111", body: "x", deviceId: "dev_x" })
+    ).rejects.toMatchObject({ code: "binding_token_required" });
+    // The class deliberately exposes no `request`, so an admin path cannot be
+    // reached by naming one.
+    expect("request" in runtime).toBe(false);
+  });
+
+  it("runtime enforces the service token's allowlist and budget", async () => {
+    const deviceId = await insertDevice();
+    const token = await mint({
+      scopes: ["sms:send:transactional", "devices:read"],
+      allowedDeviceIds: [deviceId],
+      maxPerHour: 1,
+    });
+    if (!("token" in token)) throw new Error(token.refused);
+    const runtime = new DakFlareRuntimeApi(ctx(), testEnv);
+
+    const sent = (await runtime.sendSms(
+      { to: "+8801711000111", body: "runtime", deviceId },
+      { token: token.token }
+    )) as { command_id?: string };
+    expect(typeof sent.command_id).toBe("string");
+    await expect(
+      runtime.sendSms({ to: "+8801711000111", body: "again", deviceId }, { token: token.token })
+    ).rejects.toMatchObject({ status: 429 });
+
+    const fleet = (await runtime.devices({ token: token.token })) as { devices: unknown[] };
+    expect(Array.isArray(fleet.devices)).toBe(true);
+  });
+
+  it("admin runs as the deployment and mints a service token once", async () => {
+    const admin = new DakFlareAdminApi(ctx(), testEnv);
+    const minted = (await admin.mintServiceToken({
+      name: unique("admin-minted"),
+      scopes: ["sms:send:transactional"],
+      allowedDeviceIds: [],
+      maxPerHour: 10,
+    })) as { id: string; token: string };
+    expect(minted.token.startsWith("dkf_agt_")).toBe(true);
+    const row = await env.DB.prepare(`SELECT kind, allowed_device_ids_json FROM agent_tokens WHERE id = ?`)
+      .bind(minted.id)
+      .first<{ kind: string; allowed_device_ids_json: string | null }>();
+    expect(row?.kind).toBe("service");
+    // A read the admin may make without a token.
+    const fleet = (await admin.listDevices()) as { devices: unknown[] };
+    expect(Array.isArray(fleet.devices)).toBe(true);
+  });
+
+  it("the manifest documents both entrypoints", async () => {
+    const admin = new DakFlareAdminApi(ctx(), testEnv);
+    const manifest = (await admin.manifest()) as {
+      rpc: { admin: { entrypoint: string }; runtime: { entrypoint: string }; inbound: { transport: string } };
+    };
+    expect(manifest.rpc.admin.entrypoint).toBe("DakFlareAdminApi");
+    expect(manifest.rpc.runtime.entrypoint).toBe("DakFlareRuntimeApi");
+    expect(manifest.rpc.inbound.transport).toBe("https");
   });
 });

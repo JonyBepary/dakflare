@@ -211,3 +211,190 @@ export class DakFlareApi extends WorkerEntrypoint<Env> {
     return { status: response.status, body: parsed, bookmark };
   }
 }
+
+
+/**
+ * Runtime entrypoint: the surface a business Worker uses for traffic.
+ *
+ * It has no escape hatch, no admin route and no way to run as the deployment:
+ * every method requires the caller's own service token, so `allowed_device_ids`,
+ * `allowed_channels` and `max_per_hour` are enforced by the send gate. It
+ * delegates to the same router as `DakFlareApi`, which is why error codes and
+ * statuses are the HTTP ones.
+ */
+export class DakFlareRuntimeApi extends WorkerEntrypoint<Env> {
+  async manifest(options: BindingCallOptions = {}): Promise<unknown> {
+    return this.#inner().manifest(this.#require(options));
+  }
+
+  async integrationHealth(options: BindingCallOptions = {}): Promise<unknown> {
+    return this.#inner().integrationHealth(this.#require(options));
+  }
+
+  async devices(options: BindingCallOptions = {}): Promise<unknown> {
+    return this.#inner().devices(this.#require(options));
+  }
+
+  async messages(
+    query: { limit?: number; deviceId?: string; direction?: string } = {},
+    options: BindingCallOptions = {}
+  ): Promise<unknown> {
+    return this.#inner().messages(query, this.#require(options));
+  }
+
+  async sendSms(
+    input: { to: string; body: string; deviceId?: string; idempotencyKey?: string },
+    options: BindingCallOptions = {}
+  ): Promise<unknown> {
+    return this.#inner().sendSms(input, this.#require(options));
+  }
+
+  #inner(): DakFlareApi {
+    return new DakFlareApi(
+      this.ctx as unknown as ExecutionContext,
+      this.env
+    );
+  }
+
+  #require(options: BindingCallOptions): BindingCallOptions {
+    if (options.token === undefined || options.token === "") {
+      throw new BindingError(
+        "binding_token_required",
+        "DakFlareRuntimeApi requires { token }: a service token with sms:send:transactional " +
+          "and the scopes the call needs. There is no admin credential on this path.",
+        401
+      );
+    }
+    return options;
+  }
+}
+
+/**
+ * Admin entrypoint: provisioning, inspection and replay.
+ *
+ * It runs as the deployment, so it exists only for a caller in the same account
+ * that is trusted with provisioning. It is the one place that can mint a service
+ * token or create a webhook, and it refuses to run when the deployment is in
+ * `agent_token` mode — an admin path with no admin credential is a
+ * misconfiguration, not a fallback.
+ */
+export class DakFlareAdminApi extends WorkerEntrypoint<Env> {
+  async manifest(): Promise<unknown> {
+    return this.#inner().manifest();
+  }
+
+  async integrationHealth(): Promise<unknown> {
+    return this.#inner().integrationHealth();
+  }
+
+  async listDevices(): Promise<unknown> {
+    return this.#inner().devices();
+  }
+
+  /** Mint a service token. The value is returned once and cannot be read back. */
+  async mintServiceToken(input: {
+    name: string;
+    scopes: string[];
+    allowedDeviceIds?: string[];
+    allowedChannels?: string[];
+    maxPerHour: number;
+    expiresInS?: number;
+  }): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: "/v1/admin/agent-tokens",
+        method: "POST",
+        body: {
+          name: input.name,
+          kind: "service",
+          scopes: input.scopes,
+          ...(input.allowedDeviceIds === undefined
+            ? {}
+            : { allowed_device_ids: input.allowedDeviceIds }),
+          ...(input.allowedChannels === undefined
+            ? {}
+            : { allowed_channels: input.allowedChannels }),
+          max_per_hour: input.maxPerHour,
+          ...(input.expiresInS === undefined ? {} : { expires_in_s: input.expiresInS }),
+        },
+      })
+    ).body;
+  }
+
+  /** Create an outbound hook. The signing secret is returned once. */
+  async createWebhook(input: {
+    name: string;
+    targetUrl: string;
+    events?: string[];
+    bodyPolicy?: "redacted" | "allowlisted_raw" | "full";
+    bodyAllowlist?: { senders?: string[]; bodyPatterns?: string[] };
+    signingKeyId?: string;
+    timeoutMs?: number;
+    maxAttempts?: number;
+    deviceId?: string;
+  }): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: "/v1/admin/webhooks",
+        method: "POST",
+        body: {
+          kind: "outbound",
+          name: input.name,
+          target_url: input.targetUrl,
+          ...(input.events === undefined ? {} : { events: input.events }),
+          ...(input.bodyPolicy === undefined ? {} : { body_policy: input.bodyPolicy }),
+          ...(input.bodyAllowlist === undefined ? {} : { body_allowlist: input.bodyAllowlist }),
+          ...(input.signingKeyId === undefined ? {} : { signing_key_id: input.signingKeyId }),
+          ...(input.timeoutMs === undefined ? {} : { timeout_ms: input.timeoutMs }),
+          ...(input.maxAttempts === undefined ? {} : { max_attempts: input.maxAttempts }),
+          ...(input.deviceId === undefined ? {} : { device_id: input.deviceId }),
+        },
+      })
+    ).body;
+  }
+
+  /** Create or replace a flow. The validator's answer is the route's answer. */
+  async putWorkflow(id: string, input: unknown): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: `/v1/admin/workflows/${encodeURIComponent(id)}`,
+        method: "PUT",
+        body: input,
+      })
+    ).body;
+  }
+
+  async listWebhookDeliveries(webhookId: string): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: `/v1/admin/webhooks/${encodeURIComponent(webhookId)}/deliveries`,
+      })
+    ).body;
+  }
+
+  async replayDelivery(webhookId: string, deliveryId: string): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: `/v1/webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/replay`,
+        method: "POST",
+      })
+    ).body;
+  }
+
+  /** Escape hatch for admin routes that do not have a typed method yet. */
+  async request(input: BindingRequestInput): Promise<BindingResponse> {
+    return this.#inner().request(input);
+  }
+
+  #inner(): DakFlareApi {
+    if (readBindingAuth(this.env.BINDING_AUTH) !== "trusted") {
+      throw new BindingError(
+        "binding_untrusted",
+        "DakFlareAdminApi needs BINDING_AUTH=trusted: it runs as the deployment. " +
+          "Use DakFlareRuntimeApi with a service token for traffic.",
+        503
+      );
+    }
+    return new DakFlareApi(this.ctx as unknown as ExecutionContext, this.env);
+  }
+}
