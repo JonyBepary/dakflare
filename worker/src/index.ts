@@ -998,10 +998,12 @@ export default {
 
           // A 2xx with an empty body is a valid answer (202 Accepted is the
           // common one). Reading it is best-effort: a receipt that cannot be
-          // parsed is still a delivery.
+          // parsed is still a delivery. A failure body is capped and kept so
+          // the operator can see which receiver answered 404 and why.
           let ack: unknown = null;
+          let failureBody: string | undefined;
+          const text = await res.text().catch(() => "");
           if (res.ok) {
-            const text = await res.text().catch(() => "");
             if (text.trim() !== "") {
               try {
                 ack = JSON.parse(text);
@@ -1009,6 +1011,11 @@ export default {
                 ack = { text: text.slice(0, 512) };
               }
             }
+          } else {
+            failureBody = text.slice(0, 300);
+            console.error(
+              `[webhook] ${payload.deliveryId ?? "(no id)"} -> ${res.status} ${payload.url} ${failureBody}`
+            );
           }
 
           if (typeof payload.deliveryId === "string") {
@@ -1017,7 +1024,9 @@ export default {
               httpStatus: res.status,
               ok: res.ok,
               ack,
-              error: res.ok ? undefined : `HTTP ${res.status}`,
+              error: res.ok
+                ? undefined
+                : `HTTP ${res.status}${failureBody ? `: ${failureBody}` : ""}`,
             });
             if (!res.ok && outcome.retry) {
               msg.retry();
