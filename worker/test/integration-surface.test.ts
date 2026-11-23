@@ -703,3 +703,72 @@ describe("the two named entrypoints", () => {
     expect(manifest.rpc.inbound.transport).toBe("https");
   });
 });
+
+
+describe("usage and message status", () => {
+  function ctx(): ExecutionContext {
+    return { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  }
+
+  it("reports the calling token's own hour, not the fleet's", async () => {
+    const deviceId = await insertDevice();
+    const token = await mint({
+      scopes: ["sms:send:transactional", "devices:read"],
+      allowedDeviceIds: [deviceId],
+      maxPerHour: 2,
+    });
+    if (!("token" in token)) throw new Error(token.refused);
+    const runtime = new DakFlareRuntimeApi(ctx(), testEnv);
+    await runtime.sendSms({ to: "+8801711000111", body: "one", deviceId }, { token: token.token });
+
+    const health = (await runtime.usage({ token: token.token })) as {
+      usage?: { kind: string; sent_current_hour: number; max_per_hour: number; resets_at: number };
+    };
+    expect(health.usage).toMatchObject({ kind: "service", sent_current_hour: 1, max_per_hour: 2 });
+    expect(health.usage?.resets_at).toBeGreaterThan(Date.now());
+
+    // A human credential has no token budget, and the field is absent rather than zero.
+    const adminHealth = (await new DakFlareAdminApi(ctx(), testEnv).integrationHealth()) as {
+      usage?: unknown;
+    };
+    expect(adminHealth.usage).toBeUndefined();
+  });
+
+  it("answers a command id from the D1 mirror, and 404s an unknown one", async () => {
+    const deviceId = await insertDevice();
+    const token = await mint({
+      scopes: ["sms:send:transactional", "messages:read"],
+      allowedDeviceIds: [deviceId],
+      maxPerHour: 5,
+    });
+    if (!("token" in token)) throw new Error(token.refused);
+    const runtime = new DakFlareRuntimeApi(ctx(), testEnv);
+    const sent = (await runtime.sendSms(
+      { to: "+8801711000111", body: "status me", deviceId },
+      { token: token.token }
+    )) as { command_id: string };
+
+    const status = (await runtime.messageStatus(sent.command_id, { token: token.token })) as {
+      command_id: string;
+      state: string;
+      source: string;
+    };
+    expect(status.command_id).toBe(sent.command_id);
+    expect(status.source).toBe("d1-mirror");
+    expect(typeof status.state).toBe("string");
+
+    await expect(
+      runtime.messageStatus("cmd_does_not_exist", { token: token.token })
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("publishes the event catalog", async () => {
+    const manifest = (await new DakFlareAdminApi(ctx(), testEnv).manifest()) as {
+      events: string[];
+      capabilities: string[];
+    };
+    expect(manifest.events).toEqual(["message.received", "device.status_changed", "device.revoked"]);
+    expect(manifest.capabilities).toContain("token_usage");
+    expect(manifest.capabilities).toContain("message_status");
+  });
+});

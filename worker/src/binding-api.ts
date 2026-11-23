@@ -249,6 +249,23 @@ export class DakFlareRuntimeApi extends WorkerEntrypoint<Env> {
     return this.#inner().sendSms(input, this.#require(options));
   }
 
+  /** The token's own hour: sent, limit, reset. */
+  async usage(options: BindingCallOptions = {}): Promise<unknown> {
+    return this.#inner().integrationHealth(this.#require(options));
+  }
+
+  /** One outbound command, by the id `sendSms` returned. */
+  async messageStatus(commandId: string, options: BindingCallOptions = {}): Promise<unknown> {
+    const { token } = this.#require(options);
+    return (
+      await this.#inner().request(
+        { path: `/v1/integration/messages/${encodeURIComponent(commandId)}` },
+        true,
+        { token }
+      )
+    ).body;
+  }
+
   #inner(): DakFlareApi {
     return new DakFlareApi(
       this.ctx as unknown as ExecutionContext,

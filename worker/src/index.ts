@@ -41,6 +41,7 @@ import { handleHealth } from "./routes/health";
 import {
   handleIntegrationHealth,
   handleIntegrationManifest,
+  handleMessageStatus,
   handleWebhookDeliveryReplay,
 } from "./routes/integration";
 import { HEADER_TRACE_ID } from "./lib/integration-envelope";
@@ -1615,8 +1616,14 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
       );
     }
     if (method === "GET" && pathname === "/v1/integration/health") {
-      return withAdminAccess(req, env, "read", "read integration health", () =>
-        handleIntegrationHealth(req, env)
+      return withAdminAccess(req, env, "read", "read integration health", (actor) =>
+        handleIntegrationHealth(req, env, actor)
+      );
+    }
+    const messageStatusMatch = pathname.match(/^\/v1\/integration\/messages\/([^/]+)$/);
+    if (method === "GET" && messageStatusMatch) {
+      return withAdminAccess(req, env, "read", "read a message status", () =>
+        handleMessageStatus(req, env, decodeURIComponent(messageStatusMatch[1]))
       );
     }
     const deliveryReplayMatch = pathname.match(

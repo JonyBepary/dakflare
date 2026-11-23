@@ -195,6 +195,7 @@ export const SCOPE_FOR_ACTION: Readonly<Record<string, string | null>> = {
   // token needs before it can call anything; replay is a bounded write.
   "read the integration manifest": "devices:read",
   "read integration health": "devices:read",
+  "read a message status": "messages:read",
   "replay a webhook delivery": "webhooks:replay",
 
   // Never for an agent token. Listed so the refusal is a decision.

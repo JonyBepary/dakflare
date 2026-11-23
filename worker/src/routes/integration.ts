@@ -44,7 +44,11 @@ export function handleIntegrationManifest(req: Request): Response {
         "delivery_replay",
         "content_policy_allowlist",
         "trace_propagation",
+        "token_usage",
+        "message_status",
       ],
+      // The event types a hook can subscribe to. A hook names these in `events`.
+      events: ["message.received", "device.status_changed", "device.revoked"],
       scopes: TOKEN_SCOPES,
       // The same contract, reached two other ways. The HTTP routes above stay
       // canonical: the RPC entrypoints dispatch through them, so an error is the
@@ -101,7 +105,11 @@ export function handleIntegrationManifest(req: Request): Response {
   );
 }
 
-export async function handleIntegrationHealth(req: Request, env: Env): Promise<Response> {
+export async function handleIntegrationHealth(
+  req: Request,
+  env: Env,
+  actor?: AdminActor
+): Promise<Response> {
   const traceId = req.headers.get(HEADER_TRACE_ID) ?? crypto.randomUUID();
   const [deviceCounts, deliveryCounts, lastDelivery] = await Promise.all([
     env.DB.prepare(
@@ -131,10 +139,38 @@ export async function handleIntegrationHealth(req: Request, env: Env): Promise<R
     byState[row.state] = row.count;
   }
 
+  // A service token sees its own hour, so an integration can back off before it
+  // is refused rather than after. A human credential has no token budget.
+  let usage: Record<string, unknown> | null = null;
+  if (actor?.agentTokenId !== undefined) {
+    const row = await env.DB.prepare(
+      `SELECT kind, sent_current_hour, max_per_hour, hour_window_start
+         FROM agent_tokens WHERE id = ?`
+    )
+      .bind(actor.agentTokenId)
+      .first<{
+        kind: string;
+        sent_current_hour: number;
+        max_per_hour: number;
+        hour_window_start: number;
+      }>();
+    if (row !== null) {
+      const windowMs = 3_600_000;
+      const rolled = Date.now() - row.hour_window_start >= windowMs;
+      usage = {
+        kind: row.kind,
+        sent_current_hour: rolled ? 0 : row.sent_current_hour,
+        max_per_hour: row.max_per_hour,
+        resets_at: rolled ? Date.now() + windowMs : row.hour_window_start + windowMs,
+      };
+    }
+  }
+
   return Response.json(
     {
       ok: true,
       dakflare_version: pkg.version,
+      ...(usage === null ? {} : { usage }),
       devices: {
         total: deviceCounts?.total ?? 0,
         active: deviceCounts?.active ?? 0,
@@ -255,5 +291,49 @@ export async function handleWebhookDeliveryReplay(
       trace_id: traceId,
     },
     { status: 202, headers: { [HEADER_TRACE_ID]: traceId } }
+  );
+}
+
+
+/**
+ * `GET /v1/integration/messages/:id` — one outbound command, by the id `sendSms`
+ * returned.
+ *
+ * The row is D1's mirror of the command, which is what receipts update; the live
+ * object may be ahead of it for a moment. The `source` field says so rather than
+ * implying a live read.
+ */
+export async function handleMessageStatus(
+  req: Request,
+  env: Env,
+  commandId: string
+): Promise<Response> {
+  const traceId = req.headers.get(HEADER_TRACE_ID) ?? crypto.randomUUID();
+  const row = await env.DB.prepare(
+    `SELECT local_id, peer, received_at, reply_state, reply_error, direction
+       FROM messages WHERE local_id = ? AND direction = 'out' LIMIT 1`
+  )
+    .bind(commandId)
+    .first<{
+      local_id: string;
+      peer: string;
+      received_at: number;
+      reply_state: string | null;
+      reply_error: string | null;
+      direction: string;
+    }>();
+  if (row === null) {
+    return Response.json({ error: "message_not_found" }, { status: 404 });
+  }
+  return Response.json(
+    {
+      command_id: row.local_id,
+      to: row.peer,
+      state: row.reply_state ?? "PENDING",
+      error: row.reply_error,
+      at: row.received_at,
+      source: "d1-mirror",
+    },
+    { headers: { [HEADER_TRACE_ID]: traceId } }
   );
 }
