@@ -904,6 +904,7 @@ export default {
     ctx.waitUntil(runRetention(env));
   },
 
+  // The EdgePay isolated deployment uses this queue; see scripts/sync-edgepay-worker.sh.
   async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext): Promise<void> {
     // One consumer, three queues. Inbound channel events are deduped in the DO before they get
     // here, so this half only has to write them atomically and refuse to drop a failed batch.
