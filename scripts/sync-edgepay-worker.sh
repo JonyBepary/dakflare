@@ -73,15 +73,17 @@ fi
 
 # Only a Worker-source or isolated-config change needs a deploy. A docs-only
 # commit still advances the recorded commit, so it is not re-examined forever.
-if [ -n "$LAST" ] && git diff --quiet "$LAST".."$TARGET" -- \
-  worker/src \
-  worker/package.json \
-  worker/package-lock.json \
-  "$CONFIG" \
-  worker/migrations; then
-  printf '%s\n' "$TARGET" >"$STATE_FILE"
-  log "recorded $TARGET; no Worker change"
-  exit 0
+if [ -n "$LAST" ] && git cat-file -e "$LAST^{commit}" 2>/dev/null; then
+  if git diff --quiet "$LAST".."$TARGET" -- \
+    worker/src \
+    worker/package.json \
+    worker/package-lock.json \
+    "$CONFIG" \
+    worker/migrations; then
+    printf '%s\n' "$TARGET" >"$STATE_FILE"
+    log "recorded $TARGET; no Worker change"
+    exit 0
+  fi
 fi
 
 cd "$WORKTREE/worker"
@@ -94,6 +96,16 @@ if [ "$LOCK_HASH" != "$PREV_LOCK" ] || [ ! -d node_modules ]; then
     exit 1
   fi
   printf '%s\n' "$LOCK_HASH" >"$LOCK_HASH_FILE"
+fi
+
+# A code deploy against an old schema is the failure this guard exists for: the
+# new Worker starts serving before the columns it reads exist. Leave the previous
+# version live until a human applies the migration from the sync worktree.
+PENDING_MIGRATIONS="$(npx wrangler d1 migrations list DB --remote --config wrangler.edgepay.toml 2>/dev/null \
+  | grep -Eo '[0-9]{4}_[a-z0-9_]+\.sql' | sort -u | tr '\n' ' ' || true)"
+if [ -n "$PENDING_MIGRATIONS" ]; then
+  log "pending D1 migrations: $PENDING_MIGRATIONS; apply them before deploying $TARGET"
+  exit 1
 fi
 
 # Wrangler refuses to upload when a `cf` build output is present; it would read
