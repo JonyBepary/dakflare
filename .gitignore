@@ -48,6 +48,9 @@ design/landing/hero.html
 # Review archives
 *.zip
 
+# Release artifacts (built here, uploaded to a GitHub release)
+dist/
+
 
 # Local review prompts and archives, deliberately not in git
 docs/archive/

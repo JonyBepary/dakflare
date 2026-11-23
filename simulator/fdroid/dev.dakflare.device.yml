@@ -1,0 +1,58 @@
+# fdroiddata metadata for the handset app — DRAFT, not yet submitted.
+#
+# This is the file that would become `metadata/dev.dakflare.device.yml` in an
+# fdroiddata merge request. It is kept here so the recipe is reviewed next to the
+# code it builds, and so the missing pieces are visible instead of implied.
+#
+# What is NOT ready (F-Droid builds without network, from a clean checkout):
+#   1. Node dependencies. The frontend must install from a cache that travels
+#      with the repo (Yarn Berry `.yarn/cache` + `yarn install --immutable`) or
+#      the recipe fails at `npm ci`.
+#   2. Rust dependencies. `cargo vendor` plus `.cargo/config.toml`, or a `srclib`
+#      with the vendored crates.
+#   3. The NDK revision must be pinned to the one `tauri android build` expects.
+# Until those exist, `fdroid build` fails; the developer-signed channels below do
+# not depend on them.
+Categories:
+  - Phone & SMS
+License: AGPL-3.0-only
+AuthorName: Jony Bepary
+WebSite: https://github.com/JonyBepary/dakflare
+SourceCode: https://github.com/JonyBepary/dakflare
+IssueTracker: https://github.com/JonyBepary/dakflare/issues
+Changelog: https://github.com/JonyBepary/dakflare/releases
+
+AutoName: DakFlare Device
+
+RepoType: git
+Repo: https://github.com/JonyBepary/dakflare.git
+
+Builds:
+  - versionName: 6.3.0
+    versionCode: 630
+    commit: device-v6.3.0
+    subdir: simulator
+    sudo:
+      - apt-get update
+      - apt-get install -y openjdk-21-jdk-headless
+    ndk: r27c
+    prebuild: |
+      # Offline dependency setup goes here once vendoring lands. F-Droid builds
+      # with no network access.
+      npx tauri android init --ci
+    build: |
+      npx tauri android build --apk --target aarch64
+    output: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+    antifeatures:
+      - NonFreeNet
+
+# Only meaningful with a reproducible build: this makes F-Droid distribute the
+# developer-signed APK instead of re-signing it, so one key covers every channel
+# and a user can move between them. The digest is the release certificate
+# documented in docs/PHONE_RELEASE.md.
+AllowedAPKSigningKeys: 77b28184758f829e9353c26c440f06bb285d9c83d11f99f1896739251fdc81f6
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^device-v[0-9.]+$
+CurrentVersion: 6.3.0
+CurrentVersionCode: 630
