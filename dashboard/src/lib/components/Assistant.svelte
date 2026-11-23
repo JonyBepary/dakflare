@@ -92,8 +92,6 @@
 		agentLinkLabel,
 		agentPhaseLine,
 		agentRefusalLine,
-		agentStepElapsed,
-		agentStepLine,
 		agentTroubleLine,
 		applyAgentFrame,
 		attachmentExpiredLine,
@@ -124,6 +122,8 @@
 	import { session } from '$lib/session.svelte';
 	import AnswerText from './AnswerText.svelte';
 	import AssistantProposalCard, { type ProposalResult } from './AssistantProposalCard.svelte';
+	import AssistantPromptBar from './assistant/AssistantPromptBar.svelte';
+	import AssistantTrace from './assistant/AssistantTrace.svelte';
 	import Icon from './Icon.svelte';
 	import Spinner from './Spinner.svelte';
 
@@ -139,7 +139,6 @@
 	const uid = $props.id();
 	const panelId = `assistant-panel-${uid}`;
 	const titleId = `assistant-title-${uid}`;
-	const inputId = `assistant-question-${uid}`;
 	const contextId = `assistant-context-${uid}`;
 	const historyId = `assistant-history-${uid}`;
 	const turnId = `assistant-turn-${uid}`;
@@ -339,8 +338,6 @@
 	let politeText = $state('');
 	let alertText = $state('');
 
-	let field = $state<HTMLInputElement | null>(null);
-
 	/** Drops an answer that arrives after the panel was closed or re-asked. */
 	let sequence = 0;
 	/** Drops a transcript or file read that belongs to a panel that is gone. */
@@ -415,12 +412,6 @@
 	/** The plan line's place, only while a step is actually queued. */
 	const planStep = $derived(steps.length + 1);
 	const planTotal = $derived(steps.length + pending);
-
-	/**
-	 * One quiet line or a timeline. A single successful read is a note, not work to
-	 * audit; two steps, or any step that did not succeed, is the rail.
-	 */
-	const timeline = $derived(steps.length >= 2 || steps.some((step) => step.verdict !== 'ok'));
 
 	/** Whether the current exchange has anything to show under "This turn". */
 	const showTurn = $derived(
@@ -538,7 +529,7 @@
 		// inside it and Escape is where the operator expects it. Floating, the field
 		// is the point of the panel and takes focus as it always has.
 		if (expanded) panelEl?.focus();
-		else field?.focus();
+		else panelEl?.querySelector<HTMLInputElement>('input.ask-input')?.focus();
 		void loadSession();
 		liveProbe = startLive();
 		void liveProbe;
@@ -1093,11 +1084,6 @@
 		await agent.connect();
 	}
 
-	function submit(event: SubmitEvent): void {
-		event.preventDefault();
-		void runAsk(question);
-	}
-
 	/* ------------------------------------------------------------ the files */
 
 	/** The file control's change: one batch, checked before anything is sent. */
@@ -1319,22 +1305,6 @@
 			: 'The link closed before the answer finished. Nothing after this point arrived.';
 	}
 
-	/**
-	 * The time between the step before this one and this one.
-	 *
-	 * It comes from the frames' own stamps, never from this browser's clock: a
-	 * resume replays an hour-old turn in a second, and a clock here would date the
-	 * work to when the socket happened to deliver it. `null` when either frame
-	 * carried no stamp, so an unstamped turn shows no time rather than a guess.
-	 */
-	function gapBefore(index: number): string | null {
-		if (index === 0) return null;
-		const before = steps[index - 1]?.settledAt;
-		const at = steps[index]?.settledAt;
-		if (before === null || before === undefined || at === null || at === undefined) return null;
-		if (at < before) return null;
-		return agentStepElapsed(at - before);
-	}
 </script>
 
 <svelte:window onkeydown={onkeydown} />
@@ -1538,43 +1508,15 @@
 								<AnswerText class="answer" text={turn.text} trailing={caretShown ? caret : undefined} />
 							{/if}
 
-							{#if steps.length === 1 && !timeline}
-								<!-- One read is a note, not a timeline: no rail, no chip, no header. -->
-								<p class="step-one">
-									<span class="mono step-tool">{steps[0].tool}</span>
-									<span>{agentStepLine(steps[0].tool)}</span>
-								</p>
-							{:else if timeline}
-								<!-- The timeline. One row per settled step, in the order the gateway
-								     ran them, with the reason on the row rather than behind a tooltip:
-								     a refusal is the row an operator came here to read. -->
-								<ol class="steps" aria-label="What the agent did">
-									{#each steps as step, index (step.seq)}
-										{@const gap = gapBefore(index)}
-										<li class="step" data-verdict={step.verdict}>
-											<span class="step-mark" aria-hidden="true"></span>
-											<span class="step-main">
-												<span class="step-head">
-													<span class="step-say">{agentStepLine(step.tool, step.verdict)}</span>
-													{#if gap !== null}
-														<span class="step-gap mono">+{gap}</span>
-													{/if}
-													<span class="step-chip" data-verdict={step.verdict}>{step.verdict}</span>
-												</span>
-												<span class="step-tool mono">{step.tool}</span>
-												{#if step.reason !== null && step.reason !== ''}
-													<!-- The gateway's own words, verbatim. A step with no reason
-													     prints none rather than a sentence this console wrote. -->
-													<span class="step-reason">
-														{#if step.code !== null && step.code !== ''}<span class="mono step-code"
-																>{step.code}</span
-															><span class="step-sep">{' · '}</span>{/if}{step.reason}
-													</span>
-												{/if}
-											</span>
-										</li>
-									{/each}
-								</ol>
+							{#if steps.length > 0 || pending > 0}
+								<!-- The calls, as chips, then the work they belong to as one
+								     foldable trace. A lone successful read is still a single note;
+								     the trace owns that rule so this panel does not repeat it.
+								     Keyed by the turn, so a new question starts unfolded rather
+								     than inheriting the last turn's disclosure. -->
+								{#key turn?.key}
+									<AssistantTrace {steps} queue={turn.queue} streaming={unfinished} />
+								{/key}
 							{/if}
 
 							{#if resuming}
@@ -1812,25 +1754,16 @@
 				{/if}
 			</section>
 
-			<form class="ask" onsubmit={submit}>
-				<label class="sr-only" for={inputId}>Your question</label>
-				<input
-					id={inputId}
-					class="input ask-input"
-					type="text"
-					bind:this={field}
-					bind:value={question}
-					placeholder="What does this page tell me?"
-					autocomplete="off"
-					spellcheck="false"
-					maxlength="500"
-					enterkeyhint="send"
-					disabled={asking}
-				/>
-				<button type="submit" class="btn btn-primary ask-send" disabled={!canAsk}>
-					{asking ? 'Asking' : 'Ask'}
-				</button>
-			</form>
+			<AssistantPromptBar
+				bind:value={question}
+				attachments={attachments}
+				disabled={asking}
+				{canAsk}
+				{asking}
+				{contextLabel}
+				flowId={context.flowId ?? null}
+				onsubmit={(text) => void runAsk(text)}
+			/>
 		</section>
 
 		<footer class="panel-foot">
@@ -1904,8 +1837,7 @@
 	}
 
 	.panel[data-presentation='fullscreen'] .body,
-	.panel[data-presentation='fullscreen'] .files,
-	.panel[data-presentation='fullscreen'] .ask {
+	.panel[data-presentation='fullscreen'] .composer {
 		width: 100%;
 		/* The measure plus the box's own 12px of inline padding, so the words — not
 		   the padding — land on the same edge as the header and the footer. */
@@ -2277,171 +2209,6 @@
 		}
 	}
 
-	/* A lone successful read is a note, not a timeline: one quiet line with the
-	   tool's own name beside it, and no rail, chip or header to read past. */
-	.step-one {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 6px;
-		margin: 0;
-		color: var(--df-text-secondary);
-		font-size: var(--df-p-text-xs);
-		line-height: 1.45;
-	}
-
-	.step-one .step-tool {
-		color: var(--df-text-meta);
-	}
-
-	/* The timeline: one row per settled step, hung on a hairline rail. The rail is
-	   the only chrome — no card, no header, no shadow. It sits under the answer the
-	   way a ledger sits under a paragraph, and a new row grows downward without
-	   moving the prose above it. */
-	.steps {
-		display: flex;
-		flex-direction: column;
-		margin: 0;
-		padding: 0 0 0 12px;
-		list-style: none;
-		border-left: 1px solid var(--df-border-control);
-	}
-
-	.step {
-		position: relative;
-		padding: 6px 0;
-	}
-
-	.step + .step {
-		border-top: 1px solid var(--df-border-hairline);
-	}
-
-	/* The node on the rail. Filled by verdict, so a refusal is findable before the
-	   words on the row are read. */
-	.step-mark {
-		position: absolute;
-		left: -16px;
-		top: 10px;
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--df-state-ok-ink);
-	}
-
-	.step[data-verdict='refused'] .step-mark {
-		background: var(--df-state-warn-ink);
-	}
-
-	.step[data-verdict='failed'] .step-mark {
-		background: var(--df-state-danger-ink);
-	}
-
-	/* The row that did not run is the one an operator came to read: it keeps its
-	   place, takes a tint, and puts the gateway's reason on the row at reading
-	   size — not behind a tooltip, and never in place of the model's words. The
-	   2px edge is a border, not a shadow: the console's rows do not float. */
-	.step[data-verdict='refused'],
-	.step[data-verdict='failed'] {
-		margin-left: -8px;
-		padding-left: 6px;
-		padding-right: 6px;
-		border-left: 2px solid;
-		border-radius: var(--df-p-radius-xs);
-	}
-
-	.step[data-verdict='refused'] {
-		background: color-mix(in srgb, var(--df-state-warn-bg) 70%, transparent);
-		border-left-color: var(--df-state-warn-ink);
-	}
-
-	.step[data-verdict='failed'] {
-		background: color-mix(in srgb, var(--df-state-danger-bg) 70%, transparent);
-		border-left-color: var(--df-state-danger-ink);
-	}
-
-	.step-main {
-		display: flex;
-		flex-direction: column;
-		gap: 1px;
-		min-width: 0;
-	}
-
-	.step-head {
-		display: flex;
-		align-items: baseline;
-		gap: 6px;
-		flex-wrap: wrap;
-		min-width: 0;
-	}
-
-	.step-say {
-		flex: 1 1 auto;
-		min-width: 0;
-		color: var(--df-text-primary);
-		font-size: var(--df-p-text-sm);
-		line-height: 1.35;
-		overflow-wrap: anywhere;
-	}
-
-	/* The verdict, in the gateway's three words. Lowercase and mono on purpose: it
-	   is an outcome token, not a label this console composed. */
-	.step-chip {
-		flex: none;
-		padding: 0 4px;
-		border: 1px solid color-mix(in srgb, currentColor 40%, transparent);
-		border-radius: var(--df-p-radius-xs);
-		font-family: var(--df-font-mono);
-		font-size: var(--df-p-text-xs);
-		letter-spacing: 0.01em;
-		line-height: 1.5;
-		color: var(--df-state-ok-ink);
-	}
-
-	.step-chip[data-verdict='refused'] {
-		color: var(--df-state-warn-ink);
-	}
-
-	.step-chip[data-verdict='failed'] {
-		color: var(--df-state-danger-ink);
-	}
-
-	/* The time the gateway itself stamped between the step before and this one.
-	   Meta ink: it is evidence, not a headline. */
-	.step-gap {
-		flex: none;
-		margin-left: auto;
-		color: var(--df-text-meta);
-		font-size: var(--df-p-text-xs);
-		letter-spacing: 0.02em;
-	}
-
-	.step-tool {
-		color: var(--df-text-meta);
-		font-size: var(--df-p-text-xs);
-		line-height: 1.4;
-		overflow-wrap: anywhere;
-	}
-
-	.step-reason {
-		margin-top: 2px;
-		color: var(--df-text-primary);
-		font-size: var(--df-p-text-xs);
-		line-height: 1.45;
-		overflow-wrap: anywhere;
-		white-space: pre-wrap;
-	}
-
-	.step-code {
-		color: var(--df-text-secondary);
-		/* `.mono` scales to 0.94em of its parent; this is the one place that would
-		   land under 11px, so the size is restated. */
-		font-size: var(--df-p-text-xs);
-	}
-
-	.step-sep {
-		color: var(--df-text-meta);
-	}
-
 	/* The plan line's counter: the batch the gateway announced, in mono so it reads
 	   as a position rather than as prose. */
 	.phase-count {
@@ -2608,38 +2375,6 @@
 		}
 	}
 
-	.ask {
-		display: flex;
-		gap: 6px;
-		align-items: stretch;
-		padding: 10px 12px 12px;
-	}
-
-	.ask-input {
-		flex: 1;
-		min-width: 0;
-		min-height: 36px;
-		font-size: var(--df-p-text-sm);
-		/* The global 16 px guard lives on `.input` and this scoped rule outranks it,
-		   so the guard is restated here and below. */
-		@media (max-width: 720px), (pointer: coarse) {
-			font-size: 16px;
-		}
-		/* The assistant's own geometry: 4px, the smaller step of the console's
-		   radius scale, so the panel reads as a tool rather than a card. */
-		border-radius: var(--df-p-radius-xs);
-	}
-
-	/* Same reason as the field: every control inside the panel is 4px. */
-	.panel .btn {
-		border-radius: var(--df-p-radius-xs);
-	}
-
-	.ask-send {
-		flex: none;
-		height: 36px;
-	}
-
 	.panel-foot {
 		flex: none;
 		padding: 7px 12px;
@@ -2712,15 +2447,6 @@
 			margin-right: -8px;
 		}
 
-		.ask-input {
-			font-size: 16px;
-			min-height: 44px;
-		}
-
-		.ask-send {
-			height: 44px;
-		}
-
 		.messages {
 			gap: 12px;
 		}
@@ -2787,8 +2513,8 @@
 		/* The field follows the prose up a step: a 12px field under 15px text
 		   reads as a broken control. Only past 720px — under it the 16px guard that
 		   keeps iOS from zooming owns this, and it must win. */
-		.panel[data-presentation='fullscreen'] .ask-input,
-		.panel[data-presentation='fullscreen'] .ask-send {
+		.panel[data-presentation='fullscreen'] :global(.ask-input),
+		.panel[data-presentation='fullscreen'] :global(.ask-send) {
 			font-size: var(--df-p-text-md);
 		}
 	}
