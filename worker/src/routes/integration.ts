@@ -76,9 +76,9 @@ export function handleIntegrationManifest(req: Request): Response {
           enforces: ["sms:send:transactional", "allowed_device_ids", "allowed_channels", "max_per_hour", "idempotency_key"],
         },
         inbound: {
-          transport: "https",
+          transport: "service-binding-fetch | https",
           auth: "v1 envelope, X-Dakflare-Delivery as nonce and idempotency key, 300 s skew",
-          note: "delivery stays a signed webhook; it is not an RPC",
+          note: "same-account delivery is a signed fetch over the EDGEPAY service binding; cross-account is signed HTTPS; neither is an RPC",
         },
       },
       signing: {
