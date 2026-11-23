@@ -11,7 +11,29 @@ The split agent Worker is the one caller inside this repository, and it uses the
 form (`CORE: bindings.worker({ worker: "dakflare-worker" })`) rather than `DakFlareApi`, because
 `DakFlareApi` is typed for the public `/v1` contract and `CORE` also reaches internal routes such
 as `/v1/admin/agent/enqueue`. It sends `Authorization: Bearer $ADMIN_TOKEN` — the same credential
-the CLI uses — so scopes, limiters and audit rows still apply. The binding can name an entrypoint
+the CLI uses — so scopes, limiters and audit rows still apply.
+
+### A trusted binding can present a weaker credential
+
+Under `BINDING_AUTH=trusted` a call with no token runs as the deployment. That is right for
+provisioning and administration, and wrong for a runtime send: a send as `ADMIN_TOKEN` has no
+`allowed_device_ids`, no `allowed_channels` and no hourly budget, because those live on the token.
+
+So every method takes `{ token }` even in trusted mode, and a token that is passed **is forwarded**
+instead of the deployment credential. It cannot escalate — the caller already had the deployment —
+and it keeps the service-token semantics the send gate enforces:
+
+```ts
+// Runtime: the business's own service token, bounded by its allowlist and budget.
+await env.DAKFLARE.sendSms({ to, body, deviceId, idempotencyKey }, { token: serviceToken });
+
+// Provisioning: no token, the binding's own credential.
+await env.DAKFLARE.request({ path: "/v1/admin/agent-tokens", method: "POST", body: mint });
+```
+
+A service token cannot reach an admin route this way: the scope table refuses it before the
+handler runs (`mint agent tokens: null`, and so on). The rule is one line in `#call`; the
+separation is the scope table's, not the transport's. The binding can name an entrypoint
 when a caller wants only the typed surface: `bindings.worker({ worker: "dakflare-worker",
 exportName: "DakFlareApi" })`. `docs/OPS_DEPLOY.md` has the deploy order and the secrets both
 Workers need.

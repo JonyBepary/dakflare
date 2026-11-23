@@ -152,6 +152,15 @@ export class DakFlareApi extends WorkerEntrypoint<Env> {
           );
         }
         headers.set("authorization", `Bearer ${token}`);
+      } else if (token !== undefined && token !== "") {
+        // A trusted caller may deliberately present a weaker credential than the
+        // binding's own. That cannot escalate — the caller could already run as
+        // the deployment — and it is the only way a runtime send keeps service
+        // token semantics: `allowed_device_ids`, `allowed_channels` and the
+        // hourly budget live on the token, and a send as ADMIN_TOKEN has none of
+        // them. Provisioning and admin calls still use the binding's credential
+        // by passing no token.
+        headers.set("authorization", `Bearer ${token}`);
       } else {
         const adminToken = this.env.ADMIN_TOKEN;
         if (adminToken === undefined || adminToken === "") {

@@ -561,3 +561,76 @@ describe("message.received events", () => {
     expect(row?.n).toBe(1);
   });
 });
+
+
+describe("trusted binding with a per-call service token", () => {
+  // BINDING_AUTH is unset in the test environment, which is the trusted mode.
+  function trustedApi(): DakFlareApi {
+    return new DakFlareApi(
+      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
+      testEnv
+    );
+  }
+
+  it("keeps service-token semantics: allowlist, budget, and no admin actions", async () => {
+    const deviceId = await insertDevice();
+    const token = await mint({
+      scopes: ["sms:send:transactional", "devices:read", "messages:read"],
+      allowedDeviceIds: ["dev_not_this_one"],
+      maxPerHour: 1,
+    });
+    if (!("token" in token)) throw new Error(token.refused);
+    const client = trustedApi();
+
+    // The token's allowlist is enforced even though the binding itself is trusted.
+    await expect(
+      client.sendSms(
+        { to: "+8801711000111", body: "runtime", deviceId },
+        { token: token.token }
+      )
+    ).rejects.toMatchObject({ status: 403, code: "device_not_allowed" });
+
+    // A token that may use this handset is bounded by its own budget.
+    const allowed = await mint({
+      scopes: ["sms:send:transactional", "devices:read"],
+      allowedDeviceIds: [deviceId],
+      maxPerHour: 1,
+    });
+    if (!("token" in allowed)) throw new Error(allowed.refused);
+    const first = (await client.sendSms(
+      { to: "+8801711000111", body: "runtime", deviceId },
+      { token: allowed.token }
+    )) as { command_id?: string };
+    expect(typeof first.command_id).toBe("string");
+    await expect(
+      client.sendSms(
+        { to: "+8801711000111", body: "runtime again", deviceId },
+        { token: allowed.token }
+      )
+    ).rejects.toMatchObject({ status: 429 });
+
+    // Admin routes stay closed to the same token.
+    await expect(
+      client.request({ path: "/v1/admin/webhooks" }, true, { token: allowed.token })
+    ).rejects.toMatchObject({ status: 403 });
+
+    // Reads the token holds still work.
+    const fleet = (await client.devices({ token: allowed.token })) as { devices: unknown[] };
+    expect(Array.isArray(fleet.devices)).toBe(true);
+    const manifest = (await client.manifest({ token: allowed.token })) as {
+      schema_version: string;
+    };
+    expect(manifest.schema_version).toBe("1.0");
+  });
+
+  it("still uses the deployment credential when no token is passed", async () => {
+    const client = trustedApi();
+    const hooks = (await client.request({ path: "/v1/admin/webhooks?kind=outbound" })) as {
+      status: number;
+      body: unknown;
+    };
+    expect(hooks.status).toBe(200);
+    const fleet = (await client.devices()) as { devices: unknown[] };
+    expect(Array.isArray(fleet.devices)).toBe(true);
+  });
+});
