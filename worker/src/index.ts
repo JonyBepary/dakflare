@@ -208,6 +208,8 @@ export interface Env {
   ASSISTANT?: DurableObjectNamespace<AssistantAgent>;
   /** Service binding to the split agent Worker (main Worker only). */
   AGENT_SVC?: Fetcher;
+  /** Same-account EdgePay receiver for webhook delivery (isolated deployment). */
+  EDGEPAY?: Fetcher;
   /** Service binding to the main Worker (agent Worker only). */
   CORE?: Fetcher;
   /**
@@ -988,13 +990,25 @@ export default {
             bodyString,
             { deliveryId, traceId }
           );
-          const res = await fetch(payload.url, {
+          // Same-account delivery uses the service binding, not a public
+          // fetch: two Workers on the same `workers.dev` zone cannot fetch each
+          // other (error 1042). The request is unchanged — same method, signed
+          // headers and body — so the receiver verifies the v1 envelope as usual.
+          const deliveryInit: RequestInit = {
             method: "POST",
             headers,
             body: bodyString,
             redirect: "manual",
             signal: AbortSignal.timeout(10_000),
-          });
+          };
+          const useEdgePayBinding =
+            env.EDGEPAY !== undefined &&
+            new URL(payload.url).pathname.startsWith(
+              "/api/v1/integrations/dakflare/"
+            );
+          const res = useEdgePayBinding
+            ? await env.EDGEPAY!.fetch(new Request(payload.url, deliveryInit))
+            : await fetch(payload.url, deliveryInit);
 
           // A 2xx with an empty body is a valid answer (202 Accepted is the
           // common one). Reading it is best-effort: a receipt that cannot be
