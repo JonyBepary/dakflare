@@ -21,57 +21,84 @@ exist in this account) and static assets. Secrets (`ADMIN_TOKEN`,
 `AUTH_PEPPER`, `BETTER_AUTH_SECRET`, `WEBHOOK_SECRET_KEY`) are not in the file;
 Wrangler preserves them across deploys.
 
-## Why a timer, not GitHub Actions
+## Check-only timer, explicit update
 
 This repository's deployment posture is sovereign: the operator's authenticated
-`cf`/`wrangler` session deploys, and no edge credential is stored in CI. The
-sync lane follows that rule. A systemd user timer runs on the operator machine,
-pulls `origin/main`, and deploys from a detached worktree. Nothing in GitHub
-can deploy production and no token is copied into `~/.config` beyond the
-Wrangler OAuth session that already exists.
+`wrangler` session deploys, and no edge credential is stored in CI. The update
+lane follows that rule:
+
+- a systemd user timer **checks** daily (default 09:00) and never deploys;
+- `edgepay dakflare worker update` is the only deploy path;
+- the candidate must be on `origin/main`, have a successful **Conformance
+  Pipeline** run for its exact SHA, be at least 24 hours past that run
+  (`--min-age-hours`), and change Worker source/migrations/config;
+- pending D1 migrations require `--apply-migrations`; there is no implicit
+  schema change and no CI/soak override.
+
+The same-account webhook transport is a service binding (`EDGEPAY` →
+`edgepay-cf`), so the queue consumer delivers the signed v1 request without a
+public `fetch()` and without the same-zone error 1042. Cross-account receivers
+still use public HTTPS.
 
 ## Install
 
 ```bash
-./scripts/install-edgepay-sync.sh
+./scripts/install-edgepay-check.sh
 loginctl enable-linger "$USER"   # optional: run while logged out
 ```
 
-The timer fires five minutes after boot and every 15 minutes. It deploys only
-when `worker/src`, `worker/migrations`, `worker/package*.json` or
-`worker/wrangler.edgepay.toml` changed. A commit is recorded only after the
-deployed `/v1/integration/manifest` answers (200 or 401; 404 means the old
-build). A failed deploy leaves the previous version serving.
+The timer checks daily at 09:00. It logs a candidate and, if `notify-send`
+exists, sends a desktop notification. It has no deploy path. Use the EdgePay
+CLI to change cadence:
+
+```bash
+edgepay dakflare worker schedule daily|weekly|monthly|off
+```
 
 ## Manual
 
+From EdgePay:
+
 ```bash
-./scripts/sync-edgepay-worker.sh                 # deploy if main advanced
-DAKFLARE_SYNC_DRY_RUN=1 ./scripts/sync-edgepay-worker.sh
-DAKFLARE_SYNC_FORCE=1 ./scripts/sync-edgepay-worker.sh
+edgepay dakflare worker check
+edgepay dakflare worker update          # prompts; --yes in scripts
+edgepay dakflare worker status
 ```
+
+From this repository (same engine, lower level):
+
+```bash
+./scripts/sync-edgepay-worker.sh --check
+./scripts/sync-edgepay-worker.sh --deploy --min-age-hours 24
+./scripts/sync-edgepay-worker.sh --deploy --apply-migrations
+```
+
+A deploy uses a detached worktree under
+`~/.local/state/dakflare/edgepay-worker-worktree`, the existing Wrangler
+session, and records the commit only after `/v1/integration/manifest` answers
+200/401. A failed deploy leaves the previous version serving.
 
 State and logs:
 
 ```text
 ~/.local/state/dakflare/edgepay-worker.commit     # last verified deploy
 ~/.local/state/dakflare/edgepay-worker.log
-~/.local/state/dakflare/edgepay-worker-worktree/  # detached origin/main
+~/.local/state/dakflare/edgepay-worker-worktree/
 ```
 
 ## D1 migrations
 
-The script deploys code, not schema. Apply the isolated database's migrations
-from the worktree after a migration lands on `main`:
+The script deploys code, not schema. `update` refuses while migrations are
+pending unless `--apply-migrations` is passed; the operator confirms that in
+the CLI. To apply them separately:
 
 ```bash
 cd ~/.local/state/dakflare/edgepay-worker-worktree/worker
 npx wrangler d1 migrations apply DB --remote --config wrangler.edgepay.toml
 ```
 
-Adding migrations to the timer is intentionally not automatic: a D1 schema
-change is reviewed by a human, while code-only security fixes are exactly the
-thing that should not wait.
+A schema change is reviewed by a human; a code-only security fix is the case the
+check/update lane is meant to make quick.
 
 ## First-deploy checklist for a new EdgePay instance
 

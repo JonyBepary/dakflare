@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# Deploy the main DakFlare Worker code to the EdgePay-owned isolated Worker.
+# Check for, or explicitly deploy, a verified DakFlare update to the EdgePay
+# isolated Worker.
 #
-# Why this exists: `edgepay-dakflare-worker` is a second deployment of this
-# repository's Worker against its own D1/KV/R2/queues. Without a sync lane it
-# silently ages while `main` gains signature, rotation and scope fixes. This
-# script runs from a systemd user timer (or by hand) and deploys `origin/main`
-# when the Worker source or its isolated config changed.
+# Default mode is CHECK. Nothing is deployed unless `--deploy` is passed by an
+# operator (the EdgePay CLI passes it after an explicit confirmation). The
+# systemd timer runs `--check --notify` only.
 #
-# Design constraints:
-#   - It never touches the operator's working tree: a detached worktree at
-#     `origin/main` is checked out in the state directory.
-#   - It never stores a Cloudflare credential. Wrangler uses the operator's
-#     existing OAuth session (`~/.config/.wrangler`), matching the repository's
-#     "deployment is sovereign, not a CI secret" rule.
-#   - A deploy is only recorded after the new manifest route answers. A failed
-#     upload leaves the previous version serving traffic.
-#   - Refuse to run over a dirty worktree state, and serialize with flock.
+# A candidate must be:
+#   1. on origin/main (never a PR head or another branch);
+#   2. verified by the repository's Conformance Pipeline (`pipeline.yml`)
+#      with status=completed and conclusion=success;
+#   3. at least `--min-age-hours` old since that CI run (default 24h), so a
+#      late-night merge waits for a deliberate update;
+#   4. a Worker-source/migration/config change (docs-only commits are not a
+#      reason to deploy).
+#
+# D1 migrations are never applied implicitly. `--apply-migrations` is required,
+# and the operator confirms it in the EdgePay CLI before this script runs.
 #
 # Manual use:
-#   ./scripts/sync-edgepay-worker.sh              # deploy if main advanced
-#   DAKFLARE_SYNC_DRY_RUN=1 ./scripts/sync-edgepay-worker.sh
-#   DAKFLARE_SYNC_FORCE=1 ./scripts/sync-edgepay-worker.sh   # redeploy HEAD
+#   ./scripts/sync-edgepay-worker.sh                       # check, human output
+#   ./scripts/sync-edgepay-worker.sh --check --json
+#   ./scripts/sync-edgepay-worker.sh --deploy --min-age-hours 24
+#   ./scripts/sync-edgepay-worker.sh --deploy --apply-migrations
+#   ./scripts/sync-edgepay-worker.sh --deploy --commit <sha>
 set -euo pipefail
+
+MODE="check"
+JSON=0
+NOTIFY=0
+MIN_AGE_HOURS="${DAKFLARE_MIN_AGE_HOURS:-24}"
+APPLY_MIGRATIONS=0
+TARGET_SHA=""
 
 REPO="${DAKFLARE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 BRANCH="${DAKFLARE_SYNC_BRANCH:-main}"
+REPO_SLUG="${DAKFLARE_REPO_SLUG:-JonyBepary/dakflare}"
+WORKFLOW="${DAKFLARE_CI_WORKFLOW:-pipeline.yml}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dakflare"
 STATE_FILE="$STATE_DIR/edgepay-worker.commit"
 LOCK_HASH_FILE="$STATE_DIR/edgepay-worker.lockhash"
@@ -34,33 +46,228 @@ WORKTREE="$STATE_DIR/edgepay-worker-worktree"
 CONFIG="worker/wrangler.edgepay.toml"
 VERIFY_URL="${DAKFLARE_VERIFY_URL:-https://edgepay-dakflare-worker.sohelahmedjony.workers.dev/v1/integration/manifest}"
 
+usage() {
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) MODE="check" ;;
+    --deploy) MODE="deploy" ;;
+    --json) JSON=1 ;;
+    --notify) NOTIFY=1 ;;
+    --apply-migrations) APPLY_MIGRATIONS=1 ;;
+    --min-age-hours)
+      [ "$#" -ge 2 ] || { echo "--min-age-hours needs a value" >&2; exit 2; }
+      MIN_AGE_HOURS="$2"
+      shift
+      ;;
+    --commit)
+      [ "$#" -ge 2 ] || { echo "--commit needs a value" >&2; exit 2; }
+      TARGET_SHA="$2"
+      shift
+      ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage; exit 2 ;;
+  esac
+  shift
+done
+
+case "$MIN_AGE_HOURS" in
+  ''|*[!0-9]*) echo "--min-age-hours must be a non-negative integer" >&2; exit 2 ;;
+esac
+
 mkdir -p "$STATE_DIR"
 
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE"
 }
 
-# One sync at a time. A timer tick that overlaps a slow npm ci exits quietly.
+# One operation at a time. A timer check that overlaps an operator deploy exits.
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
+  [ "$JSON" -eq 1 ] && printf '{"ok":false,"reason":"busy"}\n'
   exit 0
 fi
 
 cd "$REPO"
 if ! git fetch --quiet origin "$BRANCH"; then
   log "fetch failed; keeping the current deployment"
+  [ "$JSON" -eq 1 ] && printf '{"ok":false,"reason":"fetch_failed"}\n'
   exit 1
 fi
-TARGET="$(git rev-parse "origin/$BRANCH")"
+
+TARGET="${TARGET_SHA:-$(git rev-parse "origin/$BRANCH")}"
 LAST="$(cat "$STATE_FILE" 2>/dev/null || true)"
 
-if [ "${DAKFLARE_SYNC_FORCE:-0}" != "1" ] && [ "$TARGET" = "$LAST" ]; then
+# A candidate must be reachable from origin/main. This rejects PR heads and
+# feature branches even if someone passes --commit.
+if ! git merge-base --is-ancestor "$TARGET" "origin/$BRANCH"; then
+  REASON="commit_not_on_main"
+  ELIGIBLE=0
+  AVAILABLE=0
+  WORKER_CHANGED=0
+  PENDING=""
+  CI_STATUS="missing"
+  CI_CONCLUSION="missing"
+  CI_URL=""
+  CI_CREATED=""
+  AGE_HOURS=""
+else
+  # Worker-source relevance. Docs/scripts/tests are not a reason to deploy.
+  WORKER_CHANGED=1
+  MIGRATIONS_CHANGED=0
+  FORWARD_OK=1
+  if [ -n "$LAST" ] && git cat-file -e "$LAST^{commit}" 2>/dev/null; then
+    # Deployed -> target must be a forward update. This refuses a rollback via
+    # --commit as well as a branch that merely contains the deployed commit.
+    if ! git merge-base --is-ancestor "$LAST" "$TARGET"; then
+      FORWARD_OK=0
+    fi
+    if git diff --quiet "$LAST".."$TARGET" -- \
+      worker/src \
+      worker/migrations \
+      worker/package.json \
+      worker/package-lock.json \
+      "$CONFIG"; then
+      WORKER_CHANGED=0
+    fi
+    if ! git diff --quiet "$LAST".."$TARGET" -- worker/migrations; then
+      MIGRATIONS_CHANGED=1
+    fi
+  fi
+
+  # CI verification. `gh` is the operator's existing authenticated session.
+  CI_JSON="[]"
+  if command -v gh >/dev/null 2>&1; then
+    CI_JSON="$(gh run list \
+      --repo "$REPO_SLUG" \
+      --workflow "$WORKFLOW" \
+      --branch "$BRANCH" \
+      --commit "$TARGET" \
+      --limit 1 \
+      --json status,conclusion,createdAt,url,headSha 2>/dev/null || echo '[]')"
+  fi
+  CI_STATUS="$(printf '%s' "$CI_JSON" | jq -r '.[0].status // "missing"')"
+  CI_CONCLUSION="$(printf '%s' "$CI_JSON" | jq -r '.[0].conclusion // "missing"')"
+  CI_URL="$(printf '%s' "$CI_JSON" | jq -r '.[0].url // ""')"
+  CI_CREATED="$(printf '%s' "$CI_JSON" | jq -r '.[0].createdAt // ""')"
+  CI_SHA="$(printf '%s' "$CI_JSON" | jq -r '.[0].headSha // ""')"
+  if [ -n "$CI_SHA" ] && [ "$CI_SHA" != "$TARGET" ]; then
+    CI_STATUS="mismatch"
+    CI_CONCLUSION="mismatch"
+  fi
+
+  AGE_HOURS=""
+  AGE_OK=0
+  if [ -n "$CI_CREATED" ]; then
+    CI_EPOCH="$(date -d "$CI_CREATED" +%s 2>/dev/null || echo '')"
+    if [ -n "$CI_EPOCH" ]; then
+      AGE_HOURS=$(( ( $(date +%s) - CI_EPOCH ) / 3600 ))
+      if [ "$AGE_HOURS" -ge "$MIN_AGE_HOURS" ]; then AGE_OK=1; fi
+    fi
+  fi
+
+  # Pending migrations are reported even in check mode. A deploy is blocked
+  # until the operator passes --apply-migrations.
+  PENDING=""
+  if [ -d "$REPO/worker/node_modules" ]; then
+    PENDING="$(cd "$REPO/worker" && npx wrangler d1 migrations list DB --remote --config wrangler.edgepay.toml 2>/dev/null \
+      | grep -Eo '[0-9]{4}_[a-z0-9_]+\.sql' | sort -u | tr '\n' ' ' || true)"
+  fi
+
+  AVAILABLE=0
+  REASON="up_to_date"
+  if [ "$FORWARD_OK" -ne 1 ]; then
+    REASON="not_a_forward_update"
+  elif [ "$TARGET" != "$LAST" ] && [ "$WORKER_CHANGED" -eq 1 ]; then
+    AVAILABLE=1
+    REASON="available"
+  elif [ "$TARGET" != "$LAST" ]; then
+    REASON="no_worker_change"
+  fi
+
+  ELIGIBLE=0
+  if [ "$AVAILABLE" -eq 1 ]; then
+    if [ "$CI_STATUS" != "completed" ] || [ "$CI_CONCLUSION" != "success" ]; then
+      REASON="ci_not_green"
+    elif [ "$AGE_OK" -ne 1 ]; then
+      REASON="soak_window"
+    elif [ -n "$PENDING" ] && [ "$APPLY_MIGRATIONS" -ne 1 ] && [ "$MODE" = "deploy" ]; then
+      REASON="pending_migrations"
+    else
+      ELIGIBLE=1
+      REASON="ok"
+    fi
+  fi
+fi
+
+if [ "$JSON" -eq 1 ]; then
+  jq -n \
+    --arg deployed "$LAST" \
+    --arg target "$TARGET" \
+    --arg branch "$BRANCH" \
+    --argjson worker_changed "$WORKER_CHANGED" \
+    --argjson migrations_changed "$MIGRATIONS_CHANGED" \
+    --argjson available "$AVAILABLE" \
+    --argjson eligible "$ELIGIBLE" \
+    --arg reason "$REASON" \
+    --arg ci_status "$CI_STATUS" \
+    --arg ci_conclusion "$CI_CONCLUSION" \
+    --arg ci_url "$CI_URL" \
+    --arg ci_created "$CI_CREATED" \
+    --arg age_hours "$AGE_HOURS" \
+    --argjson min_age_hours "$MIN_AGE_HOURS" \
+    --arg pending "$PENDING" \
+    '{
+      ok: true,
+      deployed_commit: $deployed,
+      target_commit: $target,
+      branch: $branch,
+      worker_changed: $worker_changed,
+      migrations_changed: $migrations_changed,
+      available: $available,
+      eligible: $eligible,
+      reason: $reason,
+      ci: {status: $ci_status, conclusion: $ci_conclusion, url: $ci_url, created_at: $ci_created},
+      age_hours: (if $age_hours == "" then null else ($age_hours | tonumber) end),
+      min_age_hours: $min_age_hours,
+      pending_migrations: ($pending | split(" ") | map(select(length > 0)))
+    }'
+else
+  echo "deployed:   ${LAST:-none}"
+  echo "target:     $TARGET"
+  echo "worker:     $([ "$WORKER_CHANGED" -eq 1 ] && echo changed || echo unchanged)"
+  echo "migration files: $([ "$MIGRATIONS_CHANGED" -eq 1 ] && echo changed || echo unchanged)"
+  echo "ci:         $CI_STATUS/$CI_CONCLUSION${CI_URL:+ $CI_URL}"
+  echo "soak:       ${AGE_HOURS:-?}h (minimum ${MIN_AGE_HOURS}h)"
+  echo "migrations: ${PENDING:-none pending}"
+  echo "available:  $AVAILABLE"
+  echo "eligible:   $ELIGIBLE ($REASON)"
+fi
+
+if [ "$MODE" = "check" ]; then
+  if [ "$NOTIFY" -eq 1 ] && [ "$AVAILABLE" -eq 1 ] && [ "$ELIGIBLE" -eq 1 ] && [ -z "$PENDING" ]; then
+    if command -v notify-send >/dev/null 2>&1; then
+      notify-send "DakFlare update available" \
+        "Commit ${TARGET:0:12} passed CI and the ${MIN_AGE_HOURS}h soak. Run: edgepay dakflare worker update"
+    fi
+  fi
+  log "check: target=$TARGET available=$AVAILABLE eligible=$ELIGIBLE reason=$REASON pending='${PENDING:-none}'"
   exit 0
 fi
 
-if [ "${DAKFLARE_SYNC_DRY_RUN:-0}" = "1" ]; then
-  echo "target=$TARGET last=${LAST:-none} config=$CONFIG"
-  exit 0
+# ---- deploy mode -----------------------------------------------------------
+if [ "$ELIGIBLE" -ne 1 ]; then
+  log "deploy refused for $TARGET: $REASON"
+  echo "Refusing to deploy: $REASON" >&2
+  exit 1
+fi
+if [ -n "$PENDING" ] && [ "$APPLY_MIGRATIONS" -ne 1 ]; then
+  log "deploy refused for $TARGET: pending migrations $PENDING"
+  echo "Pending D1 migrations: $PENDING" >&2
+  echo "Re-run with --apply-migrations after reviewing them." >&2
+  exit 1
 fi
 
 # A persistent detached worktree keeps node_modules between runs but never
@@ -71,21 +278,6 @@ else
   git worktree add --quiet --detach "$WORKTREE" "$TARGET"
 fi
 
-# Only a Worker-source or isolated-config change needs a deploy. A docs-only
-# commit still advances the recorded commit, so it is not re-examined forever.
-if [ -n "$LAST" ] && git cat-file -e "$LAST^{commit}" 2>/dev/null; then
-  if git diff --quiet "$LAST".."$TARGET" -- \
-    worker/src \
-    worker/package.json \
-    worker/package-lock.json \
-    "$CONFIG" \
-    worker/migrations; then
-    printf '%s\n' "$TARGET" >"$STATE_FILE"
-    log "recorded $TARGET; no Worker change"
-    exit 0
-  fi
-fi
-
 cd "$WORKTREE/worker"
 
 LOCK_HASH="$(sha256sum package-lock.json | cut -d' ' -f1)"
@@ -93,19 +285,29 @@ PREV_LOCK="$(cat "$LOCK_HASH_FILE" 2>/dev/null || true)"
 if [ "$LOCK_HASH" != "$PREV_LOCK" ] || [ ! -d node_modules ]; then
   if ! npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1; then
     log "npm ci failed for $TARGET"
+    echo "npm ci failed; see $LOG_FILE" >&2
     exit 1
   fi
   printf '%s\n' "$LOCK_HASH" >"$LOCK_HASH_FILE"
 fi
 
-# A code deploy against an old schema is the failure this guard exists for: the
-# new Worker starts serving before the columns it reads exist. Leave the previous
-# version live until a human applies the migration from the sync worktree.
-PENDING_MIGRATIONS="$(npx wrangler d1 migrations list DB --remote --config wrangler.edgepay.toml 2>/dev/null \
+# The check above runs in the operator's current worktree; the target may add
+# a migration file that is not present there. Recompute from the detached
+# target worktree, and refuse if anything is pending without --apply-migrations.
+PENDING_TARGET="$(npx wrangler d1 migrations list DB --remote --config wrangler.edgepay.toml 2>/dev/null \
   | grep -Eo '[0-9]{4}_[a-z0-9_]+\.sql' | sort -u | tr '\n' ' ' || true)"
-if [ -n "$PENDING_MIGRATIONS" ]; then
-  log "pending D1 migrations: $PENDING_MIGRATIONS; apply them before deploying $TARGET"
+if [ -n "$PENDING_TARGET" ] && [ "$APPLY_MIGRATIONS" -ne 1 ]; then
+  log "deploy refused for $TARGET: target worktree has pending migrations $PENDING_TARGET"
+  echo "Pending D1 migrations in the target: $PENDING_TARGET" >&2
+  echo "Re-run with --apply-migrations after reviewing them." >&2
   exit 1
+fi
+if [ -n "$PENDING_TARGET" ] && [ "$APPLY_MIGRATIONS" -eq 1 ]; then
+  if ! npx wrangler d1 migrations apply DB --remote --config wrangler.edgepay.toml >>"$LOG_FILE" 2>&1; then
+    log "migration apply failed for $TARGET"
+    echo "D1 migration apply failed; see $LOG_FILE" >&2
+    exit 1
+  fi
 fi
 
 # Wrangler refuses to upload when a `cf` build output is present; it would read
@@ -116,6 +318,7 @@ fi
 
 if ! npx wrangler deploy --config wrangler.edgepay.toml >>"$LOG_FILE" 2>&1; then
   log "deploy failed for $TARGET"
+  echo "Worker deploy failed; see $LOG_FILE" >&2
   exit 1
 fi
 
@@ -126,11 +329,13 @@ for _ in 1 2 3 4 5; do
     200|401)
       printf '%s\n' "$TARGET" >"$STATE_FILE"
       log "deployed $TARGET (manifest HTTP $status)"
+      echo "Deployed $TARGET"
       exit 0
       ;;
   esac
   sleep 2
 done
 
-log "deployed $TARGET but manifest verification failed; will retry next run"
+log "deployed $TARGET but manifest verification failed; state not advanced"
+echo "Deployed $TARGET, but the manifest check failed; state not advanced." >&2
 exit 1

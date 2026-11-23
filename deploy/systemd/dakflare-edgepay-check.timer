@@ -1,14 +1,12 @@
 [Unit]
-Description=Periodic sync of DakFlare main to the EdgePay-owned Worker
+Description=Daily check for a verified DakFlare update
 
 [Timer]
-# Five minutes after boot, then every 15 minutes. Persistent=true means a
-# missed run (laptop asleep) happens at the next opportunity instead of being
-# skipped until the following tick.
-OnBootSec=5min
-OnUnitActiveSec=15min
+# Check only. Nothing is deployed without `edgepay dakflare worker update`.
+# The EdgePay CLI rewrites this OnCalendar for weekly/monthly/off.
+OnCalendar=*-*-* 09:00:00
 Persistent=true
-Unit=dakflare-edgepay-sync.service
+Unit=dakflare-edgepay-check.service
 
 [Install]
 WantedBy=timers.target
