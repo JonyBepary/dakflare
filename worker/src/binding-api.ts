@@ -381,6 +381,16 @@ export class DakFlareAdminApi extends WorkerEntrypoint<Env> {
     ).body;
   }
 
+  /** A new signing secret, once. The old one stops being used immediately. */
+  async rotateWebhookSecret(webhookId: string): Promise<unknown> {
+    return (
+      await this.#inner().request({
+        path: `/v1/admin/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+        method: "POST",
+      })
+    ).body;
+  }
+
   async listWebhookDeliveries(webhookId: string): Promise<unknown> {
     return (
       await this.#inner().request({

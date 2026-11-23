@@ -17,7 +17,7 @@ the CLI uses — so scopes, limiters and audit rows still apply.
 
 | Binding | Entrypoint | Auth | Use |
 |---|---|---|---|
-| `DAKFLARE_ADMIN` | `DakFlareAdminApi` | trusted, same account, no token | provision: mint a service token, create a webhook, put a flow, list deliveries, replay |
+| `DAKFLARE_ADMIN` | `DakFlareAdminApi` | trusted, same account, no token | provision: mint a service token, create a webhook, rotate its secret, put a flow, list deliveries, replay |
 | `DAKFLARE_RUNTIME` | `DakFlareRuntimeApi` | a service token passed per call | send, read devices/messages, manifest, health |
 | inbound | HTTPS webhook | v1 envelope, `X-Dakflare-Delivery` as nonce | carrier messages into the consumer |
 
@@ -27,6 +27,17 @@ refuses to run under `BINDING_AUTH=agent_token`, because an admin path with no
 admin credential is a misconfiguration rather than a fallback. Both dispatch
 through the same router, so an error code and a limiter are the HTTP ones, and
 `GET /v1/integration/manifest` publishes this table as `rpc`.
+
+### Rotating a signing secret
+
+`rotateWebhookSecret(webhookId)` (or `POST /v1/admin/webhooks/:id/rotate-secret`)
+mints a new secret, stores it sealed, and returns it once with
+`previous_valid_until`. The old secret stops being used immediately — deliveries
+are signed at consumption — so the timestamp is a **transport bound** (an
+already-sent request can still be in flight), not a policy window. A consumer that
+wants to accept the old secret for a day is making its own rule; this field only
+promises what the deployment can keep. The route is human-only and audited as
+`webhook.secret_rotated`.
 
 Inbound delivery stays a signed webhook on purpose. An RPC would be a second
 delivery model beside `integration_deliveries`, and two ledgers is how a

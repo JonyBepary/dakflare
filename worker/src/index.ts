@@ -47,6 +47,7 @@ import {
 import { HEADER_TRACE_ID } from "./lib/integration-envelope";
 import {
   handleWebhookCreate,
+  handleWebhookSecretRotate,
   handleWebhookDelete,
   handleWebhookDeliveries,
   handleWebhookIngress,
@@ -1638,6 +1639,18 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext)
           decodeURIComponent(deliveryReplayMatch[1]),
           decodeURIComponent(deliveryReplayMatch[2])
         )
+      );
+    }
+
+    const webhookRotateMatch = pathname.match(
+      /^\/v1\/admin\/webhooks\/([^/]+)\/rotate-secret$/
+    );
+    if (method === "POST" && webhookRotateMatch) {
+      // Human-only: absent from SCOPE_FOR_ACTION, so an agent or service token is
+      // refused before the handler runs. A credential that can rotate a signing
+      // secret can also forge deliveries to the receiver.
+      return withAdminAccess(req, env, "write", "rotate webhook secret", (actor) =>
+        handleWebhookSecretRotate(req, env, decodeURIComponent(webhookRotateMatch[1]), actor)
       );
     }
 

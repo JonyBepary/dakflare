@@ -23,6 +23,8 @@ import { handleWebhookCreate } from "../src/routes/webhooks";
 import { handleWebhookDeliveryReplay } from "../src/routes/integration";
 import { emitDeviceEvent, emitMessageEvents } from "../src/lib/integration-delivery";
 import { hmacSha256Hex } from "../src/routes/webhooks";
+import { signOutboundRequest } from "../src/lib/outbound-webhook";
+import { verifyIntegrationEnvelope } from "../src/lib/integration-envelope";
 import type { AdminActor } from "../src/audit";
 
 const WEBHOOK_KEY = "test-only-integration-seal-key";
@@ -770,5 +772,78 @@ describe("usage and message status", () => {
     expect(manifest.events).toEqual(["message.received", "device.status_changed", "device.revoked"]);
     expect(manifest.capabilities).toContain("token_usage");
     expect(manifest.capabilities).toContain("message_status");
+  });
+});
+
+
+describe("webhook secret rotation", () => {
+  function ctx(): ExecutionContext {
+    return { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  }
+
+  it("returns a new secret once, and the old one no longer signs", async () => {
+    const hook = await createHook(["message.received"]);
+    const admin = new DakFlareAdminApi(ctx(), testEnv);
+    const rotated = (await admin.rotateWebhookSecret(hook.id)) as {
+      secret: string;
+      previous_valid_until: number;
+    };
+    expect(typeof rotated.secret).toBe("string");
+    expect(rotated.secret).not.toBe(hook.secret);
+    expect(rotated.previous_valid_until).toBeGreaterThan(Date.now());
+
+    // A delivery signed now verifies with the new secret and fails with the old.
+    const now = Date.now();
+    // The hook's URL is not exposed by createHook; read it back from D1.
+    const row = await env.DB.prepare(`SELECT target_url FROM webhooks WHERE id = ?`)
+      .bind(hook.id)
+      .first<{ target_url: string }>();
+    const fresh = await signOutboundRequest(testEnv, row?.target_url ?? "", {}, "{}", {
+      deliveryId: "dlv_rotate",
+      now,
+    });
+    const ts = Number(fresh["X-Dakflare-Timestamp"]);
+    const sig = fresh["X-Dakflare-Signature"];
+    const good = await verifyIntegrationEnvelope({
+      secret: rotated.secret,
+      timestampHeader: String(ts),
+      deliveryHeader: "dlv_rotate",
+      signatureHeader: sig,
+      rawBody: "{}",
+      nowMs: now,
+    });
+    const stale = await verifyIntegrationEnvelope({
+      secret: hook.secret,
+      timestampHeader: String(ts),
+      deliveryHeader: "dlv_rotate",
+      signatureHeader: sig,
+      rawBody: "{}",
+      nowMs: now,
+    });
+    expect(good.ok).toBe(true);
+    expect(stale.ok).toBe(false);
+
+    const audit = await env.DB.prepare(
+      `SELECT action FROM audit_log WHERE action = 'webhook.secret_rotated' AND subject = ?`
+    )
+      .bind(hook.id)
+      .first<{ action: string }>();
+    expect(audit?.action).toBe("webhook.secret_rotated");
+  });
+
+  it("refuses an inbound hook", async () => {
+    const inbound = await handleWebhookCreate(
+      new Request("https://example.com/v1/admin/webhooks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: unique("inbound") }),
+      }),
+      testEnv,
+      owner
+    );
+    const created = (await inbound.json()) as { id: string };
+    await expect(new DakFlareAdminApi(ctx(), testEnv).rotateWebhookSecret(created.id)).rejects.toMatchObject({
+      status: 409,
+    });
   });
 });

@@ -21,6 +21,7 @@
  */
 
 import type { Env } from "../index";
+import { requestMeta, writeAudit } from "../audit";
 import {
   MAX_ALLOWLIST_PATTERNS,
   validateBodyAllowlist,
@@ -752,6 +753,72 @@ export async function handleWebhookTest(
       signed: true,
     });
   }
+}
+
+/**
+ * `POST /v1/admin/webhooks/:id/rotate-secret` — a new signing secret, once.
+ *
+ * The old secret stops being used immediately: every delivery is signed at
+ * consumption, so nothing after this call carries it. `previous_valid_until` is
+ * therefore a short transport bound, not a policy window — an already-sent
+ * request can still be in flight, and nothing older than the fetch timeout can
+ * arrive. A consumer that wants to accept the old secret for a day is making its
+ * own policy; this field only promises what this deployment can keep.
+ */
+export async function handleWebhookSecretRotate(
+  req: Request,
+  env: Env,
+  id: string,
+  actor: AdminActor
+): Promise<Response> {
+  const refused = adminRefusal(actor);
+  if (refused !== null) return refused;
+
+  const row = await env.DB.prepare(`SELECT id, kind FROM webhooks WHERE id = ?`)
+    .bind(id)
+    .first<{ id: string; kind: string }>();
+  if (row === null) return json({ error: "not_found" }, 404);
+  if (row.kind !== "outbound") {
+    return Response.json(
+      { error: "conflict", message: "only an outbound webhook has a signing secret" },
+      { status: 409 }
+    );
+  }
+
+  const secret = randomHex(32);
+  const secretHash = await sha256Hex(secret);
+  const sealed = await sealSecret(env, secret);
+  if (sealed === null) {
+    return Response.json(
+      {
+        error: "webhook_secret_unavailable",
+        message:
+          "WEBHOOK_SECRET_KEY is required to seal a webhook secret; set it with `cf workers secrets update WEBHOOK_SECRET_KEY --type secret_text`",
+      },
+      { status: 503 }
+    );
+  }
+
+  const now = Date.now();
+  const previousValidUntil = now + 300_000;
+  await env.DB.prepare(
+    `UPDATE webhooks SET secret_hash = ?, secret_sealed = ?, updated_at = ? WHERE id = ?`
+  )
+    .bind(secretHash, sealed, now, id)
+    .run();
+
+  await writeAudit(env, {
+    action: "webhook.secret_rotated",
+    actor: { userId: actor.userId, label: actor.label },
+    subject: id,
+    detail: { previous_valid_until: previousValidUntil },
+    ...requestMeta(req),
+  });
+
+  return Response.json(
+    { id, secret, previous_valid_until: previousValidUntil },
+    { status: 200, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 /** `GET /v1/admin/webhooks/:id/deliveries` — the last 20, newest first. */
