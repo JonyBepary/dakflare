@@ -189,7 +189,9 @@ else
 
   ELIGIBLE=0
   if [ "$AVAILABLE" -eq 1 ]; then
-    if [ "$CI_STATUS" != "completed" ] || [ "$CI_CONCLUSION" != "success" ]; then
+    if [ "$CI_STATUS" = "missing" ]; then
+      REASON="ci_unavailable"
+    elif [ "$CI_STATUS" != "completed" ] || [ "$CI_CONCLUSION" != "success" ]; then
       REASON="ci_not_green"
     elif [ "$AGE_OK" -ne 1 ]; then
       REASON="soak_window"
