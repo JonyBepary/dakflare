@@ -702,7 +702,7 @@ describe("the two named entrypoints", () => {
     };
     expect(manifest.rpc.admin.entrypoint).toBe("DakFlareAdminApi");
     expect(manifest.rpc.runtime.entrypoint).toBe("DakFlareRuntimeApi");
-    expect(manifest.rpc.inbound.transport).toBe("https");
+    expect(manifest.rpc.inbound.transport).toBe("service-binding-fetch | https");
   });
 });
 
