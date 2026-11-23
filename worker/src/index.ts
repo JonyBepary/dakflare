@@ -2654,4 +2654,3 @@ export { ChannelConnection };
  * `dakflare-agent-worker` via `AGENT_SVC`; the isolated EdgePay instance keeps
  * the pre-split `ASSISTANT` namespace, so the class stays exported here.
  */
-export { AssistantAgent } from "./agent/runtime";
