@@ -2608,3 +2608,10 @@ export { DakFlareAdminApi, DakFlareApi, DakFlareRuntimeApi } from "./binding-api
 
 /** Exported class: a Durable Object only exists if the entry module exports it. */
 export { ChannelConnection };
+
+/**
+ * Legacy assistant object. The split deployment serves it from
+ * `dakflare-agent-worker` via `AGENT_SVC`; the isolated EdgePay instance keeps
+ * the pre-split `ASSISTANT` namespace, so the class stays exported here.
+ */
+export { AssistantAgent } from "./agent/runtime";

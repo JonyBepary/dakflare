@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic sync of DakFlare main to the EdgePay-owned Worker
+
+[Timer]
+# Five minutes after boot, then every 15 minutes. Persistent=true means a
+# missed run (laptop asleep) happens at the next opportunity instead of being
+# skipped until the following tick.
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=dakflare-edgepay-sync.service
+
+[Install]
+WantedBy=timers.target

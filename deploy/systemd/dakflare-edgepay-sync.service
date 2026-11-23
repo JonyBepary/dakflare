@@ -1,0 +1,15 @@
+[Unit]
+Description=Deploy DakFlare main to the EdgePay-owned isolated Worker
+Documentation=file://%h/Projects/dakflare/docs/EDGEPAY-SYNC.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DAKFLARE_REPO=%h/Projects/dakflare
+ExecStart=%h/Projects/dakflare/scripts/sync-edgepay-worker.sh
+Nice=10
+# The script writes its own timestamped log under
+# ~/.local/state/dakflare/edgepay-worker.log; systemd keeps the unit output too.
+StandardOutput=journal
+StandardError=journal

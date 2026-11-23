@@ -1,0 +1,199 @@
+# ---------------------------------------------------------------------------
+# EdgePay-owned DakFlare instance.
+#
+# This is the SAME Worker code as `wrangler.toml`, deployed under
+# `edgepay-dakflare-worker` against its own D1/KV/R2/queues/workflow. It exists
+# so EdgePay can bind `DakFlareAdminApi` / `DakFlareRuntimeApi` without sharing
+# the pre-existing `dakflare-worker` or its `sms_gateway` D1.
+#
+# Deploy:
+#   npx wrangler deploy --config wrangler.edgepay.toml
+#
+# The operator-local sync timer runs exactly that command when `origin/main`
+# advances (see scripts/sync-edgepay-worker.sh). Secrets are NOT in this file:
+# ADMIN_TOKEN, AUTH_PEPPER, BETTER_AUTH_SECRET and WEBHOOK_SECRET_KEY stay on
+# the Worker and are preserved by a deploy.
+#
+# Deliberate omissions vs. `wrangler.toml`:
+#   - no crons: the isolated instance is on a Free plan already using its
+#     trigger slots, and the documented operating mode is "no scheduled sends";
+#   - no `AGENT_SVC`: that split Worker does not exist in this account, so the
+#     `/agents/*` routes answer 503 as they already do;
+#   - no static assets: EdgePay consumes RPC and webhooks, not the dashboard.
+# ---------------------------------------------------------------------------
+
+name = "edgepay-dakflare-worker"
+main = "src/index.ts"
+compatibility_date = "2026-04-07"
+compatibility_flags = ["nodejs_compat"]
+upload_source_maps = true
+preview_urls = false
+
+# ---------------------------------------------------------------------------
+# Durable Objects
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "DEVICE"
+class_name = "DeviceGateway"
+
+[[durable_objects.bindings]]
+name = "AUTH_GUARD"
+class_name = "AuthGuard"
+
+[[durable_objects.bindings]]
+name = "AUTHORITY_GUARD"
+class_name = "AuthorityGuard"
+
+[[durable_objects.bindings]]
+name = "CHANNEL_CONN"
+class_name = "ChannelConnection"
+
+[[durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "Scheduler"
+
+# Kept because the namespace is already provisioned on this Worker. `index.ts`
+# re-exports `AssistantAgent` for this entrypoint.
+[[durable_objects.bindings]]
+name = "ASSISTANT"
+class_name = "AssistantAgent"
+
+[exports.DeviceGateway]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthGuard]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AuthorityGuard]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ChannelConnection]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.Scheduler]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.AssistantAgent]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.FlowExecutionWorkflow]
+type = "workflow"
+name = "edgepay-flow-execution-workflow"
+
+# ---------------------------------------------------------------------------
+# Isolated resources
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "edgepay-dakflare-db"
+database_id = "bdae464b-7d48-4647-8807-bb067f99064a"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "a9153f9b3812461db42413046f4262e8"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "edgepay-dakflare-media"
+
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "edgepay-dakflare-webhook-queue"
+
+[[queues.consumers]]
+queue = "edgepay-dakflare-webhook-queue"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+
+[[queues.producers]]
+binding = "INGEST_QUEUE"
+queue = "edgepay-dakflare-ingest-queue"
+
+[[queues.consumers]]
+queue = "edgepay-dakflare-ingest-queue"
+max_batch_size = 50
+max_batch_timeout = 2
+max_retries = 3
+dead_letter_queue = "edgepay-dakflare-ingest-dlq"
+
+[[queues.consumers]]
+queue = "edgepay-dakflare-ingest-dlq"
+max_batch_size = 50
+max_batch_timeout = 5
+max_retries = 1
+
+[[workflows]]
+name = "edgepay-flow-execution-workflow"
+binding = "FLOW_WORKFLOW"
+class_name = "FlowExecutionWorkflow"
+
+[ai]
+binding = "AI"
+
+# Namespace ids are the isolated Worker's existing counters; reusing them keeps
+# an in-flight limit window from resetting on deploy.
+[[ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "2101"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "ADMIN_LIMITER"
+namespace_id = "2102"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "DEVICE_LIMITER"
+namespace_id = "2103"
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_FAIL_LIMITER"
+namespace_id = "2104"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "PAIR_GLOBAL_LIMITER"
+namespace_id = "2105"
+simple = { limit = 300, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "2106"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "2107"
+simple = { limit = 20, period = 60 }
+
+[vars]
+AGENT_RUNTIME = "on"
+D1_READ_REPLICATION = "off"
+BINDING_AUTH = "trusted"
+AUTH_PASSWORD_MODE = "client-derived"
+MAGIC_LINK_FROM = "DakFlare <onboarding@resend.dev>"
+MAGIC_LINK_TTL_SECONDS = "900"
+AUTH_LOCKOUT_WINDOW_SECONDS = "900"
+FCM_BASE_URL = "https://fcm.googleapis.com"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+MESSAGE_RETENTION_DAYS = "90"
+TOKENLAB_BASE_URL = "https://api.tokenlab.amd.com/v1"
+TOKENLAB_SYSTEM1_MODEL = "Clef"
+AI_CHAT_PROVIDER = "workers-ai"
+AI_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_CHAT_BASE_URL = ""
+AI_DAILY_TOKEN_BUDGET = "20000"
+INCOMING_ROWS_PER_DAY = "10000"
+SOURCE_URL = "https://github.com/JonyBepary/dakflare"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
