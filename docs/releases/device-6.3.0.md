@@ -1,6 +1,6 @@
 # DakFlare Device 6.3.0
 
-The Android handset app for a self-hosted [DakFlare](../../README.md) gateway. The
+The Android handset app for a self-hosted [DakFlare](https://github.com/JonyBepary/dakflare#readme) gateway. The
 phone is the radio: it sends and receives SMS, runs your flows offline, and signs
 every request to your own Worker with a hardware-backed key. There is no account,
 no relay, and no third-party service in the message path.
@@ -44,7 +44,7 @@ apksigner verify --print-certs DakFlare-Device-6.3.0-universal.apk
 ```
 
 The certificate digest must be `77b28184…f6`, the same key as every earlier
-release and the one recorded in [`docs/PHONE_RELEASE.md`](../../docs/PHONE_RELEASE.md).
+release and the one recorded in [`docs/PHONE_RELEASE.md`](https://github.com/JonyBepary/dakflare/blob/main/docs/PHONE_RELEASE.md).
 A build with any other signer is not ours. The public certificate ships beside the
 APK (`DakFlare-Device-release-cert.pem`); pin it if you automate updates.
 
