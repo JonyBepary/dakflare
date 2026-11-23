@@ -105,8 +105,9 @@ queue = "edgepay-dakflare-webhook-queue"
 
 [[queues.consumers]]
 queue = "edgepay-dakflare-webhook-queue"
+# MFS settlement waits on this batch window. One second, not five.
 max_batch_size = 10
-max_batch_timeout = 5
+max_batch_timeout = 1
 max_retries = 3
 
 [[queues.producers]]
