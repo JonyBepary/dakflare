@@ -52,12 +52,6 @@ class_name = "ChannelConnection"
 name = "SCHEDULER"
 class_name = "Scheduler"
 
-# Kept because the namespace is already provisioned on this Worker. `index.ts`
-# re-exports `AssistantAgent` for this entrypoint.
-[[durable_objects.bindings]]
-name = "ASSISTANT"
-class_name = "AssistantAgent"
-
 [exports.DeviceGateway]
 type = "durable-object"
 storage = "sqlite"
@@ -78,9 +72,12 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+# The pre-split assistant object is no longer part of this deployment. Upstream
+# removed its class export; the tombstone tells the upload the namespace is
+# deleted instead of failing the reconciliation.
 [exports.AssistantAgent]
 type = "durable-object"
-storage = "sqlite"
+state = "deleted"
 
 [exports.FlowExecutionWorkflow]
 type = "workflow"
