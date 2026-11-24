@@ -64,3 +64,8 @@ docs/archive/
 
 # The extracted design kit this work came from: input, not repository content.
 multichannel-kit/
+
+# Local scratch: process files and one-off review briefs
+*.pid
+/dakflare-audit-patch/
+/dakflare-p0-wiring-kit/
